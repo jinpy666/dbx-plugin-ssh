@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::Write as _;
@@ -12,7 +11,7 @@ use russh::client::{self, AuthResult, Handle};
 use russh::keys::agent::{client::AgentClient, AgentIdentity};
 use russh::keys::ssh_key::HashAlg;
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg};
-use russh::{cipher, kex, mac, ChannelMsg, Disconnect, MethodKind};
+use russh::{ChannelMsg, Disconnect, MethodKind};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileType;
 use serde_json::{json, Value};
@@ -64,50 +63,38 @@ fn sudo_auth_for(connection: &StoredConnection) -> SudoAuth {
     auth
 }
 
-/// Builds the client negotiation config for one connection. Modern suites
-/// remain the default. The opt-in legacy profile only appends algorithms that
-/// russh implements, preserving modern preference order while allowing older
-/// appliances to negotiate hmac-sha1, SHA-1 DH groups, CBC, or 3DES.
+/// Builds the client negotiation config for one connection. The connection
+/// form carries no algorithm selector: every connection offers the full
+/// supported set (see `ssh_algorithms::preferred`). DH GEX group bounds
+/// mirror ssh(1)'s 2048/3072/8192 because russh's 3072-bit default minimum
+/// rejects appliances whose largest moduli are 2048 bits, and russh aborts
+/// the handshake when the returned prime falls outside these bounds.
 fn ssh_client_config(connection: &StoredConnection) -> client::Config {
-    let mut preferred = ssh_algorithms::preferred(connection.algorithm_policy);
-    let mut config = client::Config {
+    client::Config {
         nodelay: true,
         keepalive_interval: (connection.keepalive_interval_secs > 0)
             .then(|| Duration::from_secs(connection.keepalive_interval_secs)),
         keepalive_max: 3,
+        preferred: ssh_algorithms::preferred(),
+        gex: client::GexParams::new(2048, 3072, 8192).expect("static GEX bounds are valid"),
         ..Default::default()
-    };
-    if connection.ssh_algorithm_profile == "legacy" {
-        let mut kex_algorithms = preferred.kex.to_vec();
-        for algorithm in [kex::DH_GEX_SHA1, kex::DH_G14_SHA1, kex::DH_G1_SHA1] {
-            if !kex_algorithms.contains(&algorithm) {
-                kex_algorithms.push(algorithm);
-            }
-        }
-        preferred.kex = Cow::Owned(kex_algorithms);
-
-        let mut ciphers = preferred.cipher.to_vec();
-        for cipher_name in [cipher::AES_128_CBC, cipher::TRIPLE_DES_CBC] {
-            if !ciphers.contains(&cipher_name) {
-                ciphers.push(cipher_name);
-            }
-        }
-        preferred.cipher = Cow::Owned(ciphers);
-
-        // russh 0.60 already implements SHA-1 MACs, but keep the explicit
-        // append here as a contract guard in case its modern defaults change.
-        let mut macs = preferred.mac.to_vec();
-        for mac_name in [mac::HMAC_SHA1_ETM, mac::HMAC_SHA1] {
-            if !macs.contains(&mac_name) {
-                macs.push(mac_name);
-            }
-        }
-        preferred.mac = Cow::Owned(macs);
-        config.preferred = preferred;
-    } else {
-        config.preferred = preferred;
     }
-    config
+}
+
+/// Translates the opaque handshake errors legacy appliances produce into a
+/// hint that names the likely device gap, without pretending the cause is
+/// certain (russh reports several KEX framing failures as `KexInit` too).
+fn dial_error_message(error: russh::Error) -> String {
+    let base = format!("SSH connection failed: {error}");
+    match error {
+        russh::Error::KexInit => format!(
+            "{base}. The server aborted key exchange; on legacy appliances this \
+             usually means its DH moduli are smaller than the requested group \
+             size (2048-bit minimum) or it only offers algorithms this client \
+             does not implement"
+        ),
+        _ => base,
+    }
 }
 
 /// Resolved Quick Sudo source for one connection: the connection's own
@@ -1484,8 +1471,6 @@ impl SshRuntime {
                 &format!("jump-{}-{}", position + 1, connection.id),
                 connection.connect_timeout_secs,
                 connection.keepalive_interval_secs,
-                connection.algorithm_policy,
-                &connection.ssh_algorithm_profile,
             );
             let handle = self
                 .dial_and_authenticate(&jump_connection, dial, operation_id, emitter.clone())
@@ -1560,10 +1545,7 @@ impl SshRuntime {
                     )
                     .await
                     {
-                        Ok(result) => {
-                            break result
-                                .map_err(|error| format!("SSH connection failed: {error}"))?
-                        }
+                        Ok(result) => break result.map_err(dial_error_message)?,
                         Err(_elapsed) => continue,
                     }
                 }
@@ -1579,10 +1561,7 @@ impl SshRuntime {
                     )
                     .await
                     {
-                        Ok(result) => {
-                            break result
-                                .map_err(|error| format!("SSH connection failed: {error}"))?
-                        }
+                        Ok(result) => break result.map_err(dial_error_message)?,
                         Err(_elapsed) => continue,
                     }
                 }
@@ -5340,6 +5319,7 @@ fn plugin_error(error: PluginError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::{cipher, kex, mac};
 
     #[test]
     fn replay_buffer_is_sequence_addressable() {
@@ -5352,10 +5332,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_profile_appends_old_algorithms_without_reordering_modern_ones() {
+    fn negotiated_algorithms_cover_legacy_without_weakening_secure_order() {
+        // 存量连接可能还带着已下线的 ssh_algorithm_profile/policy 配置值；
+        // 算法面已统一，任何旧值都不得改变协商集合。
         let connection = StoredConnection::from_lifecycle_params(&json!({
             "connection": {
-                "id": "legacy-algos",
+                "id": "unified-algos",
                 "host": "example.com",
                 "port": 22,
                 "username": "user",
@@ -5370,6 +5352,9 @@ mod tests {
         assert!(config.preferred.kex.contains(&kex::DH_G1_SHA1));
         assert!(config.preferred.cipher.contains(&cipher::AES_128_CBC));
         assert!(config.preferred.cipher.contains(&cipher::TRIPLE_DES_CBC));
+        assert_eq!(config.gex.min_group_size(), 2048);
+        assert_eq!(config.gex.preferred_group_size(), 3072);
+        assert_eq!(config.gex.max_group_size(), 8192);
     }
 
     // —— 私钥来源解析：粘贴内容优先于路径（connection_secrets.private_key）———

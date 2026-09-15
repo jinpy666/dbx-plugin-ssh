@@ -53,7 +53,11 @@
   机制（`proxy_connection_uses_local_forward_endpoint`），-L/-R 用户面功能的
   自然归属是宿主；插件不重复（硬性规则 3）。FEATURE_PARITY deferred 行已注记。
 - **X11 / Agent forwarding**：后端未实现（russh 成本高），登记 deferred。
-- **算法协商（Ciphers/KEX/HMAC/压缩）**：连接配置提供 `Modern`（默认）与 `Legacy-compatible` 档；后者保持现代算法优先，并追加 hmac-sha1、SHA-1 DH、CBC/3DES 兼容套件。
+- **算法协商（Ciphers/KEX/HMAC/压缩）**：2026-09-15 起不再提供用户档位——每条
+  连接一律协商全量支持面（`ssh_algorithms::preferred`）：现代套件保持首选，
+  hmac-sha1、SHA-1 DH 固定组（group14 在 GEX-SHA1 之前）、AES-CBC、3DES 按
+  弱到强追加尾部；DH GEX 组大小界对齐 ssh(1)（2048/3072/8192），修复老设备
+  模数 ≤2048 位时 GEX 握手中止的问题。
 - **配色 per-profile**：宿主外观域。
 - **OpenSSH config 导入**：Tabby 有 importer；可后置（宿主隧道 UI 已支持
   ssh config host 别名预填，部分覆盖）。

@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ssh_algorithms::SshAlgorithmPolicy;
-
 pub const TERMINAL_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
 pub const TRANSFER_CHUNK_SIZE: usize = 256 * 1024;
 pub const MAX_TRANSFER_SIZE: u64 = 16 * 1024 * 1024 * 1024;
@@ -122,9 +120,6 @@ pub struct StoredConnection {
     pub agent_socket: String,
     pub connect_timeout_secs: u64,
     pub keepalive_interval_secs: u64,
-    /// SSH algorithm compatibility profile.  The default appends only SHA-1
-    /// MACs to russh's secure defaults; legacy KEX/ciphers require `legacy`.
-    pub algorithm_policy: SshAlgorithmPolicy,
     /// Interactive-terminal activity keepalive: interval in seconds for
     /// injecting space+backspace into the PTY so server-side idle policies
     /// (TMOUT, bastion keystroke audits) never fire. 0 = off; the parser
@@ -155,10 +150,6 @@ pub struct StoredConnection {
     /// `ssh RemoteCommand`: exec this command instead of a shell on the
     /// interactive terminal session (PTY stays on). Empty = normal shell.
     pub remote_command: String,
-    /// SSH negotiation profile. `modern` is the secure default; `legacy`
-    /// keeps modern algorithms first and appends old-but-implemented
-    /// algorithms for appliances that cannot negotiate newer suites.
-    pub ssh_algorithm_profile: String,
     /// Expect-style terminal triggers (tssh parity, contract §2.1): parsed and
     /// validated eagerly from `external_config.triggers`, so a malformed rule
     /// (bad JSON, uncompileable regex, broken three-way answer choice) fails
@@ -273,8 +264,6 @@ impl JumpHost {
         id: &str,
         timeout_secs: u64,
         keepalive_secs: u64,
-        algorithm_policy: SshAlgorithmPolicy,
-        ssh_algorithm_profile: &str,
     ) -> StoredConnection {
         StoredConnection {
             id: id.to_string(),
@@ -294,7 +283,6 @@ impl JumpHost {
             agent_socket: self.agent_socket.clone(),
             connect_timeout_secs: timeout_secs.max(1),
             keepalive_interval_secs: keepalive_secs,
-            algorithm_policy,
             // Jump hops carry no interactive terminal, so no activity
             // keepalive either.
             terminal_keepalive_secs: 0,
@@ -313,7 +301,6 @@ impl JumpHost {
             // simplification, see StoredConnection docs).
             set_env: Vec::new(),
             remote_command: String::new(),
-            ssh_algorithm_profile: ssh_algorithm_profile.to_string(),
             // Jump hops fetch no credentials locally: their inline credential
             // fields are the whole story.
             triggers: None,
@@ -389,11 +376,6 @@ impl StoredConnection {
         let password_prompt_hint = optional_string(external_config, "password_prompt_hint");
         let totp_prompt_hint = optional_string(external_config, "totp_prompt_hint");
         let auth_flow_mode = optional_string(external_config, "auth_flow_mode");
-        let algorithm_policy = SshAlgorithmPolicy::parse(
-            external_config
-                .and_then(|config| config.get("ssh_algorithm_policy"))
-                .and_then(Value::as_str),
-        );
         // 会话特性两件套（camelCase 为主；snake_case 别名兼容手改配置/历史
         // 草稿）。setEnv 严格校验，非法条目让连接直接失败（宁可连不上也
         // 不错配）；remoteCommand trim 后非空才生效。
@@ -402,17 +384,6 @@ impl StoredConnection {
             .unwrap_or_default()
             .trim()
             .to_string();
-        let ssh_algorithm_profile = optional_string(external_config, "ssh_algorithm_profile");
-        let ssh_algorithm_profile = if ssh_algorithm_profile.is_empty() {
-            "modern".to_string()
-        } else if matches!(ssh_algorithm_profile.as_str(), "modern" | "legacy") {
-            ssh_algorithm_profile
-        } else {
-            return Err(format!(
-                "Unsupported SSH algorithm profile '{}'; expected modern or legacy",
-                ssh_algorithm_profile
-            ));
-        };
         // Expect 式终端触发器（camelCase/snake_case 均为 manifest 原生 key，
         // triggers 本身无别名）。值可以是 JSON 对象（宿主 lifecycle / MCP 桥
         // 转发）或 JSON 字符串（连接表单 textarea）；密文槽位从
@@ -515,7 +486,6 @@ impl StoredConnection {
                 "keepalive_interval_secs",
             )
             .unwrap_or(30),
-            algorithm_policy,
             terminal_keepalive_secs: clamp_terminal_keepalive(
                 config_u64(external_config, connection, "terminal_keepalive_secs").unwrap_or(0),
             ),
@@ -540,7 +510,6 @@ impl StoredConnection {
             auth_flow_mode,
             set_env,
             remote_command,
-            ssh_algorithm_profile,
             triggers,
             password_command,
             passphrase_command,
@@ -951,7 +920,6 @@ mod tests {
             "totp_prompt_hint",
             "connect_timeout_secs",
             "keepalive_interval_secs",
-            "ssh_algorithm_policy",
             "terminal_keepalive_secs",
             "set_env",
             "triggers",
@@ -960,7 +928,6 @@ mod tests {
             "password_command",
             "passphrase_command",
             "remote_command",
-            "ssh_algorithm_profile",
             "read_only",
         ];
         assert_eq!(keys, expected, "manifest field list drifted from parsing");
@@ -1083,6 +1050,34 @@ mod tests {
                 ))
             );
         }
+
+        // 2FA 关闭选项（0.4.77）：表单默认 off（新连接不自动回 OTP）；
+        // 存量连接带显式 auth_flow_mode 值不受新默认影响，缺省字段在
+        // 解析层仍落到 PasswordThenOtp（见 from_lifecycle_params）。
+        let auth_flow = fields
+            .iter()
+            .find(|field| field["key"] == "auth_flow_mode")
+            .unwrap();
+        assert_eq!(
+            auth_flow["default"], "off",
+            "new connections default to 2FA off"
+        );
+        let flow_options: Vec<&str> = auth_flow["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|option| option["value"].as_str())
+            .collect();
+        assert_eq!(
+            flow_options,
+            [
+                "off",
+                "password_then_otp",
+                "password_plus_otp",
+                "password_only"
+            ],
+            "off must be the first (default) 2FA flow option"
+        );
     }
 
     #[test]
@@ -1251,50 +1246,6 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_modern_ssh_algorithms_and_accepts_legacy_profile() {
-        let modern = StoredConnection::from_lifecycle_params(&serde_json::json!({
-            "connection": {
-                "id": "modern",
-                "host": "example.com",
-                "port": 22,
-                "username": "user",
-                "password": "secret"
-            }
-        }))
-        .unwrap();
-        assert_eq!(modern.ssh_algorithm_profile, "modern");
-
-        let legacy = StoredConnection::from_lifecycle_params(&serde_json::json!({
-            "connection": {
-                "id": "legacy",
-                "host": "example.com",
-                "port": 22,
-                "username": "user",
-                "password": "secret",
-                "external_config": { "ssh_algorithm_profile": "legacy" }
-            }
-        }))
-        .unwrap();
-        assert_eq!(legacy.ssh_algorithm_profile, "legacy");
-    }
-
-    #[test]
-    fn rejects_unknown_ssh_algorithm_profile() {
-        let error = StoredConnection::from_lifecycle_params(&serde_json::json!({
-            "connection": {
-                "id": "bad-profile",
-                "host": "example.com",
-                "port": 22,
-                "username": "user",
-                "password": "secret",
-                "external_config": { "ssh_algorithm_profile": "insecure" }
-            }
-        }))
-        .unwrap_err();
-        assert!(error.contains("modern or legacy"), "{error}");
-    }
-
-    #[test]
     fn parses_jump_host_chains() {
         let connection = StoredConnection::from_lifecycle_params(&serde_json::json!({
             "connection": {
@@ -1317,13 +1268,7 @@ mod tests {
         assert_eq!(connection.jump_hosts[0].port, 2202);
         assert_eq!(connection.jump_hosts[0].password, "jump-pw");
         assert_eq!(connection.jump_hosts[1].authentication, "private-key");
-        let synthesized = connection.jump_hosts[1].to_connection(
-            "jump-2",
-            20,
-            30,
-            connection.algorithm_policy,
-            "modern",
-        );
+        let synthesized = connection.jump_hosts[1].to_connection("jump-2", 20, 30);
         assert_eq!(synthesized.host, "inner.example.com");
         assert_eq!(synthesized.runtime_port, 22);
         assert_eq!(synthesized.authentication, AuthenticationMethod::PrivateKey);
@@ -1987,14 +1932,12 @@ mod manifest_contract_tests {
             "agent_socket",
             "connect_timeout_secs",
             "keepalive_interval_secs",
-            "ssh_algorithm_policy",
             "terminal_keepalive_secs",
             "set_env",
             "triggers",
             "password_command",
             "passphrase_command",
             "remote_command",
-            "ssh_algorithm_profile",
             "sudo_source",
             "sudo_profile",
             "sudo_use_pty",
@@ -2111,7 +2054,6 @@ mod manifest_contract_tests {
             ("authentication", Value::from("password")),
             ("connect_timeout_secs", Value::from(30)),
             ("keepalive_interval_secs", Value::from(30)),
-            ("ssh_algorithm_policy", Value::from("compatible")),
             ("terminal_keepalive_secs", Value::from(0)),
             ("sudo_source", Value::from("custom")),
             ("sudo_use_pty", Value::from(false)),
@@ -2120,7 +2062,9 @@ mod manifest_contract_tests {
             ("password_command", Value::from("")),
             ("passphrase_command", Value::from("")),
             ("remote_command", Value::from("")),
-            ("auth_flow_mode", Value::from("password_then_otp")),
+            // auth_flow_mode 有意不在此列：表单默认 off（新连接不自动回
+            // OTP），解析回退保持 PasswordThenOtp（存量连接不受新默认影
+            // 响），两者允许分歧——见 auth_flow_mode 表单默认断言。
             ("read_only", Value::from(false)),
         ];
         for (key, expected) in expected_defaults {
@@ -2154,36 +2098,11 @@ mod manifest_contract_tests {
         assert_eq!(connection.authentication, AuthenticationMethod::Password);
         assert_eq!(connection.connect_timeout_secs, 15);
         assert_eq!(connection.keepalive_interval_secs, 30);
-        assert_eq!(connection.algorithm_policy, SshAlgorithmPolicy::Compatible);
         assert_eq!(connection.terminal_keepalive_secs, 0);
         assert!(connection.sudo_enabled());
         assert!(!connection.sudo_use_pty);
         assert_eq!(connection.auth_flow_mode, "password_then_otp");
         assert!(!connection.read_only);
-    }
-
-    #[test]
-    fn algorithm_policy_is_configurable_and_unknown_values_fail_closed() {
-        let parse = |policy: &str| {
-            StoredConnection::from_lifecycle_params(&serde_json::json!({
-                "connection": {
-                    "id": "algorithm-policy",
-                    "host": "example.com",
-                    "port": 22,
-                    "username": "user",
-                    "password": "pw",
-                    "external_config": {
-                        "ssh_algorithm_policy": policy
-                    }
-                }
-            }))
-            .unwrap()
-            .algorithm_policy
-        };
-
-        assert_eq!(parse("secure"), SshAlgorithmPolicy::Secure);
-        assert_eq!(parse("legacy"), SshAlgorithmPolicy::Legacy);
-        assert_eq!(parse("not-a-profile"), SshAlgorithmPolicy::Secure);
     }
 
     /// The terminal activity keepalive is opt-in: absent config means off,

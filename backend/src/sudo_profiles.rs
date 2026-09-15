@@ -385,7 +385,7 @@ pub fn save_profile(
             let trimmed = value.trim();
             if !matches!(
                 trimmed,
-                "password_only" | "password_plus_otp" | "password_then_otp"
+                "off" | "password_only" | "password_plus_otp" | "password_then_otp"
             ) {
                 return Err(format!("Unsupported authFlowMode '{trimmed}'"));
             }

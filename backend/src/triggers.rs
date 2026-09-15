@@ -355,9 +355,18 @@ pub fn run_credential_command<'a>(
 }
 
 /// Parses `external_config.triggers` into a validated [`TriggersConfig`].
-/// Accepts the raw JSON object (host lifecycle payloads, smoke tests) and the
-/// JSON-string form (connection-form textarea). Missing/empty/`stages: []`
-/// means the feature is off (`Ok(None)`); everything invalid is a hard error
+/// Accepts three input shapes:
+/// - the raw JSON object (host lifecycle payloads, smoke tests);
+/// - the JSON-string form (connection-form textarea), optionally carrying a
+///   top-level `"enabled": false` to switch the rules off without deleting
+///   them;
+/// - tssh (trzsz-ssh) text-form rules (`ExpectCount` / `ExpectPatternN` /
+///   `ExpectSendTextN` …, with or without the `#!!` ssh-config comment
+///   prefix) — detected whenever the text is not valid JSON but mentions an
+///   `Expect*` directive (tssh 自动交互输入兼容，0.4.77).
+///
+/// Missing/empty/`stages: []`/`enabled: false`/`ExpectCount 0` mean the
+/// feature is off (`Ok(None)`); everything invalid is a hard error
 /// (contract D7).
 pub fn parse_triggers(
     raw: Option<&serde_json::Value>,
@@ -366,24 +375,52 @@ pub fn parse_triggers(
     let Some(value) = raw else {
         return Ok(None);
     };
-    let object: serde_json::Map<String, serde_json::Value> = match value {
-        serde_json::Value::Null => return Ok(None),
+    match value {
+        serde_json::Value::Null => Ok(None),
         serde_json::Value::String(text) => {
             let text = text.trim();
             if text.is_empty() {
                 return Ok(None);
             }
-            serde_json::from_str(text)
-                .map_err(|error| format!("triggers: invalid JSON: {error}"))?
+            match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text) {
+                Ok(object) => parse_object(&object, secrets),
+                Err(error) => {
+                    // A mangled JSON document must surface as a JSON error;
+                    // only non-JSON text that names an Expect* directive is
+                    // reinterpreted as the tssh text form.
+                    if looks_like_tssh_text(text) {
+                        parse_tssh_text(text, secrets)
+                    } else {
+                        Err(format!("triggers: invalid JSON: {error}"))
+                    }
+                }
+            }
         }
-        serde_json::Value::Object(object) => object.clone(),
-        other => {
+        serde_json::Value::Object(object) => parse_object(object, secrets),
+        other => Err(format!(
+            "triggers: expected a JSON object or JSON string, got {}",
+            json_type_name(other)
+        )),
+    }
+}
+
+/// Shared validator for the object form (host object or parsed textarea
+/// JSON). `enabled: false` keeps the stages stored but disables the engine.
+fn parse_object(
+    object: &serde_json::Map<String, serde_json::Value>,
+    secrets: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<TriggersConfig>, String> {
+    match object.get("enabled") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Bool(false)) => return Ok(None),
+        Some(serde_json::Value::Bool(true)) => {}
+        Some(other) => {
             return Err(format!(
-                "triggers: expected a JSON object or JSON string, got {}",
+                "triggers.enabled: expected a boolean, got {}",
                 json_type_name(other)
             ))
         }
-    };
+    }
     let stages = match object.get("stages") {
         None | Some(serde_json::Value::Null) => return Ok(None),
         Some(serde_json::Value::Array(stages)) => stages,
@@ -450,6 +487,270 @@ pub fn parse_triggers(
         pass_sleep,
         stages: parsed,
     }))
+}
+
+/// True when the trimmed textarea text names at least one tssh `Expect*`
+/// directive, so failed JSON parsing falls through to the tssh text parser
+/// instead of a JSON error.
+fn looks_like_tssh_text(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = strip_tssh_comment_prefix(line).trim_start();
+        match line.split_whitespace().next() {
+            Some(token) => {
+                let token = token.trim_matches('"').to_ascii_lowercase();
+                token.starts_with("expect")
+            }
+            None => false,
+        }
+    })
+}
+
+/// Drops an optional tssh comment prefix: `#!!` (ssh-config embedding),
+/// `#!`, or a plain `#`.
+fn strip_tssh_comment_prefix(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    for prefix in ["#!!", "#!", "#"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    trimmed
+}
+
+/// Splits `Directive value…` at the first whitespace run; the value keeps its
+/// inner spacing (patterns and answers may contain spaces) and loses one
+/// optional pair of surrounding double quotes.
+fn split_tssh_directive(line: &str) -> Option<(String, &str)> {
+    let mut parts = line.splitn(2, char::is_whitespace);
+    let directive = parts.next()?.trim().to_ascii_lowercase();
+    if directive.is_empty() {
+        return None;
+    }
+    let value = parts.next().unwrap_or("").trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value);
+    Some((directive, value))
+}
+
+/// Splits a directive name into its alphabetic head and 1-based stage index
+/// (`expectpattern3` → `("expectpattern", 3)`).
+fn split_tssh_index(directive: &str) -> (&str, Option<usize>) {
+    match directive
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_ascii_digit())
+    {
+        Some((boundary, _)) if boundary + 1 < directive.len() => (
+            &directive[..=boundary],
+            directive[boundary + 1..].parse::<usize>().ok(),
+        ),
+        _ => (directive, None),
+    }
+}
+
+fn tssh_error(line_no: usize, message: &str) -> String {
+    format!("triggers: tssh text input, line {line_no}: {message}")
+}
+
+fn tssh_pattern_value(value: &str, line_no: usize) -> Result<String, String> {
+    if value.len() > MAX_PATTERN_LEN {
+        return Err(tssh_error(
+            line_no,
+            &format!("pattern exceeds {MAX_PATTERN_LEN} characters"),
+        ));
+    }
+    // The JSON form stays strict (D7), but pasted tssh rules were written for
+    // tssh's matcher: a value that is not a valid regex falls back to a
+    // literal substring match (tssh's own README example `*assword` is not a
+    // valid regex either).
+    if Regex::new(value).is_ok() {
+        Ok(value.to_string())
+    } else {
+        Ok(regex::escape(value))
+    }
+}
+
+/// Parses the tssh (trzsz-ssh) text form: `ExpectCount` / `ExpectTimeout` /
+/// `ExpectSleepMS` / `ExpectPassSleep` globals plus per-stage
+/// `ExpectPatternN` / `ExpectSendTextN` / `ExpectSendOtpN` and
+/// `ExpectCaseSendTextN <pattern> <text>`. `ExpectCount 0` explicitly
+/// disables the engine; tssh's ciphertext/TOTP answer directives
+/// (`ExpectSendPass*`, `ExpectSend*Totp*`, `ExpectCaseSend*` secret forms)
+/// are rejected with a portable-replacement hint because only tssh can
+/// decrypt `--enc-secret` output.
+fn parse_tssh_text(
+    text: &str,
+    secrets: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<TriggersConfig>, String> {
+    let mut expect_count: Option<u64> = None;
+    let mut timeout_secs: Option<u64> = None;
+    let mut sleep_ms: Option<u64> = None;
+    let mut pass_sleep: Option<PassSleep> = None;
+    let mut stages: std::collections::BTreeMap<usize, serde_json::Map<String, serde_json::Value>> =
+        std::collections::BTreeMap::new();
+
+    for (offset, raw_line) in text.lines().enumerate() {
+        let line_no = offset + 1;
+        let line = strip_tssh_comment_prefix(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (directive, value) = split_tssh_directive(line)
+            .ok_or_else(|| tssh_error(line_no, "expected 'Directive value'"))?;
+        let (name, index) = split_tssh_index(&directive);
+        let stage_number = || -> Result<usize, String> {
+            index
+                .filter(|index| (1..=MAX_STAGES).contains(index))
+                .ok_or_else(|| {
+                    tssh_error(
+                        line_no,
+                        &format!("{name} requires a stage number between 1 and {MAX_STAGES}"),
+                    )
+                })
+        };
+        match name {
+            "expectcount" => {
+                expect_count = Some(value.parse::<u64>().map_err(|_| {
+                    tssh_error(
+                        line_no,
+                        &format!("ExpectCount must be an integer, got '{value}'"),
+                    )
+                })?);
+            }
+            "expecttimeout" => {
+                let seconds = value.parse::<u64>().map_err(|_| {
+                    tssh_error(
+                        line_no,
+                        &format!("ExpectTimeout must be an integer, got '{value}'"),
+                    )
+                })?;
+                if !(1..=MAX_TIMEOUT_SECS).contains(&seconds) {
+                    return Err(tssh_error(
+                        line_no,
+                        &format!("ExpectTimeout must be between 1 and {MAX_TIMEOUT_SECS}"),
+                    ));
+                }
+                timeout_secs = Some(seconds);
+            }
+            "expectsleepms" => {
+                let millis = value.parse::<u64>().map_err(|_| {
+                    tssh_error(
+                        line_no,
+                        &format!("ExpectSleepMS must be an integer, got '{value}'"),
+                    )
+                })?;
+                if millis > MAX_SLEEP_MS {
+                    return Err(tssh_error(
+                        line_no,
+                        &format!("ExpectSleepMS must be between 0 and {MAX_SLEEP_MS}"),
+                    ));
+                }
+                sleep_ms = Some(millis);
+            }
+            "expectpasssleep" => {
+                pass_sleep = Some(PassSleep::parse(&value.to_ascii_lowercase()).ok_or_else(
+                    || tssh_error(line_no, "ExpectPassSleep must be no, none, each or enter"),
+                )?);
+            }
+            "expectpattern" => {
+                let number = stage_number()?;
+                stages.entry(number).or_default().insert(
+                    "pattern".to_string(),
+                    serde_json::Value::String(tssh_pattern_value(value, line_no)?),
+                );
+            }
+            // tssh ExpectSendOtpN runs a local command and sends its stdout —
+            // exactly the plugin's sendCommand.
+            "expectsendtext" | "expectsendotp" => {
+                let field = if name == "expectsendtext" {
+                    "sendText"
+                } else {
+                    "sendCommand"
+                };
+                let number = stage_number()?;
+                let stage = stages.entry(number).or_default();
+                if stage.contains_key("sendText")
+                    || stage.contains_key("sendCommand")
+                    || stage.contains_key("sendSecretKey")
+                {
+                    return Err(tssh_error(line_no, "duplicate stage answer"));
+                }
+                stage.insert(
+                    field.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+            "expectcasesendtext" => {
+                let number = stage_number()?;
+                let (case_pattern, case_text) =
+                    value.split_once(char::is_whitespace).ok_or_else(|| {
+                        tssh_error(line_no, "ExpectCaseSendText requires '<pattern> <answer>'")
+                    })?;
+                let case_pattern = case_pattern.trim();
+                let stage = stages.entry(number).or_default();
+                if stage.contains_key("casePattern") {
+                    return Err(tssh_error(line_no, "duplicate case rule"));
+                }
+                stage.insert(
+                    "casePattern".to_string(),
+                    serde_json::Value::String(tssh_pattern_value(case_pattern.trim(), line_no)?),
+                );
+                stage.insert(
+                    "caseSendText".to_string(),
+                    serde_json::Value::String(case_text.trim().to_string()),
+                );
+            }
+            _ if name.starts_with("expectcasesend") || name.starts_with("expectsend") => {
+                return Err(tssh_error(
+                    line_no,
+                    &format!(
+                        "'{directive}' is not portable: tssh --enc-secret ciphertexts and in-trigger TOTP secrets have no plugin equivalent; use sendText, sendSecretKey (trigger_answer_1/2) or sendCommand instead"
+                    ),
+                ));
+            }
+            _ => {
+                return Err(tssh_error(
+                    line_no,
+                    &format!("unknown directive '{directive}'"),
+                ));
+            }
+        }
+    }
+
+    // tssh gates the whole feature on ExpectCount; an explicit 0 means off.
+    // When the count is absent, pasted stages are taken at face value instead
+    // of silently doing nothing (tssh's default 0 would be a paste foot-gun).
+    let count = expect_count.unwrap_or(stages.len() as u64);
+    if count == 0 {
+        return Ok(None);
+    }
+    if stages.is_empty() {
+        return Ok(None);
+    }
+    let mut object = serde_json::Map::new();
+    if let Some(seconds) = timeout_secs {
+        object.insert("timeoutSecs".to_string(), serde_json::Value::from(seconds));
+    }
+    if let Some(millis) = sleep_ms {
+        object.insert("sleepMs".to_string(), serde_json::Value::from(millis));
+    }
+    if let Some(pacing) = pass_sleep {
+        object.insert(
+            "passSleep".to_string(),
+            serde_json::Value::String(pacing.name().to_string()),
+        );
+    }
+    let mut stage_list = Vec::new();
+    for (number, stage) in stages {
+        if (number as u64) > count {
+            break;
+        }
+        stage_list.push(serde_json::Value::Object(stage));
+    }
+    object.insert("stages".to_string(), serde_json::Value::Array(stage_list));
+    parse_object(&object, secrets)
 }
 
 fn json_type_name(value: &serde_json::Value) -> &'static str {
@@ -960,6 +1261,130 @@ mod tests {
         // 非 JSON 对象/字符串形态同样拒绝。
         let error = parse_triggers(Some(&json!(42)), &no_secrets).unwrap_err();
         assert!(error.contains("expected a JSON object"), "{error}");
+    }
+
+    #[test]
+    fn parse_json_enabled_flag_switches_engine_without_deleting_stages() {
+        // enabled:false 保留规则但显式关闭引擎；enabled:true 等价缺省。
+        let disabled = json!({
+            "enabled": false,
+            "stages": [{ "pattern": "code", "sendText": "1\\r" }]
+        });
+        assert!(parse_triggers(Some(&disabled), &no_secrets)
+            .unwrap()
+            .is_none());
+        let enabled = json!({
+            "enabled": true,
+            "stages": [{ "pattern": "code", "sendText": "1\\r" }]
+        });
+        assert!(parse_triggers(Some(&enabled), &no_secrets)
+            .unwrap()
+            .is_some());
+        let error = parse_err(json!({ "enabled": "yes", "stages": [] }));
+        assert!(error.contains("triggers.enabled"), "{error}");
+    }
+
+    #[test]
+    fn parse_tssh_text_form_maps_directives() {
+        // tssh（trzsz-ssh）自动交互文本形态：#!! 前缀、Expect* 指令。
+        let text = [
+            "#!! ExpectCount 2",
+            "#!! ExpectTimeout 45",
+            "#!! ExpectSleepMS 250",
+            "#!! ExpectPassSleep enter",
+            "#!! ExpectPattern1 (?i)are you sure",
+            "#!! ExpectSendText1 yes\\r",
+            "#!! ExpectCaseSendText2 continue\\? no",
+            "#!! ExpectPattern2 hostname.*$",
+            "#!! ExpectSendOtp2 oathtool --totp -b K",
+        ]
+        .join("\n");
+        let config = parse_triggers(Some(&json!(text)), &no_secrets)
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.timeout_secs, 45);
+        assert_eq!(config.sleep_ms, 250);
+        assert_eq!(config.pass_sleep, PassSleep::Enter);
+        assert_eq!(config.stages.len(), 2);
+        assert_eq!(config.stages[0].answer, StageAnswer::Text("yes\\r".into()));
+        let case = config.stages[1].case.as_ref().expect("case rule parsed");
+        assert!(case.pattern.is_match("continue?"));
+        assert_eq!(
+            config.stages[1].answer,
+            StageAnswer::Command("oathtool --totp -b K".into())
+        );
+    }
+
+    #[test]
+    fn parse_tssh_expect_count_gates_and_truncates() {
+        // ExpectCount 0 是 tssh 语义的显式关闭；缺省时不让粘贴的规则静默失效。
+        let off = "ExpectCount 0\nExpectPattern1 code\nExpectSendText1 yes";
+        assert!(parse_triggers(Some(&json!(off)), &no_secrets)
+            .unwrap()
+            .is_none());
+        let on = "ExpectPattern1 code\nExpectSendText1 yes";
+        let config = parse_triggers(Some(&json!(on)), &no_secrets)
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.stages.len(), 1);
+        // ExpectCount 截断超出序号的阶段。
+        let truncated = [
+            "ExpectCount 1",
+            "ExpectPattern1 a",
+            "ExpectSendText1 x",
+            "ExpectPattern2 b",
+            "ExpectSendText2 y",
+        ]
+        .join("\n");
+        let config = parse_triggers(Some(&json!(truncated)), &no_secrets)
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.stages.len(), 1);
+        assert_eq!(config.stages[0].pattern.as_str(), "a");
+    }
+
+    #[test]
+    fn parse_tssh_non_regex_pattern_falls_back_to_literal() {
+        // tssh README 示例 `*assword` 不是合法正则：文本形态按字面量匹配兜底，
+        // JSON 形态保持 D7 严格失败不受影响。
+        let text = "ExpectPattern1 *assword\nExpectSendText1 pw\\r";
+        let config = parse_triggers(Some(&json!(text)), &no_secrets)
+            .unwrap()
+            .unwrap();
+        assert!(config.stages[0].pattern.is_match("Enter *assword:"));
+        assert!(!config.stages[0].pattern.is_match("Enter password:"));
+    }
+
+    #[test]
+    fn parse_tssh_rejects_ciphertext_and_totp_answers() {
+        // tssh --enc-secret 密文与触发器内 TOTP 密钥无法移植：显式报错并给出
+        // 可移植替代（sendText/sendSecretKey/sendCommand）。
+        for text in [
+            "#!! ExpectSendPass1 d7983b4a",
+            "#!! ExpectSendTotp1 JBSWY3DPEHPK3PXP",
+            "#!! ExpectSendEncOtp2 oathtool --totp -b K",
+            "#!! ExpectCaseSendPass1 token d7983b4a",
+        ] {
+            let error =
+                parse_triggers(Some(&json!(text)), &no_secrets).expect_err("must be rejected");
+            assert!(error.contains("not portable"), "{error}");
+        }
+    }
+
+    #[test]
+    fn parse_tssh_unknown_directive_errors_but_json_errors_stay_json() {
+        let error = parse_triggers(Some(&json!("#!! ExpectWrong1 foo")), &no_secrets)
+            .expect_err("must be rejected");
+        assert!(error.contains("unknown directive"), "{error}");
+        // 非法 JSON 且不含 Expect 指令 → 维持原 JSON 报错，不被 tssh 分流吞掉。
+        let error = parse_triggers(Some(&json!("{not json")), &no_secrets).unwrap_err();
+        assert!(error.contains("invalid JSON"), "{error}");
+        // 无阶段的全局指令 = 功能关闭。
+        assert!(
+            parse_triggers(Some(&json!("#!! ExpectCount 3")), &no_secrets)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

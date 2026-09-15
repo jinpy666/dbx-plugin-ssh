@@ -53,10 +53,14 @@ pub fn sanitize_sudo_command(command: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// 变体名刻意与协议值一一对应（password_only / password_plus_otp /
+// 变体名刻意与协议值一一对应（off / password_only / password_plus_otp /
 // password_then_otp），共享的 Password 前缀是契约不是冗余。
 #[allow(clippy::enum_variant_names)]
 pub enum AuthFlowMode {
+    /// 2FA 自动应答关闭（0.4.77 起连接表单默认值）：密码类提示照常应答，
+    /// OTP/组合提示永不自动回码。存量连接缺省该字段时仍走 PasswordThenOtp，
+    /// 运行时语义不受新默认值影响。
+    Off,
     PasswordOnly,
     PasswordPlusOtp,
     PasswordThenOtp,
@@ -65,6 +69,7 @@ pub enum AuthFlowMode {
 impl AuthFlowMode {
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" => Self::Off,
             "password" | "password_only" => Self::PasswordOnly,
             "password+otp" | "password_totp" | "password_plus_otp" => Self::PasswordPlusOtp,
             _ => Self::PasswordThenOtp,
@@ -75,6 +80,7 @@ impl AuthFlowMode {
     /// reported by `ssh/settings/get`).
     pub fn name(self) -> &'static str {
         match self {
+            Self::Off => "off",
             Self::PasswordOnly => "password_only",
             Self::PasswordPlusOtp => "password_plus_otp",
             Self::PasswordThenOtp => "password_then_otp",
@@ -83,6 +89,7 @@ impl AuthFlowMode {
 
     fn allows_otp_after_password(self) -> bool {
         match self {
+            Self::Off => false,
             Self::PasswordOnly => false,
             Self::PasswordPlusOtp => true,
             Self::PasswordThenOtp => true,
@@ -167,9 +174,12 @@ impl SudoAuth {
     }
 
     /// True when the auth can answer something (a sudo password or a TOTP
-    /// secret); drives whether the in-terminal watcher is attached.
+    /// secret); drives whether the in-terminal watcher is attached. With the
+    /// flow mode off, a TOTP secret alone answers nothing, so it no longer
+    /// justifies arming the watcher.
     pub fn useful(&self) -> bool {
-        !self.password.is_empty() || self.totp_configured()
+        !self.password.is_empty()
+            || (self.totp_configured() && self.flow_mode() != AuthFlowMode::Off)
     }
 
     fn flow_mode(&self) -> AuthFlowMode {
@@ -187,7 +197,14 @@ impl SudoAuth {
     pub(crate) fn answer_for(&self, kind: PromptKind) -> Option<String> {
         match kind {
             PromptKind::Password => (!self.password.is_empty()).then(|| self.password.clone()),
-            PromptKind::Totp => self.totp_answer_logged(),
+            // Flow off: the OTP secret is never spent on prompts (manual 2FA).
+            PromptKind::Totp => {
+                if self.flow_mode() == AuthFlowMode::Off {
+                    None
+                } else {
+                    self.totp_answer_logged()
+                }
+            }
             PromptKind::Combined => {
                 let password = (!self.password.is_empty()).then(|| self.password.clone())?;
                 if self.flow_mode() == AuthFlowMode::PasswordPlusOtp {
@@ -218,8 +235,10 @@ impl SudoAuth {
     /// 其余情形与 `answer_for` 完全一致（永不推迟）。静态恢复码不变，
     /// 重试无意义，同样不推迟。
     pub(crate) fn answer_for_with_retry(&self, kind: PromptKind) -> (Option<String>, Option<u64>) {
-        let otp_bearing = matches!(kind, PromptKind::Totp)
-            || (kind == PromptKind::Combined && self.flow_mode() == AuthFlowMode::PasswordPlusOtp);
+        let otp_bearing = self.flow_mode() != AuthFlowMode::Off
+            && (matches!(kind, PromptKind::Totp)
+                || (kind == PromptKind::Combined
+                    && self.flow_mode() == AuthFlowMode::PasswordPlusOtp));
         if !otp_bearing {
             return (self.answer_for(kind), None);
         }
@@ -752,12 +771,13 @@ pub(crate) fn can_respond_to_prompt(
         }
         PromptKind::Combined => {
             // PasswordPlusOtp answers combined prompts by design; PasswordOnly
-            // answers them too (its password half is all it sends — refusing
-            // the prompt would strand the session, see the flow-modes test).
-            // PasswordThenOtp waits until the password has been answered.
+            // and Off answer them too (their password half is all they send —
+            // refusing the prompt would strand the session, see the
+            // flow-modes test). PasswordThenOtp waits until the password has
+            // been answered.
             matches!(
                 mode,
-                AuthFlowMode::PasswordPlusOtp | AuthFlowMode::PasswordOnly
+                AuthFlowMode::PasswordPlusOtp | AuthFlowMode::PasswordOnly | AuthFlowMode::Off
             ) || password_answered
         }
     }
@@ -1760,6 +1780,66 @@ mod tests {
             AuthFlowMode::parse(" password_only\t"),
             AuthFlowMode::PasswordOnly
         );
+    }
+
+    #[test]
+    fn off_flow_keeps_password_and_never_spends_otp() {
+        // `off`（0.4.77 起连接表单默认）继续应答密码类提示，但 OTP 密钥哪怕
+        // 已配置也绝不自动回码（登录 keyboard-interactive、sudo watcher、
+        // 组合提示三条路径一致），且纯 OTP 凭据不再视作「有用」。
+        let totp_only = SudoAuth::new(
+            "",
+            "",
+            "JBSWY3DPEHPK3PXP\n123456",
+            Hints {
+                password: String::new(),
+                totp: String::new(),
+                flow_mode: Some(AuthFlowMode::Off),
+            },
+        );
+        assert!(totp_only.totp_configured());
+        assert!(
+            !totp_only.useful(),
+            "totp-only auth must not arm the watcher when off"
+        );
+        assert!(totp_only.answer_for(PromptKind::Totp).is_none());
+        let (answer, retry_at) = totp_only.answer_for_with_retry(PromptKind::Totp);
+        assert!(answer.is_none());
+        assert!(retry_at.is_none(), "off must not schedule an OTP retry");
+        // 密码路径不受 off 影响：组合提示仍回密码半段（拒答会晾死会话）。
+        let with_password = SudoAuth::new(
+            "",
+            "login",
+            "JBSWY3DPEHPK3PXP",
+            Hints {
+                password: String::new(),
+                totp: String::new(),
+                flow_mode: Some(AuthFlowMode::Off),
+            },
+        );
+        assert!(with_password.useful());
+        assert_eq!(
+            with_password.answer_for(PromptKind::Combined).as_deref(),
+            Some("login")
+        );
+        assert!(!can_respond_to_prompt(
+            AuthFlowMode::Off,
+            PromptKind::Totp,
+            true
+        ));
+        assert!(can_respond_to_prompt(
+            AuthFlowMode::Off,
+            PromptKind::Password,
+            false
+        ));
+        assert!(can_respond_to_prompt(
+            AuthFlowMode::Off,
+            PromptKind::Combined,
+            false
+        ));
+        assert_eq!(AuthFlowMode::parse("off"), AuthFlowMode::Off);
+        assert_eq!(AuthFlowMode::parse("Disabled"), AuthFlowMode::Off);
+        assert_eq!(AuthFlowMode::Off.name(), "off");
     }
 
     #[test]

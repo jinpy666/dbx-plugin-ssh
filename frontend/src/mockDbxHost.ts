@@ -175,6 +175,9 @@ function mockWriteEntry(path: string, node: MockNode): { success: true } {
 
 const fixtureDownloads = new Map<string, { fileName: string; size: number; offset: number }>();
 const fixtureUploadCount = { value: 0 };
+// 可视化 mock 也需要具备真实的“清空后刷新为空”语义，否则历史工具栏
+// 的刷新/清空按钮看起来没有效果。
+let mockTransferHistoryCleared = false;
 // 编辑器 sftp/write 落盘的内存副本（按路径）：sftp/read 优先回读，保证
 // "保存 → 重开预览" 在可视化夹具里闭环（真实 sidecar 写远端文件）。
 const mockFileContents = new Map<string, Uint8Array>();
@@ -401,7 +404,7 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     const limitRaw = Number(input.limit);
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(200, Math.floor(limitRaw)) : 50;
     const now = Date.now();
-    const entries: Array<Record<string, unknown>> = [
+    const entries: Array<Record<string, unknown>> = mockTransferHistoryCleared ? [] : [
       { taskId: "visual-hist-4", connectionId: context.connectionId, direction: "upload", fileName: "deploy.sh", size: 2481, transferred: 2481, status: "completed", startedAt: now - 400_000, finishedAt: now - 396_000 },
       { taskId: "visual-hist-3", connectionId: context.connectionId, direction: "download", fileName: "server.log", size: 741_248, transferred: 741_248, status: "completed", startedAt: now - 800_000, finishedAt: now - 790_000 },
       { taskId: "visual-hist-2", connectionId: context.connectionId, direction: "download", fileName: "core.dump", size: 268_435_456, transferred: 268_435_456, status: "failed", startedAt: now - 1_600_000, finishedAt: now - 1_590_000, error: "disk quota exceeded" },
@@ -409,7 +412,10 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     ];
     result = { tasks: entries.slice(0, limit) };
   }
-  else if (method === "sftp/transfer/history/clear") result = { success: true };
+  else if (method === "sftp/transfer/history/clear") {
+    mockTransferHistoryCleared = true;
+    result = { success: true };
+  }
   else if (method === "local/capabilities") result = { canSaveLocal: false, downloadsDir: "" };
   else if (method === "sftp/upload/start") result = { taskId: `visual-upload-${++fixtureUploadCount.value}`, chunkSize: 262144 };
   else if (method === "sftp/upload/finish") result = { success: true };

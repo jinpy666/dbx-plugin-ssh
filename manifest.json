@@ -260,7 +260,7 @@
           "label": "2FA flow",
           "type": "select",
           "binding": "config",
-          "default": "password_then_otp",
+          "default": "off",
           "visible_when": {
             "field": "sudo_source",
             "one_of": [
@@ -269,6 +269,10 @@
             ]
           },
           "options": [
+            {
+              "value": "off",
+              "label": "Off (answer OTP manually)"
+            },
             {
               "value": "password_then_otp",
               "label": "Password first, then OTP"
@@ -282,7 +286,7 @@
               "label": "Password only"
             }
           ],
-          "description": "Used for login and sudo prompts. Password-only mode ignores OTP secrets. Global Quick Sudo profiles use their own settings."
+          "description": "Off (default for new connections) never sends OTP codes automatically - answer 2FA prompts yourself. The other modes let the plugin answer password and OTP prompts for login and sudo; password-only mode ignores OTP secrets. Existing connections keep their stored mode. Global Quick Sudo profiles use their own settings."
         },
         {
           "key": "totp_secret",
@@ -343,28 +347,6 @@
           "description": "Keepalive probe interval; 3 missed probes disconnect the session. 0 disables probes."
         },
         {
-          "key": "ssh_algorithm_policy",
-          "label": "SSH algorithm compatibility",
-          "type": "select",
-          "binding": "config",
-          "default": "compatible",
-          "options": [
-            {
-              "label": "Compatible (secure first)",
-              "value": "compatible"
-            },
-            {
-              "label": "Secure only",
-              "value": "secure"
-            },
-            {
-              "label": "Legacy server",
-              "value": "legacy"
-            }
-          ],
-          "description": "Compatible keeps modern algorithms first and enables SHA-1 MACs only as a last resort. Secure only disables SHA-1. Legacy also enables old SHA-1 Diffie-Hellman and AES-CBC; use it only for old servers."
-        },
-        {
           "key": "terminal_keepalive_secs",
           "label": "Terminal activity keepalive (seconds)",
           "type": "number",
@@ -388,7 +370,7 @@
           "binding": "config",
           "default": "",
           "placeholder": "{\"stages\":[{\"pattern\":\"(?i)verification code\",\"sendText\":\"654321\\\\r\"}]}",
-          "description": "Expect-style auto interaction: ordered stage regexes match terminal output in sequence and each hit auto-sends a reply - sendText (\\r = Enter), sendSecretKey (a trigger secret slot key below, Enter appended), or sendCommand (stdout of a local command). The placeholder shows a minimal one-stage example; empty disables. Risk: a malicious server can fake a matching prompt to trick the terminal into sending the configured reply, including secret-slot contents. Invalid JSON, limits exceeded (max 16 stages), or an uncompileable regex fails the connection."
+          "description": "Expect-style auto interaction: ordered stage regexes match terminal output in sequence and each hit auto-sends a reply - sendText (\\r = Enter), sendSecretKey (a trigger secret slot key below, Enter appended), or sendCommand (stdout of a local command). The placeholder shows a minimal one-stage example; empty disables. Also accepts tssh (trzsz-ssh) text rules with or without the #!! prefix: ExpectCount (0 disables), ExpectTimeout, ExpectSleepMS, ExpectPassSleep, ExpectPatternN, ExpectSendTextN, ExpectSendOtpN (= sendCommand) and ExpectCaseSendTextN; non-regex patterns match as literal text; tssh ciphertext/TOTP answers (--enc-secret) are rejected. JSON may carry \"enabled\": false to switch rules off while keeping them. Risk: a malicious server can fake a matching prompt to trick the terminal into sending the configured reply, including secret-slot contents. Invalid JSON, limits exceeded (max 16 stages), or an uncompileable regex fails the connection."
         },
         {
           "key": "trigger_answer_1",
@@ -427,24 +409,6 @@
           "binding": "config",
           "default": "",
           "description": "Executed instead of a shell when a terminal session opens (a PTY is still requested). Leave empty for a normal interactive shell; reconnecting re-runs the command."
-        },
-        {
-          "key": "ssh_algorithm_profile",
-          "label": "SSH algorithm compatibility",
-          "type": "select",
-          "binding": "config",
-          "default": "modern",
-          "options": [
-            {
-              "label": "Modern (recommended)",
-              "value": "modern"
-            },
-            {
-              "label": "Legacy-compatible",
-              "value": "legacy"
-            }
-          ],
-          "description": "Modern keeps secure algorithms first. Legacy-compatible appends hmac-sha1, SHA-1 DH groups, CBC, and 3DES only for older SSH appliances."
         },
         {
           "key": "read_only",
@@ -565,11 +529,6 @@
               "label": "Intervalo de keepalive (segundos)",
               "description": "Intervalo de sondas de keepalive; 3 sondas sin respuesta desconectan la sesión. 0 las desactiva."
             },
-            "ssh_algorithm_policy": {
-              "label": "Compatibilidad de algoritmos SSH",
-              "options": { "compatible": "Compatible (seguro primero)", "secure": "Solo seguro", "legacy": "Servidor antiguo" },
-              "description": "Compatible mantiene los algoritmos modernos primero y usa MAC SHA-1 solo como último recurso. Solo seguro desactiva SHA-1. Servidor antiguo también habilita Diffie-Hellman SHA-1 y AES-CBC; úsalo solo con servidores antiguos."
-            },
             "terminal_keepalive_secs": {
               "label": "Keepalive de actividad del terminal (segundos)",
               "description": "Inyecta espacio+retroceso en el terminal interactivo a este intervalo para que las políticas de inactividad del servidor (TMOUT, auditoría del bastión) nunca se activen. 0 lo desactiva."
@@ -581,7 +540,7 @@
             },
             "triggers": {
               "label": "Disparadores de interacción automática",
-              "description": "Interacción automática estilo expect: los patrones de cada etapa se comparan en orden con la salida del terminal y cada acierto envía automáticamente una respuesta: sendText (\\r = Enter), sendSecretKey (clave de una ranura secreta de disparador, Enter añadido) o sendCommand (stdout de un comando local). El marcador de posición muestra un ejemplo mínimo de una etapa; vacío desactiva. Riesgo: un servidor malicioso puede falsificar el aviso para que el terminal envíe la respuesta configurada, incluidas las ranuras secretas. JSON no válido, límites excedidos (máx. 16 etapas) o una expresión regular inválida hacen fallar la conexión.",
+              "description": "Interacción automática estilo expect: los patrones de cada etapa se comparan en orden con la salida del terminal y cada acierto envía automáticamente una respuesta: sendText (\\r = Enter), sendSecretKey (clave de una ranura secreta de disparador, Enter añadido) o sendCommand (stdout de un comando local). El marcador de posición muestra un ejemplo mínimo de una etapa; vacío desactiva. Riesgo: un servidor malicioso puede falsificar el aviso para que el terminal envíe la respuesta configurada, incluidas las ranuras secretas. JSON no válido, límites excedidos (máx. 16 etapas) o una expresión regular inválida hacen fallar la conexión. También acepta reglas en formato de texto de tssh (trzsz-ssh), con o sin el prefijo #!!: ExpectCount (0 desactiva), ExpectTimeout, ExpectSleepMS, ExpectPassSleep, ExpectPatternN, ExpectSendTextN, ExpectSendOtpN (= sendCommand) y ExpectCaseSendTextN; un patrón no válido como regex coincide como texto literal; las respuestas cifradas o TOTP de tssh (--enc-secret) se rechazan. El JSON puede llevar \"enabled\": false para apagar las reglas sin borrarlas.",
               "placeholder": "{\"stages\":[{\"pattern\":\"(?i)verification code\",\"sendText\":\"654321\\\\r\"}]}"
             },
             "trigger_answer_1": {
@@ -603,14 +562,6 @@
             "remote_command": {
               "label": "Comando remoto (RemoteCommand)",
               "description": "Se ejecuta en lugar de un shell al abrir una sesión de terminal (el PTY se solicita igual). Déjelo vacío para un shell interactivo normal; al reconectar se vuelve a ejecutar el comando."
-            },
-            "ssh_algorithm_profile": {
-              "label": "Compatibilidad de algoritmos SSH",
-              "options": {
-                "modern": "Moderno (recomendado)",
-                "legacy": "Compatible con sistemas antiguos"
-              },
-              "description": "Mantiene los algoritmos modernos primero; el modo compatible añade suites antiguas para dispositivos SSH heredados."
             },
             "sudo_source": {
               "label": "Origen de credenciales sudo",
@@ -635,8 +586,9 @@
             },
             "auth_flow_mode": {
               "label": "Flujo 2FA",
-              "description": "Se aplica al inicio de sesión y a sudo. Solo contraseña no usa OTP. Los perfiles globales Quick Sudo usan sus propios ajustes.",
+              "description": "Desactivado (valor por defecto en conexiones nuevas) nunca envía códigos OTP automáticamente: responda los prompts de 2FA usted mismo. Los demás modos permiten que el plugin responda a los prompts de contraseña y OTP para inicio de sesión y sudo; solo contraseña ignora los secretos OTP. Las conexiones existentes conservan su modo guardado. Los perfiles globales Quick Sudo usan sus propios ajustes.",
               "options": {
+                "off": "Desactivado (responder OTP manualmente)",
                 "password_then_otp": "Primero contraseña, después OTP",
                 "password_plus_otp": "Contraseña y OTP combinados",
                 "password_only": "Solo contraseña"
@@ -737,7 +689,7 @@
             },
             "triggers": {
               "label": "Trigger di interazione automatica",
-              "description": "Interazione automatica in stile expect: le espressioni regolari delle fasi confrontano in ordine l'output del terminale e a ogni corrispondenza viene inviata automaticamente una risposta: sendText (\\r = Invio), sendSecretKey (chiave di uno slot segreto trigger, Invio aggiunto) o sendCommand (stdout di un comando locale). Il segnaposto mostra un esempio minimo a una fase; vuoto disattiva. Rischio: un server maligno può falsificare il prompt per indurre il terminale a inviare la risposta configurata, inclusi i contenuti degli slot segreti. JSON non valido, limiti superati (max 16 fasi) o espressione regolare errata fanno fallire la connessione.",
+              "description": "Interazione automatica in stile expect: le espressioni regolari delle fasi confrontano in ordine l'output del terminale e a ogni corrispondenza viene inviata automaticamente una risposta: sendText (\\r = Invio), sendSecretKey (chiave di uno slot segreto trigger, Invio aggiunto) o sendCommand (stdout di un comando locale). Il segnaposto mostra un esempio minimo a una fase; vuoto disattiva. Rischio: un server maligno può falsificare il prompt per indurre il terminale a inviare la risposta configurata, inclusi i contenuti degli slot segreti. JSON non valido, limiti superati (max 16 fasi) o espressione regolare errata fanno fallire la connessione. Accetta anche regole in formato testo di tssh (trzsz-ssh), con o senza prefisso #!!: ExpectCount (0 disattiva), ExpectTimeout, ExpectSleepMS, ExpectPassSleep, ExpectPatternN, ExpectSendTextN, ExpectSendOtpN (= sendCommand) ed ExpectCaseSendTextN; i pattern non validi come regex corrispondono come testo letterale; le risposte cifrate/TOTP di tssh (--enc-secret) vengono rifiutate. Il JSON può contenere \"enabled\": false per disattivare le regole senza cancellarle.",
               "placeholder": "{\"stages\":[{\"pattern\":\"(?i)verification code\",\"sendText\":\"654321\\\\r\"}]}"
             },
             "trigger_answer_1": {
@@ -759,14 +711,6 @@
             "remote_command": {
               "label": "Comando remoto (RemoteCommand)",
               "description": "Viene eseguito al posto di una shell all'apertura della sessione terminale (il PTY resta richiesto). Lasciare vuoto per una shell interattiva normale; alla riconnessione il comando viene rieseguito."
-            },
-            "ssh_algorithm_profile": {
-              "label": "Compatibilità degli algoritmi SSH",
-              "options": {
-                "modern": "Moderno (consigliato)",
-                "legacy": "Compatibile con sistemi legacy"
-              },
-              "description": "Mantiene prima gli algoritmi moderni; la modalità compatibile aggiunge suite obsolete per dispositivi SSH legacy."
             },
             "sudo_source": {
               "label": "Origine delle credenziali sudo",
@@ -790,9 +734,10 @@
               "description": "Whitelist in stile sudoers per i comandi privilegiati, una voce per riga (o separata da ';'). I token corrispondono esattamente, '*' corrisponde a un argomento, un '*' finale corrisponde al resto (es. 'systemctl restart *'). Se impostata, sudo viene eseguito solo per i comandi corrispondenti; lasciare vuota per disattivare."
             },
             "auth_flow_mode": {
-              "description": "Si applica ai prompt di accesso e sudo. Solo password non usa OTP. I profili Quick Sudo globali usano le proprie impostazioni.",
+              "description": "Disattivato (predefinito per le nuove connessioni) non invia mai codici OTP automaticamente: rispondere ai prompt 2FA manualmente. Le altre modalità consentono al plugin di rispondere ai prompt password e OTP per accesso e sudo; solo password ignora i segreti OTP. Le connessioni esistenti conservano la modalità memorizzata. I profili Quick Sudo globali usano le proprie impostazioni.",
               "label": "Flusso 2FA",
               "options": {
+                "off": "Disattivato (rispondere all'OTP manualmente)",
                 "password_then_otp": "Prima password, poi OTP",
                 "password_plus_otp": "Password e OTP combinati",
                 "password_only": "Solo password"
@@ -825,11 +770,6 @@
             "keepalive_interval_secs": {
               "label": "Intervallo keepalive (secondi)",
               "description": "Intervallo delle sonde keepalive; 3 sonde senza risposta chiudono la sessione. 0 le disabilita."
-            },
-            "ssh_algorithm_policy": {
-              "label": "Compatibilità degli algoritmi SSH",
-              "options": { "compatible": "Compatibile (sicuro prima)", "secure": "Solo sicuro", "legacy": "Server legacy" },
-              "description": "Compatibile mantiene prima gli algoritmi moderni e abilita i MAC SHA-1 solo come ultima risorsa. Solo sicuro disabilita SHA-1. Server legacy abilita anche Diffie-Hellman SHA-1 e AES-CBC: usarlo solo con server obsoleti."
             },
             "terminal_keepalive_secs": {
               "label": "Keepalive attività del terminale (secondi)",
@@ -911,11 +851,6 @@
               "label": "Keepalive 間隔（秒）",
               "description": "Keepalive プローブの間隔。3 回連続無応答でセッションを切断します。0 で無効。"
             },
-            "ssh_algorithm_policy": {
-              "label": "SSH アルゴリズム互換性",
-              "options": { "compatible": "互換（安全な方式を優先）", "secure": "安全な方式のみ", "legacy": "旧式サーバー" },
-              "description": "互換では最新の方式を優先し、SHA-1 MAC は最後の手段としてのみ有効です。安全な方式のみでは SHA-1 を無効化します。旧式サーバーでは SHA-1 Diffie-Hellman と AES-CBC も有効になります。古いサーバーに限って使用してください。"
-            },
             "terminal_keepalive_secs": {
               "label": "ターミナル活動キープアライブ（秒）",
               "description": "この間隔で対話ターミナルにスペース+バックスペースを注入し、サーバー側のアイドルポリシー（TMOUT、踏み台監査）が発動しないようにします。0 で無効。"
@@ -927,7 +862,7 @@
             },
             "triggers": {
               "label": "自動インタラクション トリガー",
-              "description": "expect 風の自動インタラクション: 各ステージの正規表現を順にターミナル出力へ照合し、一致すると自動で応答を送信します。sendText（\\r = Enter）、sendSecretKey（下のトリガー用シークレットスロットのキー名、Enter を自動付加）、sendCommand（ローカルコマンドの標準出力）。プレースホルダーは最小の 1 ステージ例。空欄で無効。リスク: 悪意あるサーバーが一致するプロンプトを偽装し、設定済みの応答（シークレットスロットを含む）を送り込ませるおそれがあります。JSON 不正・上限超過（最大 16 ステージ）・正規表現エラーでは接続が失敗します。",
+              "description": "expect 風の自動インタラクション: 各ステージの正規表現を順にターミナル出力へ照合し、一致すると自動で応答を送信します。sendText（\\r = Enter）、sendSecretKey（下のトリガー用シークレットスロットのキー名、Enter を自動付加）、sendCommand（ローカルコマンドの標準出力）。プレースホルダーは最小の 1 ステージ例。空欄で無効。リスク: 悪意あるサーバーが一致するプロンプトを偽装し、設定済みの応答（シークレットスロットを含む）を送り込ませるおそれがあります。JSON 不正・上限超過（最大 16 ステージ）・正規表現エラーでは接続が失敗します。tssh（trzsz-ssh）のテキスト形式ルールも受け付けます（#!! 接頭辞の有無は問わない）：ExpectCount（0 で無効）・ExpectTimeout・ExpectSleepMS・ExpectPassSleep・ExpectPatternN・ExpectSendTextN・ExpectSendOtpN（= sendCommand）・ExpectCaseSendTextN。正規表現として無効なパターンはリテラル一致にフォールバックし、tssh の暗号文／TOTP 応答（--enc-secret）は拒否されます。JSON に \"enabled\": false を付けるとルールを消さずに無効化できます。",
               "placeholder": "{\"stages\":[{\"pattern\":\"(?i)verification code\",\"sendText\":\"654321\\\\r\"}]}"
             },
             "trigger_answer_1": {
@@ -949,14 +884,6 @@
             "remote_command": {
               "label": "リモートコマンド（RemoteCommand）",
               "description": "ターミナルセッション確立時にシェルの代わりに実行するコマンド（PTY は従来どおり要求）。空欄なら通常の対話シェルになります。再接続時は同じコマンドを再実行します。"
-            },
-            "ssh_algorithm_profile": {
-              "label": "SSH アルゴリズム互換性",
-              "options": {
-                "modern": "モダン（推奨）",
-                "legacy": "レガシー互換"
-              },
-              "description": "モダンなアルゴリズムを優先し、レガシー互換モードでは古い SSH 機器向けの方式を追加します。"
             },
             "sudo_source": {
               "label": "sudo 認証情報ソース",
@@ -981,8 +908,9 @@
             },
             "auth_flow_mode": {
               "label": "2FA フロー",
-              "description": "ログインと sudo に適用します。パスワードのみの場合は OTP を使いません。グローバル Quick Sudo は独自の設定を使います。",
+              "description": "オフ（新規接続の既定値）では OTP コードを自動送信しません。2FA プロンプトは手動で入力してください。他のモードではログインと sudo のパスワード／OTP プロンプトをプラグインが自動応答します。パスワードのみの場合は OTP を使いません。既存の接続は保存済みのモードを維持します。グローバル Quick Sudo は独自の設定を使います。",
               "options": {
+                "off": "オフ（OTP は手動で入力）",
                 "password_then_otp": "パスワードの後に OTP",
                 "password_plus_otp": "パスワードと OTP を連結",
                 "password_only": "パスワードのみ"
@@ -1083,7 +1011,7 @@
             },
             "triggers": {
               "label": "Gatilhos de interação automática",
-              "description": "Interação automática estilo expect: os padrões das etapas são comparados em ordem com a saída do terminal e cada acerto envia automaticamente uma resposta — sendText (\\r = Enter), sendSecretKey (chave de um slot secreto de gatilho abaixo, Enter adicionado) ou sendCommand (stdout de um comando local). O marcador de posição mostra um exemplo mínimo de uma etapa; vazio desativa. Risco: um servidor malicioso pode forjar o prompt para induzir o terminal a enviar a resposta configurada, incluindo o conteúdo dos slots secretos. JSON inválido, limites excedidos (máx. 16 etapas) ou regex inválida fazem a conexão falhar.",
+              "description": "Interação automática estilo expect: os padrões das etapas são comparados em ordem com a saída do terminal e cada acerto envia automaticamente uma resposta — sendText (\\r = Enter), sendSecretKey (chave de um slot secreto de gatilho abaixo, Enter adicionado) ou sendCommand (stdout de um comando local). O marcador de posição mostra um exemplo mínimo de uma etapa; vazio desativa. Risco: um servidor malicioso pode forjar o prompt para induzir o terminal a enviar a resposta configurada, incluindo o conteúdo dos slots secretos. JSON inválido, limites excedidos (máx. 16 etapas) ou regex inválida fazem a conexão falhar. Também aceita regras em formato de texto do tssh (trzsz-ssh), com ou sem o prefixo #!!: ExpectCount (0 desativa), ExpectTimeout, ExpectSleepMS, ExpectPassSleep, ExpectPatternN, ExpectSendTextN, ExpectSendOtpN (= sendCommand) e ExpectCaseSendTextN; padrões inválidos como regex correspondem como texto literal; respostas cifradas/TOTP do tssh (--enc-secret) são rejeitadas. O JSON pode usar \"enabled\": false para desligar as regras sem apagá-las.",
               "placeholder": "{\"stages\":[{\"pattern\":\"(?i)verification code\",\"sendText\":\"654321\\\\r\"}]}"
             },
             "trigger_answer_1": {
@@ -1105,14 +1033,6 @@
             "remote_command": {
               "label": "Comando remoto (RemoteCommand)",
               "description": "Executado em vez de um shell quando uma sessão de terminal é aberta (o PTY continua sendo solicitado). Deixe vazio para um shell interativo normal; reconectar executa o comando novamente."
-            },
-            "ssh_algorithm_profile": {
-              "label": "Compatibilidade de algoritmos SSH",
-              "options": {
-                "modern": "Moderno (recomendado)",
-                "legacy": "Compatível com sistemas legados"
-              },
-              "description": "Mantém os algoritmos modernos em primeiro lugar; o modo compatível acrescenta suites antigas para dispositivos SSH legados."
             },
             "sudo_source": {
               "label": "Origem das credenciais sudo",
@@ -1136,9 +1056,10 @@
               "description": "Lista de permissões em estilo sudoers para comandos privilegiados, uma entrada por linha (ou separada por ';'). Tokens correspondem exatamente, '*' corresponde a um argumento, um '*' final corresponde ao restante (ex.: 'systemctl restart *'). Quando definida, o sudo só é executado para comandos correspondentes; deixe vazio para desativar."
             },
             "auth_flow_mode": {
-              "description": "Aplica-se aos prompts de login e sudo. Somente senha não usa OTP. Os perfis globais Quick Sudo usam suas próprias configurações.",
+              "description": "Desativado (padrão para novas conexões) nunca envia códigos OTP automaticamente - responda aos prompts de 2FA você mesmo. Os demais modos permitem que o plugin responda aos prompts de senha e OTP para login e sudo; somente senha ignora segredos OTP. Conexões existentes mantêm o modo salvo. Os perfis globais Quick Sudo usam suas próprias configurações.",
               "label": "Fluxo de 2FA",
               "options": {
+                "off": "Desativado (responder OTP manualmente)",
                 "password_then_otp": "Senha primeiro, depois OTP",
                 "password_plus_otp": "Senha e OTP combinados",
                 "password_only": "Somente senha"
@@ -1171,11 +1092,6 @@
             "keepalive_interval_secs": {
               "label": "Intervalo de keepalive (segundos)",
               "description": "Intervalo das sondas de keepalive; 3 sondas sem resposta encerram a sessão. 0 desativa as sondas."
-            },
-            "ssh_algorithm_policy": {
-              "label": "Compatibilidade de algoritmos SSH",
-              "options": { "compatible": "Compatível (seguro primeiro)", "secure": "Somente seguro", "legacy": "Servidor legado" },
-              "description": "Compatível mantém os algoritmos modernos primeiro e habilita MACs SHA-1 apenas como último recurso. Somente seguro desativa SHA-1. Servidor legado também habilita Diffie-Hellman SHA-1 e AES-CBC; use apenas com servidores antigos."
             },
             "terminal_keepalive_secs": {
               "label": "Keepalive de atividade do terminal (segundos)",
@@ -1257,11 +1173,6 @@
               "label": "Keepalive 间隔（秒）",
               "description": "Keepalive 探测间隔；连续 3 次未响应即断开会话。0 表示关闭探测。"
             },
-            "ssh_algorithm_policy": {
-              "label": "SSH 算法兼容性",
-              "options": { "compatible": "兼容（优先安全算法）", "secure": "仅安全算法", "legacy": "老旧服务器" },
-              "description": "兼容模式优先使用现代算法，仅在没有其他选择时启用 SHA-1 MAC。仅安全算法会禁用 SHA-1。老旧服务器模式还会启用 SHA-1 Diffie-Hellman 和 AES-CBC，仅用于老旧服务器。"
-            },
             "terminal_keepalive_secs": {
               "label": "终端活动保活（秒）",
               "description": "按该间隔向交互终端注入空格+退格（不产生命令痕迹），避免服务器侧空闲策略（TMOUT、堡垒机审计）断开终端。0 表示关闭。"
@@ -1273,7 +1184,7 @@
             },
             "triggers": {
               "label": "自动交互触发器",
-              "description": "expect 式自动交互：各阶段正则按序匹配终端输出，命中即自动回发——sendText（\\r 代表回车）、sendSecretKey（下方触发器密文槽的键名，自动补回车）或 sendCommand（本地命令的标准输出）。占位符为最小单阶段示例；留空关闭。风险：恶意服务器可伪造匹配提示，骗取终端回发配置的内容（含密文槽）。JSON 非法、超过上限（最多 16 阶段）或正则无法编译时连接直接失败。",
+              "description": "expect 式自动交互：各阶段正则按序匹配终端输出，命中即自动回发——sendText（\\r 代表回车）、sendSecretKey（下方触发器密文槽的键名，自动补回车）或 sendCommand（本地命令的标准输出）。占位符为最小单阶段示例；留空关闭。风险：恶意服务器可伪造匹配提示，骗取终端回发配置的内容（含密文槽）。JSON 非法、超过上限（最多 16 阶段）或正则无法编译时连接直接失败。同时兼容 tssh（trzsz-ssh）文本规则（可带 #!! 前缀）：ExpectCount（0 即关闭）、ExpectTimeout、ExpectSleepMS、ExpectPassSleep、ExpectPatternN、ExpectSendTextN、ExpectSendOtpN（= sendCommand）、ExpectCaseSendTextN；非法正则按字面量匹配兜底，tssh 密文/TOTP 应答（--enc-secret）不受支持并报错。JSON 可携带 \"enabled\": false 在保留规则的同时显式关闭。",
               "placeholder": "{\"stages\":[{\"pattern\":\"(?i)verification code\",\"sendText\":\"654321\\\\r\"}]}"
             },
             "trigger_answer_1": {
@@ -1295,14 +1206,6 @@
             "remote_command": {
               "label": "远程命令（RemoteCommand）",
               "description": "终端会话建立时执行该命令替代 shell（PTY 照常申请）。留空则为普通交互 shell；重连会重新执行同一条命令。"
-            },
-            "ssh_algorithm_profile": {
-              "label": "SSH 算法兼容性",
-              "options": {
-                "modern": "现代（推荐）",
-                "legacy": "兼容旧版设备"
-              },
-              "description": "优先使用现代算法；兼容模式会为老旧 SSH 设备追加旧算法套件。"
             },
             "sudo_source": {
               "label": "Sudo 凭据来源",
@@ -1327,8 +1230,9 @@
             },
             "auth_flow_mode": {
               "label": "2FA 认证流程",
-              "description": "用于登录和 sudo 提示。仅密码模式不使用 OTP 密钥；全局 Quick Sudo 配置使用自身设置。",
+              "description": "关闭（新连接的默认值）时不自动发送 OTP 验证码，2FA 提示由用户手动输入；其余模式由插件自动应答登录和 sudo 的密码/OTP 提示，仅密码模式不使用 OTP 密钥。已创建连接保留原有设置；全局 Quick Sudo 配置使用自身设置。",
               "options": {
+                "off": "关闭（手动输入 OTP）",
                 "password_then_otp": "先密码，再 OTP",
                 "password_plus_otp": "密码与 OTP 组合",
                 "password_only": "仅密码"
@@ -1430,11 +1334,6 @@
               "label": "Keepalive 間隔（秒）",
               "description": "Keepalive 探測間隔；連續 3 次未回應即中斷連線。0 表示關閉探測。"
             },
-            "ssh_algorithm_policy": {
-              "label": "SSH 演算法相容性",
-              "options": { "compatible": "相容（優先安全演算法）", "secure": "僅安全演算法", "legacy": "舊版伺服器" },
-              "description": "相容模式會優先使用現代演算法，只有在沒有其他選擇時才啟用 SHA-1 MAC。僅安全演算法會停用 SHA-1。舊版伺服器模式還會啟用 SHA-1 Diffie-Hellman 與 AES-CBC，僅適用於舊版伺服器。"
-            },
             "terminal_keepalive_secs": {
               "label": "終端活動保活（秒）",
               "description": "按該間隔向互動終端注入空格+退格鍵（不產生命令痕跡），避免伺服器端閒置策略（TMOUT、堡壘機稽核）中斷終端。0 表示關閉。"
@@ -1446,7 +1345,7 @@
             },
             "triggers": {
               "label": "自動互動觸發器",
-              "description": "expect 式自動互動：各階段正規表示式按序比對終端輸出，命中即自動回傳——sendText（\\r 代表 Enter）、sendSecretKey（下方觸發器密文槽的鍵名，自動補 Enter）或 sendCommand（本地命令的標準輸出）。佔位符為最小單階段範例；留空關閉。風險：惡意伺服器可偽造比對提示，騙取終端回傳設定的內容（含密文槽）。JSON 非法、超過上限（最多 16 階段）或正規表示式無法編譯時連線直接失敗。",
+              "description": "expect 式自動互動：各階段正規表示式按序比對終端輸出，命中即自動回傳——sendText（\\r 代表 Enter）、sendSecretKey（下方觸發器密文槽的鍵名，自動補 Enter）或 sendCommand（本地命令的標準輸出）。佔位符為最小單階段範例；留空關閉。風險：惡意伺服器可偽造比對提示，騙取終端回傳設定的內容（含密文槽）。JSON 非法、超過上限（最多 16 階段）或正規表示式無法編譯時連線直接失敗。同時相容 tssh（trzsz-ssh）文字規則（可帶 #!! 前綴）：ExpectCount（0 即關閉）、ExpectTimeout、ExpectSleepMS、ExpectPassSleep、ExpectPatternN、ExpectSendTextN、ExpectSendOtpN（= sendCommand）、ExpectCaseSendTextN；非法正規表示式按字面量比對兜底，tssh 密文/TOTP 應答（--enc-secret）不支援並報錯。JSON 可攜帶 \"enabled\": false 在保留規則的同時顯式關閉。",
               "placeholder": "{\"stages\":[{\"pattern\":\"(?i)verification code\",\"sendText\":\"654321\\\\r\"}]}"
             },
             "trigger_answer_1": {
@@ -1468,14 +1367,6 @@
             "remote_command": {
               "label": "遠端命令（RemoteCommand）",
               "description": "終端工作階段建立時執行該命令替代 shell（PTY 照常要求）。留空則為一般互動 shell；重新連線會重新執行同一條命令。"
-            },
-            "ssh_algorithm_profile": {
-              "label": "SSH 演算法相容性",
-              "options": {
-                "modern": "現代（推薦）",
-                "legacy": "相容舊版設備"
-              },
-              "description": "優先使用現代演算法；相容模式會為老舊 SSH 設備追加舊演算法套件。"
             },
             "sudo_source": {
               "label": "Sudo 憑據來源",
@@ -1500,8 +1391,9 @@
             },
             "auth_flow_mode": {
               "label": "2FA 認證流程",
-              "description": "用於登入及 sudo 提示。僅密碼模式不使用 OTP 金鑰；全域 Quick Sudo 設定使用自身設定。",
+              "description": "關閉（新連線的預設值）時不自動傳送 OTP 驗證碼，2FA 提示由使用者手動輸入；其餘模式由外掛自動應答登入及 sudo 的密碼/OTP 提示，僅密碼模式不使用 OTP 金鑰。已建立連線保留原有設定；全域 Quick Sudo 設定使用自身設定。",
               "options": {
+                "off": "關閉（手動輸入 OTP）",
                 "password_then_otp": "先密碼，再 OTP",
                 "password_plus_otp": "密碼與 OTP 組合",
                 "password_only": "僅密碼"

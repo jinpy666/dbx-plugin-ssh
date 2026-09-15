@@ -93,8 +93,11 @@ for (const authentication of options("authentication")) {
         current.visible("sudo_password", sudo_source === "custom");
         current.visible("sudo_profile", sudo_source === "global");
         current.visible("auth_flow_mode", sudo_source !== "global");
-        current.visible("totp_secret", sudo_source !== "global" && auth_flow_mode !== "password_only");
-        current.visible("totp_prompt_hint", sudo_source !== "global" && auth_flow_mode !== "password_only");
+        // TOTP secret/hint only apply to modes that answer OTP prompts;
+        // "off" (manual 2FA) and "password_only" hide both.
+        const answersOtp = ["password_then_otp", "password_plus_otp"].includes(auth_flow_mode);
+        current.visible("totp_secret", sudo_source !== "global" && answersOtp);
+        current.visible("totp_prompt_hint", sudo_source !== "global" && answersOtp);
       }
     }
   }

@@ -5324,6 +5324,7 @@ async function loadSudoProfiles() {
 }
 
 function flowModeLabel(mode: string) {
+  if (mode === "off") return t("flowOff");
   if (mode === "password_only") return t("flowOnly");
   if (mode === "password_plus_otp") return t("flowPlusOtp");
   return t("flowThenOtp");
@@ -6356,7 +6357,7 @@ onBeforeUnmount(() => {
     </header>
 
     <div v-if="notice" class="notice">{{ notice }}</div>
-    <div v-if="sftpError" class="error-banner"><span>{{ sftpError }}</span><button @click="sftpError = ''"><X /></button></div>
+    <div v-if="sftpError" class="error-banner"><span>{{ sftpError }}</span><button :title="t('close')" @click="sftpError = ''"><X /></button></div>
 
     <section ref="paneContainer" :class="orderedPaneClass">
       <section class="terminal-pane" :class="{ 'drag-active': terminalDragActive, 'batch-bar-open': connected && batchBarOpen }" :style="terminalBasis" @contextmenu="showTerminalMenu" @dragenter.prevent="onTerminalDragEnter" @dragover.prevent @dragleave.self="terminalDragActive = false" @drop.prevent="onTerminalDrop($event)">
@@ -6427,7 +6428,7 @@ onBeforeUnmount(() => {
         <section v-if="metricsOpen" class="metrics-float">
           <header>
             <h2>{{ t("metrics") }}<span v-if="metricsDistroBadge" class="distro-badge" :style="{ backgroundColor: metricsDistroBadge.color }" :title="metricsDistroBadge.name">{{ metricsDistroBadge.label }}</span><span v-if="metrics?.hostname" class="metrics-host"> · {{ metrics.hostname }}</span></h2>
-            <button class="icon-button" @click="closeMetrics"><X /></button>
+            <button :title="t('close')" class="icon-button" @click="closeMetrics"><X /></button>
           </header>
           <div class="metrics-float-body">
             <div v-if="metricsLoading && !metrics" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
@@ -6546,7 +6547,7 @@ onBeforeUnmount(() => {
         <section v-if="recordingsOpen" class="metrics-float recordings-float">
           <header>
             <h2>{{ t("recordingsTitle") }}</h2>
-            <button class="icon-button" @click="toggleRecordings"><X /></button>
+            <button :title="t('close')" class="icon-button" @click="toggleRecordings"><X /></button>
           </header>
           <div class="metrics-float-body">
             <div v-if="recordingsLoading && !recordings.length" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
@@ -6888,7 +6889,7 @@ onBeforeUnmount(() => {
               <button :title="t('editSave.save')" :disabled="previewSaving" @click="savePreview"><Loader2 v-if="previewSaving" class="spinning" /><Save v-else />{{ t("editSave.save") }}</button>
             </template>
           </div>
-          <button class="icon-button" @click="closePreview"><X /></button>
+          <button :title="t('close')" class="icon-button" @click="closePreview"><X /></button>
         </header>
         <div v-if="previewLoading" class="empty"><Loader2 class="spinning" />{{ t("loading") }}</div>
         <div v-else-if="previewMode === 'image'" class="preview-image-stage">
@@ -6900,7 +6901,7 @@ onBeforeUnmount(() => {
 
     <section v-if="operationDialog === 'mkdir'" class="modal-backdrop" @mousedown.self="operationDialog = null">
       <article class="modal small-modal">
-        <header><h2>{{ t("newFolder") }}</h2><button class="icon-button" @click="operationDialog = null"><X /></button></header>
+        <header><h2>{{ t("newFolder") }}</h2><button :title="t('close')" class="icon-button" @click="operationDialog = null"><X /></button></header>
         <input v-model="operationDraft" autofocus @keydown.enter="createDirectory" />
         <footer><button @click="operationDialog = null">{{ t("cancel") }}</button><button class="primary-button" :disabled="!operationDraft.trim()" @click="createDirectory">{{ t("confirm") }}</button></footer>
       </article>
@@ -6908,7 +6909,7 @@ onBeforeUnmount(() => {
 
     <section v-if="commandOpen" class="modal-backdrop" @mousedown.self="commandOpen = false">
       <article class="modal command-modal">
-        <header><h2>{{ t("commandTitle") }}</h2><button class="icon-button" @click="commandOpen = false"><X /></button></header>
+        <header><h2>{{ t("commandTitle") }}</h2><button :title="t('close')" class="icon-button" @click="commandOpen = false"><X /></button></header>
         <input
           v-model="commandDraft"
           class="mono"
@@ -6956,7 +6957,7 @@ onBeforeUnmount(() => {
 
     <section v-if="chmodTarget" class="modal-backdrop" @mousedown.self="chmodTarget = undefined">
       <article class="modal small-modal">
-        <header><h2>{{ t("permissionsEdit") }} · {{ chmodTarget.name }}</h2><button class="icon-button" @click="chmodTarget = undefined"><X /></button></header>
+        <header><h2>{{ t("permissionsEdit") }} · {{ chmodTarget.name }}</h2><button :title="t('close')" class="icon-button" @click="chmodTarget = undefined"><X /></button></header>
         <div class="perm-matrix" role="group" :aria-label="t('permissionsEdit')">
           <span></span>
           <span v-for="column in PERM_COLUMNS" :key="column.bit" class="perm-matrix-head">{{ t(column.key) }}</span>
@@ -6975,7 +6976,7 @@ onBeforeUnmount(() => {
 
     <section v-if="deleteTarget" class="modal-backdrop" @mousedown.self="deleteTarget = undefined">
       <article class="modal small-modal destructive-modal">
-        <header><h2>{{ t("deleteTitle") }}</h2><button class="icon-button" @click="deleteTarget = undefined"><X /></button></header>
+        <header><h2>{{ t("deleteTitle") }}</h2><button :title="t('close')" class="icon-button" @click="deleteTarget = undefined"><X /></button></header>
         <div class="destructive-copy"><span class="destructive-icon"><Trash2 /></span><div><strong>{{ deleteTarget.name }}</strong><p class="muted">{{ t("deleteMessage") }}</p></div></div>
         <footer><button @click="deleteTarget = undefined">{{ t("cancel") }}</button><button class="danger-button" :disabled="deleteSubmitting" @click="confirmDelete"><Trash2 />{{ t("delete") }}</button></footer>
       </article>
@@ -6983,7 +6984,7 @@ onBeforeUnmount(() => {
 
     <section v-if="batchDeleteOpen" class="modal-backdrop" @mousedown.self="batchDeleteOpen = false">
       <article class="modal small-modal destructive-modal">
-        <header><h2>{{ t("sftpBatch.deleteTitle") }}</h2><button class="icon-button" @click="batchDeleteOpen = false"><X /></button></header>
+        <header><h2>{{ t("sftpBatch.deleteTitle") }}</h2><button :title="t('close')" class="icon-button" @click="batchDeleteOpen = false"><X /></button></header>
         <div class="destructive-copy"><span class="destructive-icon"><Trash2 /></span><div><strong>{{ t("sftpBatch.selected", { count: selectedEntries.length }) }}</strong><p class="muted">{{ t("sftpBatch.deleteMessage") }}</p></div></div>
         <div v-if="batchProgress" class="batch-progress-row"><progress class="batch-progress-bar" :value="batchProgressPercent(batchProgress)" max="100" /><span class="batch-progress mono">{{ t("sftpBatch.progress", { done: batchProgress.done, total: batchProgress.total }) }}</span></div>
         <footer><button @click="batchDeleteOpen = false" :disabled="batchDeleteSubmitting">{{ t("cancel") }}</button><button class="danger-button" :disabled="batchDeleteSubmitting" @click="confirmBatchDelete"><Loader2 v-if="batchDeleteSubmitting" class="spinning" /><Trash2 v-else />{{ t("delete") }}</button></footer>
@@ -6993,7 +6994,7 @@ onBeforeUnmount(() => {
     <!-- 录制删除确认：应用内弹窗替代 window.confirm（宿主沙箱 iframe 无 allow-modals，confirm 恒 false） -->
     <section v-if="recordingDeleteTarget" class="modal-backdrop" @mousedown.self="recordingDeleteTarget = null">
       <article class="modal small-modal destructive-modal">
-        <header><h2>{{ t("recordingDelete") }}</h2><button class="icon-button" @click="recordingDeleteTarget = null"><X /></button></header>
+        <header><h2>{{ t("recordingDelete") }}</h2><button :title="t('close')" class="icon-button" @click="recordingDeleteTarget = null"><X /></button></header>
         <div class="destructive-copy"><span class="destructive-icon"><Trash2 /></span><div><strong>{{ t("recordingDeleteConfirm", { host: recordingDeleteTarget.host || recordingDeleteTarget.recordingId }) }}</strong><p class="muted">{{ formatRecordedAt(recordingDeleteTarget.startedAt) }} · {{ formatDuration(recordingDeleteTarget.durationSecs ?? 0) }}</p></div></div>
         <footer><button @click="recordingDeleteTarget = null" :disabled="recordingDeleteSubmitting">{{ t("cancel") }}</button><button class="danger-button" :disabled="recordingDeleteSubmitting" @click="confirmRecordingDelete"><Loader2 v-if="recordingDeleteSubmitting" class="spinning" /><Trash2 v-else />{{ t("delete") }}</button></footer>
       </article>
@@ -7001,7 +7002,7 @@ onBeforeUnmount(() => {
 
     <section v-if="newFileDialog" class="modal-backdrop" @mousedown.self="newFileDialog = false">
       <article class="modal small-modal">
-        <header><h2>{{ t("sftpNewFile.title") }}</h2><button class="icon-button" @click="newFileDialog = false"><X /></button></header>
+        <header><h2>{{ t("sftpNewFile.title") }}</h2><button :title="t('close')" class="icon-button" @click="newFileDialog = false"><X /></button></header>
         <input v-model="newFileDraft" autofocus spellcheck="false" :placeholder="t('sftpNewFile.placeholder')" @keydown.enter="createNewFile" />
         <footer><button @click="newFileDialog = false">{{ t("cancel") }}</button><button class="primary-button" :disabled="!newFileDraft.trim() || newFileSubmitting" @click="createNewFile"><Loader2 v-if="newFileSubmitting" class="spinning" />{{ t("confirm") }}</button></footer>
       </article>
@@ -7009,7 +7010,7 @@ onBeforeUnmount(() => {
 
     <section v-if="attrsTarget" class="modal-backdrop" @mousedown.self="closeAttributes">
       <article class="modal small-modal attrs-modal">
-        <header><h2>{{ t("sftpAttrs.title") }} · {{ attrsTarget.name }}</h2><button class="icon-button" @click="closeAttributes"><X /></button></header>
+        <header><h2>{{ t("sftpAttrs.title") }} · {{ attrsTarget.name }}</h2><button :title="t('close')" class="icon-button" @click="closeAttributes"><X /></button></header>
         <div v-if="attrsLoading" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
         <template v-else-if="attrsInfo">
           <dl class="attrs-grid">
@@ -7045,7 +7046,7 @@ onBeforeUnmount(() => {
 
     <section v-if="settingsOpen" class="modal-backdrop" @mousedown.self="settingsOpen = false">
       <article class="modal settings-modal">
-        <header><h2>{{ t("settings") }}</h2><button class="icon-button" @click="settingsOpen = false"><X /></button></header>
+        <header><h2>{{ t("settings") }}</h2><button :title="t('close')" class="icon-button" @click="settingsOpen = false"><X /></button></header>
         <div class="settings-body">
           <div v-if="settingsLoading" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
           <div v-else-if="settingsLoadFailed" class="task-error" role="alert">
@@ -7103,6 +7104,7 @@ onBeforeUnmount(() => {
                 <label class="settings-field">
                   <span>{{ t("settingsFlowMode") }}</span>
                   <select v-model="profileDraft.authFlowMode">
+                    <option value="off">{{ t("flowOff") }}</option>
                     <option value="password_then_otp">{{ t("flowThenOtp") }}</option>
                     <option value="password_plus_otp">{{ t("flowPlusOtp") }}</option>
                     <option value="password_only">{{ t("flowOnly") }}</option>
@@ -7143,6 +7145,7 @@ onBeforeUnmount(() => {
             <label class="settings-field">
               <span>{{ t("settingsFlowMode") }}</span>
               <select v-model="settingsDraft.authFlowMode">
+                <option value="off">{{ t("flowOff") }}</option>
                 <option value="password_then_otp">{{ t("flowThenOtp") }}</option>
                 <option value="password_plus_otp">{{ t("flowPlusOtp") }}</option>
                 <option value="password_only">{{ t("flowOnly") }}</option>
@@ -7281,7 +7284,7 @@ onBeforeUnmount(() => {
 
     <section v-if="auditOpen" class="modal-backdrop" @mousedown.self="auditOpen = false">
       <article class="modal settings-modal audit-modal">
-        <header><h2>{{ t("auditLog.title") }}</h2><button class="icon-button" @click="auditOpen = false"><X /></button></header>
+        <header><h2>{{ t("auditLog.title") }}</h2><button :title="t('close')" class="icon-button" @click="auditOpen = false"><X /></button></header>
         <div class="settings-body">
           <div class="audit-toolbar">
             <label class="highlight-editor-flag">
@@ -7321,7 +7324,7 @@ onBeforeUnmount(() => {
 
     <section v-if="profilesOpen" class="modal-backdrop" @mousedown.self="profilesOpen = false">
       <article class="modal settings-modal">
-        <header><h2>{{ t("profilesTitle") }}</h2><button class="icon-button" @click="profilesOpen = false"><X /></button></header>
+        <header><h2>{{ t("profilesTitle") }}</h2><button :title="t('close')" class="icon-button" @click="profilesOpen = false"><X /></button></header>
         <div class="settings-body">
           <p class="muted">{{ t("profilesHint") }}</p>
           <div v-if="sudoProfilesLoading && !sudoProfiles.length" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
@@ -7423,7 +7426,7 @@ onBeforeUnmount(() => {
       <article class="modal alert-triage-modal">
         <header>
           <h2>{{ t("alertTriage.title") }}</h2>
-          <button class="icon-button" @click="alertTriageOpen = false"><X /></button>
+          <button :title="t('close')" class="icon-button" @click="alertTriageOpen = false"><X /></button>
         </header>
         <p class="muted alert-triage-hint">{{ t("alertTriage.hint") }}</p>
         <textarea v-model="alertTriagePayload" class="mono alert-triage-payload" rows="6" :placeholder="t('alertTriage.placeholder')" :disabled="alertTriageBusy" spellcheck="false" autofocus />
@@ -7459,7 +7462,7 @@ onBeforeUnmount(() => {
       <article class="modal small-modal" :class="{ 'destructive-modal': pasteConfirm.danger }">
         <header>
           <h2>{{ pasteConfirm.danger ? t("terminalDanger.title") : t("terminalPasteConfirm.title") }}</h2>
-          <button class="icon-button" @click="resolvePasteConfirm(false)"><X /></button>
+          <button :title="t('close')" class="icon-button" @click="resolvePasteConfirm(false)"><X /></button>
         </header>
         <div v-if="pasteConfirm.danger" class="destructive-copy">
           <span class="destructive-icon"><TriangleAlert /></span>
@@ -7483,7 +7486,7 @@ onBeforeUnmount(() => {
       <article class="modal small-modal">
         <header>
           <h2>{{ t("terminalDropPrompt.title") }}</h2>
-          <button class="icon-button" @click="resolveDropUpload('cancel')"><X /></button>
+          <button :title="t('close')" class="icon-button" @click="resolveDropUpload('cancel')"><X /></button>
         </header>
         <p class="muted">{{ t("terminalDropPrompt.summary", { count: dropUploadPrompt.files.length }) }}</p>
         <pre class="command-output mono drop-file-list">{{ dropUploadPrompt.files.map((file) => file.name).join("\n") }}</pre>

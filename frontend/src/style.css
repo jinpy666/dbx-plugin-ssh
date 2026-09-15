@@ -55,6 +55,8 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--primary); o
      与指标/录制浮动卡（.metrics-float z=6），否则弹窗下探部分会被这些层
      盖住；仍低于 context-menu(50)/modal(80)/回放(90)。 */
   z-index: 40;
+  isolation: isolate;
+  overflow: visible;
   display: flex;
   height: 36px;
   min-height: 36px;
@@ -155,7 +157,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--primary); o
 .terminal-state-icon { width: 36px; height: 36px; opacity: .6; }
 .divider { position: relative; z-index: 4; width: 1px; flex: 0 0 1px; background: var(--border); cursor: col-resize; }
 .divider:hover { background: color-mix(in srgb, var(--foreground) 38%, var(--border)); }
-.sftp-pane { position: relative; flex: 1; }
+.sftp-pane { position: relative; z-index: 0; flex: 1; }
 .sftp-pane.drag-active { background: color-mix(in srgb, var(--primary) 4%, var(--background)); }
 
 /* SFTP 面板主体：左侧 tree/quick 双 tab 侧栏（可收起为窄条）+ 右侧文件区。

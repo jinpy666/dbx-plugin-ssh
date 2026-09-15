@@ -469,6 +469,35 @@ def main() -> None:
             if cleared.get("quickSudoProfileId"):
                 raise AssertionError(f"binding not cleared: {json.dumps(cleared)[:160]}")
 
+        def case_profiles_off_flow_and_reject():
+            # 0.4.77：authFlowMode 新增 off（2FA 关闭）选项；未知值仍拒绝。
+            # 测试专用密钥：运行时拼装，绝不使用真实凭据。
+            off_secret = f"smoke-off-{uuid.uuid4().hex}"
+            created = req("sudo/profiles/save", {
+                "name": "smoke-ops-off",
+                "sudoPassword": off_secret,
+                "authFlowMode": "off",
+            })
+            profile = created.get("profile") or {}
+            if created.get("created") is not True:
+                raise AssertionError(f"want created=true: {json.dumps(created)[:160]}")
+            if profile.get("authFlowMode") != "off":
+                raise AssertionError(
+                    f"off flow not persisted: {json.dumps(profile)[:160]}"
+                )
+            error = None
+            try:
+                req("sudo/profiles/save", {"name": "smoke-ops-bogus", "authFlowMode": "bogus"})
+            except SidecarError as raised:
+                error = str(raised)
+                if missing_method(raised) is not None:
+                    raise
+            if error is None or "Unsupported authFlowMode" not in error:
+                raise AssertionError(f"bogus flow not rejected: {error}")
+            removed = req("sudo/profiles/delete", {"id": profile.get("id")})
+            if removed.get("removed") is not True:
+                raise AssertionError(f"cleanup delete failed: {json.dumps(removed)[:160]}")
+
         def case_profiles_delete():
             profile_id = profile_state.get("id")
             if not profile_id:
@@ -1010,6 +1039,8 @@ def main() -> None:
                    case_profiles_settings_binding, needs="sudo/profiles/save create")
         report.run("connection/action quick-sudo-profiles", "connection/action",
                    case_connection_action_profiles, needs="sudo/profiles/save create")
+        report.run("sudo/profiles/off flow accepted + bogus rejected", "sudo/profiles/save",
+                   case_profiles_off_flow_and_reject)
         report.run("sudo/profiles/delete + repeat", "sudo/profiles/delete",
                    case_profiles_delete, needs="sudo/profiles/save create")
 
