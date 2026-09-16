@@ -572,6 +572,19 @@ enum TerminalCommand {
     Close,
 }
 
+/// Enqueue keyboard input with bounded backpressure instead of dropping it
+/// when the PTY writer briefly falls behind. Binary input handlers run on the
+/// SDK's blocking worker threads, so blocking here does not block the Tokio
+/// runtime that drains the terminal channel.
+fn enqueue_terminal_input(
+    sender: &mpsc::Sender<TerminalCommand>,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    sender
+        .blocking_send(TerminalCommand::Input(data))
+        .map_err(|error| format!("SSH input queue is closed: {error}"))
+}
+
 /// Terminal activity keepalive payload: space + backspace. Net-zero on a
 /// shell prompt (an empty line never enters history), movement-only in
 /// full-screen apps; protocol-level keepalives don't count as keyboard
@@ -1797,14 +1810,17 @@ impl SshRuntime {
     }
 
     pub fn write_terminal(&self, session_id: &str, data: Vec<u8>) -> Result<(), String> {
-        let sessions = self.sessions.blocking_read();
-        let session = sessions
-            .get(session_id)
-            .ok_or("SSH session was not found")?;
-        session
-            .terminal_tx
-            .try_send(TerminalCommand::Input(data))
-            .map_err(|error| format!("SSH input queue is full or closed: {error}"))
+        // Do not hold the session-map read guard while applying backpressure:
+        // closing a dead session needs the write lock to drop the receiver so
+        // a blocked sender can observe closure and return.
+        let terminal_tx = {
+            let sessions = self.sessions.blocking_read();
+            sessions
+                .get(session_id)
+                .map(|session| session.terminal_tx.clone())
+                .ok_or("SSH session was not found")?
+        };
+        enqueue_terminal_input(&terminal_tx, data)
     }
 
     /// Normalizes one batch command into PTY key input: newlines become
@@ -5348,6 +5364,39 @@ mod tests {
         let frames = replay.after(1);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].sequence, 2);
+    }
+
+    #[test]
+    fn terminal_input_enqueue_applies_backpressure_instead_of_dropping() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(TerminalCommand::Input(b"first".to_vec()))
+            .expect("seed the bounded queue");
+
+        let (done_sender, done_receiver) = std::sync::mpsc::channel();
+        let blocked_sender = sender.clone();
+        std::thread::spawn(move || {
+            let result = enqueue_terminal_input(&blocked_sender, b"second".to_vec());
+            done_sender.send(result).expect("report enqueue result");
+        });
+
+        assert!(done_receiver
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(TerminalCommand::Input(data)) if data == b"first"
+        ));
+        assert_eq!(
+            done_receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            Ok(())
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(TerminalCommand::Input(data)) if data == b"second"
+        ));
     }
 
     #[test]

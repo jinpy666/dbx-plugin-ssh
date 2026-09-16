@@ -91,6 +91,7 @@ import {
   type TerminalSearchOptions,
 } from "./lib/terminalInteraction";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
+import { createTerminalInputQueue } from "./lib/terminalInputQueue";
 import { describeReconnectCountdown, describeReconnectRestoredNotice, isConnectionInactiveError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS, type ReconnectCountdown } from "./lib/terminalReconnect";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
 import { decideConnectRetry } from "./lib/connectRetry";
@@ -847,8 +848,6 @@ let replayInFlight = false;
 // closes cannot self-heal by retrying — after a few attempts the drain must
 // resync past the hole instead of spinning the replay loop forever.
 let replayNoProgress = 0;
-let binaryInputChain = Promise.resolve();
-let terminalInputSequence = 0;
 let noticeTimer = 0;
 let commandMarkerTimer = 0;
 let agentPromptTimer = 0;
@@ -869,7 +868,6 @@ let trzszPickResolver: ((files: File[] | undefined) => void) | undefined;
 let pendingTerminalInput = "";
 let activeTerminalSessionId = "";
 const pendingTerminalFrames = new Map<number, { stream: number; data: Uint8Array }>();
-const terminalInputAckWaiters = new Map<number, { resolve: () => void; reject: (error: Error) => void; timer: number }>();
 const uploadAckWaiters = new Map<string, { nextOffset: number; resolve: () => void; reject: (error: Error) => void; timer: number }>();
 const downloadChunkWaiters = new Map<string, { offset: number; resolve: (bytes: Uint8Array) => void; reject: (error: Error) => void; timer: number }>();
 const transferSamples = new Map<string, TransferSpeedSample>();
@@ -885,6 +883,10 @@ const commandMarkerParser = new Osc633CommandParser();
 // reads `terminal` lazily so it also works across terminal recreation.
 const terminalWriteThrottle: TerminalWriteThrottle = createTerminalWriteThrottle({
   sink: (data) => terminal?.write(data),
+});
+const terminalInputQueue = createTerminalInputQueue({
+  send: (sessionId, payload) => window.dbxPlugin.sendBinary(`ssh/terminal/in/${sessionId}`, payload),
+  onError: (cause) => showError(cause, "terminal"),
 });
 
 const locale = ref("zh-CN");
@@ -1370,27 +1372,7 @@ function trackPendingInput(data: string) {
 function sendTerminalBytes(data: Uint8Array) {
   const sessionId = session.value?.sessionId;
   if (!sessionId) return;
-  const sequence = ++terminalInputSequence;
-  const payload = new Uint8Array(8 + data.byteLength);
-  writeU64(payload, 0, sequence);
-  payload.set(data, 8);
-  binaryInputChain = binaryInputChain
-    .then(async () => {
-      const acknowledged = waitForTerminalInputAck(sequence);
-      await window.dbxPlugin.sendBinary(`ssh/terminal/in/${sessionId}`, payload);
-      await acknowledged;
-    })
-    .catch((cause) => showError(cause, "terminal"));
-}
-
-function waitForTerminalInputAck(sequence: number) {
-  return new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      terminalInputAckWaiters.delete(sequence);
-      reject(new Error(t("errors.terminalInputAckTimeout")));
-    }, 15_000);
-    terminalInputAckWaiters.set(sequence, { resolve, reject, timer });
-  });
+  terminalInputQueue.enqueue(sessionId, data);
 }
 
 function scheduleFit() {
@@ -1887,16 +1869,6 @@ function handleEvent(event: DbxPluginEvent) {
     if (params.source && params.source !== batchBarSourceId) applyRemoteBatchBarState(params);
     return;
   }
-  if (event.method === "ssh/terminal/inputAck") {
-    const sequence = Number(event.params.sequence);
-    const waiter = terminalInputAckWaiters.get(sequence);
-    if (waiter) {
-      window.clearTimeout(waiter.timer);
-      terminalInputAckWaiters.delete(sequence);
-      waiter.resolve();
-    }
-    return;
-  }
   if (event.method === "ssh/host-key/prompt" || event.method === "connection/challenge") {
     hostKeyPrompt.value = event.params as unknown as HostKeyPrompt;
     return;
@@ -2149,7 +2121,7 @@ async function closeSession(updateStatus = true) {
   teardownTrzsz();
   pendingTerminalFrames.clear();
   lastSequence = 0;
-  terminalInputSequence = 0;
+  terminalInputQueue.reset();
   reconnectPending.value = false;
   resetCommandMarker();
   if (sessionId) await window.dbxPlugin.invoke("ssh/session/close", { sessionId }).catch(() => undefined);
@@ -6343,10 +6315,6 @@ onBeforeUnmount(() => {
   detachHighlightRender();
   terminal?.dispose();
   for (const waiter of uploadAckWaiters.values()) {
-    window.clearTimeout(waiter.timer);
-    waiter.reject(new Error(t("errors.workbenchDetached")));
-  }
-  for (const waiter of terminalInputAckWaiters.values()) {
     window.clearTimeout(waiter.timer);
     waiter.reject(new Error(t("errors.workbenchDetached")));
   }
