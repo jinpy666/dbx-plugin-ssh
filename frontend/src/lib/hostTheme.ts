@@ -14,6 +14,15 @@ const THEME_TOKEN_COLORS = [
   ["destructive", "--color-destructive"],
 ] as const;
 
+// These are the existing font tokens bridged by shared/frontend/themeSync.ts.
+// Keep this mapping limited to tokens already in the host theme contract; the
+// SSH terminal must follow DBX's mono font rather than inventing a plugin-only
+// font setting.
+const THEME_TOKEN_FONTS = [
+  ["terminal", "--font-mono"],
+  ["ui", "--font-sans"],
+] as const;
+
 export function isDbxPluginTheme(value: unknown): value is DbxPluginTheme {
   if (typeof value !== "object" || value === null) return false;
   const theme = value as { appearance?: unknown; tokens?: unknown };
@@ -32,6 +41,8 @@ export function themeFromEnvDetail(detail: unknown): DbxPluginTheme | null {
 export function themeToAppearance(theme: DbxPluginTheme): {
   colorScheme: "light" | "dark";
   colors: Partial<DbxPluginAppearance["colors"]>;
+  terminal?: Partial<DbxPluginAppearance["terminal"]>;
+  ui?: Partial<NonNullable<DbxPluginAppearance["ui"]>>;
 } {
   const tokens = theme.tokens ?? {};
   const colors: Partial<DbxPluginAppearance["colors"]> = {};
@@ -39,7 +50,17 @@ export function themeToAppearance(theme: DbxPluginTheme): {
     const value = tokens[token];
     if (typeof value === "string" && value.trim()) colors[key] = value;
   }
-  return { colorScheme: theme.appearance, colors };
+  const fonts: {
+    terminal?: Partial<DbxPluginAppearance["terminal"]>;
+    ui?: Partial<NonNullable<DbxPluginAppearance["ui"]>>;
+  } = {};
+  for (const [target, token] of THEME_TOKEN_FONTS) {
+    const value = tokens[token];
+    if (typeof value !== "string" || !value.trim()) continue;
+    if (target === "terminal") fonts.terminal = { fontFamily: value };
+    else fonts.ui = { fontFamily: value };
+  }
+  return { colorScheme: theme.appearance, colors, ...fonts };
 }
 
 export function onHostThemeChange(listener: (theme: DbxPluginTheme) => void): () => void {
