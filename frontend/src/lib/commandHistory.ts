@@ -8,6 +8,39 @@ export const PERSISTED_COMMAND_MAX_LENGTH = 200;
 // 疑似内嵌凭据的命令不落 localStorage（内存历史仍保留，便于当前会话重放）。
 const SECRET_LIKE_PATTERN = /(?:password|passwd|passphrase|token|secret|api[-_]?key|access[-_]?key)\s*[:=]/i;
 
+export type CommandInputAction = "run" | "history-up" | "history-down" | "none";
+
+/**
+ * Resolves keyboard behavior for the multiline command editor. Ctrl/Cmd+Enter
+ * submits; plain Enter remains available for shell scripts and backslash
+ * continuations. History navigation only takes over at the corresponding edge
+ * of the editor, so arrows keep their normal multiline editing behavior.
+ */
+export function commandInputAction(options: {
+  key: string;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  selectionStart: number;
+  selectionEnd: number;
+  valueLength: number;
+}): CommandInputAction {
+  if (options.key === "Enter" && (options.ctrlKey || options.metaKey) && !options.shiftKey) {
+    return "run";
+  }
+  if (
+    options.selectionStart !== options.selectionEnd ||
+    options.ctrlKey ||
+    options.metaKey ||
+    options.shiftKey
+  ) {
+    return "none";
+  }
+  if (options.key === "ArrowUp" && options.selectionStart === 0) return "history-up";
+  if (options.key === "ArrowDown" && options.selectionEnd === options.valueLength) return "history-down";
+  return "none";
+}
+
 /** 记录一条命令：去重后置顶，截断到上限；空命令原样返回等价副本。 */
 export function pushCommandHistory(history: string[], command: string, limit = COMMAND_HISTORY_LIMIT): string[] {
   const trimmed = command.trim();

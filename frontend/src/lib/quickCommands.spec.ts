@@ -29,10 +29,12 @@ describe("filterQuickCommands", () => {
 });
 
 describe("quickCommandText", () => {
-  it("flattens multi-line commands with single-space joins and trims", () => {
+  it("preserves multi-line commands as PTY Enter keystrokes and trims", () => {
     expect(quickCommandText("docker ps\n")).toBe("docker ps");
     expect(quickCommandText("systemctl status nginx\r\n")).toBe("systemctl status nginx");
-    expect(quickCommandText("  echo a\necho b  ")).toBe("echo a echo b");
+    expect(quickCommandText("  echo a\necho b  ")).toBe("echo a\recho b");
+    expect(quickCommandText("echo a\r\necho b\recho c")).toBe("echo a\recho b\recho c");
+    expect(quickCommandText(["echo \\", "--flag value"].join("\n"))).toBe("echo \\\r--flag value");
   });
   it("returns empty string for blank input", () => {
     expect(quickCommandText(" \n ")).toBe("");

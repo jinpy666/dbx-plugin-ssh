@@ -116,7 +116,7 @@ import {
   validateBookmarkInput,
   type SftpBookmark,
 } from "./lib/sftpBookmarks";
-import { browseCommandHistory, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
+import { browseCommandHistory, commandInputAction, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
 import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, quickPickCommandById, selectBatchTargets, summarizeBatchResults, toggleBatchTarget, type BatchSendSummary, type BatchSendTarget } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
@@ -4419,6 +4419,30 @@ function browseCommandHistoryDown() {
   commandDraft.value = step.draft;
 }
 
+function handleCommandInputKeydown(event: KeyboardEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLTextAreaElement)) return;
+  const action = commandInputAction({
+    key: event.key,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+    selectionStart: target.selectionStart,
+    selectionEnd: target.selectionEnd,
+    valueLength: target.value.length,
+  });
+  if (action === "run") {
+    event.preventDefault();
+    void runCommand();
+  } else if (action === "history-up") {
+    event.preventDefault();
+    browseCommandHistoryUp();
+  } else if (action === "history-down") {
+    event.preventDefault();
+    browseCommandHistoryDown();
+  }
+}
+
 // 一键重发：把历史条目回填输入框并立即执行。
 function rerunHistoryCommand(command: string) {
   if (commandRunning.value) return;
@@ -7117,16 +7141,15 @@ onBeforeUnmount(() => {
     <section v-if="commandOpen" class="modal-backdrop" @mousedown.self="commandOpen = false">
       <article class="modal command-modal">
         <header><h2>{{ t("commandTitle") }}</h2><button :title="t('close')" class="icon-button" @click="commandOpen = false"><X /></button></header>
-        <input
+        <textarea
           v-model="commandDraft"
           class="mono"
+          rows="5"
           spellcheck="false"
           autofocus
           :placeholder="t('commandPlaceholder')"
           :disabled="commandRunning"
-          @keydown.enter="runCommand"
-          @keydown.up.prevent="browseCommandHistoryUp"
-          @keydown.down.prevent="browseCommandHistoryDown"
+          @keydown="handleCommandInputKeydown"
         />
         <div v-if="commandHistory.length" class="command-history">
           <div class="command-history-header">

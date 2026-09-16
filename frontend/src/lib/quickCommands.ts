@@ -75,7 +75,11 @@ export function filterQuickCommands(
   );
 }
 
-/** 写入终端的命令文本：多行命令折叠为单行并去首尾空白（Run/Paste 共用）。 */
+/**
+ * 写入终端的命令文本：保留多行结构，并把换行统一成 PTY 的 Enter
+ * （Run/Paste 共用）。保留换行对反斜杠续行尤其重要；折叠为空格会把
+ * `command \\` 变成带转义空格的错误命令。
+ */
 export function quickCommandText(command: string): string {
-  return command.replace(/\r?\n/g, " ").trim();
+  return command.replace(/\r\n?/g, "\n").replace(/\n/g, "\r").trim();
 }
