@@ -2197,6 +2197,156 @@ mod tests {
         );
     }
 
+    /// 登录期 2FA 组合矩阵：流程模式 × 服务器提问形态 × 首因子是否已过。
+    /// 每个用例用各自独立的静态码，避免进程级防重放台账把后一个用例吃掉。
+    #[test]
+    fn keyboard_interactive_combination_matrix() {
+        let _otp_ledger = otp_ledger_test_guard();
+        struct Case {
+            mode: AuthFlowMode,
+            first_factor: bool,
+            context: &'static str,
+            prompts: Vec<&'static str>,
+            expect: Vec<&'static str>,
+            code: &'static str,
+        }
+        let cases = vec![
+            // off：密码类提问照答，OTP 永不自动回码（即使首因子已过）。
+            Case {
+                mode: AuthFlowMode::Off,
+                first_factor: true,
+                context: "",
+                prompts: vec!["Password:"],
+                expect: vec!["pw"],
+                code: "111111",
+            },
+            Case {
+                mode: AuthFlowMode::Off,
+                first_factor: true,
+                context: "",
+                prompts: vec!["[OTP Code]: "],
+                expect: vec![""],
+                code: "222222",
+            },
+            // password_only：同上，只服务密码。
+            Case {
+                mode: AuthFlowMode::PasswordOnly,
+                first_factor: true,
+                context: "",
+                prompts: vec!["[OTP Code]: "],
+                expect: vec![""],
+                code: "333333",
+            },
+            // 先密码再 OTP：首因子已过则回码；未过则留空（保护）。
+            Case {
+                mode: AuthFlowMode::PasswordThenOtp,
+                first_factor: true,
+                context: "",
+                prompts: vec!["[OTP Code]: "],
+                expect: vec!["444444"],
+                code: "444444",
+            },
+            Case {
+                mode: AuthFlowMode::PasswordThenOtp,
+                first_factor: false,
+                context: "",
+                prompts: vec!["[OTP Code]: "],
+                expect: vec![""],
+                code: "555555",
+            },
+            // 合并提问（服务器把密码与验证码放一行）：+合并模式拼接，先密码再 OTP
+            // 只回密码（服务器随后会再问一次验证码，属契约外兜底）。
+            Case {
+                mode: AuthFlowMode::PasswordPlusOtp,
+                first_factor: false,
+                context: "",
+                prompts: vec!["Password: OTP Code: "],
+                expect: vec!["pw888888"],
+                code: "888888",
+            },
+            Case {
+                mode: AuthFlowMode::PasswordThenOtp,
+                first_factor: true,
+                context: "",
+                prompts: vec!["Password: OTP Code: "],
+                expect: vec!["pw"],
+                code: "666666",
+            },
+            // MFA 先问（反问顺序）：先密码再 OTP 留空；+合并模式不设密码门槛，回码。
+            Case {
+                mode: AuthFlowMode::PasswordThenOtp,
+                first_factor: false,
+                context: "",
+                prompts: vec!["Please enter OTP code"],
+                expect: vec![""],
+                code: "121212",
+            },
+            Case {
+                mode: AuthFlowMode::PasswordPlusOtp,
+                first_factor: false,
+                context: "",
+                prompts: vec!["Please enter OTP code"],
+                expect: vec!["131313"],
+                code: "131313",
+            },
+            // 提问文案认不出时用挑战 name/instructions 兜底（koko 形状）。
+            Case {
+                mode: AuthFlowMode::PasswordThenOtp,
+                first_factor: true,
+                context: "Please Enter MFA Code.",
+                prompts: vec!["Code: "],
+                expect: vec!["141414"],
+                code: "141414",
+            },
+        ];
+        for case in cases {
+            let auth = SudoAuth {
+                password: "pw".into(),
+                totp_secrets: parse_totp_secrets(case.code),
+                password_prompt_hint: String::new(),
+                totp_prompt_hint: String::new(),
+                flow_mode: Some(case.mode),
+                ..Default::default()
+            };
+            let mut state = if case.first_factor {
+                KeyboardInteractiveState::first_factor_accepted()
+            } else {
+                KeyboardInteractiveState::default()
+            };
+            let prompts: Vec<_> = case
+                .prompts
+                .iter()
+                .map(|text| prompt(text, false))
+                .collect();
+            let answers = keyboard_interactive_answers(&auth, &mut state, case.context, &prompts);
+            let expected: Vec<String> = case.expect.iter().map(|text| text.to_string()).collect();
+            assert_eq!(
+                answers, expected,
+                "mode={:?} first_factor={} prompts={:?} context={:?}",
+                case.mode, case.first_factor, case.prompts, case.context
+            );
+        }
+
+        // 同一轮内先密码、后验证码：in-round 提升，不依赖 partial success
+        // （PAM 风格主机把密码放在 KI 里问）。
+        let auth = SudoAuth {
+            password: "pw".into(),
+            totp_secrets: parse_totp_secrets("151515"),
+            password_prompt_hint: String::new(),
+            totp_prompt_hint: String::new(),
+            flow_mode: Some(AuthFlowMode::PasswordThenOtp),
+            ..Default::default()
+        };
+        let mut state = KeyboardInteractiveState::default();
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut state,
+            "",
+            &[prompt("Password:", false), prompt("OTP Code: ", false)],
+        );
+        assert_eq!(answers, vec!["pw".to_string(), "151515".to_string()]);
+    }
+
     #[test]
     fn terminal_auto_sudo_answers_sudo_password() {
         let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));

@@ -206,6 +206,10 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 **提问识别**：除提问文本本身，挑战的 `name` / `instructions` 也参与匹配——堡垒机（koko）把可读文案放在 instructions（`Please Enter MFA Code.`）、提问是 `[OTP Code]: `，二者都能命中内置模式（新增 `otp code` / `mfa code` / `mfa:` / 动态密码 / 验证码 / 一次性密码）。OTP 信号优先于用户自定义的"密码提示词"：命中 OTP 模式的提问不会被密码提示词改判成密码提问（避免把登录密码当验证码回给服务器）。
 
+**凭据来源与密码半边（2026-09-16）**：登录期 KI 用的流程模式 / TOTP 密钥 / 提示词与 Quick Sudo 同源——`global` 模式下连接表单隐藏 2FA 四件套（凭据整体由全局配置接管），登录提问因此也读该配置的 `authFlowMode` / `totpSecret` / hints；`custom` 模式下连接自身配置优先，绑定（0.4.x 遗留）只补齐连接留空的项；`off` 不提升全局配置。**密码半边始终是登录口令**（含 `password_command` 解析结果）：登录提问若回一个单独的 sudo 口令只会认证失败，还会把特权口令平白送给对端。
+
+**选型指引**：主机先问 MFA、再问密码（或把验证码与密码放进同一个提问）时用「密码 + OTP 合并」模式——该模式不设"先密码"门槛，裸 MFA 提问也会被应答；「先密码，再 OTP」对裸 MFA 提问保持留空（保护），失败信息会点名提问与配置入口。
+
 **诊断**：认证失败时错误信息带上服务器实际提问（`name` / `instructions` / 提问文本，去控制字符并截断，绝不包含凭据），并指路"配置该连接的 TOTP 密钥或 OTP 提示词"；`auth_flow_mode=off` 不自动回码时同样点名提问，便于用户知道该配哪里。端到端回归见 `scripts/smoke_login_mfa_test.py`（本机 mock 堡垒机 + 真 sidecar，paramiko 缺失时 SKIP）。
 
 ## 终端内 Quick Sudo

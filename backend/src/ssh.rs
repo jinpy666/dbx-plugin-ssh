@@ -111,6 +111,48 @@ pub(crate) fn resolved_sudo_auth(
     auth
 }
 
+/// Credentials for the *login* keyboard-interactive exchange. The flow mode,
+/// TOTP secrets and prompt hints follow the same effective source as Quick
+/// Sudo, with one distinction that mirrors the connection form:
+///
+/// * `global` — the form hides the 2FA four-piece set because the profile owns
+///   those credentials, so the profile replaces the connection's values
+///   wholesale (a fresh global connection still carries the `off` default).
+/// * `custom` — the form shows the fields, so an explicitly configured
+///   connection value wins and the bound profile (0.4.x legacy binding) only
+///   fills what the connection leaves empty.
+///
+/// The password half is always the login password: a login prompt answered
+/// with a separate sudo password can only fail authentication, and it would
+/// hand a privileged credential to the host for nothing.
+pub(crate) fn login_sudo_auth(
+    connection: &StoredConnection,
+    profile: Option<&sudo_profiles::SudoProfile>,
+) -> SudoAuth {
+    let mut auth = sudo_auth_for(connection);
+    if let Some(profile) = profile {
+        if connection.sudo_source == SudoSource::Global {
+            sudo_profiles::apply_profile(&mut auth, profile, &connection.password);
+        } else {
+            if auth.totp_secrets.is_empty() {
+                auth.totp_secrets = exec::parse_totp_secrets(&profile.totp_secret);
+            }
+            if auth.password_prompt_hint.is_empty() {
+                auth.password_prompt_hint =
+                    exec::sanitize_prompt_hint(&profile.password_prompt_hint);
+            }
+            if auth.totp_prompt_hint.is_empty() {
+                auth.totp_prompt_hint = exec::sanitize_prompt_hint(&profile.totp_prompt_hint);
+            }
+            if auth.flow_mode.is_none() && !profile.auth_flow_mode.trim().is_empty() {
+                auth.flow_mode = Some(AuthFlowMode::parse(&profile.auth_flow_mode));
+            }
+        }
+    }
+    auth.password = connection.password.clone();
+    auth
+}
+
 /// Placeholder context for a connection's local credential commands
 /// (`%h` host, `%u` username, `%p` port, `%n` connection name or id).
 fn credential_placeholders(connection: &StoredConnection) -> triggers::CommandPlaceholders {
@@ -1626,7 +1668,15 @@ impl SshRuntime {
         // 后供密码链（try_password / keyboard-interactive）与 sudo 编排共用，
         // 避免多处执行命令。既有显式密码优先（契约优先级）。
         let connection = &resolve_password_command(connection).await;
-        let orchestration = sudo_auth_for(connection);
+        let orchestration = {
+            // 登录期 KI 与 sudo 共用同一套生效凭据来源（连接配置，或
+            // sudo_source 解析出的全局 Quick Sudo 配置）：global 模式在表单上
+            // 隐藏 2FA 四件套、契约写明"凭据来源整体由全局配置接管"，所以登录
+            // 提问也必须能读到该配置的 TOTP/提示词/流程模式。
+            let store = sudo_profiles::load_store(&self.data_dir);
+            let profile = effective_sudo_profile(connection, &store);
+            login_sudo_auth(connection, profile.as_ref())
+        };
 
         match connection.authentication {
             AuthenticationMethod::Password => {
@@ -6550,10 +6600,10 @@ mod tests {
         assert!(other["tasks"].as_array().unwrap().is_empty());
     }
 
-    /// JumpServer（koko）登录期 MFA 的端到端回归（issue #17 / #30）：密码
-    /// 认证通过（partial success）后服务器改用 keyboard-interactive 提问
-    /// "Please Enter MFA Code." + "[OTP Code]: "，插件必须自动回 TOTP 验证码，
-    /// 而不是把提问留空让服务器反复重问。
+    /// 登录期 2FA 的端到端回归（issue #17 / #30）：密码/公钥先被接受后服务器
+    /// 用 keyboard-interactive 问 MFA（koko 形状）。mock 服务端按 `Shape`
+    /// 参数化，覆盖"密码方法 + partial success"、"KI 里先密码再 MFA"、
+    /// "只问 MFA"、"一个合并提问"四种提问形态。
     mod koko_login {
         use super::*;
         use russh::keys::ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey};
@@ -6562,11 +6612,31 @@ mod tests {
         use std::net::SocketAddr;
 
         const LOGIN_PASSWORD: &str = "jump-pw";
+        const SUDO_PASSWORD: &str = "asset-pw";
         const MFA_CODE: &str = "654321";
         // 逐字取自 koko pkg/auth/mfa_option.go（mfaOptionInstruction /
         // mfaOptionQuestion，MFA 类型 otp）。
         const MFA_INSTRUCTION: &str = "Please Enter MFA Code.";
         const MFA_QUESTION: &str = "[OTP Code]: ";
+
+        /// mock 堡垒机的认证形态。
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Shape {
+            /// 开放 password 方法：密码通过后 partial success → KI 问 MFA（koko 默认）。
+            PasswordThenMfa,
+            /// 只开放 keyboard-interactive：KI 第一轮问密码，第二轮问 MFA（PAM 风格）。
+            KiPasswordThenMfa,
+            /// 只开放 keyboard-interactive：只问 MFA（反问顺序主机）。
+            KiMfaOnly,
+            /// 只开放 keyboard-interactive：一个提问同时要密码与验证码。
+            KiCombined,
+        }
+
+        impl Shape {
+            fn allows_password_method(self) -> bool {
+                self == Shape::PasswordThenMfa
+            }
+        }
 
         /// 测试专用 Ed25519 密钥：由固定种子展开，不依赖 RNG 版本，也绝不
         /// 涉及真实私钥（仅供本机 mock 服务器与客户端握手）。
@@ -6576,13 +6646,31 @@ mod tests {
             ))
         }
 
-        #[derive(Clone, Default)]
+        #[derive(Clone)]
         struct MockKoko {
+            shape: Shape,
+            instruction: &'static str,
+            prompt: &'static str,
             answers: Arc<Mutex<Vec<String>>>,
         }
 
+        impl MockKoko {
+            fn new(shape: Shape, instruction: &'static str, prompt: &'static str) -> Self {
+                Self {
+                    shape,
+                    instruction,
+                    prompt,
+                    answers: Arc::new(Mutex::new(Vec::new())),
+                }
+            }
+        }
+
         struct MockKokoSession {
+            shape: Shape,
+            instruction: &'static str,
+            prompt: &'static str,
             answers: Arc<Mutex<Vec<String>>>,
+            ki_round: usize,
         }
 
         impl russh::server::Handler for MockKokoSession {
@@ -6631,23 +6719,49 @@ mod tests {
                 response: Option<Response<'a>>,
             ) -> Result<Auth, Self::Error> {
                 let Some(mut response) = response else {
+                    // 开局提问：PAM 形状先问密码；合并形状一个提问问两样。
+                    let (instruction, prompt) = match self.shape {
+                        Shape::KiPasswordThenMfa => ("Please enter your password.", "Password: "),
+                        Shape::KiCombined => ("Password and MFA required", "Password: OTP Code: "),
+                        _ => (self.instruction, self.prompt),
+                    };
                     return Ok(Auth::Partial {
                         name: "jumper".into(),
-                        instructions: MFA_INSTRUCTION.into(),
-                        prompts: vec![(MFA_QUESTION.into(), true)].into(),
+                        instructions: instruction.into(),
+                        prompts: vec![(prompt.into(), self.shape == Shape::KiPasswordThenMfa)]
+                            .into(),
                     });
                 };
                 let answer = response
                     .next()
                     .map(|bytes| String::from_utf8_lossy(bytes.as_ref()).into_owned())
                     .unwrap_or_default();
-                let accepted = answer == MFA_CODE;
-                self.answers.lock().unwrap().push(answer);
-                Ok(if accepted {
-                    Auth::Accept
-                } else {
-                    Auth::reject()
-                })
+                self.answers.lock().unwrap().push(answer.clone());
+                self.ki_round += 1;
+                match self.shape {
+                    // 第一轮是密码：答对后继续问 MFA。
+                    Shape::KiPasswordThenMfa if self.ki_round == 1 => {
+                        if answer != LOGIN_PASSWORD {
+                            return Ok(Auth::reject());
+                        }
+                        Ok(Auth::Partial {
+                            name: "jumper".into(),
+                            instructions: self.instruction.into(),
+                            prompts: vec![(self.prompt.into(), true)].into(),
+                        })
+                    }
+                    // 合并提问：一条应答里必须同时有密码与验证码。
+                    Shape::KiCombined => Ok(if answer == format!("{LOGIN_PASSWORD}{MFA_CODE}") {
+                        Auth::Accept
+                    } else {
+                        Auth::reject()
+                    }),
+                    _ => Ok(if answer == MFA_CODE {
+                        Auth::Accept
+                    } else {
+                        Auth::reject()
+                    }),
+                }
             }
 
             async fn auth_succeeded(&mut self, _session: &mut Session) -> Result<(), Self::Error> {
@@ -6660,23 +6774,37 @@ mod tests {
 
             fn new_client(&mut self, _peer: Option<SocketAddr>) -> Self::Handler {
                 MockKokoSession {
+                    shape: self.shape,
+                    instruction: self.instruction,
+                    prompt: self.prompt,
                     answers: self.answers.clone(),
+                    ki_round: 0,
                 }
             }
         }
 
-        async fn spawn_mock_koko() -> (u16, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+        async fn spawn_mock_koko(
+            shape: Shape,
+            instruction: &'static str,
+            prompt: &'static str,
+        ) -> (u16, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
                 .await
                 .expect("bind mock koko");
             let port = listener.local_addr().expect("mock koko address").port();
+            let mut methods = MethodSet::empty();
+            if shape.allows_password_method() {
+                methods.push(MethodKind::Password);
+            }
+            methods.push(MethodKind::KeyboardInteractive);
             let config = Arc::new(russh::server::Config {
+                methods,
                 keys: vec![test_key(1)],
                 auth_rejection_time: Duration::from_millis(10),
                 auth_rejection_time_initial: Some(Duration::from_millis(10)),
                 ..Default::default()
             });
-            let mut server = MockKoko::default();
+            let mut server = MockKoko::new(shape, instruction, prompt);
             let answers = server.answers.clone();
             let task = tokio::spawn(async move {
                 let _ = server.run_on_socket(config, &listener).await;
@@ -6708,7 +6836,8 @@ mod tests {
 
         #[tokio::test]
         async fn mfa_code_is_answered_after_partial_success_password() {
-            let (port, answers, server) = spawn_mock_koko().await;
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let connection = koko_connection(
                 port,
@@ -6725,6 +6854,171 @@ mod tests {
             );
         }
 
+        /// 提问文案认不出、但挑战指令行是 koko 的 "Please Enter MFA Code."：
+        /// 用户照屏幕抄进 OTP 提示词的就是这句话（issue #17 的 martin-bian）。
+        #[tokio::test]
+        async fn mfa_is_answered_from_challenge_instructions() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, "Code: ").await;
+            let runtime = test_runtime();
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE }),
+                json!({
+                    "authentication": "password",
+                    "auth_flow_mode": "password_then_otp",
+                    "totp_prompt_hint": "Please Enter MFA Code.",
+                }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            result.expect("instructions-only MFA prompt must be answered");
+            assert_eq!(answers.lock().unwrap().as_slice(), [MFA_CODE.to_string()]);
+        }
+
+        /// 完全自定义的提问文案靠用户提示词命中（无内置模式可依赖）。
+        #[tokio::test]
+        async fn mfa_is_answered_from_user_hint() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::PasswordThenMfa, "", "Enter verification token: ").await;
+            let runtime = test_runtime();
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE }),
+                json!({
+                    "authentication": "password",
+                    "auth_flow_mode": "password_then_otp",
+                    "totp_prompt_hint": "verification token",
+                }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            result.expect("hint-matched MFA prompt must be answered");
+            assert_eq!(answers.lock().unwrap().as_slice(), [MFA_CODE.to_string()]);
+        }
+
+        /// 只开 keyboard-interactive、直接问 MFA（反问顺序主机）+ 先密码再 OTP：
+        /// 保护仍然生效——不回码，且失败信息点名服务器提问与配置入口。
+        #[tokio::test]
+        async fn bare_mfa_prompt_stays_unanswered_before_the_password() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::KiMfaOnly, MFA_INSTRUCTION, MFA_QUESTION).await;
+            let runtime = test_runtime();
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE }),
+                json!({ "authentication": "password", "auth_flow_mode": "password_then_otp" }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            let error = result.err().expect("bare MFA prompt must not be answered");
+            assert!(
+                error.contains(MFA_QUESTION.trim()),
+                "error must name the server prompt: {error}"
+            );
+            assert!(
+                !answers
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|answer| answer == MFA_CODE),
+                "the OTP code must not be submitted before the password step"
+            );
+        }
+
+        /// 同一形态改配「密码 + OTP 合并」：反问顺序主机应能登录（表单选型指引）。
+        #[tokio::test]
+        async fn bare_mfa_prompt_is_answered_in_combined_mode() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::KiMfaOnly, MFA_INSTRUCTION, MFA_QUESTION).await;
+            let runtime = test_runtime();
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE }),
+                json!({ "authentication": "password", "auth_flow_mode": "password_plus_otp" }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            result.expect("combined mode answers a bare MFA prompt");
+            assert_eq!(answers.lock().unwrap().as_slice(), [MFA_CODE.to_string()]);
+        }
+
+        /// PAM 风格主机在 KI 里问密码：登录提问必须收到**登录口令**，而不是
+        /// 单独的 sudo 口令（凭据混用只会认证失败，还把特权口令送给主机）。
+        #[tokio::test]
+        async fn login_password_prompt_gets_the_login_password() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::KiPasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
+            let runtime = test_runtime();
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE, "sudo_password": SUDO_PASSWORD }),
+                json!({ "authentication": "password", "auth_flow_mode": "password_then_otp" }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            result.expect("PAM-style KI login must succeed");
+            assert_eq!(
+                answers.lock().unwrap().as_slice(),
+                [LOGIN_PASSWORD.to_string(), MFA_CODE.to_string()],
+                "the KI password question must get the login password, never the sudo password"
+            );
+        }
+
+        /// 合并提问（一条应答同时要密码与验证码）：+合并模式拼接后通过。
+        #[tokio::test]
+        async fn combined_prompt_gets_password_and_code() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::KiCombined, MFA_INSTRUCTION, MFA_QUESTION).await;
+            let runtime = test_runtime();
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE }),
+                json!({ "authentication": "password", "auth_flow_mode": "password_plus_otp" }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            result.expect("combined prompt must be answered with password + code");
+            assert_eq!(
+                answers.lock().unwrap().as_slice(),
+                [format!("{LOGIN_PASSWORD}{MFA_CODE}")]
+            );
+        }
+
+        /// global（表单隐藏 2FA 四件套、契约写明凭据由全局配置接管）：登录期
+        /// MFA 也必须能读到该配置的 TOTP 与流程模式。
+        #[tokio::test]
+        async fn global_profile_supplies_login_mfa_credentials() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
+            let runtime = test_runtime();
+            let mut store = sudo_profiles::SudoProfileStore::default();
+            let (profile, _) = sudo_profiles::save_profile(
+                &mut store,
+                &json!({
+                    "name": "ops",
+                    "sudoPassword": SUDO_PASSWORD,
+                    "totpSecret": MFA_CODE,
+                    "authFlowMode": "password_then_otp",
+                }),
+            )
+            .expect("save global profile");
+            sudo_profiles::save_store(&runtime.data_dir(), &store).expect("persist profile store");
+            let connection = koko_connection(
+                port,
+                json!({}),
+                json!({
+                    "authentication": "password",
+                    "sudo_source": "global",
+                    "sudo_profile": profile.name,
+                }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            result.expect("global-profile connection must answer login MFA");
+            assert_eq!(answers.lock().unwrap().as_slice(), [MFA_CODE.to_string()]);
+        }
+
         /// 私钥被接受、服务器还要 MFA：以前直接报 "private-key authentication
         /// was rejected"，现在继续答 keyboard-interactive 验证码（issue #30 的
         /// 私钥反馈）。
@@ -6735,7 +7029,8 @@ mod tests {
         /// `scripts/smoke_login_mfa_test.py`（paramiko 会如实置位）。
         #[tokio::test]
         async fn publickey_partial_success_is_reported_by_russh_server_as_reject() {
-            let (port, answers, server) = spawn_mock_koko().await;
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let key_text = test_key(2)
                 .to_openssh(russh::keys::ssh_key::LineEnding::LF)
