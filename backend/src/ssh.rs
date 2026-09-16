@@ -683,8 +683,9 @@ impl ReplayBuffer {
     }
 }
 
-/// `workbench_id` is interior-mutable: attach re-homes a live session to the
-/// reopened workbench (the host mints a fresh workbenchId per sidebar open).
+/// `workbench_id` is kept with the session so attach can only restore the
+/// session that belongs to the same workbench. A different workbench must open
+/// its own SSH session instead of stealing another tab's PTY.
 struct SessionEntry {
     connection_id: String,
     workbench_id: RwLock<String>,
@@ -1905,11 +1906,9 @@ impl SshRuntime {
         }))
     }
 
-    /// Picks the session to attach for a (re)opened workbench. The exact
-    /// `(connection_id, workbench_id)` match wins; otherwise the connection's
-    /// live session is re-homed — the host mints a fresh `workbenchId` on
-    /// every sidebar reopen, and a strict double match would force a
-    /// redundant SSH re-dial for a session that is still perfectly alive.
+    /// Picks the session to attach for a (re)opened workbench. Sessions are
+    /// workbench-owned: never attach a different tab's live PTY, even when it
+    /// uses the same saved connection.
     fn pick_attach_target(
         sessions: &[(String, String, String, bool)],
         connection_id: &str,
@@ -1921,13 +1920,6 @@ impl SshRuntime {
                 *connected
                     && session_connection.as_str() == connection_id
                     && session_workbench.as_str() == workbench_id
-            })
-            .or_else(|| {
-                sessions
-                    .iter()
-                    .find(|(_, session_connection, _, connected)| {
-                        *connected && session_connection.as_str() == connection_id
-                    })
             })
             .map(|(session_id, _, _, _)| session_id.clone())
     }
@@ -1956,17 +1948,8 @@ impl SshRuntime {
                     )
                 })
                 .collect();
-            let target = Self::pick_attach_target(&snapshot, connection_id, workbench_id)
-                .ok_or("No live SSH session is attached to this workbench")?;
-            // Re-home when the workbench ids diverge: the reopened tab owns
-            // the session from now on (close_workbench, list payloads), while
-            // the SSH connection and replay buffer continue undisturbed.
-            if let Some(entry) = sessions.get(&target) {
-                if let Ok(mut workbench) = entry.workbench_id.write() {
-                    *workbench = workbench_id.to_string();
-                }
-            }
-            target
+            Self::pick_attach_target(&snapshot, connection_id, workbench_id)
+                .ok_or("No live SSH session is attached to this workbench")?
         };
         let replay = self
             .replay_terminal(&session_id, after_sequence, emitter)
@@ -6229,9 +6212,10 @@ mod tests {
     }
 
     #[test]
-    fn attach_target_prefers_exact_workbench_then_rehomes_connection_session() {
+    fn attach_target_requires_exact_workbench() {
         let sessions: Vec<(String, String, String, bool)> = vec![
             ("s-old".into(), "conn-1".into(), "wb-old".into(), true),
+            ("s-new".into(), "conn-1".into(), "wb-new".into(), true),
             ("s-other".into(), "conn-2".into(), "wb-other".into(), true),
         ];
         // Exact double match wins when the workbench id is stable.
@@ -6239,11 +6223,15 @@ mod tests {
             SshRuntime::pick_attach_target(&sessions, "conn-1", "wb-old").as_deref(),
             Some("s-old")
         );
-        // Sidebar reopen mints a fresh workbenchId: the connection's live
-        // session must still be found instead of forcing a re-dial.
+        // A second workbench on the same saved connection gets its own exact
+        // session rather than stealing the first tab's PTY.
         assert_eq!(
             SshRuntime::pick_attach_target(&sessions, "conn-1", "wb-new").as_deref(),
-            Some("s-old")
+            Some("s-new")
+        );
+        assert_eq!(
+            SshRuntime::pick_attach_target(&sessions, "conn-1", "wb-missing"),
+            None
         );
         // Dead sessions never attach; other connections' sessions stay put.
         let dead: Vec<(String, String, String, bool)> =

@@ -20,23 +20,21 @@ describe("pickLiveSessionForReattach", () => {
     ).toBe("s-1");
   });
 
-  it("reattaches the connection's live session under a freshly minted workbenchId", () => {
-    // Sidebar reopen replaces workbenchId: strict double-matching would
-    // force a redundant SSH re-dial.
+  it("does not attach another workbench's session on the same connection", () => {
     expect(
       pickLiveSessionForReattach([session({ sessionId: "s-live", workbenchId: "wb-old" })], {
         connectionId: "conn-1",
         workbenchId: "wb-new",
       }),
-    ).toBe("s-live");
+    ).toBe("");
   });
 
   it("prefers the newest createdAt when several live sessions exist", () => {
     const sessions = [
       session({ sessionId: "s-old", createdAt: 50, workbenchId: "wb-x" }),
-      session({ sessionId: "s-new", createdAt: 200, workbenchId: "wb-y" }),
+      session({ sessionId: "s-new", createdAt: 200, workbenchId: "wb-1" }),
     ];
-    expect(pickLiveSessionForReattach(sessions, { connectionId: "conn-1", workbenchId: "wb-z" })).toBe("s-new");
+    expect(pickLiveSessionForReattach(sessions, { connectionId: "conn-1", workbenchId: "wb-1" })).toBe("s-new");
   });
 
   it("ignores dead sessions and other connections", () => {

@@ -6231,10 +6231,9 @@ async function initialize() {
   }
   if (typeof state.sessionId === "string" && state.sessionId) await attachSession(state.sessionId);
   else {
-    // 宿主切 tab / 左侧菜单重开会整体重建工作台 webview，且不回传
-    // workbenchState（桥未实现）、每次重开还换新 workbenchId——持久化
-    // sessionId 的 attach 路径永远不命中。改为向 sidecar 查询该连接的
-    // 存活会话并 attach（replay 恢复终端内容），避免全新拨号重置连接。
+    // 宿主切 tab / 左侧菜单重开可能整体重建工作台 webview。只恢复
+    // 同一 workbench 的 live session；不能按 connectionId 复用任意会话，
+    // 否则打开同一连接的新 Tab 会接管已有 Tab 的 PTY。
     const reattach = await findReattachSession();
     if (reattach) await attachSession(reattach, reattach);
     // bootRestore: 宿主启动恢复 tab 时会异步重放 connect（见 queryStore
@@ -6245,9 +6244,9 @@ async function initialize() {
 }
 
 /**
- * Asks the sidecar for a live session bound to this connection (sidecar
- * `ssh/sessions/list`); "" when none — caller dials fresh. Failures degrade
- * to a fresh open instead of blocking the workbench.
+ * Asks the sidecar for the live session bound to this workbench and connection
+ * (sidecar `ssh/sessions/list`); "" when none — caller dials a fresh session.
+ * Failures degrade to a fresh open instead of blocking the workbench.
  */
 async function findReattachSession(): Promise<string> {
   try {

@@ -322,11 +322,11 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   else if (method === "ssh/session/attach") {
     const input = params as Record<string, unknown>;
     if (failSessionOpen) throw new Error("Connection is not active");
-    // Mirror the real sidecar: the connection's live session is re-homed to
-    // the requesting workbench and reported with a complete replay. The
-    // transcript (Welcome + OSC 633 cycle) is pushed as live frames right
-    // after attach so the first paint under the default reattach startup
-    // already shows shell-integration content (P2-2), not a bare prompt.
+    // Mirror the real sidecar: the session already owned by this workbench is
+    // reported with a complete replay. The transcript (Welcome + OSC 633
+    // cycle) is pushed as live frames right after attach so the first paint
+    // under the default reattach startup already shows shell-integration
+    // content (P2-2), not a bare prompt.
     result = {
       sessionId: String(input.sessionId || "") || "visual-session",
       connectionId: context.connectionId,
