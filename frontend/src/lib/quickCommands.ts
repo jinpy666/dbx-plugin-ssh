@@ -1,6 +1,8 @@
 // 快速命令栏：用户自定义常用命令片段（对标 tiny-rdm 快速命令）。
 // localStorage CRUD，上限 20 条；纯函数，localStorage 读写留在调用方。
 
+import { normalizeTerminalInputText } from "./terminalInput";
+
 export interface QuickCommand {
   id: string;
   name: string;
@@ -81,5 +83,5 @@ export function filterQuickCommands(
  * `command \\` 变成带转义空格的错误命令。
  */
 export function quickCommandText(command: string): string {
-  return command.replace(/\r\n?/g, "\n").replace(/\n/g, "\r").trim();
+  return normalizeTerminalInputText(command).trim();
 }

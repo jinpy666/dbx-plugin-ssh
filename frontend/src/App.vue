@@ -126,6 +126,7 @@ import { commandMarkerTooltip, formatCommandDuration, Osc633CommandParser, runni
 import { advanceBatchProgress, batchProgressPercent, createBatchProgress, type BatchProgressState } from "./lib/sftpBatchProgress";
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
 import { sanitizeCommandOutput } from "./lib/terminalOutputText";
+import { normalizeTerminalInputBytes } from "./lib/terminalInput";
 import { looksBinary } from "./lib/textSniff";
 import { formatBytes, formatRate } from "./lib/format";
 import { DBX_POPOVER, resolveAppearance, TERMINAL_ANSI, type DbxPluginAppearanceInput } from "./lib/appearance";
@@ -1372,7 +1373,7 @@ function trackPendingInput(data: string) {
 function sendTerminalBytes(data: Uint8Array) {
   const sessionId = session.value?.sessionId;
   if (!sessionId) return;
-  terminalInputQueue.enqueue(sessionId, data);
+  terminalInputQueue.enqueue(sessionId, normalizeTerminalInputBytes(data));
 }
 
 function scheduleFit() {
