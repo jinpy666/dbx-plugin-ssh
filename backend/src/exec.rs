@@ -32,11 +32,19 @@ const TOTP_PROMPT_PATTERS: &[&str] = &[
     "verification code",
     "verification code:",
     "otp:",
+    // JumpServer 堡垒机（koko）的 MFA 提问：[OTP Code]: / [RADIUS Code]:，
+    // 指令行 "Please Enter MFA Code."（见 koko pkg/auth/mfa_option.go）。
+    "otp code",
+    "mfa code",
+    "mfa:",
     "totp:",
     "2fa code",
     "one-time password",
     "one time password",
     "authentication code",
+    "动态密码",
+    "验证码",
+    "一次性密码",
 ];
 
 const AUTH_FAILURE_MARKERS: &[&str] = &[
@@ -727,25 +735,22 @@ pub(crate) fn classify_auth_prompt(prompt: &str, auth: &SudoAuth) -> Option<Prom
         return None;
     }
     let lower = trimmed.to_lowercase();
-    let mut password_matched = false;
-    let mut totp_matched = false;
     // Hints are matched against the normalized prompt text, so legacy or
     // host-provided hints carrying control characters/ANSI sequences are
     // normalized the same way instead of never matching.
     let password_hint = normalize_auth_prompt_text(&auth.password_prompt_hint).to_lowercase();
-    if !password_hint.is_empty() && lower.contains(&password_hint) {
-        password_matched = true;
-    }
+    let password_hint_matched = !password_hint.is_empty() && lower.contains(&password_hint);
     let totp_hint = normalize_auth_prompt_text(&auth.totp_prompt_hint).to_lowercase();
-    if !totp_hint.is_empty() && lower.contains(&totp_hint) {
-        totp_matched = true;
-    }
-    if !password_matched && PASSWORD_PROMPT_PATTERS.iter().any(|p| lower.contains(p)) {
-        password_matched = true;
-    }
-    if !totp_matched && TOTP_PROMPT_PATTERS.iter().any(|p| lower.contains(p)) {
-        totp_matched = true;
-    }
+    let totp_hint_matched = !totp_hint.is_empty() && lower.contains(&totp_hint);
+    let password_builtin = PASSWORD_PROMPT_PATTERS.iter().any(|p| lower.contains(p));
+    let totp_builtin = TOTP_PROMPT_PATTERS.iter().any(|p| lower.contains(p));
+    // OTP 信号优先于用户自定义的"密码提示词"：堡垒机把 MFA 提问写成
+    // "[OTP Code]: "，用户若把这串可见文案填进密码提示词字段，旧逻辑会把
+    // 提问判成密码提问、把登录密码当作验证码回给服务器（必然认证失败，
+    // issue #30）。只有内置密码模式才允许把提问拉回密码侧。
+    let password_matched =
+        password_builtin || (password_hint_matched && !totp_builtin && !totp_hint_matched);
+    let totp_matched = totp_builtin || totp_hint_matched;
     match (password_matched, totp_matched) {
         (true, true) => Some(PromptKind::Combined),
         (false, true) => Some(PromptKind::Totp),
@@ -1394,67 +1399,111 @@ pub fn parse_disk_usage(df_output: &str) -> Option<serde_json::Value> {
         .or_else(|| df_output.lines().rev().find_map(candidate))
 }
 
-/// Tracks whether a password answer was already accepted during a
-/// keyboard-interactive handshake, mirroring tiny-rdm's per-connection state.
+/// Tracks whether the first authentication factor is already behind us during
+/// a keyboard-interactive handshake, mirroring tiny-rdm's per-connection
+/// state. `password_then_otp` gates OTP answers on this flag so a bare OTP
+/// question cannot be answered before the password step.
 #[derive(Debug, Default)]
 pub struct KeyboardInteractiveState {
     password_answered: bool,
 }
 
+impl KeyboardInteractiveState {
+    /// Seeds the state for a keyboard-interactive exchange that starts *after*
+    /// the first factor was already accepted. JumpServer/koko accepts the
+    /// password (or publickey) with `partial_success` and only then asks for
+    /// the MFA code over keyboard-interactive; without this seed the MFA
+    /// question looks like "the password has not been sent yet" and
+    /// `password_then_otp` leaves it blank, so the login can never succeed.
+    pub fn first_factor_accepted() -> Self {
+        Self {
+            password_answered: true,
+        }
+    }
+}
+
+/// Joins a keyboard-interactive challenge's `name` and `instructions` into the
+/// fallback text used to classify prompts whose own wording is unrecognized.
+/// koko sends the readable "Please Enter MFA Code." as instructions while the
+/// prompt itself is "[OTP Code]: ", so users who copy the visible line into
+/// the OTP hint would otherwise never match anything. Server-controlled text,
+/// so it is stripped of control characters and capped like a user hint.
+pub fn keyboard_interactive_challenge_context(name: &str, instructions: &str) -> String {
+    let mut context = String::new();
+    for part in [name, instructions] {
+        let part = sanitize_prompt_hint(part);
+        if part.is_empty() || context.contains(&part) {
+            continue;
+        }
+        if !context.is_empty() {
+            context.push('\n');
+        }
+        context.push_str(&part);
+    }
+    context
+}
+
 /// Builds automatic answers for a keyboard-interactive login round. Prompts
-/// are classified individually; unknown or unanswered prompts get an empty
-/// string so the server can re-prompt or fail cleanly. Ported from
-/// tiny-rdm's keyboardInteractivePasswordAuth callback.
+/// are classified individually; a prompt whose own wording is unrecognized
+/// falls back to the challenge `name`/`instructions`. Unknown or unanswered
+/// prompts get an empty string so the server can re-prompt or fail cleanly.
+/// Ported from tiny-rdm's keyboardInteractivePasswordAuth callback.
 pub fn keyboard_interactive_answers(
     auth: &SudoAuth,
     state: &mut KeyboardInteractiveState,
+    challenge_context: &str,
     prompts: &[russh::client::Prompt],
 ) -> Vec<String> {
     let mode = auth.flow_mode();
     let mut password_answered_round = false;
+    let context_kind = (!challenge_context.trim().is_empty())
+        .then(|| classify_auth_prompt(challenge_context, auth))
+        .flatten();
     let answers = prompts
         .iter()
-        .map(|prompt| match classify_auth_prompt(&prompt.prompt, auth) {
-            Some(PromptKind::Password) => {
-                if auth.password.is_empty() {
-                    String::new()
-                } else {
-                    password_answered_round = true;
-                    auth.password.clone()
-                }
-            }
-            Some(PromptKind::Totp) => {
-                if !can_respond_to_prompt(
-                    mode,
-                    PromptKind::Totp,
-                    state.password_answered || password_answered_round,
-                ) {
-                    String::new()
-                } else {
-                    auth.totp_answer_logged().unwrap_or_default()
-                }
-            }
-            Some(PromptKind::Combined) => {
-                if auth.password.is_empty() {
-                    String::new()
-                } else if mode == AuthFlowMode::PasswordPlusOtp {
-                    match auth.totp_answer_logged() {
-                        Some(code) => {
-                            password_answered_round = true;
-                            format!("{}{}", auth.password, code)
-                        }
-                        // No code available (or the previous one is still
-                        // inside its replay window): leave the prompt empty
-                        // so the server re-prompts or fails cleanly.
-                        None => String::new(),
+        .map(
+            |prompt| match classify_auth_prompt(&prompt.prompt, auth).or(context_kind) {
+                Some(PromptKind::Password) => {
+                    if auth.password.is_empty() {
+                        String::new()
+                    } else {
+                        password_answered_round = true;
+                        auth.password.clone()
                     }
-                } else {
-                    password_answered_round = true;
-                    auth.password.clone()
                 }
-            }
-            None => String::new(),
-        })
+                Some(PromptKind::Totp) => {
+                    if !can_respond_to_prompt(
+                        mode,
+                        PromptKind::Totp,
+                        state.password_answered || password_answered_round,
+                    ) {
+                        String::new()
+                    } else {
+                        auth.totp_answer_logged().unwrap_or_default()
+                    }
+                }
+                Some(PromptKind::Combined) => {
+                    if auth.password.is_empty() {
+                        String::new()
+                    } else if mode == AuthFlowMode::PasswordPlusOtp {
+                        match auth.totp_answer_logged() {
+                            Some(code) => {
+                                password_answered_round = true;
+                                format!("{}{}", auth.password, code)
+                            }
+                            // No code available (or the previous one is still
+                            // inside its replay window): leave the prompt empty
+                            // so the server re-prompts or fails cleanly.
+                            None => String::new(),
+                        }
+                    } else {
+                        password_answered_round = true;
+                        auth.password.clone()
+                    }
+                }
+                None => String::new(),
+            },
+        )
         .collect();
     if password_answered_round {
         state.password_answered = true;
@@ -2007,6 +2056,7 @@ mod tests {
         let answers = keyboard_interactive_answers(
             &auth,
             &mut state,
+            "",
             &[
                 prompt("Password:", false),
                 prompt("Enter account name:", true),
@@ -2016,8 +2066,12 @@ mod tests {
         assert!(state.password_answered);
 
         // Round 2: TOTP is allowed because a password round already succeeded.
-        let answers =
-            keyboard_interactive_answers(&auth, &mut state, &[prompt("Verification code:", false)]);
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut state,
+            "",
+            &[prompt("Verification code:", false)],
+        );
         assert_eq!(answers, vec!["654321".to_string()]);
 
         // password+otp combined prompts concatenate when configured. A
@@ -2030,6 +2084,7 @@ mod tests {
         let answers = keyboard_interactive_answers(
             &plus,
             &mut KeyboardInteractiveState::default(),
+            "",
             &[prompt("Password: otp:", false)],
         );
         assert_eq!(answers, vec!["pw998877".to_string()]);
@@ -2040,6 +2095,7 @@ mod tests {
         let answers = keyboard_interactive_answers(
             &only,
             &mut KeyboardInteractiveState::default(),
+            "",
             &[prompt("Verification code:", false)],
         );
         assert_eq!(answers, vec![String::new()]);
@@ -2052,9 +2108,93 @@ mod tests {
         let answers = keyboard_interactive_answers(
             &auth,
             &mut KeyboardInteractiveState::default(),
+            "",
             &[prompt("Verification code:", false)],
         );
         assert_eq!(answers, vec![String::new()]);
+    }
+
+    /// JumpServer/koko 的登录期 MFA：密码（或公钥）被 partial success 接受后，
+    /// 服务器用 keyboard-interactive 提问 "Please Enter MFA Code." + "[OTP Code]: "。
+    /// 这里逐条钉住修复后的行为（issue #17 / #30）。
+    #[test]
+    fn koko_mfa_prompt_is_answered_after_partial_success_password() {
+        let _otp_ledger = otp_ledger_test_guard();
+        let mut auth = terminal_auth();
+        auth.flow_mode = Some(AuthFlowMode::PasswordThenOtp);
+        let prompt = prompt("[OTP Code]: ", false);
+
+        // 未播种（密码尚未提交）：先密码再 OTP 的语义仍然拦住裸 OTP 提问。
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut KeyboardInteractiveState::default(),
+            "",
+            std::slice::from_ref(&prompt),
+        );
+        assert_eq!(answers, vec![String::new()]);
+
+        // 前置认证 partial success（koko 的密码已通过）后必须自动回码。
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut KeyboardInteractiveState::first_factor_accepted(),
+            "",
+            std::slice::from_ref(&prompt),
+        );
+        assert_eq!(answers, vec!["654321".to_string()]);
+    }
+
+    #[test]
+    fn keyboard_interactive_falls_back_to_challenge_instructions() {
+        let _otp_ledger = otp_ledger_test_guard();
+        let mut auth = terminal_auth();
+        auth.flow_mode = Some(AuthFlowMode::PasswordThenOtp);
+        // 提问文案本身认不出来时，用 koko 的指令行兜底（用户照屏幕抄进
+        // OTP 提示词的也是这句话）。
+        let context = keyboard_interactive_challenge_context("jumper", "Please Enter MFA Code.");
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut KeyboardInteractiveState::first_factor_accepted(),
+            &context,
+            &[prompt("Code: ", false)],
+        );
+        assert_eq!(answers, vec!["654321".to_string()]);
+
+        // 指令行缺省时不得凭空回码。
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut KeyboardInteractiveState::first_factor_accepted(),
+            &keyboard_interactive_challenge_context("jumper", ""),
+            &[prompt("Code: ", false)],
+        );
+        assert_eq!(answers, vec![String::new()]);
+    }
+
+    /// issue #30：用户把 "OTP Code" 填进了密码提示词字段。旧逻辑把它判成密码
+    /// 提问，于是把登录密码当验证码回给服务器（必然被拒）。OTP 信号必须优先。
+    #[test]
+    fn password_hint_cannot_hijack_an_otp_prompt() {
+        let _otp_ledger = otp_ledger_test_guard();
+        let mut auth = terminal_auth();
+        auth.flow_mode = Some(AuthFlowMode::PasswordThenOtp);
+        auth.password_prompt_hint = "OTP Code".into();
+        assert_eq!(
+            classify_auth_prompt("[OTP Code]: ", &auth),
+            Some(PromptKind::Totp)
+        );
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut KeyboardInteractiveState::first_factor_accepted(),
+            "",
+            &[prompt("[OTP Code]: ", false)],
+        );
+        assert_eq!(answers, vec!["654321".to_string()]);
+        assert_ne!(answers[0], auth.password);
+
+        // 内置密码模式仍然把真正的密码提问判成密码（提示词重叠不影响）。
+        assert_eq!(
+            classify_auth_prompt("<user>@root@host's password: ", &auth),
+            Some(PromptKind::Password)
+        );
     }
 
     #[test]

@@ -27,6 +27,10 @@
    密码提问 → 自动应答无从发生、认证失败，用户不知道配哪里。连接失败错误
    文案应指路（"请在 2FA/TOTP 字段配置应答"）。（Tabby 有 Interactive 面板，
    插件以自动应答编排替代，缺的是失败时的可发现性。）
+   **2026-09-16 已修**（issue #17/#30）：KI 失败信息现在带上服务器实际提问
+   （`name`/`instructions`/提问文本）并指路"配置 TOTP 密钥或 OTP 提示词"；
+    `password_then_otp` 的首因子判定、koko 提问识别与提示词优先级同步修复，
+    见 `docs/PROTOCOL.zh-CN.md`「登录期 2FA」与 `scripts/smoke_login_mfa_test.py`。
 
 ### P2 功能缺口（对标差距）
 

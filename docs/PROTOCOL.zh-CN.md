@@ -200,7 +200,13 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 ## 登录期 2FA（keyboard-interactive）
 
-密码认证被拒绝或服务器未开放 `password` 方法时，自动降级 keyboard-interactive（PAM）认证：每一轮提示按 Quick Sudo 的同一套编排配置自动应答（密码 / TOTP / 组合提示，遵循 `auth_flow_mode`），未知提示留空交由服务器处理。覆盖 `PasswordAuthentication no` + PAM 2FA 的主机，最多 4 轮，复用连接超时。密钥+密码（`private-key-password`）回退路径同样适用。
+密码认证被拒绝或服务器未开放 `password` 方法时，自动降级 keyboard-interactive（PAM）认证：每一轮提示按 Quick Sudo 的同一套编排配置自动应答（密码 / TOTP / 组合提示，遵循 `auth_flow_mode`），未知提示留空交由服务器处理，最多 4 轮，复用连接超时。覆盖 `PasswordAuthentication no` + PAM 2FA 的主机，以及 JumpServer/koko 的"密码或私钥 + 动态口令"登录；密钥+密码（`private-key-password`）回退路径同样适用。
+
+**首因子判定（2026-09-16，issue #17 / #30）**：`password_then_otp` 只在"首因子已经过掉"时才自动回 OTP 验证码。除同一次 KI 交换里答过密码提问外，以下两种情形同样算首因子已满足——① 密码方法已尝试、服务器要求继续认证（koko/JumpServer 用 partial success 表示"密码通过、还差 MFA"；即使服务器未置该位，密码已提交这一事实同样成立）；② 公钥 / SSH Agent 身份被服务器接受但要求后续认证（partial success 且剩余方法只有 keyboard-interactive，私钥/agent 路径据此续答 KI，不再直接报"认证被拒"）。既没有 password 方法、也没提交过密码的纯 KI 主机保持原保护：裸 OTP 提问不自动应答。
+
+**提问识别**：除提问文本本身，挑战的 `name` / `instructions` 也参与匹配——堡垒机（koko）把可读文案放在 instructions（`Please Enter MFA Code.`）、提问是 `[OTP Code]: `，二者都能命中内置模式（新增 `otp code` / `mfa code` / `mfa:` / 动态密码 / 验证码 / 一次性密码）。OTP 信号优先于用户自定义的"密码提示词"：命中 OTP 模式的提问不会被密码提示词改判成密码提问（避免把登录密码当验证码回给服务器）。
+
+**诊断**：认证失败时错误信息带上服务器实际提问（`name` / `instructions` / 提问文本，去控制字符并截断，绝不包含凭据），并指路"配置该连接的 TOTP 密钥或 OTP 提示词"；`auth_flow_mode=off` 不自动回码时同样点名提问，便于用户知道该配哪里。端到端回归见 `scripts/smoke_login_mfa_test.py`（本机 mock 堡垒机 + 真 sidecar，paramiko 缺失时 SKIP）。
 
 ## 终端内 Quick Sudo
 

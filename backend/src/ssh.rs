@@ -1639,7 +1639,29 @@ impl SshRuntime {
                 .await?;
             }
             AuthenticationMethod::PrivateKey => {
-                authenticate_private_key(&mut session, connection).await?;
+                let key_result = authenticate_private_key_result(&mut session, connection).await?;
+                if !key_result.success() {
+                    // 公钥被接受、服务器还要求 MFA（koko 的私钥 + 二次认证）：
+                    // 继续答 keyboard-interactive 的验证码提问；公钥被直接
+                    // 拒绝（非 partial success）时仍按密钥认证失败报错，不
+                    // 静默改用密码。
+                    if auth_partial_success(&key_result)
+                        && method_offered(&key_result, MethodKind::KeyboardInteractive)
+                    {
+                        eprintln!(
+                            "[ssh-trace] auth: publickey partial success, continuing with keyboard-interactive"
+                        );
+                        authenticate_keyboard_interactive(
+                            &mut session,
+                            connection,
+                            &orchestration,
+                            true,
+                        )
+                        .await?;
+                    } else {
+                        return Err("SSH private-key authentication was rejected".to_string());
+                    }
+                }
             }
             AuthenticationMethod::PrivateKeyPassword => {
                 let key_result = authenticate_private_key_result(&mut session, connection).await?;
@@ -1654,7 +1676,26 @@ impl SshRuntime {
                 }
             }
             AuthenticationMethod::Agent => {
-                authenticate_agent(&mut session, connection).await?;
+                match authenticate_agent(&mut session, connection).await? {
+                    AgentAuthOutcome::Accepted => {}
+                    // agent 身份被接受、服务器还要 MFA：与私钥路径同样续答
+                    // keyboard-interactive 验证码提问。
+                    AgentAuthOutcome::NeedsKeyboardInteractive => {
+                        eprintln!(
+                            "[ssh-trace] auth: agent partial success, continuing with keyboard-interactive"
+                        );
+                        authenticate_keyboard_interactive(
+                            &mut session,
+                            connection,
+                            &orchestration,
+                            true,
+                        )
+                        .await?;
+                    }
+                    AgentAuthOutcome::Rejected => {
+                        return Err("No SSH Agent identity was accepted".to_string());
+                    }
+                }
             }
             AuthenticationMethod::None => unreachable!(),
         }
@@ -4760,6 +4801,22 @@ fn method_offered(result: &AuthResult, kind: MethodKind) -> bool {
     }
 }
 
+/// True when the server accepted the preceding step but demands another
+/// authentication method before letting the session in — the shape koko (and
+/// PAM 2FA stacks in general) uses for "password/publickey accepted, now send
+/// the MFA code". It seeds the keyboard-interactive exchange whenever no
+/// password was submitted first (publickey / agent / KI-only paths); the
+/// password path seeds itself, since a submitted password already documents
+/// that the server moved past the first factor.
+fn auth_partial_success(result: &AuthResult) -> bool {
+    match result {
+        AuthResult::Failure {
+            partial_success, ..
+        } => *partial_success,
+        _ => false,
+    }
+}
+
 /// Tries password authentication first, then keyboard-interactive. The
 /// `offered` result of the preceding auth attempt tells which methods the
 /// server still accepts. Keyboard-interactive rounds are auto-answered from
@@ -4781,8 +4838,15 @@ async fn authenticate_password_or_interactive(
             return Ok(());
         }
         if method_offered(&result, MethodKind::KeyboardInteractive) {
-            eprintln!("[ssh-trace] auth: falling back to keyboard-interactive");
-            return authenticate_keyboard_interactive(session, connection, orchestration).await;
+            eprintln!(
+                "[ssh-trace] auth: falling back to keyboard-interactive (partial_success={})",
+                auth_partial_success(&result)
+            );
+            // 密码已经提交过一次：接下来的 keyboard-interactive 就是第二因子
+            // （koko/JumpServer 用 partial success 通知 MFA，PAM 栈甚至不置该位），
+            // 因此 OTP 提问必须能应答，而不是被判成"密码还没到"。
+            return authenticate_keyboard_interactive(session, connection, orchestration, true)
+                .await;
         }
         return Err("SSH password authentication was rejected".to_string());
     }
@@ -4791,7 +4855,13 @@ async fn authenticate_password_or_interactive(
         // Servers with PasswordAuthentication disabled still accept the
         // password through keyboard-interactive (PAM), including hosts that
         // ask a 2FA/TOTP follow-up question.
-        return authenticate_keyboard_interactive(session, connection, orchestration).await;
+        return authenticate_keyboard_interactive(
+            session,
+            connection,
+            orchestration,
+            auth_partial_success(offered),
+        )
+        .await;
     }
     eprintln!("[ssh-trace] auth: neither password nor keyboard-interactive offered");
     Err("SSH server did not advertise password or keyboard-interactive authentication; refusing to send the password".to_string())
@@ -4810,15 +4880,59 @@ async fn try_password(
     .map_err(|error| format!("SSH password authentication failed: {error}"))
 }
 
+/// Rounds allowed for one keyboard-interactive exchange before the handshake
+/// is given up (servers that keep re-asking see a deterministic failure).
+const KEYBOARD_INTERACTIVE_MAX_ROUNDS: usize = 4;
+
+/// Renders the server's challenge wording for an error message. Only the
+/// prompt/instruction text is used (never an answer), stripped of control
+/// characters and capped, so a hostile server cannot smuggle escape sequences
+/// into the workbench error dialog.
+fn challenge_display_text(text: &str, seen: &[String]) -> Option<String> {
+    let sanitized = exec::sanitize_prompt_hint(text);
+    if sanitized.is_empty() || seen.iter().any(|existing| existing == &sanitized) {
+        return None;
+    }
+    Some(sanitized)
+}
+
+/// Explains an unanswered keyboard-interactive challenge: what the server
+/// asked, and where the user has to put a credential for it to be answered.
+/// `asked` holds the deduplicated prompt wording, `answered` says whether any
+/// non-empty answer was sent in this exchange.
+fn keyboard_interactive_guidance(asked: &[String], answered: bool) -> String {
+    if asked.is_empty() {
+        return String::new();
+    }
+    let quoted: Vec<String> = asked.iter().map(|text| format!("{text:?}")).collect();
+    let mut message = format!("; the server asked for {}", quoted.join(", "));
+    if answered {
+        message.push_str(" and rejected the submitted answer");
+    } else {
+        message.push_str(
+            " — nothing was answered. Configure the connection's TOTP secret or OTP prompt hint (Quick Sudo 2FA settings) so MFA prompts can be answered automatically",
+        );
+    }
+    message
+}
+
 /// Drives a keyboard-interactive handshake, answering each round from the
 /// orchestration config (password plus optional TOTP follow-ups).
+/// `first_factor_accepted` says whether the preceding auth step already
+/// succeeded partially (koko: password/publickey accepted, MFA still owed) —
+/// `password_then_otp` needs it to answer the MFA question.
 async fn authenticate_keyboard_interactive(
     session: &mut Handle<SshClient>,
     connection: &StoredConnection,
     orchestration: &SudoAuth,
+    first_factor_accepted: bool,
 ) -> Result<(), String> {
     let timeout = Duration::from_secs(connection.connect_timeout_secs);
-    let mut state = exec::KeyboardInteractiveState::default();
+    let mut state = if first_factor_accepted {
+        exec::KeyboardInteractiveState::first_factor_accepted()
+    } else {
+        exec::KeyboardInteractiveState::default()
+    };
     let mut response = tokio::time::timeout(
         timeout,
         session.authenticate_keyboard_interactive_start(&connection.username, None),
@@ -4826,15 +4940,45 @@ async fn authenticate_keyboard_interactive(
     .await
     .map_err(|_| "SSH keyboard-interactive authentication timed out".to_string())?
     .map_err(|error| format!("SSH keyboard-interactive authentication failed: {error}"))?;
-    for _ in 0..4 {
+    let mut asked: Vec<String> = Vec::new();
+    let mut answered = false;
+    for _ in 0..KEYBOARD_INTERACTIVE_MAX_ROUNDS {
         match response {
             client::KeyboardInteractiveAuthResponse::Success => return Ok(()),
             client::KeyboardInteractiveAuthResponse::Failure { .. } => {
-                return Err("SSH keyboard-interactive authentication was rejected".to_string());
+                return Err(format!(
+                    "SSH keyboard-interactive authentication was rejected{}",
+                    keyboard_interactive_guidance(&asked, answered)
+                ));
             }
-            client::KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
-                let answers =
-                    exec::keyboard_interactive_answers(orchestration, &mut state, &prompts);
+            client::KeyboardInteractiveAuthResponse::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => {
+                // koko 把可读文案放在 instructions（"Please Enter MFA Code."），
+                // 提问本身是 "[OTP Code]: "：两者都参与分类与错误说明。
+                let context = exec::keyboard_interactive_challenge_context(&name, &instructions);
+                for text in std::iter::once(&name)
+                    .chain(std::iter::once(&instructions))
+                    .chain(prompts.iter().map(|prompt| &prompt.prompt))
+                {
+                    if asked.len() >= 4 {
+                        break;
+                    }
+                    if let Some(display) = challenge_display_text(text, &asked) {
+                        asked.push(display);
+                    }
+                }
+                let answers = exec::keyboard_interactive_answers(
+                    orchestration,
+                    &mut state,
+                    &context,
+                    &prompts,
+                );
+                if answers.iter().any(|answer| !answer.is_empty()) {
+                    answered = true;
+                }
                 response = tokio::time::timeout(
                     timeout,
                     session.authenticate_keyboard_interactive_respond(answers),
@@ -4847,7 +4991,10 @@ async fn authenticate_keyboard_interactive(
             }
         }
     }
-    Err("SSH keyboard-interactive authentication did not finish".to_string())
+    Err(format!(
+        "SSH keyboard-interactive authentication did not finish after {KEYBOARD_INTERACTIVE_MAX_ROUNDS} rounds{}",
+        keyboard_interactive_guidance(&asked, answered)
+    ))
 }
 
 async fn authenticate_private_key_result(
@@ -4924,20 +5071,6 @@ fn normalize_private_key_text(text: &str) -> String {
     normalized.trim_start().to_string()
 }
 
-async fn authenticate_private_key(
-    session: &mut Handle<SshClient>,
-    connection: &StoredConnection,
-) -> Result<(), String> {
-    if authenticate_private_key_result(session, connection)
-        .await?
-        .success()
-    {
-        Ok(())
-    } else {
-        Err("SSH private-key authentication was rejected".to_string())
-    }
-}
-
 fn expand_private_key_path(path: &str) -> PathBuf {
     let Some(remainder) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) else {
         return PathBuf::from(path);
@@ -4949,10 +5082,21 @@ fn expand_private_key_path(path: &str) -> PathBuf {
         .join(remainder)
 }
 
+/// Outcome of trying every identity the SSH Agent offers for one connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentAuthOutcome {
+    Accepted,
+    /// The server accepted an identity but still demands keyboard-interactive
+    /// (MFA), so the caller must continue the handshake instead of reporting
+    /// "no identity was accepted".
+    NeedsKeyboardInteractive,
+    Rejected,
+}
+
 async fn authenticate_agent(
     session: &mut Handle<SshClient>,
     connection: &StoredConnection,
-) -> Result<(), String> {
+) -> Result<AgentAuthOutcome, String> {
     #[cfg(unix)]
     let mut agent = if connection.agent_socket.is_empty() {
         AgentClient::connect_env()
@@ -4990,9 +5134,10 @@ async fn authenticate_agent(
         .ok()
         .flatten()
         .flatten();
-    let authenticated = tokio::time::timeout(
+    let outcome = tokio::time::timeout(
         Duration::from_secs(connection.connect_timeout_secs),
         async {
+            let mut needs_keyboard_interactive = false;
             for identity in identities {
                 let result = match &identity {
                     AgentIdentity::PublicKey { key, .. } => {
@@ -5016,18 +5161,27 @@ async fn authenticate_agent(
                             .await
                     }
                 };
-                if result.is_ok_and(|result| result.success()) {
-                    return true;
+                if let Ok(result) = result {
+                    if result.success() {
+                        return AgentAuthOutcome::Accepted;
+                    }
+                    if auth_partial_success(&result)
+                        && method_offered(&result, MethodKind::KeyboardInteractive)
+                    {
+                        needs_keyboard_interactive = true;
+                    }
                 }
             }
-            false
+            if needs_keyboard_interactive {
+                AgentAuthOutcome::NeedsKeyboardInteractive
+            } else {
+                AgentAuthOutcome::Rejected
+            }
         },
     )
     .await
     .map_err(|_| "SSH Agent authentication timed out".to_string())?;
-    authenticated
-        .then_some(())
-        .ok_or_else(|| "No SSH Agent identity was accepted".to_string())
+    Ok(outcome)
 }
 
 async fn publish_terminal(
@@ -6394,5 +6548,211 @@ mod tests {
             .build_transfer_history(Some("s2"), 50, &no_connection)
             .unwrap();
         assert!(other["tasks"].as_array().unwrap().is_empty());
+    }
+
+    /// JumpServer（koko）登录期 MFA 的端到端回归（issue #17 / #30）：密码
+    /// 认证通过（partial success）后服务器改用 keyboard-interactive 提问
+    /// "Please Enter MFA Code." + "[OTP Code]: "，插件必须自动回 TOTP 验证码，
+    /// 而不是把提问留空让服务器反复重问。
+    mod koko_login {
+        use super::*;
+        use russh::keys::ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey};
+        use russh::server::{Auth, Response, Server as _, Session};
+        use russh::{MethodKind, MethodSet};
+        use std::net::SocketAddr;
+
+        const LOGIN_PASSWORD: &str = "jump-pw";
+        const MFA_CODE: &str = "654321";
+        // 逐字取自 koko pkg/auth/mfa_option.go（mfaOptionInstruction /
+        // mfaOptionQuestion，MFA 类型 otp）。
+        const MFA_INSTRUCTION: &str = "Please Enter MFA Code.";
+        const MFA_QUESTION: &str = "[OTP Code]: ";
+
+        /// 测试专用 Ed25519 密钥：由固定种子展开，不依赖 RNG 版本，也绝不
+        /// 涉及真实私钥（仅供本机 mock 服务器与客户端握手）。
+        fn test_key(seed: u8) -> russh::keys::PrivateKey {
+            russh::keys::PrivateKey::from(Ed25519Keypair::from_seed(
+                &[seed; Ed25519PrivateKey::BYTE_SIZE],
+            ))
+        }
+
+        #[derive(Clone, Default)]
+        struct MockKoko {
+            answers: Arc<Mutex<Vec<String>>>,
+        }
+
+        struct MockKokoSession {
+            answers: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl russh::server::Handler for MockKokoSession {
+            type Error = russh::Error;
+
+            async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+                Ok(Auth::reject())
+            }
+
+            async fn auth_password(
+                &mut self,
+                _user: &str,
+                password: &str,
+            ) -> Result<Auth, Self::Error> {
+                if password != LOGIN_PASSWORD {
+                    return Ok(Auth::reject());
+                }
+                // koko: 第一因子通过 → PartialSuccessError，下一步
+                // keyboard-interactive 问 MFA。
+                let mut methods = MethodSet::empty();
+                methods.push(MethodKind::KeyboardInteractive);
+                Ok(Auth::Reject {
+                    proceed_with_methods: Some(methods),
+                    partial_success: true,
+                })
+            }
+
+            async fn auth_publickey(
+                &mut self,
+                _user: &str,
+                _public_key: &russh::keys::PublicKey,
+            ) -> Result<Auth, Self::Error> {
+                // koko 的私钥 + MFA：公钥被接受后仍要二次认证。
+                let mut methods = MethodSet::empty();
+                methods.push(MethodKind::KeyboardInteractive);
+                Ok(Auth::Reject {
+                    proceed_with_methods: Some(methods),
+                    partial_success: true,
+                })
+            }
+
+            async fn auth_keyboard_interactive<'a>(
+                &'a mut self,
+                _user: &str,
+                _submethods: &str,
+                response: Option<Response<'a>>,
+            ) -> Result<Auth, Self::Error> {
+                let Some(mut response) = response else {
+                    return Ok(Auth::Partial {
+                        name: "jumper".into(),
+                        instructions: MFA_INSTRUCTION.into(),
+                        prompts: vec![(MFA_QUESTION.into(), true)].into(),
+                    });
+                };
+                let answer = response
+                    .next()
+                    .map(|bytes| String::from_utf8_lossy(bytes.as_ref()).into_owned())
+                    .unwrap_or_default();
+                let accepted = answer == MFA_CODE;
+                self.answers.lock().unwrap().push(answer);
+                Ok(if accepted {
+                    Auth::Accept
+                } else {
+                    Auth::reject()
+                })
+            }
+
+            async fn auth_succeeded(&mut self, _session: &mut Session) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+
+        impl russh::server::Server for MockKoko {
+            type Handler = MockKokoSession;
+
+            fn new_client(&mut self, _peer: Option<SocketAddr>) -> Self::Handler {
+                MockKokoSession {
+                    answers: self.answers.clone(),
+                }
+            }
+        }
+
+        async fn spawn_mock_koko() -> (u16, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind mock koko");
+            let port = listener.local_addr().expect("mock koko address").port();
+            let config = Arc::new(russh::server::Config {
+                keys: vec![test_key(1)],
+                auth_rejection_time: Duration::from_millis(10),
+                auth_rejection_time_initial: Some(Duration::from_millis(10)),
+                ..Default::default()
+            });
+            let mut server = MockKoko::default();
+            let answers = server.answers.clone();
+            let task = tokio::spawn(async move {
+                let _ = server.run_on_socket(config, &listener).await;
+            });
+            (port, answers, task)
+        }
+
+        fn koko_connection(port: u16, secrets: Value, external: Value) -> StoredConnection {
+            StoredConnection::from_lifecycle_params(&json!({
+                "connection": {
+                    "id": "koko-login",
+                    "name": "koko",
+                    "db_type": "ssh",
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "username": "jumper",
+                    "password": LOGIN_PASSWORD,
+                    "connection_secrets": secrets,
+                    "external_config": external,
+                }
+            }))
+            .expect("parse koko connection")
+        }
+
+        fn test_runtime() -> SshRuntime {
+            let data_dir = std::env::temp_dir().join(format!("dbx-koko-e2e-{}", Uuid::new_v4()));
+            SshRuntime::new(data_dir).with_auto_trust_keys()
+        }
+
+        #[tokio::test]
+        async fn mfa_code_is_answered_after_partial_success_password() {
+            let (port, answers, server) = spawn_mock_koko().await;
+            let runtime = test_runtime();
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE }),
+                json!({ "authentication": "password", "auth_flow_mode": "password_then_otp" }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            result.expect("koko MFA login must succeed");
+            assert_eq!(
+                answers.lock().unwrap().as_slice(),
+                [MFA_CODE.to_string()],
+                "the MFA question must be answered with the TOTP code"
+            );
+        }
+
+        /// 私钥被接受、服务器还要 MFA：以前直接报 "private-key authentication
+        /// was rejected"，现在继续答 keyboard-interactive 验证码（issue #30 的
+        /// 私钥反馈）。
+        ///
+        /// 说明：russh 服务端（0.60/0.63 同）在处理 Auth::Reject 时会把
+        /// `partial_success` 无条件清零后回包，mock 服务器因此无法向客户端
+        /// 复现"公钥已通过、还差 MFA"这一步——该路径的端到端覆盖交给
+        /// `scripts/smoke_login_mfa_test.py`（paramiko 会如实置位）。
+        #[tokio::test]
+        async fn publickey_partial_success_is_reported_by_russh_server_as_reject() {
+            let (port, answers, server) = spawn_mock_koko().await;
+            let runtime = test_runtime();
+            let key_text = test_key(2)
+                .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+                .expect("encode client key");
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE, "private_key": key_text.to_string() }),
+                json!({ "authentication": "private-key", "auth_flow_mode": "password_then_otp" }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            assert_eq!(
+                result.err().as_deref(),
+                Some("SSH private-key authentication was rejected"),
+                "russh 服务端清零 partial success，客户端据此拒绝继续"
+            );
+            assert!(answers.lock().unwrap().is_empty());
+        }
     }
 }
