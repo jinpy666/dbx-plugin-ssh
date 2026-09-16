@@ -88,3 +88,55 @@
 2. P2-5 启动命令（插件自助，走 IMPL_PLAN 流程）。
 3. P2-6 Auto 认证。
 4. P3 各项随宿主契约演进。
+
+## 五、2026-09-16 修复标注（表单保存报错）
+
+用户侧症状是"保存报错"。核对宿主实现后确认：宿主连接对话框能产生的保存期
+文案只有 `connection.pluginRequiredField`（"请填写{字段}"），且保存/保存并
+连接按钮在「可见 ∧ 必填 ∧ 为空」时本来就是禁用的（`pluginFieldConditions.ts`
++ `ConnectionDialog.connectionConfigForSubmit`）。因此真正的报错来自
+`保存并连接` 之后的 test/connect：宿主 Rust 层
+（`validate_plugin_connection_values_for_action`：必填、值类型、`port` 绑定
+1..65535、`connection_secrets` 必须声明为 secret）与 sidecar
+`from_lifecycle_params`（凭据规则）各校验一遍。穷举 960 个表单状态后，唯一会
+**卡死保存**的是 `password` 的 `required_when`，本轮修复如下：
+
+1. **登录密码改为显式「密码来源」二选一（P1，标准产品做法）**：密码类的真实
+   规则是 OR——`password` ∨ `password_command`（D9 外部密码管理器），而宿主
+   契约只能表达单字段 `required_when`，写死"密码必填"会让"留空 + 密码命令"
+   的连接**根本保存不了**（按钮灰掉且没有任何解释）。修法是把它变成用户可
+   显式选择的一个字段：新增 `password_source`（`direct`/`command`，默认
+   `direct`，仅密码类认证可见），`password` 与 `password_command` 分别挂在
+   两个取值上做 `visible_when` + `required_when`——既恢复"选中即必填"的严格
+   校验，又没有死路（换个来源即可）；`password_command` 随之从高级区搬到凭据
+   区。解析层照来源执行：`direct` 缺密码、`command` 缺命令都直接报错并点名
+   两个字段；`command` 模式下存量密码让位，保证用户选定的命令真的执行；没有
+   来源字段的老配置（0.4.x 与 MCP 内联参数）保持原 OR 语义，**不需要重存也
+   不会被卡住**，重开表单时把「密码来源」选回「本地命令取回」即可（本机
+   DB 中 0 条连接用到该功能）。
+2. **私钥"路径或内容二选一"文案指路（P1）**：同样无法在契约里表达 OR，
+   保持两个字段都不 required；`private_key_path` / `private_key` 的 7 语描述
+   明确"至少填一项，内容优先于路径"，sidecar 报错点名
+   `"Private key path"` / `"Private key content"`。选私钥认证却什么都不填时，
+   保存会成功，随后在连接/测试阶段报出可操作的错误（这是契约能力上限，不是
+   可修的表单 bug）。
+3. **端口范围提示（P1）**：`port` 只受 `type: number` 约束，宿主 Rust 层与
+   sidecar 各自校验 1..65535（填 0 会"保存成功、连接报错"）。契约无 min/max
+   属性，改在 7 语 description 写明范围与默认值。
+4. **依赖下限（P2）**：`engines.dbx` 从 `>=0.5.77` 抬到 `>=0.6.14`——条件
+   显隐/条件必填是宿主 0.6.14 才实现的能力，低于该版本的表单会平铺全部字段、
+   忽略 `required_when`，与本契约声明的行为不符。
+5. **回归网**：新增 `model.rs` 契约测试
+   `form_save_state_matches_parser_acceptance`——按宿主语义穷举
+   advanced_options × authentication × password_source × sudo_source ×
+   auth_flow_mode × read_only × triggers_enabled × 六种凭据取值（30,720
+   组合），断言
+   「表单拦下 ⇒ 解析层也必须拒绝」（否则就是死锁）且「表单放行而解析层拒绝 ⇒
+   报错必须点名表单字段」；`credential_requirements_are_form_satisfiable`
+   锁住"凭据不得静态必填、必填必须挂在用户可切换的选择器上"；
+   `password_source_is_honored_by_the_parser` 锁住三种来源语义。前端契约脚本
+   `scripts/connection-forms/verify.mjs` 同步断言七语描述与 credential 契约。
+
+仍未修（宿主契约能力上限，不改表单）：`read_only=true` 时 sudo 块照常显示
+（需宿主多条件 `visible_when`）；私钥"路径∨内容"仍无选择器，因此只能在连接
+时报错（文案已点名两个字段），后续可仿 `password_source` 增加来源选择器。

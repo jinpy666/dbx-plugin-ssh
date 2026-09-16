@@ -352,7 +352,7 @@ impl StoredConnection {
             .filter(|value| *value > 0)
             .unwrap_or(port);
         let username = string_field(connection, "username")?;
-        let password = connection
+        let mut password = connection
             .get("password")
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -460,16 +460,57 @@ impl StoredConnection {
         } else {
             runtime_host
         };
-        // password_command 让「密码留空、连接时本地取回」成为合法形态：
-        // 仅当命令也未配置时才拒绝密码类认证方法。
-        if matches!(
+        // 表单的「密码来源」（password_source）是显式选择，解析层照它执行：
+        //   * "direct"  —— 表单里必须填密码（宿主 required_when 已先拦一道，
+        //                  这里兜底 MCP/手改配置/导入等非对话框路径）；
+        //   * "command" —— 由本地命令取回；此时存量密码必须让位，否则
+        //                  「显式密码优先」会让命令永不执行，用户选定的
+        //                  来源被静默忽略；
+        //   * 缺省      —— 老配置（0.4.x 只有 password/password_command）与
+        //                  MCP 内联参数保持历史语义：两者二选一即可。
+        // 报错一律点名表单字段，非对话框路径也能直接改对。
+        let password_source = config_text(external_config, &["password_source"])
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(source) = password_source {
+            match (
+                source,
+                matches!(
+                    authentication,
+                    AuthenticationMethod::Password | AuthenticationMethod::PrivateKeyPassword
+                ),
+            ) {
+                ("direct", true) if password.is_empty() => {
+                    return Err(
+                        "Password source \"Enter in this form\" requires the \"Password\" field \
+                         (or choose \"Local command\" as \"Password source\" and provide \
+                         \"Password command\")"
+                            .to_string(),
+                    );
+                }
+                ("command", true) if password_command.is_empty() => {
+                    return Err(
+                        "Password source \"Local command\" requires the \"Password command\" field \
+                         (or choose \"Enter in this form\" as \"Password source\" and fill \
+                         \"Password\")"
+                            .to_string(),
+                    );
+                }
+                ("command", true) => password.clear(),
+                ("direct", _) | ("command", _) => {}
+                (other, _) => return Err(format!("Unsupported password source '{other}'")),
+            }
+        } else if matches!(
             authentication,
             AuthenticationMethod::Password | AuthenticationMethod::PrivateKeyPassword
         ) && password.is_empty()
             && password_command.is_empty()
         {
             return Err(
-                "Password authentication requires a password or a password_command".to_string(),
+                "Password authentication requires a password or a password_command: fill the \
+                 \"Password\" field, or set \"Password source\" to \"Local command\" and provide \
+                 \"Password command\""
+                    .to_string(),
             );
         }
         if matches!(
@@ -479,7 +520,9 @@ impl StoredConnection {
             && private_key.is_empty()
         {
             return Err(
-                "Private-key authentication requires a private key path or key content".to_string(),
+                "Private-key authentication requires a private key path or key content: fill \
+                 \"Private key path\", or paste the key into \"Private key content\""
+                    .to_string(),
             );
         }
         Ok(Self {
@@ -924,7 +967,9 @@ mod tests {
             "port",
             "username",
             "authentication",
+            "password_source",
             "password",
+            "password_command",
             "private_key_path",
             "private_key_passphrase",
             "private_key",
@@ -947,7 +992,6 @@ mod tests {
             "triggers",
             "trigger_answer_1",
             "trigger_answer_2",
-            "password_command",
             "passphrase_command",
             "remote_command",
             "read_only",
@@ -977,17 +1021,24 @@ mod tests {
                 Some("config") => assert!(
                     !key.contains("password")
                         || key == "password_prompt_hint"
-                        || key == "password_command",
+                        || key == "password_command"
+                        // A selector ("direct"/"command"), never credential
+                        // material: both halves stay secret/config bound.
+                        || key == "password_source",
                     "config binding must not carry credential material: {key}"
                 ),
                 _ => {}
             }
         }
 
-        // required_when 链必须与 from_lifecycle_params 的凭据校验一致
-        // （model.rs: password/private-key-password 校验密码）。private_key_path
-        // 不再声明 required_when：私钥「路径或内容」是二选一，manifest 表达不了
-        // or 语义，由解析层在连接时兜底校验。
+        // 登录密码走显式「密码来源」二选一（password_source）：
+        //   direct  → password 必填；command → password_command 必填。
+        // 两个分支合起来必须覆盖 password_source 的全部取值，否则某个选项
+        // 会变成「两边都不需要」或「两边都要」，前者保存后被解析层拒绝、后者
+        // 死锁（宿主契约只能表达单字段 required_when，做不到「除非另一字段有
+        // 值」，所以来源必须由用户显式选）。私钥那组仍是「路径∨内容」，
+        // manifest 表达不了 OR，保持两边都非必填（见
+        // credential_requirements_stay_parse_time_only）。
         let one_of = |key: &str, constraint: &str| -> Vec<String> {
             fields.iter().find(|field| field["key"] == key).unwrap()[constraint]
                 .as_object()
@@ -1001,9 +1052,41 @@ mod tests {
                 })
                 .unwrap_or_default()
         };
+        let password_source = fields
+            .iter()
+            .find(|field| field["key"] == "password_source")
+            .expect("password_source field");
+        let source_options: Vec<String> = password_source["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|option| option["value"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(password_source["default"], "direct");
+        assert_eq!(source_options, ["direct", "command"]);
+        let gate_field = |key: &str, constraint: &str| -> Option<String> {
+            fields.iter().find(|field| field["key"] == key).unwrap()[constraint]["field"]
+                .as_str()
+                .map(str::to_string)
+        };
         assert_eq!(
-            one_of("password", "required_when"),
-            ["password", "private-key-password"]
+            gate_field("password", "required_when").as_deref(),
+            Some("password_source")
+        );
+        assert_eq!(one_of("password", "required_when"), ["direct"]);
+        assert_eq!(
+            gate_field("password_command", "required_when").as_deref(),
+            Some("password_source")
+        );
+        assert_eq!(one_of("password_command", "required_when"), ["command"]);
+        let mut covered = one_of("password", "required_when");
+        covered.extend(one_of("password_command", "required_when"));
+        covered.sort();
+        let mut expected = source_options.clone();
+        expected.sort();
+        assert_eq!(
+            covered, expected,
+            "password_source branches must cover every option exactly once"
         );
         // private_key_path 是「路径或私钥内容」二选一：无 required_when，
         // 凭据齐全性由解析层校验（见 private_key_accepts_path_or_content）。
@@ -1541,6 +1624,8 @@ mod tests {
 #[cfg(test)]
 mod manifest_contract_tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     fn manifest() -> Value {
@@ -1582,51 +1667,576 @@ mod manifest_contract_tests {
         entry[condition]["field"].as_str()
     }
 
-    /// Manifest fields required per `authentication` option must match the
-    /// credentials `from_lifecycle_params` actually rejects when missing.
+    /// Credential requirements must be *satisfiable on the form*:
+    /// the login password is strict per `password_source` (direct → Password
+    /// required, command → Password command required), which the user can
+    /// always satisfy by typing it or switching the source; key material stays
+    /// either-or (path ∨ pasted content) and therefore must never become
+    /// form-required.
+    /// Anything else either dead-locks the dialog footer or lets a save through
+    /// that the parser then rejects.
     #[test]
-    fn required_chain_matches_parser() {
-        // Model-required credentials per authentication option, mirroring the
-        // parse rejection branches in from_lifecycle_params. Identity fields
-        // (id/host/port/username) are always required on both sides.
-        let model_required: &[(&str, &[&str])] = &[
-            ("password", &["password"]),
-            // 私钥是「路径或内容」二选一，manifest 的 required_when 表达不了
-            // or 语义，所以两侧都不强制单字段；缺失由解析层在连接时报错。
-            ("private-key", &[]),
-            ("private-key-password", &["password"]),
-            ("agent", &[]),
-            ("none", &[]),
-        ];
-
-        for (authentication, expected) in model_required {
-            let mut manifest_required: Vec<String> = Vec::new();
-            for entry in connection_fields() {
-                let key = entry["key"].as_str().unwrap().to_string();
-                let binding = entry["binding"].as_str().unwrap_or("");
-                // Only credential/config surfaces take part in the auth chain.
-                if !matches!(binding, "password" | "secret" | "config") || key == "authentication" {
-                    continue;
-                }
-                let statically_required = entry["required"].as_bool().unwrap_or(false);
-                let conditional = condition_field(&entry, "required_when")
-                    == Some("authentication")
-                    && condition_one_of(&entry, "required_when")
-                        .map(|one_of| one_of.iter().any(|value| value == authentication))
-                        .unwrap_or(false);
-                if statically_required || conditional {
-                    manifest_required.push(key);
-                }
+    fn credential_requirements_are_form_satisfiable() {
+        // No credential field may be *statically* required: a static flag
+        // ignores the other branch (password_command / pasted key content) and
+        // dead-locks the footer. Requirements have to hang off the explicit
+        // source selector, which always has an alternative option.
+        let selectors: Vec<&str> = ["authentication", "password_source"].to_vec();
+        for entry in connection_fields() {
+            let key = entry["key"].as_str().unwrap().to_string();
+            let binding = entry["binding"].as_str().unwrap_or("");
+            if !matches!(binding, "password" | "secret" | "config") {
+                continue;
             }
-            let mut expected: Vec<String> =
-                expected.iter().map(|value| value.to_string()).collect();
-            expected.sort();
-            manifest_required.sort();
+            assert!(
+                !entry["required"].as_bool().unwrap_or(false),
+                "credential field '{key}' must not be statically required"
+            );
+            if let Some(source) = condition_field(&entry, "required_when") {
+                assert!(
+                    selectors.contains(&source),
+                    "credential field '{key}' must be required via a user-chosen selector, not '{source}'"
+                );
+                let options = field(source)["options"]
+                    .as_array()
+                    .map(|options| options.len())
+                    .unwrap_or(0);
+                let required_for = condition_one_of(&entry, "required_when").unwrap_or_default();
+                assert!(
+                    options > required_for.len(),
+                    "credential field '{key}' must have an escape branch in '{source}'"
+                );
+            }
+        }
+
+        // private_key_path / private_key stay either-or: never form-required.
+        for key in ["private_key_path", "private_key", "private_key_passphrase"] {
             assert_eq!(
-                manifest_required, expected,
-                "required chain mismatch for authentication='{authentication}'"
+                condition_field(&field(key), "required_when"),
+                None,
+                "{key} must stay optional (path or pasted content is enough)"
             );
         }
+
+        // The parse-time rules are real: with neither half of an OR the parser
+        // rejects, and the message names the two form fields that fix it.
+        let missing_password = StoredConnection::from_lifecycle_params(&serde_json::json!({
+            "connection": {
+                "id": "no-pw",
+                "host": "example.com",
+                "port": 22,
+                "username": "user",
+                "external_config": { "authentication": "password" }
+            }
+        }))
+        .unwrap_err();
+        assert!(missing_password.contains("Password"), "{missing_password}");
+        assert!(
+            missing_password.contains("Password command"),
+            "{missing_password}"
+        );
+        let missing_key = StoredConnection::from_lifecycle_params(&serde_json::json!({
+            "connection": {
+                "id": "no-key",
+                "host": "example.com",
+                "port": 22,
+                "username": "user",
+                "external_config": { "authentication": "private-key" }
+            }
+        }))
+        .unwrap_err();
+        assert!(missing_key.contains("Private key path"), "{missing_key}");
+        assert!(missing_key.contains("Private key content"), "{missing_key}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Host dialog semantics, mirrored from the host checkout so this repository
+    // can regression-test the form contract without importing it:
+    //   * `pluginFieldConditions.ts` — visibility cascades through the
+    //     referenced sibling; `required_when` never implies required.
+    //   * `ConnectionDialog.connectionConfigForSubmit` — "save" is blocked by
+    //     the first field that is visible, required and empty (surfaced as
+    //     `connection.pluginRequiredField` = "请填写{field}").
+    //   * `frontendPlugin.buildPluginConnectionConfig` — where each bound value
+    //     lands (connection/external_config/connection_secrets).
+    // -----------------------------------------------------------------------
+
+    /// Dialog value of a field: the stored/typed value, else the manifest default.
+    fn form_value(values: &BTreeMap<String, Value>, entry: &Value) -> Option<Value> {
+        let key = entry["key"].as_str().unwrap_or_default();
+        match values.get(key) {
+            Some(value) => Some(value.clone()),
+            None => entry
+                .get("default")
+                .filter(|value| !value.is_null())
+                .cloned(),
+        }
+    }
+
+    fn form_condition_matches(
+        condition: &Value,
+        values: &BTreeMap<String, Value>,
+        fields: &[Value],
+    ) -> bool {
+        let Some(key) = condition["field"].as_str() else {
+            return false;
+        };
+        let Some(target) = fields
+            .iter()
+            .find(|entry| entry["key"].as_str() == Some(key))
+        else {
+            return false;
+        };
+        let Some(value) = form_value(values, target) else {
+            return false;
+        };
+        let text = match value {
+            Value::Null => return false,
+            Value::String(text) => text,
+            other => other.to_string(),
+        };
+        if text.trim().is_empty() {
+            return false;
+        }
+        condition["one_of"].as_array().is_some_and(|one_of| {
+            one_of
+                .iter()
+                .any(|option| option.as_str() == Some(text.as_str()))
+        })
+    }
+
+    fn form_field_visible(
+        entry: &Value,
+        values: &BTreeMap<String, Value>,
+        fields: &[Value],
+    ) -> bool {
+        let mut seen = vec![entry["key"].as_str().unwrap_or_default().to_string()];
+        let mut current = entry;
+        loop {
+            let Some(condition) = current.get("visible_when").filter(|value| !value.is_null())
+            else {
+                return true;
+            };
+            if !form_condition_matches(condition, values, fields) {
+                return false;
+            }
+            let Some(target_key) = condition["field"].as_str() else {
+                return true;
+            };
+            if seen.iter().any(|key| key == target_key) {
+                return true;
+            }
+            seen.push(target_key.to_string());
+            let Some(target) = fields
+                .iter()
+                .find(|candidate| candidate["key"].as_str() == Some(target_key))
+            else {
+                return true;
+            };
+            current = target;
+        }
+    }
+
+    fn form_field_required(
+        entry: &Value,
+        values: &BTreeMap<String, Value>,
+        fields: &[Value],
+    ) -> bool {
+        if entry["required"].as_bool().unwrap_or(false) {
+            return true;
+        }
+        match entry.get("required_when").filter(|value| !value.is_null()) {
+            None => false,
+            Some(condition) => form_condition_matches(condition, values, fields),
+        }
+    }
+
+    fn form_value_present(value: Option<&Value>) -> bool {
+        match value {
+            None | Some(Value::Null) => false,
+            Some(Value::String(text)) => !text.trim().is_empty(),
+            Some(_) => true,
+        }
+    }
+
+    /// The field the dialog would block "save" on, if any.
+    fn form_blocking_field(fields: &[Value], values: &BTreeMap<String, Value>) -> Option<String> {
+        fields
+            .iter()
+            .find(|entry| {
+                form_field_visible(entry, values, fields)
+                    && form_field_required(entry, values, fields)
+                    && !form_value_present(form_value(values, entry).as_ref())
+            })
+            .map(|entry| entry["key"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// The lifecycle `connection` object a save would persist, built the way the
+    /// host builds it (config → `external_config`, secret → `connection_secrets`
+    /// with empty values removed, identity/password bindings hoisted).
+    fn connection_payload(fields: &[Value], values: &BTreeMap<String, Value>) -> Value {
+        let mut external = serde_json::Map::new();
+        let mut secrets = serde_json::Map::new();
+        let mut name = String::from("SSH server");
+        let mut host = String::new();
+        let mut port: u64 = 0;
+        let mut username = String::new();
+        let mut password = String::new();
+        let text = |value: Option<Value>| -> String {
+            match value {
+                Some(Value::String(text)) => text,
+                Some(other) => other.to_string(),
+                None => String::new(),
+            }
+        };
+        for entry in fields {
+            let key = entry["key"].as_str().unwrap_or_default().to_string();
+            let value = form_value(values, entry);
+            match entry["binding"].as_str().unwrap_or_default() {
+                "config" => match value {
+                    None | Some(Value::Null) => {
+                        external.remove(&key);
+                    }
+                    Some(value) => {
+                        external.insert(key.clone(), value);
+                    }
+                },
+                "secret" => match value {
+                    None | Some(Value::Null) => {
+                        secrets.remove(&key);
+                    }
+                    Some(Value::String(value)) if value.is_empty() => {
+                        secrets.remove(&key);
+                    }
+                    Some(value) => {
+                        secrets.insert(key.clone(), Value::String(text(Some(value))));
+                    }
+                },
+                "name" => name = text(value),
+                "host" => host = text(value),
+                "port" => {
+                    port = value
+                        .as_ref()
+                        .and_then(Value::as_u64)
+                        .map(|port| port.min(u64::from(u16::MAX)))
+                        .unwrap_or(0);
+                }
+                "username" => username = text(value),
+                "password" => password = text(value),
+                _ => {}
+            }
+        }
+        serde_json::json!({
+            "id": "form-matrix",
+            "name": name,
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "external_config": external,
+            "connection_secrets": secrets,
+        })
+    }
+
+    /// 表单“保存”判定 ⇔ 解析层接受度。宿主动画框只拦「可见 ∧ 必填 ∧ 为空」，
+    /// 真正的凭据规则在解析层，两者必须同向：
+    ///   * 表单拦下、解析层却接受 → 用户被卡死（无法保存一个插件支持的配置）；
+    ///   * 表单放行、解析层拒绝 → 只允许出现在 OR 语义（密码∨密码命令、
+    ///     私钥路径∨私钥内容）无法在契约里表达处，且报错必须点名表单字段。
+    #[test]
+    fn form_save_state_matches_parser_acceptance() {
+        let fields = connection_fields();
+        let defaults: BTreeMap<String, Value> = fields
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("default")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        (
+                            entry["key"].as_str().unwrap_or_default().to_string(),
+                            value.clone(),
+                        )
+                    })
+            })
+            .collect();
+
+        let mut cases = 0usize;
+        let mut blocked_without_rejection = 0usize;
+        let mut blocked_samples: Vec<String> = Vec::new();
+        let mut unexplained_rejections: Vec<String> = Vec::new();
+        for advanced_options in [false, true] {
+            for authentication in [
+                "password",
+                "private-key",
+                "private-key-password",
+                "agent",
+                "none",
+            ] {
+                for sudo_source in ["custom", "global", "off"] {
+                    for auth_flow_mode in [
+                        "off",
+                        "password_then_otp",
+                        "password_plus_otp",
+                        "password_only",
+                    ] {
+                        for read_only in [false, true] {
+                            for triggers_enabled in [false, true] {
+                                for password in ["", "secret"] {
+                                    for password_command in ["", "echo pw"] {
+                                        for password_source in ["direct", "command"] {
+                                            for private_key_path in ["", "~/.ssh/id_ed25519"] {
+                                                for private_key in [
+                                                    "",
+                                                    "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n",
+                                                ] {
+                                                    for private_key_passphrase in ["", "phrase"] {
+                                                        let mut values = defaults.clone();
+                                                        for (key, value) in [
+                                                            (
+                                                                "advanced_options",
+                                                                json!(advanced_options),
+                                                            ),
+                                                            (
+                                                                "authentication",
+                                                                json!(authentication),
+                                                            ),
+                                                            ("sudo_source", json!(sudo_source)),
+                                                            (
+                                                                "auth_flow_mode",
+                                                                json!(auth_flow_mode),
+                                                            ),
+                                                            ("read_only", json!(read_only)),
+                                                            (
+                                                                "triggers_enabled",
+                                                                json!(triggers_enabled),
+                                                            ),
+                                                            ("password", json!(password)),
+                                                            (
+                                                                "password_command",
+                                                                json!(password_command),
+                                                            ),
+                                                            (
+                                                                "password_source",
+                                                                json!(password_source),
+                                                            ),
+                                                            (
+                                                                "private_key_path",
+                                                                json!(private_key_path),
+                                                            ),
+                                                            ("private_key", json!(private_key)),
+                                                            (
+                                                                "private_key_passphrase",
+                                                                json!(private_key_passphrase),
+                                                            ),
+                                                        ] {
+                                                            values.insert(key.to_string(), value);
+                                                        }
+                                                        cases += 1;
+                                                        let blocked =
+                                                            form_blocking_field(&fields, &values);
+                                                        let payload =
+                                                            connection_payload(&fields, &values);
+                                                        let parsed =
+                                                            StoredConnection::from_lifecycle_params(
+                                                                &json!({ "connection": payload }),
+                                                            );
+                                                        match (&blocked, &parsed) {
+                                                            (Some(key), Ok(_)) => {
+                                                                blocked_without_rejection += 1;
+                                                                if blocked_samples.len() < 4 {
+                                                                    blocked_samples.push(format!(
+                                                                    "{key}: authentication={authentication} \
+                                                                     password={password:?} \
+                                                                     password_command={password_command:?} \
+                                                                     private_key_path={private_key_path:?} \
+                                                                     private_key={} \
+                                                                     private_key_passphrase={private_key_passphrase:?}",
+                                                                    if private_key.is_empty() {
+                                                                        "\"\""
+                                                                    } else {
+                                                                        "<key>"
+                                                                    }
+                                                                ));
+                                                                }
+                                                            }
+                                                            (None, Err(error)) => {
+                                                                let lower = error.to_lowercase();
+                                                                // The message has to name the form
+                                                                // fields that satisfy the rule, so a
+                                                                // rejection is never a dead end.
+                                                                let actionable = (lower
+                                                                    .contains("\"password\"")
+                                                                    && lower.contains(
+                                                                        "\"password command\"",
+                                                                    ))
+                                                                    || (lower.contains(
+                                                                        "\"private key path\"",
+                                                                    ) && lower.contains(
+                                                                        "\"private key content\"",
+                                                                    ))
+                                                                    || lower.contains("ssh port");
+                                                                if !actionable
+                                                                    && unexplained_rejections.len()
+                                                                        < 4
+                                                                {
+                                                                    unexplained_rejections
+                                                                        .push(error.clone());
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            blocked_without_rejection, 0,
+            "the dialog blocks {blocked_without_rejection} configuration(s) the parser accepts \
+             (dead-locked footer, no way to save). Samples: {blocked_samples:#?}"
+        );
+        assert!(
+            unexplained_rejections.is_empty(),
+            "parser rejects without naming the form field that fixes it: {unexplained_rejections:?}"
+        );
+        assert!(
+            cases >= 15_000,
+            "form/parser matrix shrank unexpectedly ({cases} cases)"
+        );
+    }
+
+    /// 端口在表单里只受 `type: number` 约束，宿主 Rust 层与解析层各自校验
+    /// 1..65535；契约无 min/max 属性，所以范围提示必须留在描述里（前端契约
+    /// 脚本 `scripts/connection-forms/verify.mjs` 断言七语都写了）。
+    #[test]
+    fn password_source_is_honored_by_the_parser() {
+        let connection = |external: Value, password: Option<&str>| {
+            let mut payload = json!({
+                "id": "pw-source",
+                "host": "example.com",
+                "port": 22,
+                "username": "user",
+                "external_config": external,
+            });
+            if let Some(password) = password {
+                payload["password"] = json!(password);
+            }
+            StoredConnection::from_lifecycle_params(&json!({ "connection": payload }))
+        };
+
+        // 老配置（0.4.x 只有 password/password_command）与 MCP 内联参数没有
+        // 来源字段：保持历史语义，两者二选一，显式密码优先、命令保留。
+        let legacy = connection(
+            json!({ "authentication": "password", "password_command": "echo pw" }),
+            Some("stored"),
+        )
+        .unwrap();
+        assert_eq!(legacy.password, "stored");
+        assert_eq!(legacy.password_command, "echo pw");
+        let legacy_command = connection(
+            json!({ "authentication": "password", "password_command": "echo pw" }),
+            None,
+        )
+        .unwrap();
+        assert!(legacy_command.password.is_empty());
+        assert_eq!(legacy_command.password_command, "echo pw");
+
+        // direct：密码必填，缺失时点名两个表单字段（并给出改来源的出口）。
+        let direct = connection(
+            json!({ "authentication": "password", "password_source": "direct" }),
+            Some("typed"),
+        )
+        .unwrap();
+        assert_eq!(direct.password, "typed");
+        let direct_missing = connection(
+            json!({
+                "authentication": "password",
+                "password_source": "direct",
+                "password_command": "echo pw"
+            }),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            direct_missing.contains("Password source"),
+            "{direct_missing}"
+        );
+        assert!(direct_missing.contains("\"Password\""), "{direct_missing}");
+
+        // command：命令必填，且存量密码让位——否则「显式密码优先」会让用户
+        // 显式选择的本地命令永不执行。
+        let command = connection(
+            json!({
+                "authentication": "password",
+                "password_source": "command",
+                "password_command": "echo pw"
+            }),
+            Some("stale"),
+        )
+        .unwrap();
+        assert!(
+            command.password.is_empty(),
+            "command source must drop the stored password so the command runs"
+        );
+        assert_eq!(command.password_command, "echo pw");
+        let command_missing = connection(
+            json!({ "authentication": "password", "password_source": "command" }),
+            Some("stale"),
+        )
+        .unwrap_err();
+        assert!(
+            command_missing.contains("Password command"),
+            "{command_missing}"
+        );
+
+        // 非密码类认证不受来源约束（字段隐藏，值可能是残留）。
+        let agent = connection(
+            json!({ "authentication": "agent", "password_source": "command" }),
+            None,
+        )
+        .unwrap();
+        assert!(agent.password.is_empty());
+
+        // 未知来源：明确报错，不静默回退成 direct。
+        let unknown = connection(
+            json!({ "authentication": "password", "password_source": "keychain" }),
+            Some("typed"),
+        )
+        .unwrap_err();
+        assert!(
+            unknown.contains("Unsupported password source 'keychain'"),
+            "{unknown}"
+        );
+    }
+
+    #[test]
+    fn port_zero_is_rejected_by_parser_with_a_self_explanatory_message() {
+        let error = StoredConnection::from_lifecycle_params(&serde_json::json!({
+            "connection": {
+                "id": "port-zero",
+                "host": "example.com",
+                "port": 0,
+                "username": "user",
+                "password": "pw",
+                "external_config": { "authentication": "password" }
+            }
+        }))
+        .unwrap_err();
+        assert!(error.contains("port"), "{error}");
+        let description = field("port")["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(description.contains("65535"), "{description}");
     }
 
     /// 发布前的表单组合矩阵：认证方式、sudo 来源、只读开关、2FA 模式等
@@ -2093,6 +2703,7 @@ mod manifest_contract_tests {
             "triggers_enabled",
             "triggers",
             "password_command",
+            "password_source",
             "passphrase_command",
             "remote_command",
             "sudo_source",

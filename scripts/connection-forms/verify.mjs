@@ -83,7 +83,7 @@ assert.equal(byKey.advanced_options.default, false, "advanced_options: must defa
 const advancedFields = [
   "sudo_source", "connect_timeout_secs", "keepalive_interval_secs",
   "terminal_keepalive_secs", "set_env", "triggers_enabled",
-  "password_command", "passphrase_command", "remote_command", "read_only",
+  "passphrase_command", "remote_command", "read_only",
 ];
 for (const key of advancedFields) {
   assert.deepEqual(byKey[key].visible_when, { field: "advanced_options", one_of: ["true"] },
@@ -92,31 +92,43 @@ for (const key of advancedFields) {
 
 for (const advanced_options of [false, true]) {
   for (const authentication of options("authentication")) {
-    for (const sudo_source of options("sudo_source")) {
-      for (const auth_flow_mode of options("auth_flow_mode")) {
-        for (const read_only of [false, true]) {
-          const current = state({ advanced_options, authentication, sudo_source, auth_flow_mode, read_only });
-          const password = ["password", "private-key-password"].includes(authentication);
-          const privateKey = ["private-key", "private-key-password"].includes(authentication);
-          current.visible("password", password); current.required("password", password);
-          // The path is optional because the private_key secret field can carry
-          // pasted OpenSSH/PEM/PPK content and takes precedence over the path.
-          current.visible("private_key_path", privateKey); current.required("private_key_path", false);
-          current.visible("private_key_passphrase", privateKey); current.required("private_key_passphrase", false);
-          current.visible("agent_socket", authentication === "agent");
-          current.visible("sudo_password", advanced_options && sudo_source === "custom");
-          current.visible("sudo_profile", advanced_options && sudo_source === "global");
-          current.visible("auth_flow_mode", advanced_options && sudo_source !== "global");
-          // TOTP secret/hint only apply to modes that answer OTP prompts;
-          // "off" (manual 2FA) and "password_only" hide both.
-          const answersOtp = ["password_then_otp", "password_plus_otp"].includes(auth_flow_mode);
-          current.visible("totp_secret", advanced_options && sudo_source !== "global" && answersOtp);
-          current.visible("totp_prompt_hint", advanced_options && sudo_source !== "global" && answersOtp);
-          current.visible("triggers_enabled", advanced_options);
-          current.visible("password_command", advanced_options);
-          current.visible("passphrase_command", advanced_options);
-          current.visible("remote_command", advanced_options);
-          current.visible("read_only", advanced_options);
+    for (const password_source of options("password_source")) {
+      for (const sudo_source of options("sudo_source")) {
+        for (const auth_flow_mode of options("auth_flow_mode")) {
+          for (const read_only of [false, true]) {
+            const current = state({ advanced_options, authentication, password_source, sudo_source, auth_flow_mode, read_only });
+            const passwordAuth = ["password", "private-key-password"].includes(authentication);
+            const privateKey = ["private-key", "private-key-password"].includes(authentication);
+            // The login password is an explicit either-or: "Enter in this form"
+            // requires the Password field, "Local command" requires Password
+            // command. The user-chosen source is what makes strict validation
+            // possible at all (a single-field `required_when` cannot say
+            // "required unless password_command is set").
+            const direct = password_source === "direct";
+            current.visible("password_source", passwordAuth);
+            current.visible("password", passwordAuth && direct);
+            current.required("password", passwordAuth && direct);
+            current.visible("password_command", passwordAuth && !direct);
+            current.required("password_command", passwordAuth && !direct);
+            // Same either-or shape for key material: a path or pasted content
+            // is enough, so neither field may become form-required.
+            current.visible("private_key_path", privateKey); current.required("private_key_path", false);
+            current.required("private_key", false);
+            current.visible("private_key_passphrase", privateKey); current.required("private_key_passphrase", false);
+            current.visible("agent_socket", authentication === "agent");
+            current.visible("sudo_password", advanced_options && sudo_source === "custom");
+            current.visible("sudo_profile", advanced_options && sudo_source === "global");
+            current.visible("auth_flow_mode", advanced_options && sudo_source !== "global");
+            // TOTP secret/hint only apply to modes that answer OTP prompts;
+            // "off" (manual 2FA) and "password_only" hide both.
+            const answersOtp = ["password_then_otp", "password_plus_otp"].includes(auth_flow_mode);
+            current.visible("totp_secret", advanced_options && sudo_source !== "global" && answersOtp);
+            current.visible("totp_prompt_hint", advanced_options && sudo_source !== "global" && answersOtp);
+            current.visible("triggers_enabled", advanced_options);
+            current.visible("passphrase_command", advanced_options);
+            current.visible("remote_command", advanced_options);
+            current.visible("read_only", advanced_options);
+          }
         }
       }
     }
@@ -124,6 +136,64 @@ for (const advanced_options of [false, true]) {
 }
 
 assert.equal(byKey.sudo_whitelist.type, "textarea");
+
+// ---------------------------------------------------------------------------
+// Credential contract: what the form must not require, and what it must say.
+//
+// The host enforces these rules twice — in the dialog (`pluginFieldConditions`
+// + `ConnectionDialog.connectionConfigForSubmit`, which surfaces
+// `connection.pluginRequiredField` = "请填写{field}") and again on
+// test/connect in Rust (`validate_plugin_connection_values_for_action`, which
+// additionally checks value types, the `port` binding range, and that every
+// stored `connection_secrets` key is declared as a secret field). The manifest
+// can only express a single-field `required_when`, which cannot say "required
+// unless another field is set". So each either-or either gets an explicit
+// user-facing selector, or it stays parse-time:
+//   * password auth:  `password_source` = direct → Password required,
+//                     `password_source` = command → Password command required
+//                     (old configs without the selector keep the OR semantics
+//                     in `from_lifecycle_params`, so nothing breaks silently);
+//   * private key:    private_key_path OR private_key (pasted content) - no
+//                     selector yet, so neither half may become form-required.
+// A form that requires one half of a selector-less either-or blocks a
+// configuration the sidecar accepts (dead footer, no explanation).
+// ---------------------------------------------------------------------------
+assert.equal(byKey.password_source.type, "select");
+assert.equal(byKey.password_source.binding, "config");
+assert.equal(byKey.password_source.default, "direct", "password_source: must default to the common case");
+assert.deepEqual(options("password_source").sort(), ["command", "direct"]);
+assert.deepEqual(byKey.password.required_when, { field: "password_source", one_of: ["direct"] });
+assert.deepEqual(byKey.password.visible_when, { field: "password_source", one_of: ["direct"] });
+assert.deepEqual(byKey.password_command.required_when, { field: "password_source", one_of: ["command"] });
+assert.deepEqual(byKey.password_command.visible_when, { field: "password_source", one_of: ["command"] });
+// Every password_source option must be covered by exactly one required branch:
+// a gap means a save that the parser then rejects, an overlap means a dead end.
+assert.deepEqual(
+  [...byKey.password.required_when.one_of, ...byKey.password_command.required_when.one_of].sort(),
+  options("password_source").slice().sort(),
+  "password_source branches must cover every option",
+);
+for (const key of ["private_key_path", "private_key", "private_key_passphrase"]) {
+  assert.equal(byKey[key].required_when, undefined, `${key}: must not be form-required (either-or credential)`);
+}
+for (const key of ["password_source", "password", "password_command", "private_key_path", "private_key", "port"]) {
+  for (const locale of locales) {
+    const localized = manifest.localizations[locale]?.contributions?.[provider.id]?.fields?.[key]
+      ?? (locale === "en" ? byKey[key] : undefined);
+    assert(localized?.description?.trim(), `${locale}/${key}: missing description for the credential/range contract`);
+  }
+}
+// Port values are validated by the host Rust layer (1..65535) and by the
+// sidecar; the contract has no min/max attribute, so the range hint must
+// survive in the description text of every locale.
+for (const locale of locales) {
+  const localized = manifest.localizations[locale]?.contributions?.[provider.id]?.fields?.port
+    ?? (locale === "en" ? byKey.port : undefined);
+  assert(/1\D*65535/.test(String(localized.description)), `${locale}/port: 1-65535 hint missing from description`);
+}
+assert.equal(byKey.port.default, 22, "port: default must stay the documented 22");
+state({ advanced_options: false, authentication: "password" }).visible("password", true);
+state({ advanced_options: false, authentication: "private-key" }).visible("password", false);
 
 // Package B: ssh/trigger + external password manager fields (manifest §2.2).
 // Triggers are one tssh/JSON text area gated by a separate, default-off switch.
@@ -183,8 +253,11 @@ state({ advanced_options: true, triggers_enabled: false }).visible("trigger_answ
 state({ advanced_options: true, triggers_enabled: true }).visible("triggers", true);
 state({ advanced_options: true, triggers_enabled: true }).visible("trigger_answer_1", true);
 state({ advanced_options: true, triggers_enabled: true }).visible("trigger_answer_2", true);
-state({ advanced_options: false }).visible("password_command", false);
 state({ advanced_options: false }).visible("passphrase_command", false);
-state({ advanced_options: true }).visible("password_command", true);
 state({ advanced_options: true }).visible("passphrase_command", true);
+// Password command lives in the credential block now: it is driven by the
+// password source and no longer by the advanced switch.
+state({ advanced_options: false, authentication: "password", password_source: "command" }).visible("password_command", true);
+state({ advanced_options: false, authentication: "password", password_source: "direct" }).visible("password_command", false);
+state({ advanced_options: false, authentication: "private-key", password_source: "command" }).visible("password_command", false);
 console.log(`PASS SSH connection form: ${scenarios} combinations; field ordering and seven-language labels/options`);

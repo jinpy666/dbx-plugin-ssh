@@ -10,7 +10,7 @@
   "homepage": "https://github.com/jinpy666/dbx-plugin-ssh",
   "icon": "assets/plugin.svg",
   "engines": {
-    "dbx": ">=0.5.77",
+    "dbx": ">=0.6.14",
     "host_api": ">=1.0.0"
   },
   "permissions": [
@@ -60,7 +60,8 @@
           "type": "number",
           "binding": "port",
           "required": true,
-          "default": 22
+          "default": 22,
+          "description": "TCP port, 1-65535 (default 22). The host refuses to connect when this is 0 or out of range."
         },
         {
           "key": "username",
@@ -101,22 +102,66 @@
           "description": "Choose how to sign in to the server: password, private key, SSH agent, or none."
         },
         {
-          "key": "password",
-          "label": "Password",
-          "type": "password",
-          "binding": "password",
+          "key": "password_source",
+          "label": "Password source",
+          "type": "select",
+          "binding": "config",
+          "default": "direct",
+          "options": [
+            {
+              "label": "Enter in this form",
+              "value": "direct"
+            },
+            {
+              "label": "Local command",
+              "value": "command"
+            }
+          ],
+          "description": "Where the login password comes from. \"Enter in this form\" requires the Password field; \"Local command\" requires Password command, which runs with your user privileges at connect time.",
           "visible_when": {
             "field": "authentication",
             "one_of": [
               "password",
               "private-key-password"
             ]
+          }
+        },
+        {
+          "key": "password",
+          "label": "Password",
+          "type": "password",
+          "binding": "password",
+          "description": "Password for \"Password\" and \"Private key, then password\", used when Password source is \"Enter in this form\". Switch Password source to \"Local command\" to fetch it with a local command instead.",
+          "visible_when": {
+            "field": "password_source",
+            "one_of": [
+              "direct"
+            ]
           },
           "required_when": {
-            "field": "authentication",
+            "field": "password_source",
             "one_of": [
-              "password",
-              "private-key-password"
+              "direct"
+            ]
+          }
+        },
+        {
+          "key": "password_command",
+          "label": "Password command",
+          "type": "text",
+          "binding": "config",
+          "default": "",
+          "description": "Local command to fetch the login password. stdout minus one final newline is used. Required when Password source is \"Local command\"; runs with your user privileges.",
+          "visible_when": {
+            "field": "password_source",
+            "one_of": [
+              "command"
+            ]
+          },
+          "required_when": {
+            "field": "password_source",
+            "one_of": [
+              "command"
             ]
           }
         },
@@ -126,7 +171,7 @@
           "type": "text",
           "binding": "config",
           "options_action": "keys/discover/options",
-          "description": "Desktop: local path. Web/Docker: path on the DBX server or container. When the host supports dynamic options, a dropdown lists private keys discovered under ~/.ssh (path, algorithm, fingerprint); otherwise type the path manually.",
+          "description": "Desktop: local path. Web/Docker: path on the DBX server or container. When the host supports dynamic options, a dropdown lists private keys discovered under ~/.ssh (path, algorithm, fingerprint); otherwise type the path manually. Provide either this path or the pasted key content below - at least one of the two.",
           "visible_when": {
             "field": "authentication",
             "one_of": [
@@ -155,7 +200,7 @@
           "type": "textarea",
           "binding": "secret",
           "required": false,
-          "description": "Paste the private key contents (OpenSSH, PEM, or PPK format) instead of a file path. A non-empty key content takes precedence over the key path; it is kept in the secret store and never displayed again.",
+          "description": "Paste the private key contents (OpenSSH, PEM, or PPK format) instead of a file path. Provide either this content or the key path above - at least one of the two. A non-empty key content takes precedence over the key path; it is kept in the secret store and never displayed again.",
           "visible_when": {
             "field": "authentication",
             "one_of": [
@@ -457,20 +502,6 @@
           }
         },
         {
-          "key": "password_command",
-          "label": "Password command",
-          "type": "text",
-          "binding": "config",
-          "default": "",
-          "description": "Local command to fetch a missing login password. stdout minus one final newline is used. Runs with your user privileges.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
-          }
-        },
-        {
           "key": "passphrase_command",
           "label": "Passphrase command",
           "type": "text",
@@ -580,7 +611,8 @@
               "label": "Host"
             },
             "port": {
-              "label": "Puerto"
+              "label": "Puerto",
+              "description": "Puerto TCP, 1-65535 (predeterminado 22). El host rechaza la conexión si es 0 o queda fuera de rango."
             },
             "username": {
               "label": "Usuario"
@@ -597,11 +629,20 @@
               "description": "Cómo iniciar sesión en el servidor: contraseña, clave privada, agente SSH o sin autenticación."
             },
             "password": {
-              "label": "Contraseña"
+              "label": "Contraseña",
+              "description": "Contraseña para «Contraseña» y «Clave privada y después contraseña»; obligatoria cuando «Origen de la contraseña» es «Escribir en este formulario». Para obtenerla con un comando local, cambia ese origen a «Comando local»."
+            },
+            "password_source": {
+              "label": "Origen de la contraseña",
+              "options": {
+                "direct": "Escribir en este formulario",
+                "command": "Comando local"
+              },
+              "description": "Define de dónde sale la contraseña de acceso. «Escribir en este formulario» exige el campo Contraseña; «Comando local» exige Comando de contraseña, que se ejecuta con tus permisos al conectar."
             },
             "private_key_path": {
               "label": "Ruta de clave privada",
-              "description": "Escritorio: ruta local. Web/Docker: ruta en el servidor o contenedor de DBX. Si el host admite opciones dinámicas, un desplegable lista las claves privadas halladas en ~/.ssh (ruta, algoritmo, huella); si no, escribe la ruta a mano."
+              "description": "Escritorio: ruta local. Web/Docker: ruta en el servidor o contenedor de DBX. Si el host admite opciones dinámicas, un desplegable lista las claves privadas halladas en ~/.ssh (ruta, algoritmo, huella); si no, escribe la ruta a mano. Indica esta ruta o el contenido pegado abajo: al menos uno de los dos."
             },
             "private_key_passphrase": {
               "label": "Frase de contraseña de la clave",
@@ -609,7 +650,7 @@
             },
             "private_key": {
               "label": "Contenido de la clave privada",
-              "description": "Pega el contenido de la clave privada (formato OpenSSH, PEM o PPK) en lugar de una ruta de archivo. Un contenido no vacío tiene prioridad sobre la ruta; se guarda en el almacén de secretos y no se vuelve a mostrar."
+              "description": "Alternativa a la ruta de arriba: indica la ruta o pega el contenido, al menos uno de los dos. Pega el contenido de la clave privada (formato OpenSSH, PEM o PPK) en lugar de una ruta de archivo. Un contenido no vacío tiene prioridad sobre la ruta; se guarda en el almacén de secretos y no se vuelve a mostrar."
             },
             "agent_socket": {
               "label": "Socket del agente",
@@ -647,7 +688,7 @@
             },
             "password_command": {
               "label": "Comando de contraseña",
-              "description": "Comando local para obtener una contraseña de acceso ausente. Se usa stdout sin el último salto de línea. Se ejecuta con tus permisos."
+              "description": "Comando local para obtener la contraseña de acceso. Se usa stdout sin el último salto de línea. Obligatorio cuando «Origen de la contraseña» es «Comando local»; se ejecuta con tus permisos."
             },
             "passphrase_command": {
               "label": "Comando de passphrase",
@@ -749,7 +790,8 @@
               "label": "Host"
             },
             "port": {
-              "label": "Porta"
+              "label": "Porta",
+              "description": "Porta TCP, 1-65535 (predefinita 22). L'host rifiuta la connessione se è 0 o fuori intervallo."
             },
             "username": {
               "label": "Nome utente"
@@ -766,11 +808,20 @@
               "description": "Come accedere al server: password, chiave privata, agent o nessuna autenticazione."
             },
             "password": {
-              "label": "Password"
+              "label": "Password",
+              "description": "Password per «Password» e «Chiave privata, poi password»; obbligatoria quando «Origine password» è «Inserisci nel modulo». Per recuperarla con un comando locale, cambia l'origine in «Comando locale»."
+            },
+            "password_source": {
+              "label": "Origine password",
+              "options": {
+                "direct": "Inserisci nel modulo",
+                "command": "Comando locale"
+              },
+              "description": "Da dove arriva la password di accesso. «Inserisci nel modulo» richiede il campo Password; «Comando locale» richiede Comando password, eseguito con i tuoi privilegi alla connessione."
             },
             "private_key_path": {
               "label": "Percorso chiave privata",
-              "description": "Desktop: percorso locale. Web/Docker: percorso sul server o contenitore DBX. Se l'host supporta le opzioni dinamiche, un menu a tendina elenca le chiavi private trovate in ~/.ssh (percorso, algoritmo, fingerprint); altrimenti digita il percorso manualmente."
+              "description": "Desktop: percorso locale. Web/Docker: percorso sul server o contenitore DBX. Se l'host supporta le opzioni dinamiche, un menu a tendina elenca le chiavi private trovate in ~/.ssh (percorso, algoritmo, fingerprint); altrimenti digita il percorso manualmente. Indica questo percorso o il contenuto incollato qui sotto: almeno uno dei due."
             },
             "private_key_passphrase": {
               "label": "Passphrase chiave privata",
@@ -778,7 +829,7 @@
             },
             "private_key": {
               "label": "Contenuto della chiave privata",
-              "description": "Incolla il contenuto della chiave privata (formato OpenSSH, PEM o PPK) invece di un percorso file. Un contenuto non vuoto ha precedenza sul percorso; viene conservato nell'archivio segreti e non mostrato più."
+              "description": "Alternativa al percorso qui sopra: indica il percorso o incolla il contenuto, almeno uno dei due. Incolla il contenuto della chiave privata (formato OpenSSH, PEM o PPK) invece di un percorso file. Un contenuto non vuoto ha precedenza sul percorso; viene conservato nell'archivio segreti e non mostrato più."
             },
             "agent_socket": {
               "label": "Socket agent",
@@ -804,7 +855,7 @@
             },
             "password_command": {
               "label": "Comando password",
-              "description": "Comando locale per recuperare una password di accesso mancante. Usa lo stdout senza l'ultimo ritorno a capo. Viene eseguito con i tuoi privilegi."
+              "description": "Comando locale per recuperare la password di accesso. Usa lo stdout senza l'ultimo ritorno a capo. Obbligatorio quando «Origine password» è «Comando locale»; viene eseguito con i tuoi privilegi."
             },
             "passphrase_command": {
               "label": "Comando passphrase",
@@ -918,7 +969,8 @@
               "label": "ホスト"
             },
             "port": {
-              "label": "ポート"
+              "label": "ポート",
+              "description": "TCP ポート（1〜65535、既定 22）。0 や範囲外の値ではホストが接続を拒否します。"
             },
             "username": {
               "label": "ユーザー名"
@@ -935,11 +987,20 @@
               "description": "サーバーへのサインイン方法：パスワード、秘密鍵、SSH Agent、または認証なし。"
             },
             "password": {
-              "label": "パスワード"
+              "label": "パスワード",
+              "description": "「パスワード」「秘密鍵の後にパスワード」で使うパスワードです。「パスワードの取得方法」が「このフォームに入力」のときは必須です。ローカルコマンドで取得する場合は取得方法を「ローカルコマンド」に切り替えてください。"
+            },
+            "password_source": {
+              "label": "パスワードの取得方法",
+              "options": {
+                "direct": "このフォームに入力",
+                "command": "ローカルコマンド"
+              },
+              "description": "ログインパスワードの取得方法です。「このフォームに入力」はパスワード欄が必須、「ローカルコマンド」はパスワードコマンドが必須で、接続時にユーザー権限で実行されます。"
             },
             "private_key_path": {
               "label": "秘密鍵のパス",
-              "description": "デスクトップ：ローカルパス。Web/Docker：DBX サーバーまたはコンテナ上のパス。ホストが動的オプションに対応している場合、~/.ssh 配下で検出された秘密鍵（パス・アルゴリズム・フィンガープリント）のドロップダウンを表示します。未対応の場合は手入力してください。"
+              "description": "デスクトップ：ローカルパス。Web/Docker：DBX サーバーまたはコンテナ上のパス。ホストが動的オプションに対応している場合、~/.ssh 配下で検出された秘密鍵（パス・アルゴリズム・フィンガープリント）のドロップダウンを表示します。未対応の場合は手入力してください。このパスか下の「秘密鍵の内容」のどちらか一方は必須です。"
             },
             "private_key_passphrase": {
               "label": "秘密鍵のパスフレーズ",
@@ -947,7 +1008,7 @@
             },
             "private_key": {
               "label": "秘密鍵の内容",
-              "description": "ファイルパスの代わりに秘密鍵の内容（OpenSSH・PEM・PPK 形式）を貼り付けます。内容が空でなければパスより優先されます。シークレットストアに保存され、再表示されません。"
+              "description": "上のパスとの二択です。パスか内容のどちらか一方は必須です。ファイルパスの代わりに秘密鍵の内容（OpenSSH・PEM・PPK 形式）を貼り付けます。内容が空でなければパスより優先されます。シークレットストアに保存され、再表示されません。"
             },
             "agent_socket": {
               "label": "エージェントソケット",
@@ -985,7 +1046,7 @@
             },
             "password_command": {
               "label": "パスワードコマンド",
-              "description": "未設定のログインパスワードを取得するローカルコマンド。末尾の改行 1 つを除く標準出力を使います。ユーザー権限で実行されます。"
+              "description": "ログインパスワードを取得するローカルコマンド。末尾の改行 1 つを除く標準出力を使います。「パスワードの取得方法」が「ローカルコマンド」のときは必須で、ユーザー権限で実行されます。"
             },
             "passphrase_command": {
               "label": "パスフレーズコマンド",
@@ -1087,7 +1148,8 @@
               "label": "Host"
             },
             "port": {
-              "label": "Porta"
+              "label": "Porta",
+              "description": "Porta TCP, 1-65535 (padrão 22). O host recusa a conexão quando é 0 ou está fora do intervalo."
             },
             "username": {
               "label": "Usuário"
@@ -1104,11 +1166,20 @@
               "description": "Como entrar no servidor: senha, chave privada, agente SSH ou sem autenticação."
             },
             "password": {
-              "label": "Senha"
+              "label": "Senha",
+              "description": "Senha para «Senha» e «Chave privada e depois senha»; obrigatória quando «Origem da senha» é «Digitar neste formulário». Para obtê-la com um comando local, mude a origem para «Comando local»."
+            },
+            "password_source": {
+              "label": "Origem da senha",
+              "options": {
+                "direct": "Digitar neste formulário",
+                "command": "Comando local"
+              },
+              "description": "Define de onde vem a senha de login. «Digitar neste formulário» exige o campo Senha; «Comando local» exige Comando de senha, executado com seus privilégios ao conectar."
             },
             "private_key_path": {
               "label": "Caminho da chave privada",
-              "description": "Desktop: caminho local. Web/Docker: caminho no servidor ou contêiner DBX. Se o host suportar opções dinâmicas, uma lista suspensa mostra as chaves privadas encontradas em ~/.ssh (caminho, algoritmo, impressão digital); caso contrário, digite o caminho manualmente."
+              "description": "Desktop: caminho local. Web/Docker: caminho no servidor ou contêiner DBX. Se o host suportar opções dinâmicas, uma lista suspensa mostra as chaves privadas encontradas em ~/.ssh (caminho, algoritmo, impressão digital); caso contrário, digite o caminho manualmente. Informe este caminho ou o conteúdo colado abaixo: pelo menos um dos dois."
             },
             "private_key_passphrase": {
               "label": "Frase secreta da chave",
@@ -1116,7 +1187,7 @@
             },
             "private_key": {
               "label": "Conteúdo da chave privada",
-              "description": "Cole o conteúdo da chave privada (formato OpenSSH, PEM ou PPK) em vez de um caminho de arquivo. Um conteúdo não vazio tem precedência sobre o caminho; fica no cofre de segredos e nunca é exibido novamente."
+              "description": "Alternativa ao caminho acima: informe o caminho ou cole o conteúdo, pelo menos um dos dois. Cole o conteúdo da chave privada (formato OpenSSH, PEM ou PPK) em vez de um caminho de arquivo. Um conteúdo não vazio tem precedência sobre o caminho; fica no cofre de segredos e nunca é exibido novamente."
             },
             "agent_socket": {
               "label": "Socket do agente",
@@ -1142,7 +1213,7 @@
             },
             "password_command": {
               "label": "Comando de senha",
-              "description": "Comando local para obter uma senha de login ausente. Usa o stdout sem a última quebra de linha. Executado com seus privilégios."
+              "description": "Comando local para obter a senha de login. Usa o stdout sem a última quebra de linha. Obrigatório quando «Origem da senha» é «Comando local»; executado com seus privilégios."
             },
             "passphrase_command": {
               "label": "Comando de frase secreta",
@@ -1256,7 +1327,8 @@
               "label": "主机"
             },
             "port": {
-              "label": "端口"
+              "label": "端口",
+              "description": "TCP 端口，取值 1-65535（默认 22）；填 0 或超出范围时宿主会拒绝连接。"
             },
             "username": {
               "label": "用户名"
@@ -1273,11 +1345,20 @@
               "description": "选择登录服务器的方式：密码、私钥、SSH Agent 或无认证。"
             },
             "password": {
-              "label": "密码"
+              "label": "密码",
+              "description": "供「密码」「私钥后密码」两种认证使用；「密码来源」选「在表单中填写」时必填。若由本地命令取回，请把「密码来源」改为「本地命令取回」。"
+            },
+            "password_source": {
+              "label": "密码来源",
+              "options": {
+                "direct": "在表单中填写",
+                "command": "本地命令取回"
+              },
+              "description": "登录密码的来源。「在表单中填写」时密码为必填；「本地命令取回」时必填「密码命令」，命令以当前用户权限在连接时执行。"
             },
             "private_key_path": {
               "label": "私钥路径",
-              "description": "桌面端：本地路径。Web/Docker：DBX 服务器或容器上的路径。宿主支持动态选项时会以下拉列出 ~/.ssh 下发现的私钥（路径、算法、指纹）；否则请手动填写路径。"
+              "description": "桌面端：本地路径。Web/Docker：DBX 服务器或容器上的路径。宿主支持动态选项时会以下拉列出 ~/.ssh 下发现的私钥（路径、算法、指纹）；否则请手动填写路径。本路径与下方「私钥内容」二选一，至少填一项。"
             },
             "private_key_passphrase": {
               "label": "私钥口令",
@@ -1285,7 +1366,7 @@
             },
             "private_key": {
               "label": "私钥内容",
-              "description": "直接粘贴私钥内容（OpenSSH/PEM/PPK 格式）代替文件路径；内容非空时优先于路径生效。保存在密钥库中，不再回显。"
+              "description": "与「私钥路径」二选一：至少填一项。直接粘贴私钥内容（OpenSSH/PEM/PPK 格式）代替文件路径；内容非空时优先于路径生效，保存在密钥库中，不再回显。"
             },
             "agent_socket": {
               "label": "Agent Socket",
@@ -1323,7 +1404,7 @@
             },
             "password_command": {
               "label": "密码命令",
-              "description": "登录密码缺失时执行的本地命令。使用 stdout（去掉一个结尾换行）；命令以当前用户权限运行。"
+              "description": "用于取回登录密码的本地命令。使用 stdout（去掉一个结尾换行）；「密码来源」选「本地命令取回」时必填，并以当前用户权限执行。"
             },
             "passphrase_command": {
               "label": "私钥口令命令",
@@ -1425,7 +1506,8 @@
               "label": "主機"
             },
             "port": {
-              "label": "連接埠"
+              "label": "連接埠",
+              "description": "TCP 連接埠，取值 1-65535（預設 22）；填 0 或超出範圍時宿主會拒絕連線。"
             },
             "username": {
               "label": "使用者名稱"
@@ -1442,11 +1524,20 @@
               "description": "選擇登入伺服器的方式：密碼、私鑰、SSH Agent 或無認證。"
             },
             "password": {
-              "label": "密碼"
+              "label": "密碼",
+              "description": "供「密碼」「私鑰後密碼」兩種認證使用；「密碼來源」選「在表單中填寫」時必填。若由本機命令取回，請把「密碼來源」改為「本機命令取回」。"
+            },
+            "password_source": {
+              "label": "密碼來源",
+              "options": {
+                "direct": "在表單中填寫",
+                "command": "本機命令取回"
+              },
+              "description": "登入密碼的來源。「在表單中填寫」時密碼為必填；「本機命令取回」時必填「密碼命令」，命令以目前使用者權限於連線時執行。"
             },
             "private_key_path": {
               "label": "私鑰路徑",
-              "description": "桌面端：本機路徑。Web/Docker：DBX 伺服器或容器上的路徑。宿主支援動態選項時會以下拉列出 ~/.ssh 下發現的私鑰（路徑、演算法、指紋）；否則請手動填寫路徑。"
+              "description": "桌面端：本機路徑。Web/Docker：DBX 伺服器或容器上的路徑。宿主支援動態選項時會以下拉列出 ~/.ssh 下發現的私鑰（路徑、演算法、指紋）；否則請手動填寫路徑。本路徑與下方「私鑰內容」二選一，至少填一項。"
             },
             "private_key_passphrase": {
               "label": "私鑰密語",
@@ -1454,7 +1545,7 @@
             },
             "private_key": {
               "label": "私鑰內容",
-              "description": "直接貼上私鑰內容（OpenSSH/PEM/PPK 格式）代替檔案路徑；內容非空時優先於路徑生效。儲存在金鑰庫中，不再回顯。"
+              "description": "與「私鑰路徑」二選一：至少填一項。直接貼上私鑰內容（OpenSSH/PEM/PPK 格式）代替檔案路徑；內容非空時優先於路徑生效，儲存在金鑰庫中，不再回顯。"
             },
             "agent_socket": {
               "label": "Agent Socket",
@@ -1492,7 +1583,7 @@
             },
             "password_command": {
               "label": "密碼命令",
-              "description": "登入密碼缺失時執行的本機命令。使用 stdout（去掉一個結尾換行）；命令以目前使用者權限執行。"
+              "description": "用於取回登入密碼的本機命令。使用 stdout（去掉一個結尾換行）；「密碼來源」選「本機命令取回」時必填，並以目前使用者權限執行。"
             },
             "passphrase_command": {
               "label": "私鑰通關密語命令",
