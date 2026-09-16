@@ -6985,6 +6985,28 @@ mod tests {
             );
         }
 
+        /// 同一条合并提问在「先密码，再 OTP」下也要拼接：只回密码对真正的
+        /// 合并提问必然失败（模式差异只影响"OTP 能不能单独先答"，不影响
+        /// 合并提问的应答内容）。
+        #[tokio::test]
+        async fn combined_prompt_gets_password_and_code_in_password_then_otp() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::KiCombined, MFA_INSTRUCTION, MFA_QUESTION).await;
+            let runtime = test_runtime();
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE }),
+                json!({ "authentication": "password", "auth_flow_mode": "password_then_otp" }),
+            );
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+            result.expect("merged prompt must be answered in the default mode too");
+            assert_eq!(
+                answers.lock().unwrap().as_slice(),
+                [format!("{LOGIN_PASSWORD}{MFA_CODE}")]
+            );
+        }
+
         /// global（表单隐藏 2FA 四件套、契约写明凭据由全局配置接管）：登录期
         /// MFA 也必须能读到该配置的 TOTP 与流程模式。
         #[tokio::test]

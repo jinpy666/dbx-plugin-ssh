@@ -250,7 +250,7 @@
               "label": "Off"
             }
           ],
-          "description": "Choose the source of sudo credentials. Ignored for read-only connections.",
+          "description": "Choose the source of sudo credentials. Ignored for read-only connections. Off disables sudo credential handling; the 2FA fields below still serve login-time MFA.",
           "visible_when": {
             "field": "advanced_options",
             "one_of": [
@@ -330,7 +330,7 @@
           "options": [
             {
               "value": "off",
-              "label": "Off (answer OTP manually)"
+              "label": "Off (never auto-answer OTP)"
             },
             {
               "value": "password_then_otp",
@@ -345,7 +345,7 @@
               "label": "Password only"
             }
           ],
-          "description": "Choose how login and sudo prompts handle OTP. Off keeps OTP manual; existing connections keep their saved mode."
+          "description": "How login and sudo prompts handle OTP. Pick \"Password + OTP combined\" for hosts that ask for the code first or merge password and code into one prompt. Off never auto-answers OTP, so hosts that require MFA at login cannot sign in. Existing connections keep their saved mode."
         },
         {
           "key": "totp_secret",
@@ -359,21 +359,7 @@
               "password_plus_otp"
             ]
           },
-          "description": "One per line: otpauth:// URI, base32 key, or static code."
-        },
-        {
-          "key": "password_prompt_hint",
-          "label": "Password prompt",
-          "type": "text",
-          "binding": "config",
-          "visible_when": {
-            "field": "sudo_source",
-            "one_of": [
-              "custom",
-              "off"
-            ]
-          },
-          "description": "Optional text used to recognize password prompts."
+          "description": "One per line: otpauth:// URI, base32 key, or static code. Used for sudo prompts and for login-time MFA (bastions that ask for a code over keyboard-interactive)."
         },
         {
           "key": "totp_prompt_hint",
@@ -387,7 +373,21 @@
               "password_plus_otp"
             ]
           },
-          "description": "Optional text used to recognize OTP prompts."
+          "description": "Optional extra text for recognizing OTP prompts. Built-in patterns already cover common wording such as \"[OTP Code]\" or \"Please Enter MFA Code.\" — only add a hint when the server asks differently."
+        },
+        {
+          "key": "password_prompt_hint",
+          "label": "Password prompt",
+          "type": "text",
+          "binding": "config",
+          "visible_when": {
+            "field": "sudo_source",
+            "one_of": [
+              "custom",
+              "off"
+            ]
+          },
+          "description": "Optional text for recognizing password prompts. OTP wording belongs in the OTP prompt field above — a hint filled here only ever matches password prompts."
         },
         {
           "key": "connect_timeout_secs",
@@ -705,7 +705,7 @@
                 "global": "Perfil Quick Sudo global",
                 "off": "Desactivado"
               },
-              "description": "Elige el origen de las credenciales sudo. Se ignora en conexiones de solo lectura."
+              "description": "Elige el origen de las credenciales sudo. Se ignora en conexiones de solo lectura. Desactivado no gestiona credenciales sudo; los campos 2FA siguientes siguen sirviendo al MFA del inicio de sesión."
             },
             "sudo_profile": {
               "label": "Perfil Quick Sudo",
@@ -717,13 +717,13 @@
             },
             "totp_secret": {
               "label": "Secretos TOTP",
-              "description": "Uno por línea: URI otpauth://, clave base32 o código estático."
+              "description": "Uno por línea: URI otpauth://, clave base32 o código estático. Se usa en prompts de sudo y en el MFA del inicio de sesión (bastiones que piden un código por keyboard-interactive)."
             },
             "auth_flow_mode": {
               "label": "2FA",
-              "description": "Define cómo responder a OTP en el inicio de sesión y sudo. Desactivado mantiene el OTP manual.",
+              "description": "Cómo tratar el OTP en el inicio de sesión y en sudo. Elige «Contraseña y OTP combinados» para hosts que piden el código primero o unen contraseña y código en un solo prompt. Desactivado nunca responde al OTP: los hosts que exigen MFA en el inicio de sesión no podrán entrar. Las conexiones existentes conservan su modo guardado.",
               "options": {
-                "off": "Desactivado (responder OTP manualmente)",
+                "off": "Desactivado (nunca responder al OTP)",
                 "password_then_otp": "Primero contraseña, después OTP",
                 "password_plus_otp": "Contraseña y OTP combinados",
                 "password_only": "Solo contraseña"
@@ -731,11 +731,11 @@
             },
             "password_prompt_hint": {
               "label": "Prompt de contraseña",
-              "description": "Texto opcional para reconocer prompts de contraseña."
+              "description": "Texto opcional para reconocer prompts de contraseña. El texto de OTP va en el campo de prompt de OTP de arriba: una pista aquí solo coincide con prompts de contraseña."
             },
             "totp_prompt_hint": {
               "label": "Prompt de OTP",
-              "description": "Texto opcional para reconocer prompts de OTP."
+              "description": "Texto adicional opcional para reconocer prompts de OTP. Los patrones integrados ya cubren textos habituales como «[OTP Code]» o «Please Enter MFA Code.»; añade una pista solo si el servidor lo pide de otra forma."
             },
             "sudo_use_pty": {
               "label": "Solicitar PTY para sudo",
@@ -872,7 +872,7 @@
                 "global": "Profilo Quick Sudo globale",
                 "off": "Disattivato"
               },
-              "description": "Scegli la fonte delle credenziali sudo. Ignorato sulle connessioni di sola lettura."
+              "description": "Scegli la fonte delle credenziali sudo. Ignorato sulle connessioni di sola lettura. Disattivato non gestisce credenziali sudo; i campi 2FA seguenti servono comunque all'MFA dell'accesso."
             },
             "sudo_profile": {
               "label": "Profilo Quick Sudo",
@@ -887,10 +887,10 @@
               "description": "Allowlist opzionale dei comandi sudo, uno per riga. Vuota consente tutti i comandi."
             },
             "auth_flow_mode": {
-              "description": "Scegli come gestire gli OTP per accesso e sudo. Disattivato lascia l'OTP manuale.",
+              "description": "Come gestire gli OTP per accesso e sudo. Scegli «Password e OTP combinati» per host che chiedono prima il codice o uniscono password e codice in un unico prompt. Disattivato non risponde mai all'OTP: gli host che richiedono MFA all'accesso non potranno entrare. Le connessioni esistenti mantengono il modo salvato.",
               "label": "2FA",
               "options": {
-                "off": "Disattivato (rispondere all'OTP manualmente)",
+                "off": "Disattivato (non rispondere all'OTP)",
                 "password_then_otp": "Prima password, poi OTP",
                 "password_plus_otp": "Password e OTP combinati",
                 "password_only": "Solo password"
@@ -906,15 +906,15 @@
             },
             "totp_secret": {
               "label": "Segreti TOTP",
-              "description": "Uno per riga: URI otpauth://, chiave base32 o codice statico."
+              "description": "Uno per riga: URI otpauth://, chiave base32 o codice statico. Usato per i prompt sudo e per l'MFA dell'accesso (bastion che chiedono un codice via keyboard-interactive)."
             },
             "password_prompt_hint": {
               "label": "Prompt password",
-              "description": "Testo opzionale per riconoscere i prompt della password."
+              "description": "Testo opzionale per riconoscere i prompt della password. Il testo OTP va nel campo prompt OTP accanto: una pista qui corrisponde solo ai prompt della password."
             },
             "totp_prompt_hint": {
               "label": "Prompt OTP",
-              "description": "Testo opzionale per riconoscere i prompt OTP."
+              "description": "Testo aggiuntivo opzionale per riconoscere i prompt OTP. I pattern integrati coprono già testi comuni come «[OTP Code]» o «Please Enter MFA Code.»; aggiungi una pista solo se il server chiede diversamente."
             },
             "connect_timeout_secs": {
               "label": "Timeout SSH (secondi)",
@@ -1063,7 +1063,7 @@
                 "global": "グローバル Quick Sudo プロファイル",
                 "off": "オフ"
               },
-              "description": "sudo 認証情報の取得元を選択します。読み取り専用接続では無視されます。"
+              "description": "sudo 認証情報の取得元を選択します。読み取り専用接続では無視されます。オフでは sudo 認証情報を扱いませんが、以下の 2FA フィールドはログイン時の MFA に引き続き使われます。"
             },
             "sudo_profile": {
               "label": "Quick Sudo プロファイル",
@@ -1075,13 +1075,13 @@
             },
             "totp_secret": {
               "label": "TOTP シークレット",
-              "description": "1 行に 1 件：otpauth:// URI、base32 キー、または静的コード。"
+              "description": "1 行に 1 件：otpauth:// URI、base32 キー、または静的コード。sudo プロンプトと、ログイン時の MFA（keyboard-interactive でコードを求める踏み台）に使われます。"
             },
             "auth_flow_mode": {
               "label": "2FA",
-              "description": "ログインと sudo の OTP 処理を選択します。オフでは OTP を手動入力します。",
+              "description": "ログインと sudo の OTP 処理を選択します。コードを先に聞くホストや、パスワードとコードを 1 つのプロンプトにまとめるホストでは「パスワードと OTP を連結」を選んでください。オフは OTP を自動応答しないため、ログイン時に MFA を要求するホストにはログインできません。既存の接続は保存済みのモードを保持します。",
               "options": {
-                "off": "オフ（OTP は手動で入力）",
+                "off": "オフ（OTP を自動応答しない）",
                 "password_then_otp": "パスワードの後に OTP",
                 "password_plus_otp": "パスワードと OTP を連結",
                 "password_only": "パスワードのみ"
@@ -1089,11 +1089,11 @@
             },
             "password_prompt_hint": {
               "label": "パスワードプロンプト",
-              "description": "パスワードプロンプトを識別する任意の文字列。"
+              "description": "パスワードプロンプトを識別する任意の文字列。OTP の文言は隣の OTP プロンプト欄に入れてください（ここに入れた文字列はパスワードプロンプトにしか一致しません）。"
             },
             "totp_prompt_hint": {
               "label": "OTP プロンプト",
-              "description": "OTP プロンプトを識別する任意の文字列。"
+              "description": "OTP プロンプトを識別する追加文字列（任意）。「[OTP Code]」「Please Enter MFA Code.」などの一般的な文言は組み込みパターンで対応済みです。サーバーが別の文言を使う場合のみ指定してください。"
             },
             "sudo_use_pty": {
               "label": "sudo で PTY を要求",
@@ -1230,7 +1230,7 @@
                 "global": "Perfil Quick Sudo global",
                 "off": "Desativado"
               },
-              "description": "Escolha a origem das credenciais sudo. Ignorado em conexões somente leitura."
+              "description": "Escolha a origem das credenciais sudo. Ignorado em conexões somente leitura. Desativado não trata credenciais sudo; os campos 2FA abaixo continuam servindo ao MFA do login."
             },
             "sudo_profile": {
               "label": "Perfil Quick Sudo",
@@ -1245,10 +1245,10 @@
               "description": "Lista opcional de comandos sudo, um por linha. Vazia permite todos."
             },
             "auth_flow_mode": {
-              "description": "Escolha como tratar OTP no login e no sudo. Desativado mantém o OTP manual.",
+              "description": "Como tratar OTP no login e no sudo. Escolha «Senha e OTP combinados» para hosts que pedem o código primeiro ou juntam senha e código em um único prompt. Desativado nunca responde OTP: hosts que exigem MFA no login não conseguirão entrar. Conexões existentes mantêm o modo salvo.",
               "label": "2FA",
               "options": {
-                "off": "Desativado (responder OTP manualmente)",
+                "off": "Desativado (nunca responder OTP)",
                 "password_then_otp": "Senha primeiro, depois OTP",
                 "password_plus_otp": "Senha e OTP combinados",
                 "password_only": "Somente senha"
@@ -1264,15 +1264,15 @@
             },
             "totp_secret": {
               "label": "Segredos TOTP",
-              "description": "Um por linha: URI otpauth://, chave base32 ou código estático."
+              "description": "Um por linha: URI otpauth://, chave base32 ou código estático. Usado em prompts de sudo e no MFA do login (bastiões que pedem um código via keyboard-interactive)."
             },
             "password_prompt_hint": {
               "label": "Prompt de senha",
-              "description": "Texto opcional para reconhecer prompts de senha."
+              "description": "Texto opcional para reconhecer prompts de senha. O texto de OTP pertence ao campo de prompt de OTP ao lado: uma pista aqui só corresponde a prompts de senha."
             },
             "totp_prompt_hint": {
               "label": "Prompt de OTP",
-              "description": "Texto opcional para reconhecer prompts de OTP."
+              "description": "Texto extra opcional para reconhecer prompts de OTP. Os padrões integrados já cobrem textos comuns como «[OTP Code]» ou «Please Enter MFA Code.»; adicione uma pista só se o servidor pedir de outra forma."
             },
             "connect_timeout_secs": {
               "label": "Tempo limite SSH (segundos)",
@@ -1421,7 +1421,7 @@
                 "global": "全局 Quick Sudo 配置",
                 "off": "关闭"
               },
-              "description": "选择 sudo 凭据来源。只读连接上忽略。"
+              "description": "选择 sudo 凭据来源。只读连接上忽略。关闭时不处理 sudo 凭据，但下面的 2FA 字段仍服务登录期 MFA。"
             },
             "sudo_profile": {
               "label": "Quick Sudo 配置",
@@ -1433,13 +1433,13 @@
             },
             "totp_secret": {
               "label": "TOTP 密钥",
-              "description": "每行一条：otpauth:// URI、base32 密钥或静态码。"
+              "description": "每行一条：otpauth:// URI、base32 密钥或静态码。用于 sudo 提问，也用于登录期 MFA（经 keyboard-interactive 问验证码的堡垒机）。"
             },
             "auth_flow_mode": {
               "label": "2FA",
-              "description": "选择登录和 sudo 如何处理 OTP。关闭时手动输入；已有连接保留原设置。",
+              "description": "选择登录与 sudo 如何处理 OTP。先问验证码、或把密码与验证码合并成一条提问的主机请选「密码与 OTP 组合」；关闭则永不自动应答 OTP，需要 MFA 登录的主机将无法登录。已有连接保留原设置。",
               "options": {
-                "off": "关闭（手动输入 OTP）",
+                "off": "关闭（不自动应答 OTP）",
                 "password_then_otp": "先密码，再 OTP",
                 "password_plus_otp": "密码与 OTP 组合",
                 "password_only": "仅密码"
@@ -1447,11 +1447,11 @@
             },
             "password_prompt_hint": {
               "label": "密码提示",
-              "description": "用于识别密码提示的可选文本。"
+              "description": "用于识别密码提示的可选文本。OTP 文案请填相邻的 OTP 提示字段——填在这里只会匹配密码提问。"
             },
             "totp_prompt_hint": {
               "label": "OTP 提示",
-              "description": "用于识别 OTP 提示的可选文本。"
+              "description": "可选：用于识别 OTP 提示的额外文本。常见文案（「[OTP Code]」「Please Enter MFA Code.」）已由内置模式覆盖，只有服务器用别的写法时才需要填。"
             },
             "sudo_use_pty": {
               "label": "sudo 请求 PTY",
@@ -1600,7 +1600,7 @@
                 "global": "全域 Quick Sudo 設定",
                 "off": "關閉"
               },
-              "description": "選擇 sudo 憑據來源。唯讀連線上忽略。"
+              "description": "選擇 sudo 憑據來源。唯讀連線上忽略。關閉時不處理 sudo 憑據，但下方的 2FA 欄位仍服務登入期 MFA。"
             },
             "sudo_profile": {
               "label": "Quick Sudo 設定",
@@ -1612,13 +1612,13 @@
             },
             "totp_secret": {
               "label": "TOTP 金鑰",
-              "description": "每行一條：otpauth:// URI、base32 金鑰或靜態碼。"
+              "description": "每行一條：otpauth:// URI、base32 金鑰或靜態碼。用於 sudo 提問，也用於登入期 MFA（經 keyboard-interactive 問驗證碼的堡壘機）。"
             },
             "auth_flow_mode": {
               "label": "2FA",
-              "description": "選擇登入與 sudo 如何處理 OTP。關閉時手動輸入；現有連線保留原設定。",
+              "description": "選擇登入與 sudo 如何處理 OTP。先問驗證碼、或把密碼與驗證碼合併成一條提問的主機請選「密碼與 OTP 組合」；關閉則永不自動應答 OTP，需要 MFA 登入的主機將無法登入。現有連線保留原設定。",
               "options": {
-                "off": "關閉（手動輸入 OTP）",
+                "off": "關閉（不自動應答 OTP）",
                 "password_then_otp": "先密碼，再 OTP",
                 "password_plus_otp": "密碼與 OTP 組合",
                 "password_only": "僅密碼"
@@ -1626,11 +1626,11 @@
             },
             "password_prompt_hint": {
               "label": "密碼提示",
-              "description": "用於識別密碼提示的選用文字。"
+              "description": "用於識別密碼提示的選用文字。OTP 文案請填相鄰的 OTP 提示欄位——填在這裡只會匹配密碼提問。"
             },
             "totp_prompt_hint": {
               "label": "OTP 提示",
-              "description": "用於識別 OTP 提示的選用文字。"
+              "description": "選用：用於識別 OTP 提示的額外文字。常見文案（「[OTP Code]」「Please Enter MFA Code.」）已由內建模式涵蓋，只有伺服器使用其他寫法時才需要填。"
             },
             "sudo_use_pty": {
               "label": "sudo 請求 PTY",

@@ -382,6 +382,14 @@ def scenario_matrix() -> list[Scenario]:
             expect_answers=[f"{LOGIN_PASSWORD}{MFA_CODE}"],
         ),
         Scenario(
+            "8b. 同一条合并提问 + 先密码再 OTP（应答内容相同）",
+            KI_COMBINED,
+            dict(totp),
+            dict(password_then_otp),
+            True,
+            expect_answers=[f"{LOGIN_PASSWORD}{MFA_CODE}"],
+        ),
+        Scenario(
             "9. global 全局 Quick Sudo 配置提供登录期 MFA",
             PASSWORD_THEN_MFA,
             {},

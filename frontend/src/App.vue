@@ -7356,6 +7356,7 @@ onBeforeUnmount(() => {
                 <option value="password_only">{{ t("flowOnly") }}</option>
               </select>
             </label>
+            <p class="muted settings-note">{{ t("settingsFlowHint") }}</p>
             <label class="settings-field">
               <span>{{ t("settingsPasswordHint") }}</span>
               <input v-model="settingsDraft.passwordPromptHint" spellcheck="false" :placeholder="t('settingsHintPlaceholder')" />

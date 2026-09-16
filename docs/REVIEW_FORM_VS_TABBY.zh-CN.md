@@ -31,6 +31,12 @@
    （`name`/`instructions`/提问文本）并指路"配置 TOTP 密钥或 OTP 提示词"；
     `password_then_otp` 的首因子判定、koko 提问识别与提示词优先级同步修复，
     见 `docs/PROTOCOL.zh-CN.md`「登录期 2FA」与 `scripts/smoke_login_mfa_test.py`。
+   **2026-09-17 表单文案与顺序**（同一 issue 的二次反馈）：`Off` 选项由
+   "手动输入 OTP"改为"不自动应答 OTP"（插件没有手工应答通道，旧文案名不副实）；
+   `2FA` 说明补选型指引（先问验证码 / 合并提问请选「密码与 OTP 合并」）；
+   `totp_prompt_hint` 前移到 `password_prompt_hint` 之前（#30 用户是把
+   `OTP Code` 填进了密码提示词），两处提示词说明补"填错字段不会生效"；
+   TOTP 密钥说明点明同时服务登录期 MFA。七语本地化同步更新。
 
 ### P2 功能缺口（对标差距）
 

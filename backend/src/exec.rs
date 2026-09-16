@@ -103,6 +103,15 @@ impl AuthFlowMode {
             Self::PasswordThenOtp => true,
         }
     }
+
+    /// True when a *merged* prompt (one question that asks for both the
+    /// password and the code) must be answered with the concatenation. Both
+    /// OTP modes do this: a merged prompt cannot be split, so sending only the
+    /// password half always fails. `PasswordOnly` / `Off` keep sending the
+    /// password half alone — they never auto-answer OTP by definition.
+    fn answers_merged_prompt_with_otp(self) -> bool {
+        matches!(self, Self::PasswordPlusOtp | Self::PasswordThenOtp)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,9 +224,15 @@ impl SudoAuth {
             }
             PromptKind::Combined => {
                 let password = (!self.password.is_empty()).then(|| self.password.clone())?;
-                if self.flow_mode() == AuthFlowMode::PasswordPlusOtp {
-                    let code = self.totp_answer_logged()?;
-                    Some(format!("{password}{code}"))
+                // 同一条提问里既有密码又有验证码（合并提问）：两种 OTP 模式都
+                // 必须拼接——只回密码对真正的合并提问无法通过。没有可用验证码
+                // （未配置密钥 / 落在重放窗口）时退回密码单发，把"再问一次"
+                // 交给服务器。
+                if self.flow_mode().answers_merged_prompt_with_otp() {
+                    match self.totp_answer_logged() {
+                        Some(code) => Some(format!("{password}{code}")),
+                        None => Some(password),
+                    }
                 } else {
                     Some(password)
                 }
@@ -246,7 +261,7 @@ impl SudoAuth {
         let otp_bearing = self.flow_mode() != AuthFlowMode::Off
             && (matches!(kind, PromptKind::Totp)
                 || (kind == PromptKind::Combined
-                    && self.flow_mode() == AuthFlowMode::PasswordPlusOtp));
+                    && self.flow_mode().answers_merged_prompt_with_otp()));
         if !otp_bearing {
             return (self.answer_for(kind), None);
         }
@@ -775,15 +790,10 @@ pub(crate) fn can_respond_to_prompt(
                 && (mode != AuthFlowMode::PasswordThenOtp || password_answered)
         }
         PromptKind::Combined => {
-            // PasswordPlusOtp answers combined prompts by design; PasswordOnly
-            // and Off answer them too (their password half is all they send —
-            // refusing the prompt would strand the session, see the
-            // flow-modes test). PasswordThenOtp waits until the password has
-            // been answered.
-            matches!(
-                mode,
-                AuthFlowMode::PasswordPlusOtp | AuthFlowMode::PasswordOnly | AuthFlowMode::Off
-            ) || password_answered
+            // 合并提问（同一条提问里既有密码又有验证码）：四种模式都会应答，
+            // 只是应答内容不同——OTP 模式拼接验证码，密码类模式只回密码半边。
+            // 拒绝应答只会把会话晾在提示上（见 flow-modes 测试）。
+            true
         }
     }
 }
@@ -1168,7 +1178,9 @@ async fn maybe_answer_prompt(
         PromptKind::Totp => *otp_answered = true,
         PromptKind::Combined => {
             *password_answered = true;
-            if mode == AuthFlowMode::PasswordPlusOtp {
+            // OTP 模式下的合并应答携带了验证码：标记已用，避免后续提示
+            // 在同一窗口里再烧一码。
+            if mode.answers_merged_prompt_with_otp() && auth.totp_configured() {
                 *otp_answered = true;
             }
         }
@@ -1485,16 +1497,18 @@ pub fn keyboard_interactive_answers(
                 Some(PromptKind::Combined) => {
                     if auth.password.is_empty() {
                         String::new()
-                    } else if mode == AuthFlowMode::PasswordPlusOtp {
+                    } else if mode.answers_merged_prompt_with_otp() {
                         match auth.totp_answer_logged() {
                             Some(code) => {
                                 password_answered_round = true;
                                 format!("{}{}", auth.password, code)
                             }
-                            // No code available (or the previous one is still
-                            // inside its replay window): leave the prompt empty
-                            // so the server re-prompts or fails cleanly.
-                            None => String::new(),
+                            // 没有可用验证码（未配置密钥 / 仍在重放窗口）：退回
+                            // 密码单发，让服务器自行重问，而不是整条留空。
+                            None => {
+                                password_answered_round = true;
+                                auth.password.clone()
+                            }
                         }
                     } else {
                         password_answered_round = true;
@@ -1602,10 +1616,14 @@ impl TerminalAutoSudo {
             }
         }
 
-        // Direct sudo password prompts are answered unconditionally.
+        // Direct sudo password prompts are answered unconditionally — but a
+        // merged prompt ([sudo] password + verification code in one line) is
+        // not a plain password prompt: sending only the password half always
+        // fails, so it falls through to the combined handling below.
         if SUDO_PROMPT_PATTERS
             .iter()
             .any(|pattern| lower.contains(pattern))
+            && !matches!(kind, Some(PromptKind::Totp | PromptKind::Combined))
         {
             if auth.password.is_empty() {
                 // Make the silent no-answer case diagnosable: the watcher is
@@ -1623,10 +1641,17 @@ impl TerminalAutoSudo {
 
         // Generic prompts are only auto-answered when custom hints are
         // configured; broad default patterns would false-positive on other
-        // interactive programs (tiny-rdm applies the same guard).
+        // interactive programs (tiny-rdm applies the same guard). Exception: a
+        // merged prompt that already carries a password-pattern hit ([sudo]
+        // password + code in one line) is specific enough to answer without a
+        // hint — answering only its password half would always fail.
         let has_custom_hint = !auth.password_prompt_hint.trim().is_empty()
             || !auth.totp_prompt_hint.trim().is_empty();
-        if !has_custom_hint {
+        let sudo_like_merged = matches!(kind, Some(PromptKind::Combined))
+            && SUDO_PROMPT_PATTERS
+                .iter()
+                .any(|pattern| lower.contains(pattern));
+        if !has_custom_hint && !sudo_like_merged {
             return None;
         }
         let kind = kind?;
@@ -1649,7 +1674,7 @@ impl TerminalAutoSudo {
             self.password_sent = true;
         }
         if matches!(kind, PromptKind::Totp)
-            || (kind == PromptKind::Combined && mode == AuthFlowMode::PasswordPlusOtp)
+            || (kind == PromptKind::Combined && mode.answers_merged_prompt_with_otp())
         {
             self.otp_sent = true;
         }
@@ -2013,6 +2038,7 @@ mod tests {
 
     #[test]
     fn combined_answers_follow_flow_mode() {
+        let _otp_ledger = otp_ledger_test_guard();
         let mut auth = SudoAuth {
             password: "pw".into(),
             totp_secrets: parse_totp_secrets("123456"),
@@ -2021,11 +2047,18 @@ mod tests {
             flow_mode: Some(AuthFlowMode::PasswordThenOtp),
             ..Default::default()
         };
-        assert_eq!(auth.answer_for(PromptKind::Combined).unwrap(), "pw");
+        // 合并提问（一条提问同时要密码与验证码）：两种 OTP 模式都拼接，
+        // 只回密码对真正的合并提问无法通过。每个模式换一个码，避免进程级
+        // 防重放台账把后一次调用吃掉。
+        assert_eq!(auth.answer_for(PromptKind::Combined).unwrap(), "pw123456");
         auth.flow_mode = Some(AuthFlowMode::PasswordPlusOtp);
-        let combined = auth.answer_for(PromptKind::Combined).unwrap();
-        assert_eq!(combined.len(), 8);
-        assert!(combined.starts_with("pw"));
+        auth.totp_secrets = parse_totp_secrets("654321");
+        assert_eq!(auth.answer_for(PromptKind::Combined).unwrap(), "pw654321");
+        // 密码类模式只回密码半边（永不自动回 OTP）。
+        auth.flow_mode = Some(AuthFlowMode::PasswordOnly);
+        assert_eq!(auth.answer_for(PromptKind::Combined).unwrap(), "pw");
+        auth.flow_mode = Some(AuthFlowMode::Off);
+        assert_eq!(auth.answer_for(PromptKind::Combined).unwrap(), "pw");
     }
 
     fn prompt(text: &str, echo: bool) -> russh::client::Prompt {
@@ -2254,8 +2287,8 @@ mod tests {
                 expect: vec![""],
                 code: "555555",
             },
-            // 合并提问（服务器把密码与验证码放一行）：+合并模式拼接，先密码再 OTP
-            // 只回密码（服务器随后会再问一次验证码，属契约外兜底）。
+            // 合并提问（服务器把密码与验证码放一行）：两种 OTP 模式都拼接——
+            // 只回密码对真正的合并提问无法通过。
             Case {
                 mode: AuthFlowMode::PasswordPlusOtp,
                 first_factor: false,
@@ -2269,8 +2302,25 @@ mod tests {
                 first_factor: true,
                 context: "",
                 prompts: vec!["Password: OTP Code: "],
-                expect: vec!["pw"],
+                expect: vec!["pw666666"],
                 code: "666666",
+            },
+            // 密码类模式仍只回密码半边（永不自动回 OTP）。
+            Case {
+                mode: AuthFlowMode::PasswordOnly,
+                first_factor: true,
+                context: "",
+                prompts: vec!["Password: OTP Code: "],
+                expect: vec!["pw"],
+                code: "161616",
+            },
+            Case {
+                mode: AuthFlowMode::Off,
+                first_factor: true,
+                context: "",
+                prompts: vec!["Password: OTP Code: "],
+                expect: vec!["pw"],
+                code: "171717",
             },
             // MFA 先问（反问顺序）：先密码再 OTP 留空；+合并模式不设密码门槛，回码。
             Case {
@@ -2386,6 +2436,37 @@ mod tests {
         );
         // The OTP is only answered once per auth sequence.
         assert_eq!(auto.observe("sudo: verification code: "), None);
+    }
+
+    #[test]
+    fn terminal_auto_sudo_answers_merged_prompt() {
+        let _otp_ledger = otp_ledger_test_guard();
+        // 终端内的合并提问（密码与验证码同一条）：OTP 模式拼接应答，不必先
+        // 出现过密码提示——提问本身就带着密码。每个用例换一个码，避免进程级
+        // 防重放台账吃掉后续断言。
+        let merged = |mode: AuthFlowMode, code: &str| {
+            let mut auth = terminal_auth();
+            auth.flow_mode = Some(mode);
+            auth.totp_secrets = parse_totp_secrets(code);
+            auth
+        };
+        let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(merged(
+            AuthFlowMode::PasswordThenOtp,
+            "654321",
+        ))));
+        assert_eq!(
+            auto.observe("[sudo] password for user: OTP Code: "),
+            Some((AutoSudoKind::Password, "pw654321".to_string()))
+        );
+        // 密码类模式仍只回密码半边（永不自动回 OTP）。
+        let mut only = TerminalAutoSudo::new(Arc::new(RwLock::new(merged(
+            AuthFlowMode::PasswordOnly,
+            "654322",
+        ))));
+        assert_eq!(
+            only.observe("[sudo] password for user: OTP Code: "),
+            Some((AutoSudoKind::Password, "pw".to_string()))
+        );
     }
 
     #[test]
