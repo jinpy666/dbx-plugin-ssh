@@ -161,10 +161,11 @@ for (const locale of locales) {
     assert(localized?.trim(), `${locale}/${sectionId}: missing section label`);
   }
 }
-// Cards (`panel`) are the outer level: connection fields live in "Basic
-// information", the sudo/2FA sections in "Identity & security", and the
-// automation/limits sections in "Advanced options" (the only card that starts
-// folded). Every field declares one, and its presentation must agree.
+// Panels are the outer level, rendered as a tab strip: connection fields live
+// in "Basic information", the sudo/2FA sections in "Identity & security", and
+// the automation/limits sections in "Advanced options". Every field declares
+// one, and the presentation must agree (`tabs` cannot mix with cards, and a
+// tab has nothing to fold).
 const PANEL_MEMBERS = {
   basic: [
     "display_name", "host", "port", "username", "authentication", "password_source", "password",
@@ -175,24 +176,24 @@ const PANEL_MEMBERS = {
 };
 const panelState = new Map();
 for (const [panelId, keys] of Object.entries(PANEL_MEMBERS)) {
-  let collapsed;
   let icon;
+  let presentation;
   for (const key of keys) {
     const panel = byKey[key].panel;
     assert(panel, `${key}: must belong to the '${panelId}' card`);
     assert.equal(panel.id, panelId, `${key}: wrong card`);
     assert(panel.label?.trim(), `${key}: card label required`);
-    const fieldCollapsed = panel.collapsed === true;
-    collapsed ??= fieldCollapsed;
-    assert.equal(fieldCollapsed, collapsed, `${key}: every field of '${panelId}' must agree on 'collapsed'`);
     icon ??= panel.icon;
     assert.equal(panel.icon, icon, `${key}: every field of '${panelId}' must agree on 'icon'`);
+    presentation ??= panel.presentation;
+    assert.equal(panel.presentation, presentation, `${key}: every field of '${panelId}' must agree on 'presentation'`);
+    assert.equal(panel.collapsed, undefined, `${key}: 'collapsed' does not apply when panels render as tabs`);
   }
-  panelState.set(panelId, { collapsed, icon });
+  panelState.set(panelId, { icon, presentation });
 }
-assert.equal(panelState.get("basic").collapsed, false, "the basic card must start expanded");
-assert.equal(panelState.get("identity").collapsed, false, "the identity card must start expanded");
-assert.equal(panelState.get("advanced").collapsed, true, "the advanced card must start collapsed");
+for (const [panelId, state] of panelState) {
+  assert.equal(state.presentation, "tabs", `${panelId}: panels must render as tabs`);
+}
 // A card's icon comes from the host's curated set.
 const PANEL_ICONS = ["user", "id-card", "shield", "key", "bolt", "terminal", "clock", "server", "lock", "globe", "sliders"];
 for (const [panelId, state] of panelState) {

@@ -48,7 +48,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -61,7 +62,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -75,7 +77,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -88,7 +91,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -123,7 +127,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -153,7 +158,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -177,7 +183,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -202,7 +209,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -225,7 +233,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -244,7 +253,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -264,7 +274,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -282,7 +293,8 @@
           "panel": {
             "id": "basic",
             "label": "Basic information",
-            "icon": "id-card"
+            "icon": "id-card",
+            "presentation": "tabs"
           }
         },
         {
@@ -313,7 +325,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -337,7 +350,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -359,7 +373,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -382,7 +397,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -406,7 +422,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -448,7 +465,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -471,7 +489,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -494,7 +513,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -517,7 +537,8 @@
           "panel": {
             "id": "identity",
             "label": "Identity & security",
-            "icon": "shield"
+            "icon": "shield",
+            "presentation": "tabs"
           }
         },
         {
@@ -537,7 +558,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -556,7 +577,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -582,7 +603,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -606,7 +627,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -630,7 +651,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -649,7 +670,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -668,7 +689,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -687,7 +708,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -706,7 +727,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -725,7 +746,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         },
         {
@@ -744,7 +765,7 @@
             "id": "advanced",
             "label": "Advanced options",
             "icon": "bolt",
-            "collapsed": true
+            "presentation": "tabs"
           }
         }
       ],
