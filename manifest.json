@@ -226,19 +226,11 @@
           }
         },
         {
-          "key": "advanced_options",
-          "label": "Show advanced options",
-          "type": "boolean",
-          "binding": "config",
-          "default": false,
-          "description": "Show optional SSH, sudo, automation, and command settings. Off by default."
-        },
-        {
           "key": "sudo_source",
           "label": "Sudo credentials",
           "type": "select",
           "binding": "config",
-          "default": "custom",
+          "default": "off",
           "options": [
             {
               "value": "custom",
@@ -253,13 +245,7 @@
               "label": "Off"
             }
           ],
-          "description": "Choose the source of sudo credentials. Ignored for read-only connections. Off disables sudo credential handling; the 2FA fields below still serve login-time MFA.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
-          }
+          "description": "Choose where sudo credentials come from: keep it Off unless this host needs sudo, then pick Custom (this connection) or a shared global Quick Sudo profile. Ignored for read-only connections. Off disables sudo credential handling; the 2FA field below still serves login-time MFA."
         },
         {
           "key": "sudo_profile",
@@ -379,15 +365,47 @@
           "description": "Optional extra text for recognizing OTP prompts. Built-in patterns already cover common wording such as \"[OTP Code]\" or \"Please Enter MFA Code.\" — only add a hint when the server asks differently."
         },
         {
+          "key": "advanced_options",
+          "label": "Show advanced options",
+          "type": "boolean",
+          "binding": "config",
+          "default": false,
+          "description": "Show the less-used settings: timeouts, keepalive, environment, automatic replies, and read-only. Off by default."
+        },
+        {
+          "key": "read_only",
+          "label": "Read-only",
+          "type": "boolean",
+          "binding": "config",
+          "default": false,
+          "description": "Reject write operations on this connection.",
+          "visible_when": {
+            "field": "advanced_options",
+            "one_of": [
+              "true"
+            ]
+          }
+        },
+        {
           "key": "password_prompt_hint",
           "label": "Password prompt",
           "type": "text",
           "binding": "config",
           "visible_when": {
-            "field": "sudo_source",
-            "one_of": [
-              "custom",
-              "off"
+            "all_of": [
+              {
+                "field": "advanced_options",
+                "one_of": [
+                  "true"
+                ]
+              },
+              {
+                "field": "sudo_source",
+                "one_of": [
+                  "custom",
+                  "off"
+                ]
+              }
             ]
           },
           "description": "Optional text for recognizing password prompts. OTP wording belongs in the OTP prompt field above — a hint filled here only ever matches password prompts."
@@ -525,20 +543,6 @@
           "binding": "config",
           "default": "",
           "description": "Run instead of the shell when a terminal opens. Empty uses a normal shell.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
-          }
-        },
-        {
-          "key": "read_only",
-          "label": "Read-only",
-          "type": "boolean",
-          "binding": "config",
-          "default": false,
-          "description": "Reject write operations on this connection.",
           "visible_when": {
             "field": "advanced_options",
             "one_of": [
@@ -708,7 +712,7 @@
                 "global": "Perfil Quick Sudo global",
                 "off": "Desactivado"
               },
-              "description": "Elige el origen de las credenciales sudo. Se ignora en conexiones de solo lectura. Desactivado no gestiona credenciales sudo; los campos 2FA siguientes siguen sirviendo al MFA del inicio de sesión."
+              "description": "Elige el origen de las credenciales sudo: selecciona Personalizado (esta conexión) o un perfil global Quick Sudo solo si este host necesita sudo; si no, deja Desactivado. Se ignora en conexiones de solo lectura. Desactivado no gestiona credenciales sudo; el campo 2FA siguiente sigue sirviendo al MFA del inicio de sesión."
             },
             "sudo_profile": {
               "label": "Perfil Quick Sudo",
@@ -758,7 +762,7 @@
             },
             "advanced_options": {
               "label": "Mostrar opciones avanzadas",
-              "description": "Muestra opciones SSH, sudo, automatización y comandos. Desactivado por defecto."
+              "description": "Muestra los ajustes menos usados: tiempos de espera, keepalive, entorno, respuestas automáticas y solo lectura. Desactivado por defecto."
             }
           },
           "actions": {
@@ -875,7 +879,7 @@
                 "global": "Profilo Quick Sudo globale",
                 "off": "Disattivato"
               },
-              "description": "Scegli la fonte delle credenziali sudo. Ignorato sulle connessioni di sola lettura. Disattivato non gestisce credenziali sudo; i campi 2FA seguenti servono comunque all'MFA dell'accesso."
+              "description": "Scegli la fonte delle credenziali sudo: seleziona Personalizzato (questa connessione) o un profilo globale Quick Sudo solo se questo host richiede sudo, altrimenti lascia Disattivato. Ignorato sulle connessioni di sola lettura. Disattivato non gestisce credenziali sudo; il campo 2FA seguente serve comunque all'MFA dell'accesso."
             },
             "sudo_profile": {
               "label": "Profilo Quick Sudo",
@@ -937,7 +941,7 @@
             },
             "advanced_options": {
               "label": "Mostra opzioni avanzate",
-              "description": "Mostra le impostazioni SSH, sudo, automazione e comandi. Disattivato per impostazione predefinita."
+              "description": "Mostra le impostazioni meno usate: timeout, keepalive, ambiente, risposte automatiche e sola lettura. Disattivato per impostazione predefinita."
             }
           },
           "actions": {
@@ -1066,7 +1070,7 @@
                 "global": "グローバル Quick Sudo プロファイル",
                 "off": "オフ"
               },
-              "description": "sudo 認証情報の取得元を選択します。読み取り専用接続では無視されます。オフでは sudo 認証情報を扱いませんが、以下の 2FA フィールドはログイン時の MFA に引き続き使われます。"
+              "description": "sudo 認証情報の取得元を選択します。このホストで sudo が必要な場合のみ「カスタム（この接続）」またはグローバルの Quick Sudo プロファイルを選び、不要ならオフのままにします。読み取り専用接続では無視されます。オフでは sudo 認証情報を扱いませんが、以下の 2FA フィールドはログイン時の MFA に引き続き使われます。"
             },
             "sudo_profile": {
               "label": "Quick Sudo プロファイル",
@@ -1116,7 +1120,7 @@
             },
             "advanced_options": {
               "label": "詳細オプションを表示",
-              "description": "SSH、sudo、自動化、コマンドの追加設定を表示します。既定ではオフです。"
+              "description": "タイムアウト・keepalive・環境変数・自動応答・読み取り専用などの詳細設定を表示します。既定はオフです。"
             }
           },
           "actions": {
@@ -1233,7 +1237,7 @@
                 "global": "Perfil Quick Sudo global",
                 "off": "Desativado"
               },
-              "description": "Escolha a origem das credenciais sudo. Ignorado em conexões somente leitura. Desativado não trata credenciais sudo; os campos 2FA abaixo continuam servindo ao MFA do login."
+              "description": "Escolha a origem das credenciais sudo: selecione Personalizado (esta conexão) ou um perfil global Quick Sudo apenas se este host exigir sudo; caso contrário, mantenha Desativado. Ignorado em conexões somente leitura. Desativado não trata credenciais sudo; o campo 2FA abaixo continua servindo ao MFA do login."
             },
             "sudo_profile": {
               "label": "Perfil Quick Sudo",
@@ -1295,7 +1299,7 @@
             },
             "advanced_options": {
               "label": "Mostrar opções avançadas",
-              "description": "Mostra configurações opcionais de SSH, sudo, automação e comandos. Desativado por padrão."
+              "description": "Mostra as configurações menos usadas: tempos limite, keepalive, ambiente, respostas automáticas e somente leitura. Desativado por padrão."
             }
           },
           "actions": {
@@ -1424,7 +1428,7 @@
                 "global": "全局 Quick Sudo 配置",
                 "off": "关闭"
               },
-              "description": "选择 sudo 凭据来源。只读连接上忽略。关闭时不处理 sudo 凭据，但下面的 2FA 字段仍服务登录期 MFA。"
+              "description": "选择 sudo 凭据来源：本机需要提权时再选「自定义（本连接）」或「全局 Quick Sudo 配置」，否则保持「关闭」。只读连接上忽略。关闭时不处理 sudo 凭据，但下面的 2FA 字段仍服务登录期 MFA。"
             },
             "sudo_profile": {
               "label": "Quick Sudo 配置",
@@ -1474,7 +1478,7 @@
             },
             "advanced_options": {
               "label": "显示高级选项",
-              "description": "显示 SSH、sudo、自动化和命令等可选设置，默认关闭。"
+              "description": "显示超时、保活、环境变量、自动应答与只读等进阶设置，默认关闭。"
             }
           },
           "actions": {
@@ -1603,7 +1607,7 @@
                 "global": "全域 Quick Sudo 設定",
                 "off": "關閉"
               },
-              "description": "選擇 sudo 憑據來源。唯讀連線上忽略。關閉時不處理 sudo 憑據，但下方的 2FA 欄位仍服務登入期 MFA。"
+              "description": "選擇 sudo 憑據來源：本機需要提權時再選「自訂（本連線）」或「全域 Quick Sudo 設定」，否則保持「關閉」。唯讀連線上忽略。關閉時不處理 sudo 憑據，但下方的 2FA 欄位仍服務登入期 MFA。"
             },
             "sudo_profile": {
               "label": "Quick Sudo 設定",
@@ -1653,7 +1657,7 @@
             },
             "advanced_options": {
               "label": "顯示進階選項",
-              "description": "顯示 SSH、sudo、自動化與命令等選用設定，預設關閉。"
+              "description": "顯示逾時、保活、環境變數、自動應答與唯讀等進階設定，預設關閉。"
             }
           },
           "actions": {

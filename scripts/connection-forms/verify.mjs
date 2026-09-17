@@ -20,33 +20,78 @@ const locales = ["en", "zh-CN", "zh-TW", "es", "it", "ja", "pt-BR"];
 
 assert.equal(new Set(fields.map((field) => field.key)).size, fields.length, "duplicate field keys");
 
-function conditionMatches(condition, value) {
-  if (!condition) return true;
+// Host condition semantics, mirrored from `pluginFieldConditions.ts` /
+// `PluginFieldCondition` (Host API 1.1): a leaf clause matches when the sibling
+// value is listed in `one_of`; `all_of` / `any_of` / `not` compose; and a clause
+// only counts while the sibling it reads is itself visible (cascading), so a
+// hidden controller's stored default can never light a field up.
+function conditionClauseMatches(clause, value) {
   if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) return false;
-  return condition.one_of.includes(String(value));
+  return clause.one_of.some((literal) => String(literal) === String(value));
+}
+
+function conditionReferencedFields(condition) {
+  if (!condition) return [];
+  if (typeof condition.field === "string") return [condition.field];
+  if (Array.isArray(condition.all_of)) return condition.all_of.flatMap(conditionReferencedFields);
+  if (Array.isArray(condition.any_of)) return condition.any_of.flatMap(conditionReferencedFields);
+  return conditionReferencedFields(condition.not);
+}
+
+function conditionLeaves(condition) {
+  if (!condition) return [];
+  if (typeof condition.field === "string") return [condition];
+  if (Array.isArray(condition.all_of)) return condition.all_of.flatMap(conditionLeaves);
+  if (Array.isArray(condition.any_of)) return condition.any_of.flatMap(conditionLeaves);
+  return conditionLeaves(condition.not);
+}
+
+function conditionMatches(condition, values) {
+  if (!condition) return true;
+  if (typeof condition.field === "string") return conditionClauseMatches(condition, values[condition.field]);
+  if (Array.isArray(condition.all_of)) return condition.all_of.every((child) => conditionMatches(child, values));
+  if (Array.isArray(condition.any_of)) return condition.any_of.some((child) => conditionMatches(child, values));
+  return !conditionMatches(condition.not, values);
+}
+
+function conditionVisible(condition, values, seen) {
+  if (!condition) return true;
+  if (typeof condition.field === "string") {
+    if (!conditionClauseMatches(condition, values[condition.field])) return false;
+    return conditionOperandVisible(condition.field, values, seen);
+  }
+  if (Array.isArray(condition.all_of)) return condition.all_of.every((child) => conditionVisible(child, values, seen));
+  if (Array.isArray(condition.any_of)) return condition.any_of.some((child) => conditionVisible(child, values, seen));
+  const operandsVisible = conditionReferencedFields(condition.not).every((key) => conditionOperandVisible(key, values, seen));
+  return operandsVisible && !conditionMatches(condition.not, values);
+}
+
+function conditionOperandVisible(key, values, seen) {
+  const target = byKey[key];
+  if (!target || seen.has(key)) return true;
+  return isVisible(target, values, new Set(seen).add(key));
 }
 
 function isVisible(field, values, seen = new Set([field.key])) {
   const condition = field.visible_when;
-  if (!condition || !conditionMatches(condition, values[condition.field])) return !condition;
-  const target = byKey[condition.field];
-  if (!target || seen.has(target.key)) return true;
-  seen.add(target.key);
-  return isVisible(target, values, seen);
+  if (!condition) return true;
+  return conditionVisible(condition, values, seen);
 }
 
 function isRequired(field, values) {
   return Boolean(field.required)
-    || Boolean(field.required_when && conditionMatches(field.required_when, values[field.required_when.field]));
+    || Boolean(field.required_when && conditionMatches(field.required_when, values));
 }
 
 for (const [index, field] of fields.entries()) {
   for (const condition of [field.visible_when, field.required_when].filter(Boolean)) {
-    const target = byKey[condition.field];
-    assert(target, `${field.key}: unknown condition field ${condition.field}`);
-    assert(fields.indexOf(target) < index, `${field.key}: condition target must precede dependent field`);
-    const values = target.type === "boolean" ? ["true", "false"] : target.options?.map((option) => option.value);
-    if (values) assert(condition.one_of.every((value) => values.includes(value)), `${field.key}: invalid condition value`);
+    for (const clause of conditionLeaves(condition)) {
+      const target = byKey[clause.field];
+      assert(target, `${field.key}: unknown condition field ${clause.field}`);
+      assert(fields.indexOf(target) < index, `${field.key}: condition target must precede dependent field`);
+      const values = target.type === "boolean" ? ["true", "false"] : target.options?.map((option) => option.value);
+      if (values) assert(clause.one_of.every((value) => values.includes(value)), `${field.key}: invalid condition value`);
+    }
   }
   if (field.type === "select" && field.default !== undefined) {
     assert(field.options.some((option) => option.value === field.default), `${field.key}: invalid default`);
@@ -81,7 +126,7 @@ assert.equal(byKey.advanced_options.type, "boolean");
 assert.equal(byKey.advanced_options.binding, "config");
 assert.equal(byKey.advanced_options.default, false, "advanced_options: must default to off");
 const advancedFields = [
-  "sudo_source", "connect_timeout_secs", "keepalive_interval_secs",
+  "connect_timeout_secs", "keepalive_interval_secs",
   "terminal_keepalive_secs", "set_env", "triggers_enabled",
   "passphrase_command", "remote_command", "read_only",
 ];
@@ -89,6 +134,29 @@ for (const key of advancedFields) {
   assert.deepEqual(byKey[key].visible_when, { field: "advanced_options", one_of: ["true"] },
     `${key}: must be gated by advanced_options`);
 }
+// Sudo and 2FA are first-class entry points, not advanced trivia: hiding them
+// behind the switch is what made bastion/MFA setup undiscoverable (issues #17
+// and #30 - users could not find the TOTP field and gave up). Their *detail*
+// fields still open on demand, so the default form only gains two rows.
+assert.equal(byKey.sudo_source.visible_when, undefined, "sudo_source must stay visible without the advanced switch");
+assert.equal(byKey.sudo_source.default, "off", "sudo_source must default to Off so a new connection stays short");
+assert.deepEqual(byKey.auth_flow_mode.visible_when, { field: "sudo_source", one_of: ["custom", "off"] },
+  "auth_flow_mode (2FA) must stay visible whenever sudo does not defer to a global profile");
+// Field order is the form's information architecture: the switch must sit
+// *below* the always-visible sudo/2FA rows, so it reads as "the settings below
+// this switch are optional" instead of implying sudo/2FA are optional extras.
+assert(fields.indexOf(byKey.advanced_options) > fields.indexOf(byKey.auth_flow_mode),
+  "advanced_options must be declared after the sudo/2FA block");
+assert(fields.indexOf(byKey.advanced_options) > fields.indexOf(byKey.totp_prompt_hint),
+  "advanced_options must be declared after the 2FA block it no longer gates");
+// The fine-tuning hint stays an advanced field: it only ever matters once the
+// server's prompt wording is unusual.
+assert.deepEqual(byKey.password_prompt_hint.visible_when, {
+  all_of: [
+    { field: "advanced_options", one_of: ["true"] },
+    { field: "sudo_source", one_of: ["custom", "off"] },
+  ],
+}, "password_prompt_hint must stay behind the advanced switch");
 
 for (const advanced_options of [false, true]) {
   for (const authentication of options("authentication")) {
@@ -116,14 +184,25 @@ for (const advanced_options of [false, true]) {
             current.required("private_key", false);
             current.visible("private_key_passphrase", privateKey); current.required("private_key_passphrase", false);
             current.visible("agent_socket", authentication === "agent");
-            current.visible("sudo_password", advanced_options && sudo_source === "custom");
-            current.visible("sudo_profile", advanced_options && sudo_source === "global");
-            current.visible("auth_flow_mode", advanced_options && sudo_source !== "global");
+            // Sudo details follow their source only. The obvious extra rule -
+            // "hide them on read-only connections" - cannot be expressed while
+            // `read_only` itself sits behind `advanced_options`: the host's `not`
+            // requires every operand to be *visible*, so `not read_only` would
+            // evaluate false whenever the advanced switch is off and the sudo
+            // block would never show. The read-only interaction therefore stays
+            // in the field description ("ignored for read-only connections").
+            current.visible("sudo_source", true);
+            current.visible("sudo_password", sudo_source === "custom");
+            current.visible("sudo_profile", sudo_source === "global");
+            current.visible("sudo_use_pty", sudo_source === "custom");
+            current.visible("sudo_whitelist", sudo_source === "custom" || sudo_source === "global");
+            current.visible("auth_flow_mode", sudo_source !== "global");
             // TOTP secret/hint only apply to modes that answer OTP prompts;
             // "off" (manual 2FA) and "password_only" hide both.
             const answersOtp = ["password_then_otp", "password_plus_otp"].includes(auth_flow_mode);
-            current.visible("totp_secret", advanced_options && sudo_source !== "global" && answersOtp);
-            current.visible("totp_prompt_hint", advanced_options && sudo_source !== "global" && answersOtp);
+            current.visible("totp_secret", sudo_source !== "global" && answersOtp);
+            current.visible("totp_prompt_hint", sudo_source !== "global" && answersOtp);
+            current.visible("password_prompt_hint", advanced_options && sudo_source !== "global");
             current.visible("triggers_enabled", advanced_options);
             current.visible("passphrase_command", advanced_options);
             current.visible("remote_command", advanced_options);
