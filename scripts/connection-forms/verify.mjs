@@ -217,12 +217,20 @@ state({ advanced_options: false, authentication: "private-key" }).visible("passw
 // exists for. It also cannot protect older hosts: parsing fails before the
 // version check runs. So this stays a release-time step, asserted only for
 // shape here.
+//
+// The field must stay *typable*. Declaring `options_action` makes the host
+// render a select-only control (`selectOptionsFor()` wins over the text input
+// in `PluginConnectionFields.vue`), which is the opposite of the host's own
+// tunnel key field - a text input with a browse action - and blocks the common
+// case of a key that no discovery list knows about. Free typing comes first;
+// selection is served by the host's built-in `private_key_path` suggestion
+// list (`list_local_ssh_keys`, desktop) and by the picker action below.
 // ---------------------------------------------------------------------------
 assert.equal(byKey.private_key_path.binding, "config", "the picked path is stored in external_config");
 assert.equal(
   byKey.private_key_path.options_action,
-  "keys/discover/options",
-  "picker must stack on top of the sidecar discovery dropdown, not replace it",
+  undefined,
+  "private_key_path must not declare options_action: the host would drop the text input for a select",
 );
 assert.deepEqual(
   byKey.private_key_path.picker,

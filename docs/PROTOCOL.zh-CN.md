@@ -496,16 +496,18 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 `~/.ssh` 不存在或无可识别私钥时返回空 `keys` 数组，不算错误。
 
-### 连接表单的私钥录入（三通道）
+### 连接表单的私钥录入（四通道）
 
-`private_key_path`（text，binding config）与 `private_key`（textarea，binding secret）是同一份凭据的两个槽位。表单提供三条录入通道，落到这两个槽位上：
+`private_key_path`（text，binding config）与 `private_key`（textarea，binding secret）是同一份凭据的两个槽位。表单提供四条录入通道，落到这两个槽位上：
 
 | 通道 | 宿主能力 | 落点 | 适用部署 |
 | --- | --- | --- | --- |
-| 发现下拉 | `options_action: keys/discover/options` | `private_key_path` | 桌面与 Web/Docker（列出的是**后端进程**能读到的 `~/.ssh`） |
+| 手工输入 | 普通 `text` 字段（**刻意不声明 `options_action`**） | `private_key_path` | 全部 |
+| 建议下拉 | 宿主内置本地密钥建议器（字段 key 恰为 `private_key_path`，`list_local_ssh_keys`） | `private_key_path` | 桌面 |
 | 文件选择 | `picker: { "kind": "file", "content_field": "private_key" }`（Host API 1.1） | 桌面：`private_key_path`；Web/Docker：`private_key` | 桌面与 Web/Docker |
 | 粘贴内容 | 无（普通 textarea） | `private_key` | 全部 |
 
+- **为什么不声明 `options_action`**：宿主对声明了它的字段渲染成**纯下拉**（`selectOptionsFor()` 优先于文本框），既与宿主自身隧道密钥字段（输入框 + 浏览按钮）不一致，也让"发现列表里没有的密钥"（U 盘、导出到 `/tmp` 的临时密钥、非 `~/.ssh` 目录）无法录入。`keys/discover/options` RPC 仍保留（`label` 即路径本身，避免下拉被算法/指纹撑长），宿主或其它集成方需要时自行渲染。
 - 桌面宿主打开原生对话框，把**绝对路径**写回 `private_key_path`（sidecar 与用户同机，自己读文件）；浏览器宿主（dbx-web / Docker）拿不到客户端路径，同一个按钮变成上传：DBX 读取文件内容（上限 1 MiB）写入 `private_key` 并清空路径。
 - 两个槽位互斥：任一方写入会清空另一方，保存时对应地从 `external_config` / `connection_secrets` 删除。sidecar 侧 `private_key` 内容优先于路径（`resolve_private_key_text`），两条通道共用同一套解析（OpenSSH/PEM/PPK，CRLF 归一化）。
 - 刻意不声明 `picker.accept`：私钥常见名为 `id_rsa` / `id_ed25519`（无扩展名），原生对话框的扩展名过滤会把它们置灰、而不是列出来。

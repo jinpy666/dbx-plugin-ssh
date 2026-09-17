@@ -559,8 +559,10 @@ def main() -> None:
                 print(f"      - {key.get('path')} {key.get('algorithm', '')} fp={fingerprint}...")
 
         def case_keys_discover_options():
-            # 连接表单 private_key_path 的 options_action 数据源：只出元数据，
-            # 不出密钥材料。
+            # 宿主下拉数据源（manifest options_action）形态：label 就是路径本身
+            # （不塞算法/指纹，避免控件被撑长），只出元数据、不出密钥材料。
+            # 注意：连接表单目前不声明 options_action（否则字段会变成纯下拉、
+            # 无法手输），该 RPC 保留给宿主/其他集成方使用。
             result = req("keys/discover/options", {})
             options = result.get("options") or []
             print(f"    {len(options)} key option(s)")
@@ -569,6 +571,8 @@ def main() -> None:
                 value = str(option.get("value", ""))
                 if not value or not label:
                     raise AssertionError(f"malformed option: {option}")
+                if label != value:
+                    raise AssertionError(f"option label must be the key path: {option}")
                 if "PRIVATE KEY" in label:
                     raise AssertionError("key material leaked into option label")
                 print(f"      - {label}")

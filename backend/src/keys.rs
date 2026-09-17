@@ -42,32 +42,16 @@ pub fn discover() -> Result<Vec<DiscoveredKey>, String> {
     Ok(discover_in(&PathBuf::from(home).join(".ssh")))
 }
 
-/// `keys/discover/options`: data source for the connection form's dynamic
-/// dropdown (manifest `options_action`). `value` is the absolute key path;
-/// the label mirrors the host's local-key picker style
-/// (`basename · algorithm[ · encrypted][ · fingerprint]`) so hosts that ship
-/// either the built-in picker or this dropdown render consistent text. Only
-/// metadata travels here — never key material.
+/// `keys/discover/options`: data source for a host-rendered key dropdown
+/// (manifest `options_action`). `value` and `label` are both the absolute key
+/// path: the path alone is the shortest text that still tells two same-named
+/// keys apart, and a label without algorithm/fingerprint cannot stretch the
+/// control. Algorithm and fingerprint stay in `keys/discover`. Only metadata
+/// travels here — never key material.
 pub fn discover_options() -> Result<Value, String> {
     let options: Vec<Value> = discover()?
         .into_iter()
-        .map(|key| {
-            let file_name = Path::new(&key.path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(key.path.as_str());
-            let mut parts = vec![file_name.to_string()];
-            if !key.algorithm.is_empty() {
-                parts.push(key.algorithm.clone());
-            }
-            if key.has_passphrase {
-                parts.push("encrypted".to_string());
-            }
-            if !key.fingerprint.is_empty() {
-                parts.push(key.fingerprint.clone());
-            }
-            json!({ "value": key.path, "label": parts.join(" · ") })
-        })
+        .map(|key| json!({ "value": key.path.clone(), "label": key.path }))
         .collect();
     Ok(json!({ "options": options }))
 }
@@ -437,8 +421,9 @@ mod tests {
         assert!(discover().unwrap().is_empty());
     }
 
-    /// `discover_options` renders one dropdown entry per discovered key with
-    /// metadata-only labels; key material never travels in the options.
+    /// `discover_options` renders one dropdown entry per discovered key whose
+    /// label is the key path itself (no metadata, so the text stays short);
+    /// key material never travels in the options.
     #[test]
     fn discover_options_shape_only_metadata() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -464,13 +449,16 @@ mod tests {
             .iter()
             .find(|option| option["value"].as_str().unwrap().ends_with("id_ed25519"))
             .expect("plain key listed");
-        assert!(plain["label"].as_str().unwrap().contains("ssh-ed25519"));
-        assert!(plain["label"].as_str().unwrap().contains("SHA256:"));
+        assert_eq!(
+            plain["label"], plain["value"],
+            "the option label is the key path itself"
+        );
+        assert!(!plain["label"].as_str().unwrap().contains("SHA256:"));
         let encrypted = options
             .iter()
             .find(|option| option["value"].as_str().unwrap().ends_with("locked.pem"))
             .expect("encrypted key listed");
-        assert!(encrypted["label"].as_str().unwrap().contains("encrypted"));
+        assert_eq!(encrypted["label"], encrypted["value"]);
 
         let serialized = serde_json::to_string(&options).unwrap();
         assert!(!serialized.contains("PRIVATE KEY"));
