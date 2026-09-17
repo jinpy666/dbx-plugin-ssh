@@ -195,6 +195,72 @@ assert.equal(byKey.port.default, 22, "port: default must stay the documented 22"
 state({ advanced_options: false, authentication: "password" }).visible("password", true);
 state({ advanced_options: false, authentication: "private-key" }).visible("password", false);
 
+// ---------------------------------------------------------------------------
+// Private key file action (`picker`, Host API 1.1).
+//
+// Desktop hosts open the native dialog and store the chosen absolute path in
+// `private_key_path`; hosts without a client filesystem (Web/Docker) cannot
+// resolve such a path, so the same action uploads the file content into
+// `private_key`, which the sidecar already prefers over the path
+// (`resolve_private_key_text`). The pairing must therefore point at the
+// secret-bound field - a config-bound target would write key material into
+// `external_config` in plain text - and `accept` must stay unset: private keys
+// are commonly named `id_rsa` / `id_ed25519` without an extension, and a native
+// dialog filter greys those out instead of offering them.
+//
+// `picker` is additive but not forward compatible: hosts whose field parser
+// predates it reject the whole manifest (`deny_unknown_fields`). The
+// `engines.dbx` floor therefore has to move to the release that ships it before
+// this manifest is published - but the value cannot be guessed ahead of time (a
+// host built from the feature branch still reports the previous version), and
+// bumping it early would block exactly the local end-to-end check the attribute
+// exists for. It also cannot protect older hosts: parsing fails before the
+// version check runs. So this stays a release-time step, asserted only for
+// shape here.
+// ---------------------------------------------------------------------------
+assert.equal(byKey.private_key_path.binding, "config", "the picked path is stored in external_config");
+assert.equal(
+  byKey.private_key_path.options_action,
+  "keys/discover/options",
+  "picker must stack on top of the sidecar discovery dropdown, not replace it",
+);
+assert.deepEqual(
+  byKey.private_key_path.picker,
+  { kind: "file", content_field: "private_key" },
+  "private_key_path: picker must select a file and feed the pasted-key field",
+);
+const pickerContentKey = byKey.private_key_path.picker.content_field;
+assert(byKey[pickerContentKey], `picker content_field '${pickerContentKey}' must be a declared sibling`);
+assert.equal(byKey[pickerContentKey].binding, "secret", "uploaded key content must land in the secret store");
+assert.equal(byKey[pickerContentKey].type, "textarea", "uploaded key content is multi-line key material");
+assert.equal(
+  byKey.private_key_path.picker.accept,
+  undefined,
+  "picker.accept must stay unset so extension-less keys (id_rsa, id_ed25519) stay selectable",
+);
+const dbxFloor = String((manifest.engines || {}).dbx || "");
+assert(
+  /^>=\d+\.\d+\.\d+$/.test(dbxFloor),
+  `engines.dbx must stay a plain '>=x.y.z' floor (got '${dbxFloor}')`,
+);
+console.log(
+  `NOTE SSH connection form: 'picker' only parses on hosts that ship it — raise engines.dbx (currently ${dbxFloor}) to that release in the release commit.`,
+);
+// Both halves of the either-or must keep pointing at each other in every
+// locale: the file action only makes sense if the text also names where an
+// upload lands (Web/Docker) and that the two sources are exclusive.
+for (const locale of locales) {
+  for (const key of ["private_key_path", "private_key"]) {
+    const localized = manifest.localizations[locale]?.contributions?.[provider.id]?.fields?.[key]
+      ?? (locale === "en" ? byKey[key] : undefined);
+    assert(localized?.description?.trim(), `${locale}/${key}: missing description`);
+    assert(
+      String(localized.description).includes("Web/Docker"),
+      `${locale}/${key}: description must document the Web/Docker upload path`,
+    );
+  }
+}
+
 // Package B: ssh/trigger + external password manager fields (manifest §2.2).
 // Triggers are one tssh/JSON text area gated by a separate, default-off switch.
 const TRIGGER_FIELDS = ["triggers_enabled", "triggers", "trigger_answer_1", "trigger_answer_2", "password_command", "passphrase_command"];

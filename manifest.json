@@ -171,7 +171,11 @@
           "type": "text",
           "binding": "config",
           "options_action": "keys/discover/options",
-          "description": "Desktop: local path. Web/Docker: path on the DBX server or container. When the host supports dynamic options, a dropdown lists private keys discovered under ~/.ssh (path, algorithm, fingerprint); otherwise type the path manually. Provide either this path or the pasted key content below - at least one of the two.",
+          "picker": {
+            "kind": "file",
+            "content_field": "private_key"
+          },
+              "description": "Desktop: local path. Web/Docker: path on the DBX server or container. Three ways to provide the key: the dropdown lists private keys under ~/.ssh that the backend can read (path, algorithm, fingerprint); the file button stores the chosen path on the desktop and, in Web/Docker builds, uploads the file content into the pasted-key field below; pasting the key text always works. Path and content are exclusive: choosing a file clears the pasted or uploaded content and the other way round. Provide at least one of the two.",
           "visible_when": {
             "field": "authentication",
             "one_of": [
@@ -200,7 +204,7 @@
           "type": "textarea",
           "binding": "secret",
           "required": false,
-          "description": "Paste the private key contents (OpenSSH, PEM, or PPK format) instead of a file path. Provide either this content or the key path above - at least one of the two. A non-empty key content takes precedence over the key path; it is kept in the secret store and never displayed again.",
+          "description": "Paste the private key contents (OpenSSH, PEM, or PPK format) instead of a file path; in Web/Docker builds the file button above uploads the key here. Provide either this content or the key path above - at least one of the two. A non-empty key content takes precedence over the key path; it is kept in the secret store and never displayed again. Choosing a key file above clears this field.",
           "visible_when": {
             "field": "authentication",
             "one_of": [
@@ -642,7 +646,7 @@
             },
             "private_key_path": {
               "label": "Ruta de clave privada",
-              "description": "Escritorio: ruta local. Web/Docker: ruta en el servidor o contenedor de DBX. Si el host admite opciones dinámicas, un desplegable lista las claves privadas halladas en ~/.ssh (ruta, algoritmo, huella); si no, escribe la ruta a mano. Indica esta ruta o el contenido pegado abajo: al menos uno de los dos."
+              "description": "Escritorio: ruta local. Web/Docker: ruta en el servidor o contenedor de DBX. Tres formas de indicar la clave: el desplegable lista las claves privadas de ~/.ssh que el backend puede leer (ruta, algoritmo, huella); el botón de archivo guarda la ruta elegida en el escritorio y, en Web/Docker, sube el contenido al campo «Contenido de la clave privada»; también puedes pegar el contenido. Ruta y contenido son excluyentes: elegir un archivo borra el contenido pegado o subido y viceversa. Indica al menos uno de los dos."
             },
             "private_key_passphrase": {
               "label": "Frase de contraseña de la clave",
@@ -650,7 +654,7 @@
             },
             "private_key": {
               "label": "Contenido de la clave privada",
-              "description": "Alternativa a la ruta de arriba: indica la ruta o pega el contenido, al menos uno de los dos. Pega el contenido de la clave privada (formato OpenSSH, PEM o PPK) en lugar de una ruta de archivo. Un contenido no vacío tiene prioridad sobre la ruta; se guarda en el almacén de secretos y no se vuelve a mostrar."
+              "description": "Alternativa a la ruta de arriba: indica la ruta o pega el contenido, al menos uno de los dos. Pega el contenido de la clave privada (formato OpenSSH, PEM o PPK) en lugar de una ruta de archivo; en Web/Docker el botón de archivo de arriba sube la clave aquí. Un contenido no vacío tiene prioridad sobre la ruta; se guarda en el almacén de secretos y no se vuelve a mostrar. Elegir un archivo arriba borra este campo."
             },
             "agent_socket": {
               "label": "Socket del agente",
@@ -821,7 +825,7 @@
             },
             "private_key_path": {
               "label": "Percorso chiave privata",
-              "description": "Desktop: percorso locale. Web/Docker: percorso sul server o contenitore DBX. Se l'host supporta le opzioni dinamiche, un menu a tendina elenca le chiavi private trovate in ~/.ssh (percorso, algoritmo, fingerprint); altrimenti digita il percorso manualmente. Indica questo percorso o il contenuto incollato qui sotto: almeno uno dei due."
+              "description": "Desktop: percorso locale. Web/Docker: percorso sul server o contenitore DBX. Tre modi per indicare la chiave: il menu a tendina elenca le chiavi private di ~/.ssh leggibili dal backend (percorso, algoritmo, fingerprint); il pulsante file salva il percorso scelto su desktop e in Web/Docker carica il contenuto nel campo «Contenuto della chiave privata»; puoi sempre incollare il contenuto. Percorso e contenuto si escludono: scegliere un file cancella il contenuto incollato o caricato e viceversa. Indica almeno uno dei due."
             },
             "private_key_passphrase": {
               "label": "Passphrase chiave privata",
@@ -829,7 +833,7 @@
             },
             "private_key": {
               "label": "Contenuto della chiave privata",
-              "description": "Alternativa al percorso qui sopra: indica il percorso o incolla il contenuto, almeno uno dei due. Incolla il contenuto della chiave privata (formato OpenSSH, PEM o PPK) invece di un percorso file. Un contenuto non vuoto ha precedenza sul percorso; viene conservato nell'archivio segreti e non mostrato più."
+              "description": "Alternativa al percorso qui sopra: indica il percorso o incolla il contenuto, almeno uno dei due. Incolla il contenuto della chiave privata (formato OpenSSH, PEM o PPK) invece di un percorso file; in Web/Docker il pulsante file qui sopra carica la chiave in questo campo. Un contenuto non vuoto ha precedenza sul percorso; viene conservato nell'archivio segreti e non mostrato più. Scegliere un file qui sopra cancella questo campo."
             },
             "agent_socket": {
               "label": "Socket agent",
@@ -1000,7 +1004,7 @@
             },
             "private_key_path": {
               "label": "秘密鍵のパス",
-              "description": "デスクトップ：ローカルパス。Web/Docker：DBX サーバーまたはコンテナ上のパス。ホストが動的オプションに対応している場合、~/.ssh 配下で検出された秘密鍵（パス・アルゴリズム・フィンガープリント）のドロップダウンを表示します。未対応の場合は手入力してください。このパスか下の「秘密鍵の内容」のどちらか一方は必須です。"
+              "description": "デスクトップ：ローカルパス。Web/Docker：DBX サーバーまたはコンテナ上のパス。指定方法は3つ：ドロップダウンはバックエンドが読める ~/.ssh の秘密鍵（パス・アルゴリズム・フィンガープリント）を一覧表示します。ファイル選択ボタンは、デスクトップでは選んだパスを記録し、Web/Docker では「ファイルをアップロード…」として内容を下の「秘密鍵の内容」に取り込みます。内容を直接貼り付けることもできます。パスと内容は排他で、ファイルを選ぶと貼り付け／アップロード済みの内容は消え、その逆も同様です。どちらか一方は必須です。"
             },
             "private_key_passphrase": {
               "label": "秘密鍵のパスフレーズ",
@@ -1008,7 +1012,7 @@
             },
             "private_key": {
               "label": "秘密鍵の内容",
-              "description": "上のパスとの二択です。パスか内容のどちらか一方は必須です。ファイルパスの代わりに秘密鍵の内容（OpenSSH・PEM・PPK 形式）を貼り付けます。内容が空でなければパスより優先されます。シークレットストアに保存され、再表示されません。"
+              "description": "上のパスとの二択です。パスか内容のどちらか一方は必須です。ファイルパスの代わりに秘密鍵の内容（OpenSSH・PEM・PPK 形式）を貼り付けます。Web/Docker では上のファイル選択ボタンで選んだ内容がここに入ります。内容が空でなければパスより優先されます。シークレットストアに保存され、再表示されません。上で鍵ファイルを選ぶとこの欄は消去されます。"
             },
             "agent_socket": {
               "label": "エージェントソケット",
@@ -1179,7 +1183,7 @@
             },
             "private_key_path": {
               "label": "Caminho da chave privada",
-              "description": "Desktop: caminho local. Web/Docker: caminho no servidor ou contêiner DBX. Se o host suportar opções dinâmicas, uma lista suspensa mostra as chaves privadas encontradas em ~/.ssh (caminho, algoritmo, impressão digital); caso contrário, digite o caminho manualmente. Informe este caminho ou o conteúdo colado abaixo: pelo menos um dos dois."
+              "description": "Desktop: caminho local. Web/Docker: caminho no servidor ou contêiner DBX. Três formas de informar a chave: a lista suspensa mostra as chaves privadas de ~/.ssh que o backend consegue ler (caminho, algoritmo, impressão digital); o botão de arquivo grava o caminho escolhido no desktop e, em Web/Docker, envia o conteúdo para o campo «Conteúdo da chave privada»; também é possível colar o conteúdo. Caminho e conteúdo são exclusivos: escolher um arquivo apaga o conteúdo colado ou enviado e vice-versa. Informe pelo menos um dos dois."
             },
             "private_key_passphrase": {
               "label": "Frase secreta da chave",
@@ -1187,7 +1191,7 @@
             },
             "private_key": {
               "label": "Conteúdo da chave privada",
-              "description": "Alternativa ao caminho acima: informe o caminho ou cole o conteúdo, pelo menos um dos dois. Cole o conteúdo da chave privada (formato OpenSSH, PEM ou PPK) em vez de um caminho de arquivo. Um conteúdo não vazio tem precedência sobre o caminho; fica no cofre de segredos e nunca é exibido novamente."
+              "description": "Alternativa ao caminho acima: informe o caminho ou cole o conteúdo, pelo menos um dos dois. Cole o conteúdo da chave privada (formato OpenSSH, PEM ou PPK) em vez de um caminho de arquivo; em Web/Docker o botão de arquivo acima envia a chave para este campo. Um conteúdo não vazio tem precedência sobre o caminho; fica no cofre de segredos e nunca é exibido novamente. Escolher um arquivo acima apaga este campo."
             },
             "agent_socket": {
               "label": "Socket do agente",
@@ -1358,7 +1362,7 @@
             },
             "private_key_path": {
               "label": "私钥路径",
-              "description": "桌面端：本地路径。Web/Docker：DBX 服务器或容器上的路径。宿主支持动态选项时会以下拉列出 ~/.ssh 下发现的私钥（路径、算法、指纹）；否则请手动填写路径。本路径与下方「私钥内容」二选一，至少填一项。"
+              "description": "桌面端：本地路径。Web/Docker：DBX 服务器或容器上的路径。三种录入方式：① 下拉列出后端可读的 ~/.ssh 私钥（路径、算法、指纹）；② 文件按钮——桌面端记录所选路径，Web/Docker 下为「上传文件…」，把文件内容写入下方「私钥内容」；③ 直接粘贴内容。路径与内容互斥：选择文件会清空已粘贴/上传的内容，反之亦然。两者至少填一项。"
             },
             "private_key_passphrase": {
               "label": "私钥口令",
@@ -1366,7 +1370,7 @@
             },
             "private_key": {
               "label": "私钥内容",
-              "description": "与「私钥路径」二选一：至少填一项。直接粘贴私钥内容（OpenSSH/PEM/PPK 格式）代替文件路径；内容非空时优先于路径生效，保存在密钥库中，不再回显。"
+              "description": "与「私钥路径」二选一：至少填一项。直接粘贴私钥内容（OpenSSH/PEM/PPK 格式）代替文件路径；Web/Docker 下上方文件按钮上传的内容也写入这里。内容非空时优先于路径生效，保存在密钥库中，不再回显；在上方选择密钥文件会清空本字段。"
             },
             "agent_socket": {
               "label": "Agent Socket",
@@ -1537,7 +1541,7 @@
             },
             "private_key_path": {
               "label": "私鑰路徑",
-              "description": "桌面端：本機路徑。Web/Docker：DBX 伺服器或容器上的路徑。宿主支援動態選項時會以下拉列出 ~/.ssh 下發現的私鑰（路徑、演算法、指紋）；否則請手動填寫路徑。本路徑與下方「私鑰內容」二選一，至少填一項。"
+              "description": "桌面端：本機路徑。Web/Docker：DBX 伺服器或容器上的路徑。三種錄入方式：① 下拉列出後端可讀的 ~/.ssh 私鑰（路徑、演算法、指紋）；② 檔案按鈕——桌面端記錄所選路徑，Web/Docker 下為「上傳檔案…」，把檔案內容寫入下方「私鑰內容」；③ 直接貼上內容。路徑與內容互斥：選擇檔案會清空已貼上/上傳的內容，反之亦然。兩者至少填一項。"
             },
             "private_key_passphrase": {
               "label": "私鑰密語",
@@ -1545,7 +1549,7 @@
             },
             "private_key": {
               "label": "私鑰內容",
-              "description": "與「私鑰路徑」二選一：至少填一項。直接貼上私鑰內容（OpenSSH/PEM/PPK 格式）代替檔案路徑；內容非空時優先於路徑生效，儲存在金鑰庫中，不再回顯。"
+              "description": "與「私鑰路徑」二選一：至少填一項。直接貼上私鑰內容（OpenSSH/PEM/PPK 格式）代替檔案路徑；Web/Docker 下上方檔案按鈕上傳的內容也會寫入這裡。內容非空時優先於路徑生效，儲存在金鑰庫中，不再回顯；在上方選擇金鑰檔案會清空本欄位。"
             },
             "agent_socket": {
               "label": "Agent Socket",

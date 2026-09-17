@@ -496,6 +496,22 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 `~/.ssh` 不存在或无可识别私钥时返回空 `keys` 数组，不算错误。
 
+### 连接表单的私钥录入（三通道）
+
+`private_key_path`（text，binding config）与 `private_key`（textarea，binding secret）是同一份凭据的两个槽位。表单提供三条录入通道，落到这两个槽位上：
+
+| 通道 | 宿主能力 | 落点 | 适用部署 |
+| --- | --- | --- | --- |
+| 发现下拉 | `options_action: keys/discover/options` | `private_key_path` | 桌面与 Web/Docker（列出的是**后端进程**能读到的 `~/.ssh`） |
+| 文件选择 | `picker: { "kind": "file", "content_field": "private_key" }`（Host API 1.1） | 桌面：`private_key_path`；Web/Docker：`private_key` | 桌面与 Web/Docker |
+| 粘贴内容 | 无（普通 textarea） | `private_key` | 全部 |
+
+- 桌面宿主打开原生对话框，把**绝对路径**写回 `private_key_path`（sidecar 与用户同机，自己读文件）；浏览器宿主（dbx-web / Docker）拿不到客户端路径，同一个按钮变成上传：DBX 读取文件内容（上限 1 MiB）写入 `private_key` 并清空路径。
+- 两个槽位互斥：任一方写入会清空另一方，保存时对应地从 `external_config` / `connection_secrets` 删除。sidecar 侧 `private_key` 内容优先于路径（`resolve_private_key_text`），两条通道共用同一套解析（OpenSSH/PEM/PPK，CRLF 归一化）。
+- 刻意不声明 `picker.accept`：私钥常见名为 `id_rsa` / `id_ed25519`（无扩展名），原生对话框的扩展名过滤会把它们置灰、而不是列出来。
+- **兼容性**：`picker` 是新增字段属性，而宿主 manifest 解析器带 `deny_unknown_fields`——不认识该属性的宿主会拒绝整份 manifest。因此**发布前必须把 `engines.dbx` 抬到含该能力的宿主发行版**（宿主 README 的原话：keep `engines.dbx` at or above that release）；本分支暂未提前抬高，因为（a）含该能力的宿主构建目前仍报上一版本号，提前抬高会把本地端到端验证挡在门外；（b）解析失败先于版本检查发生，抬高对旧宿主没有实际保护作用。用 `host_api` 也无法门控该能力：`SUPPORTED_PLUGIN_HOST_API_VERSION` 在 picker 之前就已是 `1.1.0`。
+- **数据位置**：走上传通道时私钥内容会被复制到 DBX 服务端（容器）的连接密钥库（`plugin_connection.private_key`）；桌面端只记录路径，不复制密钥。
+
 ### ssh/knownHosts/list
 
 参数：无。列出插件自身 known_hosts 存储（`DBX_PLUGIN_DATA_DIR/known_hosts`）中的条目；系统 `~/.ssh/known_hosts` 保持只读、不参与管理。返回 `{ entries: [...] }`，元素结构：
