@@ -94,9 +94,11 @@ import {
   type TerminalSearchOptions,
 } from "./lib/terminalInteraction";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
+import { createTerminalInputQueue } from "./lib/terminalInputQueue";
 import { describeReconnectCountdown, describeReconnectRestoredNotice, isConnectionInactiveError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS, type ReconnectCountdown } from "./lib/terminalReconnect";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
 import { decideConnectRetry } from "./lib/connectRetry";
+import { createConnectLog } from "./lib/connectLog";
 import { focusableElements, nextFocusIndex, pickModalFocusTarget } from "./lib/modalFocus";
 import { createZmodemSentry, sendZmodemFiles, type ZmodemUploadProgress } from "./lib/terminalZmodem";
 import { sampleTransferSpeed, type TransferSpeedSample } from "./lib/transferSpeed";
@@ -119,7 +121,7 @@ import {
   validateBookmarkInput,
   type SftpBookmark,
 } from "./lib/sftpBookmarks";
-import { browseCommandHistory, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
+import { browseCommandHistory, commandInputAction, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
 import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, quickPickCommandById, selectBatchTargets, summarizeBatchResults, toggleBatchTarget, type BatchSendSummary, type BatchSendTarget } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
@@ -128,6 +130,7 @@ import { commandMarkerTooltip, formatCommandDuration, Osc633CommandParser, runni
 import { advanceBatchProgress, batchProgressPercent, createBatchProgress, type BatchProgressState } from "./lib/sftpBatchProgress";
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
 import { sanitizeCommandOutput } from "./lib/terminalOutputText";
+import { normalizeTerminalInputBytes } from "./lib/terminalInput";
 import { looksBinary } from "./lib/textSniff";
 import { formatBytes, formatRate } from "./lib/format";
 import { DBX_POPOVER, resolveAppearance, TERMINAL_ANSI, type DbxPluginAppearanceInput } from "./lib/appearance";
@@ -167,6 +170,7 @@ import { applyTreeChildren, createTreeRoot, findTreeNode, markTreeStale, type Di
 import { workbenchMessage } from "./lib/i18n";
 import TextPreview from "./components/TextPreview.vue";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
+import ConnectingCard from "./components/ConnectingCard.vue";
 import FolderPickerDialog from "./components/FolderPickerDialog.vue";
 import SideNavPanel, { type SftpSideQuickPath } from "./components/SideNavPanel.vue";
 
@@ -451,6 +455,14 @@ const hostContext = ref<Record<string, unknown>>({});
 const appearance = ref(resolveAppearance());
 const terminalState = ref<"connecting" | "connected" | "disconnected" | "error">("connecting");
 const terminalError = ref("");
+// 连接卡片：用户取消（在途 open 无法中止，仅切换 UI 态并在 promise 落地后回收
+// 孤儿会话）、Show logs 展开态与连接尝试日志（环形 200 条，跨尝试保留历史）。
+const connectCancelled = ref(false);
+// 成功过渡动画：open 成功后先切 success 卡片（进度到顶 + 对号），hold 播完再进终端。
+const connectSucceeded = ref(false);
+const CONNECT_SUCCESS_HOLD_MS = 750;
+const connectLogsOpen = ref(false);
+const connectLog = createConnectLog();
 const sftpError = ref("");
 const sftpErrorRetry = ref<(() => void) | null>(null);
 const notice = ref("");
@@ -870,8 +882,6 @@ let replayInFlight = false;
 // closes cannot self-heal by retrying — after a few attempts the drain must
 // resync past the hole instead of spinning the replay loop forever.
 let replayNoProgress = 0;
-let binaryInputChain = Promise.resolve();
-let terminalInputSequence = 0;
 let noticeTimer = 0;
 let errorTimer = 0;
 let commandMarkerTimer = 0;
@@ -893,7 +903,6 @@ let trzszPickResolver: ((files: File[] | undefined) => void) | undefined;
 let pendingTerminalInput = "";
 let activeTerminalSessionId = "";
 const pendingTerminalFrames = new Map<number, { stream: number; data: Uint8Array }>();
-const terminalInputAckWaiters = new Map<number, { resolve: () => void; reject: (error: Error) => void; timer: number }>();
 const uploadAckWaiters = new Map<string, { nextOffset: number; resolve: () => void; reject: (error: Error) => void; timer: number }>();
 const downloadChunkWaiters = new Map<string, { offset: number; resolve: (bytes: Uint8Array) => void; reject: (error: Error) => void; timer: number }>();
 const transferSamples = new Map<string, TransferSpeedSample>();
@@ -909,6 +918,10 @@ const commandMarkerParser = new Osc633CommandParser();
 // reads `terminal` lazily so it also works across terminal recreation.
 const terminalWriteThrottle: TerminalWriteThrottle = createTerminalWriteThrottle({
   sink: (data) => terminal?.write(data),
+});
+const terminalInputQueue = createTerminalInputQueue({
+  send: (sessionId, payload) => window.dbxPlugin.sendBinary(`ssh/terminal/in/${sessionId}`, payload),
+  onError: (cause) => showError(cause, "terminal"),
 });
 
 const locale = ref("zh-CN");
@@ -936,6 +949,15 @@ const canWrite = computed(() => !connection.value.readOnly && !connectionReadOnl
 const selectedEntry = computed(() => entries.value.find((entry) => entry.uri === selectedPath.value));
 const connected = computed(() => terminalState.value === "connected" && !!session.value);
 const sessionStatus = computed<WorkbenchSessionStatus>(() => describeWorkbenchSessionStatus(terminalState.value, { reattaching: reconnectPending.value }));
+// 连接卡片四态：用户取消优先于底层 terminalState（在途 open 仍是 connecting）；
+// open 成功后的短暂 success 态优先于 connecting；其余（error/disconnected）
+// 统一呈现错误行 + Reconnect。
+const connectCardState = computed<"connecting" | "error" | "cancelled" | "success">(() => {
+  if (connectCancelled.value) return "cancelled";
+  if (connectSucceeded.value) return "success";
+  return terminalState.value === "connecting" ? "connecting" : "error";
+});
+const connectLogEntries = computed(() => connectLog.entries.value);
 // Connect-error friendlification: raw sidecar/russh error strings stay as the
 // tooltip detail while the primary line renders a localized per-category hint
 // (auth / refused / DNS / timeout / host key). Non-connect errors pass through.
@@ -1473,27 +1495,7 @@ function trackPendingInput(data: string) {
 function sendTerminalBytes(data: Uint8Array) {
   const sessionId = session.value?.sessionId;
   if (!sessionId) return;
-  const sequence = ++terminalInputSequence;
-  const payload = new Uint8Array(8 + data.byteLength);
-  writeU64(payload, 0, sequence);
-  payload.set(data, 8);
-  binaryInputChain = binaryInputChain
-    .then(async () => {
-      const acknowledged = waitForTerminalInputAck(sequence);
-      await window.dbxPlugin.sendBinary(`ssh/terminal/in/${sessionId}`, payload);
-      await acknowledged;
-    })
-    .catch((cause) => showError(cause, "terminal"));
-}
-
-function waitForTerminalInputAck(sequence: number) {
-  return new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      terminalInputAckWaiters.delete(sequence);
-      reject(new Error(t("errors.terminalInputAckTimeout")));
-    }, 15_000);
-    terminalInputAckWaiters.set(sequence, { resolve, reject, timer });
-  });
+  terminalInputQueue.enqueue(sessionId, normalizeTerminalInputBytes(data));
 }
 
 function scheduleFit() {
@@ -2033,18 +2035,9 @@ function handleEvent(event: DbxPluginEvent) {
     if (params.source && params.source !== batchBarSourceId) applyRemoteBatchBarState(params);
     return;
   }
-  if (event.method === "ssh/terminal/inputAck") {
-    const sequence = Number(event.params.sequence);
-    const waiter = terminalInputAckWaiters.get(sequence);
-    if (waiter) {
-      window.clearTimeout(waiter.timer);
-      terminalInputAckWaiters.delete(sequence);
-      waiter.resolve();
-    }
-    return;
-  }
   if (event.method === "ssh/host-key/prompt" || event.method === "connection/challenge") {
     hostKeyPrompt.value = event.params as unknown as HostKeyPrompt;
+    connectLog.push("info", t("connectCard.log.hostKeyPrompt"));
     return;
   }
   if (event.method === "ssh/host-key/notice") {
@@ -2154,6 +2147,9 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
   terminalError.value = "";
   reconnectPending.value = false;
   resetCommandMarker();
+  connectCancelled.value = false;
+  connectSucceeded.value = false;
+  connectLog.push("info", t("connectCard.log.attempt", { attempt: openRetryAttempt + 1 }));
   if (forceNew && session.value) await closeSession(false);
   createTerminal();
   // A retry is only worth it for fast failures (boot-restore races with
@@ -2168,6 +2164,13 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
       cols: terminal?.cols || 120,
       rows: terminal?.rows || 32,
     }, { timeoutMs: attemptTimeoutMs });
+    // 用户取消后在途 open 仍可能成功（invoke 无法中止）：立即关闭这个孤儿
+    // 会话并提前返回——不置 connected、不补发 replay，卡片停在已取消态。
+    if (connectCancelled.value) {
+      void window.dbxPlugin.invoke("ssh/session/close", { sessionId: info.sessionId }).catch(() => undefined);
+      connectLog.push("warn", t("connectCard.log.orphanClosed"));
+      return;
+    }
     activeTerminalSessionId = info.sessionId;
     session.value = info;
     lastSequence = 0;
@@ -2177,15 +2180,28 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     pendingTerminalFrames.clear();
     replayNoProgress = 0;
     directoryTrackingSupported.value = info.directoryTrackingSupported ?? true;
-    terminalState.value = "connected";
+    // 成功过渡（Termius 式）：先切 success 卡片——进度线填满到顶、终端图标变
+    // 对号；replay 在动画期间并行拉取，hold 播完才置 connected 进终端，避免
+    // 连接成功瞬间生硬跳变。reduced-motion 下不 hold，立即进终端。
+    connectSucceeded.value = true;
+    const successShownAt = Date.now();
+    connectLog.push("info", t("connectCard.log.connected", { seconds: ((Date.now() - attemptStarted) / 1000).toFixed(1) }));
     const replay = await window.dbxPlugin.invoke<ReplayResult>("ssh/terminal/replay", {
       sessionId: info.sessionId,
       afterSequence: 0,
     });
     if (!replay.complete) throw new Error(t("sessionUnrecoverable"));
+    const holdMs = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : CONNECT_SUCCESS_HOLD_MS;
+    const remainMs = holdMs - (Date.now() - successShownAt);
+    if (remainMs > 0) await new Promise((resolve) => window.setTimeout(resolve, remainMs));
+    connectSucceeded.value = false;
+    terminalState.value = "connected";
     await afterSessionConnected();
   } catch (cause) {
     if (disposed) return;
+    connectSucceeded.value = false;
+    // 用户已取消：不重试、不呈现错误，卡片停在已取消态等 Connect 重新发起。
+    if (connectCancelled.value) return;
     const attemptMs = Date.now() - attemptStarted;
     // "Connection is not active"：sidecar 连接注册表还没有该连接。boot 恢复
     // 场景（宿主启动时为恢复的插件 tab 重放 connect 生命周期）这是暂时态，
@@ -2205,6 +2221,7 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     if (decision.kind === "retry") {
       openRetryAttempt = decision.attempt;
       terminalState.value = "connecting";
+      connectLog.push("warn", t("connectCard.log.retry", { seconds: decision.delayMs / 1000 }));
       reconnectTimer = window.setTimeout(() => {
         if (!disposed) void openSession(false, bootRestore, true);
       }, decision.delayMs);
@@ -2212,12 +2229,19 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     }
     terminalState.value = "error";
     activeTerminalSessionId = "";
+    // 日志记录分类后的友好原因（与卡片错误行同源），未分类时保留原始错误串。
+    const rawReason = cause instanceof Error ? cause.message : String(cause ?? "");
+    const reasonKind = classifyConnectError(rawReason);
+    connectLog.push("error", t("connectCard.log.failed", { reason: inactive ? t("connectionInactive") : reasonKind ? t(connectErrorKey(reasonKind)) : rawReason }));
     showError(inactive ? new Error(t("connectionInactive")) : cause, "terminal");
   }
 }
 
 async function attachSession(sessionId: string, retryReference: string = initialState().sessionId || "") {
   terminalState.value = "connecting";
+  connectCancelled.value = false;
+  // attach（tab 恢复）不播成功过渡动画，直接进终端。
+  connectSucceeded.value = false;
   activeTerminalSessionId = sessionId;
   try {
     const info = await window.dbxPlugin.invoke<SessionInfo>("ssh/session/attach", {
@@ -2295,7 +2319,7 @@ async function closeSession(updateStatus = true) {
   teardownTrzsz();
   pendingTerminalFrames.clear();
   lastSequence = 0;
-  terminalInputSequence = 0;
+  terminalInputQueue.reset();
   reconnectPending.value = false;
   resetCommandMarker();
   if (sessionId) await window.dbxPlugin.invoke("ssh/session/close", { sessionId }).catch(() => undefined);
@@ -2310,6 +2334,23 @@ async function reconnect() {
   terminal?.clear();
   await closeSession(false);
   await openSession();
+}
+
+/**
+ * 连接卡片 Cancel：在途 ssh/session/open 无法中止，仅清掉待触发的重试定时器
+ * 并把卡片切到已取消态；promise 落地后由 openSession 内的 connectCancelled
+ * 分支负责回收孤儿会话 / 跳过重试与错误呈现。
+ */
+function cancelConnect() {
+  window.clearTimeout(reconnectTimer);
+  connectCancelled.value = true;
+  connectLog.push("warn", t("connectCard.log.cancelled"));
+}
+
+/** 已取消态的 Connect 出口：重新走完整 openSession 流程（入口会重置取消标记）。 */
+function startConnect() {
+  connectCancelled.value = false;
+  void openSession();
 }
 
 /**
@@ -2489,6 +2530,7 @@ async function resolveHostKey(accept: boolean) {
       accept,
       remember: accept && rememberHostKey.value,
     });
+    connectLog.push("info", t("connectCard.log.hostKeyResolved"));
   } catch (cause) {
     showError(cause, "terminal");
   }
@@ -4742,6 +4784,30 @@ function browseCommandHistoryDown() {
   commandDraft.value = step.draft;
 }
 
+function handleCommandInputKeydown(event: KeyboardEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLTextAreaElement)) return;
+  const action = commandInputAction({
+    key: event.key,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+    selectionStart: target.selectionStart,
+    selectionEnd: target.selectionEnd,
+    valueLength: target.value.length,
+  });
+  if (action === "run") {
+    event.preventDefault();
+    void runCommand();
+  } else if (action === "history-up") {
+    event.preventDefault();
+    browseCommandHistoryUp();
+  } else if (action === "history-down") {
+    event.preventDefault();
+    browseCommandHistoryDown();
+  }
+}
+
 // 一键重发：把历史条目回填输入框并立即执行。
 function rerunHistoryCommand(command: string) {
   if (commandRunning.value) return;
@@ -6651,10 +6717,9 @@ async function initialize() {
   }
   if (typeof state.sessionId === "string" && state.sessionId) await attachSession(state.sessionId);
   else {
-    // 宿主切 tab / 左侧菜单重开会整体重建工作台 webview，且不回传
-    // workbenchState（桥未实现）、每次重开还换新 workbenchId——持久化
-    // sessionId 的 attach 路径永远不命中。改为向 sidecar 查询该连接的
-    // 存活会话并 attach（replay 恢复终端内容），避免全新拨号重置连接。
+    // 宿主切 tab / 左侧菜单重开可能整体重建工作台 webview。只恢复
+    // 同一 workbench 的 live session；不能按 connectionId 复用任意会话，
+    // 否则打开同一连接的新 Tab 会接管已有 Tab 的 PTY。
     const reattach = await findReattachSession();
     if (reattach) await attachSession(reattach, reattach);
     // bootRestore: 宿主启动恢复 tab 时会异步重放 connect（见 queryStore
@@ -6665,9 +6730,9 @@ async function initialize() {
 }
 
 /**
- * Asks the sidecar for a live session bound to this connection (sidecar
- * `ssh/sessions/list`); "" when none — caller dials fresh. Failures degrade
- * to a fresh open instead of blocking the workbench.
+ * Asks the sidecar for the live session bound to this workbench and connection
+ * (sidecar `ssh/sessions/list`); "" when none — caller dials a fresh session.
+ * Failures degrade to a fresh open instead of blocking the workbench.
  */
 async function findReattachSession(): Promise<string> {
   try {
@@ -6752,10 +6817,6 @@ onBeforeUnmount(() => {
   detachHighlightRender();
   terminal?.dispose();
   for (const waiter of uploadAckWaiters.values()) {
-    window.clearTimeout(waiter.timer);
-    waiter.reject(new Error(t("errors.workbenchDetached")));
-  }
-  for (const waiter of terminalInputAckWaiters.values()) {
     window.clearTimeout(waiter.timer);
     waiter.reject(new Error(t("errors.workbenchDetached")));
   }
@@ -7029,15 +7090,20 @@ onBeforeUnmount(() => {
           <span class="record-countdown-hint">{{ t("recordingCountdownHint") }}</span>
         </div>
         <div v-if="terminalState !== 'connected' && !reconnectPending" class="terminal-overlay">
-          <Loader2 v-if="terminalState === 'connecting'" class="spinning large-icon" />
-          <svg v-else class="terminal-state-icon" viewBox="0 0 64 64" role="img" aria-label="SSH">
-            <rect x="5" y="8" width="54" height="48" rx="9" style="fill: color-mix(in srgb, var(--muted) 55%, var(--background))" />
-            <rect x="8" y="11" width="48" height="42" rx="6" style="fill: var(--background); stroke: var(--primary)" stroke-width="2" />
-            <path d="m17 23 9 9-9 9" fill="none" style="stroke: var(--success)" stroke-linecap="round" stroke-linejoin="round" stroke-width="4" />
-            <path d="M31 41h15" fill="none" style="stroke: var(--muted-foreground)" stroke-linecap="round" stroke-width="4" />
-          </svg>
-          <p :title="terminalErrorDetail || undefined">{{ sessionStatus === "connecting" ? t("connecting") : sessionStatus === "reconnecting" ? (terminalErrorFriendly || terminalError || t("sessionStatus.reconnecting")) : (terminalErrorFriendly || terminalError || t("disconnected")) }}</p>
-          <button v-if="terminalState !== 'connecting'" class="primary-button" @click="reconnect">{{ t("reconnect") }}</button>
+          <ConnectingCard
+            :locale="locale"
+            :name="connection.name || connectionIdentity"
+            :identity="connectionIdentity"
+            :state="connectCardState"
+            :error-text="terminalErrorFriendly || terminalError || t('disconnected')"
+            :error-detail="terminalErrorDetail"
+            :logs-open="connectLogsOpen"
+            :logs="connectLogEntries"
+            @cancel="cancelConnect"
+            @reconnect="reconnect"
+            @connect="startConnect"
+            @toggle-logs="connectLogsOpen = !connectLogsOpen"
+          />
         </div>
         <div v-if="commandMarker.installed" class="terminal-command-marker" :class="{ active: commandMarker.active, failed: !commandMarker.active && commandMarker.exitCode !== null && commandMarker.exitCode !== 0 }" :title="commandMarkerDetails" @click="terminal?.focus()">
           <Loader2 v-if="commandMarker.active" class="spinning" />
@@ -7563,16 +7629,15 @@ onBeforeUnmount(() => {
     <section v-if="commandOpen" class="modal-backdrop" @mousedown.self="commandOpen = false">
       <article class="modal command-modal">
         <header><h2>{{ t("commandTitle") }}</h2><button :title="t('close')" class="icon-button" @click="commandOpen = false"><X /></button></header>
-        <input
+        <textarea
           v-model="commandDraft"
           class="mono"
+          rows="5"
           spellcheck="false"
           autofocus
           :placeholder="t('commandPlaceholder')"
           :disabled="commandRunning"
-          @keydown.enter="runCommand"
-          @keydown.up.prevent="browseCommandHistoryUp"
-          @keydown.down.prevent="browseCommandHistoryDown"
+          @keydown="handleCommandInputKeydown"
         />
         <div v-if="commandHistory.length" class="command-history">
           <div class="command-history-header">

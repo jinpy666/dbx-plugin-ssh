@@ -572,6 +572,19 @@ enum TerminalCommand {
     Close,
 }
 
+/// Enqueue keyboard input with bounded backpressure instead of dropping it
+/// when the PTY writer briefly falls behind. Binary input handlers run on the
+/// SDK's blocking worker threads, so blocking here does not block the Tokio
+/// runtime that drains the terminal channel.
+fn enqueue_terminal_input(
+    sender: &mpsc::Sender<TerminalCommand>,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    sender
+        .blocking_send(TerminalCommand::Input(data))
+        .map_err(|error| format!("SSH input queue is closed: {error}"))
+}
+
 /// Terminal activity keepalive payload: space + backspace. Net-zero on a
 /// shell prompt (an empty line never enters history), movement-only in
 /// full-screen apps; protocol-level keepalives don't count as keyboard
@@ -683,8 +696,9 @@ impl ReplayBuffer {
     }
 }
 
-/// `workbench_id` is interior-mutable: attach re-homes a live session to the
-/// reopened workbench (the host mints a fresh workbenchId per sidebar open).
+/// `workbench_id` is kept with the session so attach can only restore the
+/// session that belongs to the same workbench. A different workbench must open
+/// its own SSH session instead of stealing another tab's PTY.
 struct SessionEntry {
     connection_id: String,
     workbench_id: RwLock<String>,
@@ -1798,14 +1812,17 @@ impl SshRuntime {
     }
 
     pub fn write_terminal(&self, session_id: &str, data: Vec<u8>) -> Result<(), String> {
-        let sessions = self.sessions.blocking_read();
-        let session = sessions
-            .get(session_id)
-            .ok_or("SSH session was not found")?;
-        session
-            .terminal_tx
-            .try_send(TerminalCommand::Input(data))
-            .map_err(|error| format!("SSH input queue is full or closed: {error}"))
+        // Do not hold the session-map read guard while applying backpressure:
+        // closing a dead session needs the write lock to drop the receiver so
+        // a blocked sender can observe closure and return.
+        let terminal_tx = {
+            let sessions = self.sessions.blocking_read();
+            sessions
+                .get(session_id)
+                .map(|session| session.terminal_tx.clone())
+                .ok_or("SSH session was not found")?
+        };
+        enqueue_terminal_input(&terminal_tx, data)
     }
 
     /// Normalizes one batch command into PTY key input: newlines become
@@ -1907,11 +1924,9 @@ impl SshRuntime {
         }))
     }
 
-    /// Picks the session to attach for a (re)opened workbench. The exact
-    /// `(connection_id, workbench_id)` match wins; otherwise the connection's
-    /// live session is re-homed — the host mints a fresh `workbenchId` on
-    /// every sidebar reopen, and a strict double match would force a
-    /// redundant SSH re-dial for a session that is still perfectly alive.
+    /// Picks the session to attach for a (re)opened workbench. Sessions are
+    /// workbench-owned: never attach a different tab's live PTY, even when it
+    /// uses the same saved connection.
     fn pick_attach_target(
         sessions: &[(String, String, String, bool)],
         connection_id: &str,
@@ -1923,13 +1938,6 @@ impl SshRuntime {
                 *connected
                     && session_connection.as_str() == connection_id
                     && session_workbench.as_str() == workbench_id
-            })
-            .or_else(|| {
-                sessions
-                    .iter()
-                    .find(|(_, session_connection, _, connected)| {
-                        *connected && session_connection.as_str() == connection_id
-                    })
             })
             .map(|(session_id, _, _, _)| session_id.clone())
     }
@@ -1958,17 +1966,8 @@ impl SshRuntime {
                     )
                 })
                 .collect();
-            let target = Self::pick_attach_target(&snapshot, connection_id, workbench_id)
-                .ok_or("No live SSH session is attached to this workbench")?;
-            // Re-home when the workbench ids diverge: the reopened tab owns
-            // the session from now on (close_workbench, list payloads), while
-            // the SSH connection and replay buffer continue undisturbed.
-            if let Some(entry) = sessions.get(&target) {
-                if let Ok(mut workbench) = entry.workbench_id.write() {
-                    *workbench = workbench_id.to_string();
-                }
-            }
-            target
+            Self::pick_attach_target(&snapshot, connection_id, workbench_id)
+                .ok_or("No live SSH session is attached to this workbench")?
         };
         let replay = self
             .replay_terminal(&session_id, after_sequence, emitter)
@@ -5374,6 +5373,39 @@ mod tests {
     }
 
     #[test]
+    fn terminal_input_enqueue_applies_backpressure_instead_of_dropping() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(TerminalCommand::Input(b"first".to_vec()))
+            .expect("seed the bounded queue");
+
+        let (done_sender, done_receiver) = std::sync::mpsc::channel();
+        let blocked_sender = sender.clone();
+        std::thread::spawn(move || {
+            let result = enqueue_terminal_input(&blocked_sender, b"second".to_vec());
+            done_sender.send(result).expect("report enqueue result");
+        });
+
+        assert!(done_receiver
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(TerminalCommand::Input(data)) if data == b"first"
+        ));
+        assert_eq!(
+            done_receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            Ok(())
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(TerminalCommand::Input(data)) if data == b"second"
+        ));
+    }
+
+    #[test]
     fn negotiated_algorithms_cover_legacy_without_weakening_secure_order() {
         // 存量连接可能还带着已下线的 ssh_algorithm_profile/policy 配置值；
         // 算法面已统一，任何旧值都不得改变协商集合。
@@ -6235,9 +6267,10 @@ mod tests {
     }
 
     #[test]
-    fn attach_target_prefers_exact_workbench_then_rehomes_connection_session() {
+    fn attach_target_requires_exact_workbench() {
         let sessions: Vec<(String, String, String, bool)> = vec![
             ("s-old".into(), "conn-1".into(), "wb-old".into(), true),
+            ("s-new".into(), "conn-1".into(), "wb-new".into(), true),
             ("s-other".into(), "conn-2".into(), "wb-other".into(), true),
         ];
         // Exact double match wins when the workbench id is stable.
@@ -6245,11 +6278,15 @@ mod tests {
             SshRuntime::pick_attach_target(&sessions, "conn-1", "wb-old").as_deref(),
             Some("s-old")
         );
-        // Sidebar reopen mints a fresh workbenchId: the connection's live
-        // session must still be found instead of forcing a re-dial.
+        // A second workbench on the same saved connection gets its own exact
+        // session rather than stealing the first tab's PTY.
         assert_eq!(
             SshRuntime::pick_attach_target(&sessions, "conn-1", "wb-new").as_deref(),
-            Some("s-old")
+            Some("s-new")
+        );
+        assert_eq!(
+            SshRuntime::pick_attach_target(&sessions, "conn-1", "wb-missing"),
+            None
         );
         // Dead sessions never attach; other connections' sessions stay put.
         let dead: Vec<(String, String, String, bool)> =

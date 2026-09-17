@@ -1,12 +1,7 @@
 /**
- * Workbench remount session discovery.
- *
- * The host reopens a plugin workbench by destroying and recreating its
- * webview, without round-tripping `workbenchState` (the bridge does not
- * implement it) and with a freshly minted `workbenchId` on every sidebar
- * reopen. The persisted-sessionId attach path therefore never engages, and
- * the frontend must ask the sidecar for the connection's live session and
- * reattach to it instead of dialing a redundant SSH connection.
+ * Workbench remount session discovery. A session belongs to one workbench;
+ * matching only that workbench prevents a new tab for the same saved
+ * connection from attaching to (and taking over) another tab's PTY.
  */
 
 export interface SessionSummary {
@@ -19,10 +14,10 @@ export interface SessionSummary {
 }
 
 /**
- * Picks the sidecar session a remounting workbench should attach to: live
- * sessions of the same connection, preferring the same workbench id, newest
- * first (`createdAt` DESC, then list order). Returns "" when nothing lives —
- * the caller falls back to a fresh `ssh/session/open`.
+ * Picks the sidecar session a remounting workbench should attach to. Returns
+ * "" when that exact workbench has no live session — the caller falls back to
+ * a fresh `ssh/session/open`, which is also how a new same-connection tab gets
+ * its independent PTY.
  */
 export function pickLiveSessionForReattach(
   sessions: SessionSummary[] | undefined,
@@ -39,10 +34,8 @@ export function pickLiveSessionForReattach(
       session.connected !== false,
   );
   if (candidates.length === 0) return "";
-  const sameWorkbench =
-    options.workbenchId && candidates.some((session) => session.workbenchId === options.workbenchId)
-      ? candidates.filter((session) => session.workbenchId === options.workbenchId)
-      : candidates;
+  const sameWorkbench = candidates.filter((session) => session.workbenchId === options.workbenchId);
+  if (sameWorkbench.length === 0) return "";
   const newest = sameWorkbench.reduce((best, session) =>
     (session.createdAt ?? 0) >= (best.createdAt ?? 0) ? session : best,
   );

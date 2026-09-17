@@ -40,17 +40,25 @@ describe("themeToAppearance", () => {
         "--color-background": "rgb(1 2 3)",
         "--color-muted-foreground": "rgb(4 5 6)",
         "--radius-lg": "10px",
+        "--font-mono": "'Fira Code', monospace",
+        "--font-sans": "'IBM Plex Sans', sans-serif",
       },
     };
     expect(themeToAppearance(theme)).toEqual({
       colorScheme: "dark",
       colors: { background: "rgb(1 2 3)", mutedForeground: "rgb(4 5 6)" },
+      terminal: { fontFamily: "'Fira Code', monospace" },
+      ui: { fontFamily: "'IBM Plex Sans', sans-serif" },
     });
+    expect(resolveAppearance(themeToAppearance(theme)).terminal.fontFamily).toBe("'Fira Code', monospace");
   });
 
   it("skips blank token values", () => {
-    const theme: DbxPluginTheme = { appearance: "light", tokens: { "--color-border": "  " } };
-    expect(themeToAppearance(theme).colors).toEqual({});
+    const theme: DbxPluginTheme = {
+      appearance: "light",
+      tokens: { "--color-border": "  ", "--font-mono": "", "--font-sans": "  " },
+    };
+    expect(themeToAppearance(theme)).toEqual({ colorScheme: "light", colors: {} });
   });
 });
 
@@ -61,7 +69,7 @@ describe("themeToAppearance + resolveAppearance", () => {
     expect(resolved.colorScheme).toBe("light");
     expect(resolved.colors.background).toBe("#fff");
     expect(resolved.colors.foreground).toBe(resolveAppearance({ colorScheme: "light" }).colors.foreground);
-    // 宿主 theme 通道不带终端字体，回退本地规范值。
+    // 缺失 --font-mono 时回退本地规范值。
     expect(resolved.terminal.fontFamily).toBe(resolveAppearance().terminal.fontFamily);
   });
 });

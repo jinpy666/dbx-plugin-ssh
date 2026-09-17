@@ -21,6 +21,12 @@ let disconnectEmitted = false;
 // ?err=authfail 让 ssh/session/open 抛出真实 sidecar 风格的认证失败错误串，
 // 供连接失败错误提示友好化（connectError.*）的浏览器 UI 验证。
 const failSessionOpen = fixtureParams.get("err") === "authfail";
+// ?slow=N 把 mock ssh/session/open 延迟 N 秒才返回，供连接中卡片（旋转弧 /
+// 流光动画、Cancel、Show logs 面板）的浏览器视觉验证（模拟慢拨号）。
+const slowSessionOpenMs = Math.max(0, Number(fixtureParams.get("slow")) || 0) * 1000;
+// ?fresh=1 让 sessions/list 返回空——首屏不走 reattach 而走 ssh/session/open，
+// 供连接成功过渡动画（success 卡片）等 open 路径的浏览器视觉验证。
+const freshSessionOpen = fixtureParams.get("fresh") === "1";
 // 初始 locale 支持 ?locale= 覆盖（镜像真实桥 api.locale）；运行时经
 // __dbxMockSetLocale 切换（镜像宿主桥 updateLocale 的"改字段 + 推监听"语义），
 // 供 i18n 切换链（onLocaleChange）的浏览器与单测验证。
@@ -310,6 +316,7 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string) =>
 const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, params?: unknown) => {
   let result: unknown;
   if (method === "ssh/session/open") {
+    if (slowSessionOpenMs) await new Promise((resolve) => setTimeout(resolve, slowSessionOpenMs));
     if (failSessionOpen) throw new Error("SSH password authentication failed: password rejected by server");
     // A fresh session restarts sequence numbering at 1 (real sidecar
     // semantics): after an auto-reconnect the client resets its cursor to 0,
@@ -320,15 +327,18 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     scheduleDisconnect();
     result = { sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, connected: true, sequence: 0, chunkSize: 262144, directoryTrackingSupported: true };
   } else if (method === "ssh/terminal/replay") result = { frameCount: 0, firstAvailableSequence: 1, tailSequence: sequence, complete: true };
-  else if (method === "ssh/sessions/list") result = { sessions: failSessionOpen ? [] : [{ sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, readOnly: !writable, connected: true, sudoKeepalive: true, createdAt: Math.floor(Date.now() / 1000), authMethod: "private-key", host: "server.demo.internal", port: 22, username: "demo" }] };
+  else if (method === "ssh/sessions/list") result = { sessions: failSessionOpen || freshSessionOpen ? [] : [{ sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, readOnly: !writable, connected: true, sudoKeepalive: true, createdAt: Math.floor(Date.now() / 1000), authMethod: "private-key", host: "server.demo.internal", port: 22, username: "demo" }] };
   else if (method === "ssh/session/attach") {
     const input = params as Record<string, unknown>;
+    // 默认启动走 sessions/list → reattach；?slow=N 同样延迟 attach，否则
+    // 连接中卡片在默认路径下一闪而过、无法视觉验证。
+    if (slowSessionOpenMs) await new Promise((resolve) => setTimeout(resolve, slowSessionOpenMs));
     if (failSessionOpen) throw new Error("Connection is not active");
-    // Mirror the real sidecar: the connection's live session is re-homed to
-    // the requesting workbench and reported with a complete replay. The
-    // transcript (Welcome + OSC 633 cycle) is pushed as live frames right
-    // after attach so the first paint under the default reattach startup
-    // already shows shell-integration content (P2-2), not a bare prompt.
+    // Mirror the real sidecar: the session already owned by this workbench is
+    // reported with a complete replay. The transcript (Welcome + OSC 633
+    // cycle) is pushed as live frames right after attach so the first paint
+    // under the default reattach startup already shows shell-integration
+    // content (P2-2), not a bare prompt.
     result = {
       sessionId: String(input.sessionId || "") || "visual-session",
       connectionId: context.connectionId,

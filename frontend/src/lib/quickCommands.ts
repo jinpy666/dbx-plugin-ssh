@@ -1,6 +1,8 @@
 // 快速命令栏：用户自定义常用命令片段（对标 tiny-rdm 快速命令）。
 // localStorage CRUD，上限 20 条；纯函数，localStorage 读写留在调用方。
 
+import { normalizeTerminalInputText } from "./terminalInput";
+
 export interface QuickCommand {
   id: string;
   name: string;
@@ -75,7 +77,11 @@ export function filterQuickCommands(
   );
 }
 
-/** 写入终端的命令文本：多行命令折叠为单行并去首尾空白（Run/Paste 共用）。 */
+/**
+ * 写入终端的命令文本：保留多行结构，并把换行统一成 PTY 的 Enter
+ * （Run/Paste 共用）。保留换行对反斜杠续行尤其重要；折叠为空格会把
+ * `command \\` 变成带转义空格的错误命令。
+ */
 export function quickCommandText(command: string): string {
-  return command.replace(/\r?\n/g, " ").trim();
+  return normalizeTerminalInputText(command).trim();
 }

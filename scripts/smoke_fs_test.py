@@ -185,6 +185,27 @@ def main() -> None:
         session_id = session.get("sessionId", workbench_id)
         print(f"    session {session_id} opened")
 
+        same_connection_session_state: dict = {}
+
+        def case_same_connection_sessions_are_independent():
+            """Two workbenches on one saved connection must get separate PTYs."""
+            second = req("ssh/session/open", {
+                "connectionId": connection_id,
+                "workbenchId": "smoke-fs-second-wb",
+                "cols": 120,
+                "rows": 30,
+            })
+            second_id = second.get("sessionId")
+            if not second_id or second_id == session_id:
+                raise AssertionError(f"same-connection open reused session: {second}")
+            same_connection_session_state["sessionId"] = second_id
+            inventory = req("ssh/sessions/list").get("sessions") or []
+            rows = [row for row in inventory if row.get("connectionId") == connection_id]
+            workbenches = {row.get("workbenchId") for row in rows}
+            if {workbench_id, "smoke-fs-second-wb"} - workbenches:
+                raise AssertionError(f"same-connection workbenches missing: {rows}")
+            print(f"    independent sessions {session_id} and {second_id}")
+
         step("sftp/home")
         result = client.request("sftp/home", {"sessionId": session_id})
         home = result.get("path") or "/config"
@@ -996,6 +1017,10 @@ def main() -> None:
 
 
         report = Report()
+        print("\n--- session isolation group ---")
+        report.run("same connection opens independent sessions", "ssh/session/open",
+                   case_same_connection_sessions_are_independent)
+
         print("\n--- sftp_ext group ---")
         report.run("sftp/stat /config", "sftp/stat", case_sftp_stat)
         report.run("sftp/exists true/false", "sftp/exists", case_sftp_exists)
@@ -1384,6 +1409,13 @@ def main() -> None:
             print("    session closed")
         except SidecarError:
             pass
+        same_connection_session_id = same_connection_session_state.get("sessionId")
+        if same_connection_session_id:
+            try:
+                client.request("ssh/session/close", {"sessionId": same_connection_session_id})
+                print("    second same-connection session closed")
+            except SidecarError:
+                pass
         agent_session_id = agent_session_state.get("sessionId")
         if agent_session_id:
             try:
