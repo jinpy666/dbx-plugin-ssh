@@ -1,0 +1,48 @@
+[package]
+name = "dbx-plugin-ssh"
+version = "0.4.76"
+edition = "2021"
+license = "MIT"
+authors = ["jinpy"]
+
+[workspace]
+
+[dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
+data-encoding = "2"
+dbx-plugin-sdk = "0.1.0"
+hmac = "0.12"
+rand = "0.8"
+# Terminal trigger (expect) stage patterns — see src/triggers.rs.
+regex = "1"
+russh = { version = "0.60", features = ["des"] }
+russh-sftp = "2.3.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+pageant = "0.2"
+
+# The OS keychain tier only ships where a native keychain exists; the Linux
+# secret-service backend pulls libdbus (absent in store build containers and
+# on headless servers), so Linux always uses the keyfile tier.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+] }
+
+# The DBX sidecar SDK is vendored under shared/ so a standalone checkout does
+# not depend on the source monorepo or a sibling host checkout. See
+# docs/REPOSITORY_SPLIT.zh-CN.md for the future public-package migration plan.
+[patch.crates-io]
+dbx-plugin-sdk = { path = "../shared/sdk/rust/dbx-plugin-sdk" }
+
+[dev-dependencies]
+tempfile = "3"

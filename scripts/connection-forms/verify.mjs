@@ -161,6 +161,50 @@ for (const locale of locales) {
     assert(localized?.trim(), `${locale}/${sectionId}: missing section label`);
   }
 }
+// Cards (`panel`) are the outer level: connection fields live in "Basic
+// information", the sudo/2FA sections in "Identity & security", and the
+// automation/limits sections in "Advanced options" (the only card that starts
+// folded). Every field declares one, and its presentation must agree.
+const PANEL_MEMBERS = {
+  basic: [
+    "display_name", "host", "port", "username", "authentication", "password_source", "password",
+    "password_command", "private_key_path", "private_key_passphrase", "private_key", "agent_socket",
+  ],
+  identity: [...SECTION_MEMBERS.sudo, ...SECTION_MEMBERS.twofa],
+  advanced: [...SECTION_MEMBERS.terminal, ...SECTION_MEMBERS.limits],
+};
+const panelState = new Map();
+for (const [panelId, keys] of Object.entries(PANEL_MEMBERS)) {
+  let collapsed;
+  let icon;
+  for (const key of keys) {
+    const panel = byKey[key].panel;
+    assert(panel, `${key}: must belong to the '${panelId}' card`);
+    assert.equal(panel.id, panelId, `${key}: wrong card`);
+    assert(panel.label?.trim(), `${key}: card label required`);
+    const fieldCollapsed = panel.collapsed === true;
+    collapsed ??= fieldCollapsed;
+    assert.equal(fieldCollapsed, collapsed, `${key}: every field of '${panelId}' must agree on 'collapsed'`);
+    icon ??= panel.icon;
+    assert.equal(panel.icon, icon, `${key}: every field of '${panelId}' must agree on 'icon'`);
+  }
+  panelState.set(panelId, { collapsed, icon });
+}
+assert.equal(panelState.get("basic").collapsed, false, "the basic card must start expanded");
+assert.equal(panelState.get("identity").collapsed, false, "the identity card must start expanded");
+assert.equal(panelState.get("advanced").collapsed, true, "the advanced card must start collapsed");
+// A card's icon comes from the host's curated set.
+const PANEL_ICONS = ["user", "id-card", "shield", "key", "bolt", "terminal", "clock", "server", "lock", "globe", "sliders"];
+for (const [panelId, state] of panelState) {
+  assert(PANEL_ICONS.includes(state.icon), `${panelId}: icon '${state.icon}' is outside the host set`);
+}
+for (const locale of locales) {
+  for (const panelId of Object.keys(PANEL_MEMBERS)) {
+    const localized = manifest.localizations[locale]?.contributions?.[provider.id]?.panels?.[panelId]?.label
+      ?? (locale === "en" ? byKey[PANEL_MEMBERS[panelId][0]].panel.label : undefined);
+    assert(localized?.trim(), `${locale}/${panelId}: missing card label`);
+  }
+}
 // Sudo and 2FA stay first-class: their entry points are visible without any
 // switch, and only their detail fields open on demand.
 assert.equal(byKey.sudo_source.visible_when, undefined, "sudo_source must stay visible");
@@ -352,7 +396,7 @@ assert(
   `engines.dbx must stay a plain '>=x.y.z' floor (got '${dbxFloor}')`,
 );
 console.log(
-  `NOTE SSH connection form: 'picker', 'group' and 'options_style' only parse on hosts that ship them — raise engines.dbx (currently ${dbxFloor}) to that release in the release commit.`,
+  `NOTE SSH connection form: 'picker', 'group', 'panel' and 'options_style' only parse on hosts that ship them — raise engines.dbx (currently ${dbxFloor}) to that release in the release commit.`,
 );
 // Both halves of the either-or must keep pointing at each other in every
 // locale: the file action only makes sense if the text also names where an

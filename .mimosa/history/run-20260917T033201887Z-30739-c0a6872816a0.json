@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20260917T033201887Z-30739-c0a6872816a0",
+  "runStatus": "inconclusive",
+  "errors": [
+    "baseline-read:scripts/smoke_login_mfa_test.py: baseline_snapshot_unreadable: file is missing from task baseline",
+    "scan:scripts/smoke_fs_test.py: scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+    "scan:scripts/smoke_login_mfa_test.py: scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+    "scan:frontend/src/lib/i18n.ts: scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+    "scan:backend/src/exec.rs: scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+    "scan:backend/src/keys.rs: scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+    "scan:backend/src/model.rs: scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+    "scan:backend/src/ssh.rs: scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": "de5ee09f74780620d92a63be47bf859d112d1c06",
+  "diffHash": "72eb92580b456ee8da487b36dbe9a96cb5cfb0777f0a845a98ef8106c7edaa08",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-09-17T03:32:01.887Z",
+  "timing": {
+    "startedAt": "2026-09-17T03:31:59.457Z",
+    "completedAt": "2026-09-17T03:32:01.887Z",
+    "durationMs": 2430
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "baseline_snapshot_unreadable": 1,
+      "scanner_failed": 7,
+      "project_check_failed": 8
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_8e986391-5171-44ff-9620-ccff163f27b5-20260917T033201887Z-30739-c0a6872816a0.json"
+}

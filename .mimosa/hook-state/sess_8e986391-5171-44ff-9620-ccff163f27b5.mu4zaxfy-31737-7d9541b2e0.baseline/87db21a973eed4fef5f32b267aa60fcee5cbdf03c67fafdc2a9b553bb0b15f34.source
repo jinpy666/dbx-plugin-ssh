@@ -1,0 +1,131 @@
+name: Release DBX SSH plugin
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_CLI_VERSION: "0.1.3"
+  # aws-lc-sys falls back to its bundled prebuilt NASM objects when the
+  # assembler is missing on the MSVC toolchain; harmless on every other OS.
+  AWS_LC_SYS_PREBUILT_NASM: "1"
+  # Windows runners default python stdout to cp1252; UTF-8 mode is a no-op
+  # on the other platforms.
+  PYTHONUTF8: "1"
+
+jobs:
+  validate:
+    if: startsWith(github.event.release.tag_name, 'ssh-v')
+    name: Validate SSH release identity
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate manifest and release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python3 scripts/validate_repo.py
+          python3 - "$RELEASE_TAG" <<'PY'
+          import json
+          import pathlib
+          import sys
+          version = json.loads(pathlib.Path("manifest.json").read_text())["version"]
+          expected = f"ssh-v{version}"
+          if sys.argv[1] != expected:
+              raise SystemExit(f"release tag {sys.argv[1]!r} does not match {expected!r}")
+          PY
+
+  build:
+    if: startsWith(github.event.release.tag_name, 'ssh-v')
+    name: Build ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+            target: linux-x64
+          - os: linux
+            runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - os: macos
+            runner: macos-15
+            target: darwin-arm64
+          - os: macos
+            runner: macos-15-intel
+            target: darwin-x64
+          - os: windows
+            runner: windows-2022
+            target: windows-x64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev nasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+          cache-on-failure: true
+      - run: cargo build --locked --release --manifest-path backend/Cargo.toml
+      - run: npm install --global "@dbx-app/plugin-cli@${PLUGIN_CLI_VERSION}"
+      - name: Package .dbxp candidate
+        # CARGO_TARGET_DIR points the CLI's own cargo build at the warm
+        # backend/target from the step above instead of a throwaway staging dir.
+        env:
+          DBX_PLUGIN_TARGET: ${{ matrix.target }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/backend/target
+          NO_COLOR: "1"
+        run: dbx-plugin package .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbx-plugin-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            dist/*.dbxp
+            dist/*.artifact.json
+
+  publish:
+    if: startsWith(github.event.release.tag_name, 'ssh-v')
+    name: Publish plugin release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dbx-plugin-*
+          path: dist
+          merge-multiple: true
+      - name: Validate candidates and merge metadata
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python3 scripts/check_candidates.py dist \
+            --expect linux-x64,linux-arm64,darwin-arm64,darwin-x64,windows-x64 \
+            --write-release-candidates dist/release-candidates.json
+      - name: Upload assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mapfile -d '' packages < <(find dist -type f -name '*.dbxp' -print0)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "No .dbxp packages were downloaded" >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "${packages[@]}" dist/release-candidates.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

@@ -44,7 +44,12 @@
           "type": "text",
           "binding": "name",
           "required": true,
-          "default": "SSH server"
+          "default": "SSH server",
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
+          }
         },
         {
           "key": "host",
@@ -52,7 +57,12 @@
           "type": "text",
           "binding": "host",
           "required": true,
-          "default": "127.0.0.1"
+          "default": "127.0.0.1",
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
+          }
         },
         {
           "key": "port",
@@ -61,7 +71,12 @@
           "binding": "port",
           "required": true,
           "default": 22,
-          "description": "TCP port, 1-65535 (default 22). The host refuses to connect when this is 0 or out of range."
+          "description": "TCP port, 1-65535 (default 22). The host refuses to connect when this is 0 or out of range.",
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
+          }
         },
         {
           "key": "username",
@@ -69,7 +84,12 @@
           "type": "text",
           "binding": "username",
           "required": true,
-          "default": "root"
+          "default": "root",
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
+          }
         },
         {
           "key": "authentication",
@@ -99,7 +119,12 @@
               "value": "none"
             }
           ],
-          "description": "Choose how to sign in to the server: password, private key, SSH agent, or none."
+          "description": "Choose how to sign in to the server: password, private key, SSH agent, or none.",
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
+          }
         },
         {
           "key": "password_source",
@@ -124,6 +149,11 @@
               "password",
               "private-key-password"
             ]
+          },
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
           }
         },
         {
@@ -143,6 +173,11 @@
             "one_of": [
               "direct"
             ]
+          },
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
           }
         },
         {
@@ -163,6 +198,11 @@
             "one_of": [
               "command"
             ]
+          },
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
           }
         },
         {
@@ -181,6 +221,11 @@
               "private-key",
               "private-key-password"
             ]
+          },
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
           }
         },
         {
@@ -195,6 +240,11 @@
               "private-key",
               "private-key-password"
             ]
+          },
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
           }
         },
         {
@@ -210,6 +260,11 @@
               "private-key",
               "private-key-password"
             ]
+          },
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
           }
         },
         {
@@ -223,6 +278,11 @@
             "one_of": [
               "agent"
             ]
+          },
+          "panel": {
+            "id": "basic",
+            "label": "Basic information",
+            "icon": "id-card"
           }
         },
         {
@@ -249,6 +309,11 @@
           "group": {
             "id": "sudo",
             "label": "Sudo"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -268,6 +333,11 @@
           "group": {
             "id": "sudo",
             "label": "Sudo"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -285,6 +355,11 @@
           "group": {
             "id": "sudo",
             "label": "Sudo"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -303,6 +378,11 @@
           "group": {
             "id": "sudo",
             "label": "Sudo"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -322,6 +402,11 @@
           "group": {
             "id": "sudo",
             "label": "Sudo"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -359,6 +444,11 @@
           "group": {
             "id": "twofa",
             "label": "2FA"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -377,6 +467,11 @@
           "group": {
             "id": "twofa",
             "label": "2FA"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -395,6 +490,11 @@
           "group": {
             "id": "twofa",
             "label": "2FA"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -413,6 +513,11 @@
           "group": {
             "id": "twofa",
             "label": "2FA"
+          },
+          "panel": {
+            "id": "identity",
+            "label": "Identity & security",
+            "icon": "shield"
           }
         },
         {
@@ -427,6 +532,12 @@
             "id": "terminal",
             "label": "Terminal & automation",
             "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
+            "collapsed": true
           }
         },
         {
@@ -439,6 +550,12 @@
           "group": {
             "id": "terminal",
             "label": "Terminal & automation",
+            "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
             "collapsed": true
           }
         },
@@ -460,6 +577,12 @@
             "id": "terminal",
             "label": "Terminal & automation",
             "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
+            "collapsed": true
           }
         },
         {
@@ -477,6 +600,12 @@
           "group": {
             "id": "terminal",
             "label": "Terminal & automation",
+            "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
             "collapsed": true
           }
         },
@@ -496,6 +625,12 @@
             "id": "terminal",
             "label": "Terminal & automation",
             "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
+            "collapsed": true
           }
         },
         {
@@ -508,6 +643,12 @@
           "group": {
             "id": "terminal",
             "label": "Terminal & automation",
+            "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
             "collapsed": true
           }
         },
@@ -522,6 +663,12 @@
             "id": "terminal",
             "label": "Terminal & automation",
             "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
+            "collapsed": true
           }
         },
         {
@@ -534,6 +681,12 @@
           "group": {
             "id": "limits",
             "label": "Timeouts, keepalive & read-only",
+            "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
             "collapsed": true
           }
         },
@@ -548,6 +701,12 @@
             "id": "limits",
             "label": "Timeouts, keepalive & read-only",
             "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
+            "collapsed": true
           }
         },
         {
@@ -561,6 +720,12 @@
             "id": "limits",
             "label": "Timeouts, keepalive & read-only",
             "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
+            "collapsed": true
           }
         },
         {
@@ -573,6 +738,12 @@
           "group": {
             "id": "limits",
             "label": "Timeouts, keepalive & read-only",
+            "collapsed": true
+          },
+          "panel": {
+            "id": "advanced",
+            "label": "Advanced options",
+            "icon": "bolt",
             "collapsed": true
           }
         }
@@ -806,6 +977,17 @@
             "limits": {
               "label": "Tiempos de espera, keepalive y solo lectura"
             }
+          },
+          "panels": {
+            "basic": {
+              "label": "Información básica"
+            },
+            "identity": {
+              "label": "Identidad y seguridad"
+            },
+            "advanced": {
+              "label": "Opciones avanzadas"
+            }
           }
         },
         "io.dbx.ssh.workbench": {
@@ -994,6 +1176,17 @@
             },
             "limits": {
               "label": "Timeout, keepalive e sola lettura"
+            }
+          },
+          "panels": {
+            "basic": {
+              "label": "Informazioni di base"
+            },
+            "identity": {
+              "label": "Identità e sicurezza"
+            },
+            "advanced": {
+              "label": "Opzioni avanzate"
             }
           }
         },
@@ -1184,6 +1377,17 @@
             "limits": {
               "label": "タイムアウト・keepalive・読み取り専用"
             }
+          },
+          "panels": {
+            "basic": {
+              "label": "基本情報"
+            },
+            "identity": {
+              "label": "ID とセキュリティ"
+            },
+            "advanced": {
+              "label": "詳細オプション"
+            }
           }
         },
         "io.dbx.ssh.workbench": {
@@ -1372,6 +1576,17 @@
             },
             "limits": {
               "label": "Tempos limite, keepalive e somente leitura"
+            }
+          },
+          "panels": {
+            "basic": {
+              "label": "Informações básicas"
+            },
+            "identity": {
+              "label": "Identidade e segurança"
+            },
+            "advanced": {
+              "label": "Opções avançadas"
             }
           }
         },
@@ -1562,6 +1777,17 @@
             "limits": {
               "label": "超时、保活与只读"
             }
+          },
+          "panels": {
+            "basic": {
+              "label": "基本信息"
+            },
+            "identity": {
+              "label": "身份与安全"
+            },
+            "advanced": {
+              "label": "高级选项"
+            }
           }
         },
         "io.dbx.ssh.workbench": {
@@ -1750,6 +1976,17 @@
             },
             "limits": {
               "label": "逾時、保活與唯讀"
+            }
+          },
+          "panels": {
+            "basic": {
+              "label": "基本資訊"
+            },
+            "identity": {
+              "label": "身分與安全"
+            },
+            "advanced": {
+              "label": "進階選項"
             }
           }
         },

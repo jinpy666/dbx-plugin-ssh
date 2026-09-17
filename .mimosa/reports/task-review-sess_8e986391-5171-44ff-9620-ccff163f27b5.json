@@ -1,0 +1,605 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20260917T033201887Z-30739-c0a6872816a0",
+  "run_status": "inconclusive",
+  "errors": [
+    {
+      "stage": "baseline-read",
+      "target": "scripts/smoke_login_mfa_test.py",
+      "reason": "baseline_snapshot_unreadable: file is missing from task baseline"
+    },
+    {
+      "stage": "scan",
+      "target": "scripts/smoke_fs_test.py",
+      "reason": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "scripts/smoke_login_mfa_test.py",
+      "reason": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "frontend/src/lib/i18n.ts",
+      "reason": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "backend/src/exec.rs",
+      "reason": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "backend/src/keys.rs",
+      "reason": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "backend/src/model.rs",
+      "reason": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT"
+    },
+    {
+      "stage": "scan",
+      "target": "backend/src/ssh.rs",
+      "reason": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT"
+    }
+  ],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "partial",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 174,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 6
+    },
+    "change_tracking": {
+      "touched_observed": 0,
+      "touched_retained": 0,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 7,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 7,
+      "selected_files": 7,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 7,
+      "scanned_files": 0,
+      "skipped_files": 0,
+      "failed_files": 7,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {
+      "baseline_snapshot_unreadable": 1,
+      "scanner_failed": 7,
+      "project_check_failed": 8
+    },
+    "reasons": [
+      {
+        "code": "baseline_snapshot_unreadable",
+        "stage": "baseline-read",
+        "target": "scripts/smoke_login_mfa_test.py",
+        "detail": "file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "scripts/smoke_fs_test.py",
+        "detail": "spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "scripts/smoke_login_mfa_test.py",
+        "detail": "spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "frontend/src/lib/i18n.ts",
+        "detail": "spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "backend/src/exec.rs",
+        "detail": "spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "backend/src/keys.rs",
+        "detail": "spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "backend/src/model.rs",
+        "detail": "spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "backend/src/ssh.rs",
+        "detail": "spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline-read",
+        "target": "scripts/smoke_login_mfa_test.py",
+        "detail": "baseline_snapshot_unreadable: file is missing from task baseline",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "scripts/smoke_fs_test.py",
+        "detail": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "scripts/smoke_login_mfa_test.py",
+        "detail": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "frontend/src/lib/i18n.ts",
+        "detail": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "backend/src/exec.rs",
+        "detail": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "backend/src/keys.rs",
+        "detail": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "backend/src/model.rs",
+        "detail": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "backend/src/ssh.rs",
+        "detail": "scanner_failed: spawnSync /Users/Jinpy/.nvm/versions/node/v22.21.0/bin/node ETIMEDOUT",
+        "affects_completion": true
+      }
+    ],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-09-17T03:32:01.887Z",
+  "session_id": "sess_8e986391-5171-44ff-9620-ccff163f27b5",
+  "target": ".",
+  "revision": "de5ee09f74780620d92a63be47bf859d112d1c06",
+  "rules_version": "unavailable",
+  "diff_hash": "72eb92580b456ee8da487b36dbe9a96cb5cfb0777f0a845a98ef8106c7edaa08",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 7,
+    "changed_files": [
+      {
+        "file": "backend/src/exec.rs",
+        "ranges": [
+          {
+            "start": 35,
+            "end": 39
+          },
+          {
+            "start": 45,
+            "end": 47
+          },
+          {
+            "start": 106,
+            "end": 114
+          },
+          {
+            "start": 227,
+            "end": 235
+          },
+          {
+            "start": 264,
+            "end": 264
+          },
+          {
+            "start": 757,
+            "end": 757
+          },
+          {
+            "start": 759,
+            "end": 768
+          },
+          {
+            "start": 793,
+            "end": 796
+          },
+          {
+            "start": 1181,
+            "end": 1183
+          },
+          {
+            "start": 1414,
+            "end": 1417
+          },
+          {
+            "start": 1423,
+            "end": 1457
+          },
+          {
+            "start": 1459,
+            "end": 1462
+          },
+          {
+            "start": 1466,
+            "end": 1466
+          },
+          {
+            "start": 1471,
+            "end": 1473
+          },
+          {
+            "start": 1476,
+            "end": 1484
+          },
+          {
+            "start": 1486,
+            "end": 1495
+          },
+          {
+            "start": 1497,
+            "end": 1511
+          },
+          {
+            "start": 1513,
+            "end": 1515
+          },
+          {
+            "start": 1518,
+            "end": 1520
+          },
+          {
+            "start": 1619,
+            "end": 1622
+          },
+          {
+            "start": 1626,
+            "end": 1626
+          },
+          {
+            "start": 1644,
+            "end": 1647
+          },
+          {
+            "start": 1650,
+            "end": 1654
+          },
+          {
+            "start": 1677,
+            "end": 1677
+          },
+          {
+            "start": 2041,
+            "end": 2041
+          },
+          {
+            "start": 2050,
+            "end": 2053
+          },
+          {
+            "start": 2055,
+            "end": 2061
+          },
+          {
+            "start": 2092,
+            "end": 2092
+          },
+          {
+            "start": 2102,
+            "end": 2107
+          },
+          {
+            "start": 2120,
+            "end": 2120
+          },
+          {
+            "start": 2131,
+            "end": 2131
+          },
+          {
+            "start": 2144,
+            "end": 2144
+          },
+          {
+            "start": 2150,
+            "end": 2399
+          },
+          {
+            "start": 2441,
+            "end": 2471
+          }
+        ],
+        "before_hash": "f89667b47f5c90b371dff52e9d1ba9e35a682768d9119abfa8f3ebba5febc7b5",
+        "after_hash": "f9b721314118de5133d70dbb5c1e603cd7eaf9793706c8522e918cd53fb52614"
+      },
+      {
+        "file": "backend/src/keys.rs",
+        "ranges": [
+          {
+            "start": 45,
+            "end": 50
+          },
+          {
+            "start": 54,
+            "end": 54
+          },
+          {
+            "start": 424,
+            "end": 426
+          },
+          {
+            "start": 452,
+            "end": 456
+          },
+          {
+            "start": 461,
+            "end": 461
+          }
+        ],
+        "before_hash": "390e36183f28378afc87f71583a77097995f712205e68167e815f1b961ee2fb6",
+        "after_hash": "d3133ea4b005ff0324506b2fc7262ac096d7f60604b708fd58ec3022c16b5362"
+      },
+      {
+        "file": "backend/src/model.rs",
+        "ranges": [
+          {
+            "start": 981,
+            "end": 981
+          },
+          {
+            "start": 990,
+            "end": 992
+          },
+          {
+            "start": 1963,
+            "end": 2028
+          },
+          {
+            "start": 2042,
+            "end": 2063
+          },
+          {
+            "start": 2066,
+            "end": 2066
+          }
+        ],
+        "before_hash": "df3b4fd4602edd839e5b06ae2bfa7dfb3ebde96ad9e6bb7b21de7a901dd3aa7a",
+        "after_hash": "85f616b0dd497fefd9c3f1a26d1a8de1f721ae86127dbfc2d420cf94fba55705"
+      },
+      {
+        "file": "backend/src/ssh.rs",
+        "ranges": [
+          {
+            "start": 114,
+            "end": 155
+          },
+          {
+            "start": 1671,
+            "end": 1679
+          },
+          {
+            "start": 1692,
+            "end": 1714
+          },
+          {
+            "start": 1729,
+            "end": 1748
+          },
+          {
+            "start": 4854,
+            "end": 4869
+          },
+          {
+            "start": 4891,
+            "end": 4899
+          },
+          {
+            "start": 4908,
+            "end": 4914
+          },
+          {
+            "start": 4933,
+            "end": 4968
+          },
+          {
+            "start": 4971,
+            "end": 4973
+          },
+          {
+            "start": 4978,
+            "end": 4978
+          },
+          {
+            "start": 4981,
+            "end": 4985
+          },
+          {
+            "start": 4993,
+            "end": 4995
+          },
+          {
+            "start": 4999,
+            "end": 5002
+          },
+          {
+            "start": 5004,
+            "end": 5031
+          },
+          {
+            "start": 5044,
+            "end": 5047
+          },
+          {
+            "start": 5135,
+            "end": 5145
+          },
+          {
+            "start": 5149,
+            "end": 5149
+          },
+          {
+            "start": 5187,
+            "end": 5187
+          },
+          {
+            "start": 5190,
+            "end": 5190
+          },
+          {
+            "start": 5214,
+            "end": 5222
+          },
+          {
+            "start": 5225,
+            "end": 5229
+          },
+          {
+            "start": 5234,
+            "end": 5234
+          },
+          {
+            "start": 6602,
+            "end": 7074
+          }
+        ],
+        "before_hash": "4a3acb2192ea1ccc847e5abd56ef186f8fa8a35d341f17a409d50e618bfff29b",
+        "after_hash": "17607a8301854f3696c2a8edb25d7d70f30a9a0ec68e61316fc6f3147300303e"
+      },
+      {
+        "file": "frontend/src/lib/i18n.ts",
+        "ranges": [
+          {
+            "start": 2265,
+            "end": 2271
+          }
+        ],
+        "before_hash": "cc8fdb528c70bc700f4b0b71fd8537e87841e99d4d525cedc88dd32131561fab",
+        "after_hash": "cc3d30fb970e99fe1da71c8155257585c2dec3083ab06a92c495dc65110b4087"
+      },
+      {
+        "file": "scripts/smoke_fs_test.py",
+        "ranges": [
+          {
+            "start": 562,
+            "end": 565
+          },
+          {
+            "start": 574,
+            "end": 575
+          }
+        ],
+        "before_hash": "ed85e77a8683cb0a44a1963ca6de1ea1f0594054b55b87da66499d6535635118",
+        "after_hash": "ebc650f33ad9555d91989fbeb65c415e01ed68ac53725decfbc8cb760b531e57"
+      },
+      {
+        "file": "scripts/smoke_login_mfa_test.py",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 501
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "0cf7793f721e98c020def23c83239a83535dfe75bd72d0a4ecdd23ba114dfa89"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-09-17T03:31:59.457Z",
+    "completed_at": "2026-09-17T03:32:01.887Z",
+    "duration_ms": 2430,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "partial/INCONCLUSIVE",
+    "latencyMs": 2430,
+    "peakMemoryBytes": 144572416,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 0,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_8e986391-5171-44ff-9620-ccff163f27b5-20260917T033201887Z-30739-c0a6872816a0.json",
+    "latest_report": ".mimosa/reports/task-review-sess_8e986391-5171-44ff-9620-ccff163f27b5.json",
+    "history_summary": ".mimosa/history/run-20260917T033201887Z-30739-c0a6872816a0.json"
+  }
+}
