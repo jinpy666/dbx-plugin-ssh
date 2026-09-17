@@ -230,7 +230,7 @@
           "label": "Sudo credentials",
           "type": "select",
           "binding": "config",
-          "default": "off",
+          "default": "custom",
           "options": [
             {
               "value": "custom",
@@ -245,7 +245,11 @@
               "label": "Off"
             }
           ],
-          "description": "Choose where sudo credentials come from: keep it Off unless this host needs sudo, then pick Custom (this connection) or a shared global Quick Sudo profile. Ignored for read-only connections. Off disables sudo credential handling; the 2FA field below still serves login-time MFA."
+          "description": "Choose where sudo credentials come from: keep it Off unless this host needs sudo, then pick Custom (this connection) or a shared global Quick Sudo profile. Ignored for read-only connections. Off disables sudo credential handling; the 2FA field below still serves login-time MFA.",
+          "group": {
+            "id": "sudo",
+            "label": "Sudo"
+          }
         },
         {
           "key": "sudo_profile",
@@ -259,7 +263,12 @@
               "global"
             ]
           },
-          "description": "Optional global Quick Sudo profile."
+          "description": "Optional global Quick Sudo profile.",
+          "options_style": "suggest",
+          "group": {
+            "id": "sudo",
+            "label": "Sudo"
+          }
         },
         {
           "key": "sudo_password",
@@ -272,7 +281,11 @@
               "custom"
             ]
           },
-          "description": "Password for sudo; empty reuses the login password."
+          "description": "Password for sudo; empty reuses the login password.",
+          "group": {
+            "id": "sudo",
+            "label": "Sudo"
+          }
         },
         {
           "key": "sudo_use_pty",
@@ -286,7 +299,11 @@
               "custom"
             ]
           },
-          "description": "Request a TTY for sudo prompts."
+          "description": "Request a TTY for sudo prompts.",
+          "group": {
+            "id": "sudo",
+            "label": "Sudo"
+          }
         },
         {
           "key": "sudo_whitelist",
@@ -301,7 +318,11 @@
               "global"
             ]
           },
-          "description": "Optional sudo command allowlist, one entry per line. Empty allows all commands."
+          "description": "Optional sudo command allowlist, one entry per line. Empty allows all commands.",
+          "group": {
+            "id": "sudo",
+            "label": "Sudo"
+          }
         },
         {
           "key": "auth_flow_mode",
@@ -334,7 +355,11 @@
               "label": "Password only"
             }
           ],
-          "description": "How login and sudo prompts handle OTP. Pick \"Password + OTP combined\" for hosts that ask for the code first or merge password and code into one prompt. Off never auto-answers OTP, so hosts that require MFA at login cannot sign in. Existing connections keep their saved mode."
+          "description": "How login and sudo prompts handle OTP. Pick \"Password + OTP combined\" for hosts that ask for the code first or merge password and code into one prompt. Off never auto-answers OTP, so hosts that require MFA at login cannot sign in. Existing connections keep their saved mode.",
+          "group": {
+            "id": "twofa",
+            "label": "2FA"
+          }
         },
         {
           "key": "totp_secret",
@@ -348,7 +373,11 @@
               "password_plus_otp"
             ]
           },
-          "description": "One per line: otpauth:// URI, base32 key, or static code. Used for sudo prompts and for login-time MFA (bastions that ask for a code over keyboard-interactive)."
+          "description": "One per line: otpauth:// URI, base32 key, or static code. Used for sudo prompts and for login-time MFA (bastions that ask for a code over keyboard-interactive).",
+          "group": {
+            "id": "twofa",
+            "label": "2FA"
+          }
         },
         {
           "key": "totp_prompt_hint",
@@ -362,28 +391,10 @@
               "password_plus_otp"
             ]
           },
-          "description": "Optional extra text for recognizing OTP prompts. Built-in patterns already cover common wording such as \"[OTP Code]\" or \"Please Enter MFA Code.\" — only add a hint when the server asks differently."
-        },
-        {
-          "key": "advanced_options",
-          "label": "Show advanced options",
-          "type": "boolean",
-          "binding": "config",
-          "default": false,
-          "description": "Show the less-used settings: timeouts, keepalive, environment, automatic replies, and read-only. Off by default."
-        },
-        {
-          "key": "read_only",
-          "label": "Read-only",
-          "type": "boolean",
-          "binding": "config",
-          "default": false,
-          "description": "Reject write operations on this connection.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
+          "description": "Optional extra text for recognizing OTP prompts. Built-in patterns already cover common wording such as \"[OTP Code]\" or \"Please Enter MFA Code.\" — only add a hint when the server asks differently.",
+          "group": {
+            "id": "twofa",
+            "label": "2FA"
           }
         },
         {
@@ -392,64 +403,16 @@
           "type": "text",
           "binding": "config",
           "visible_when": {
-            "all_of": [
-              {
-                "field": "advanced_options",
-                "one_of": [
-                  "true"
-                ]
-              },
-              {
-                "field": "sudo_source",
-                "one_of": [
-                  "custom",
-                  "off"
-                ]
-              }
+            "field": "sudo_source",
+            "one_of": [
+              "custom",
+              "off"
             ]
           },
-          "description": "Optional text for recognizing password prompts. OTP wording belongs in the OTP prompt field above — a hint filled here only ever matches password prompts."
-        },
-        {
-          "key": "connect_timeout_secs",
-          "label": "SSH timeout (seconds)",
-          "type": "number",
-          "binding": "config",
-          "default": 30,
-          "description": "SSH handshake and authentication timeout.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
-          }
-        },
-        {
-          "key": "keepalive_interval_secs",
-          "label": "SSH keepalive (seconds)",
-          "type": "number",
-          "binding": "config",
-          "default": 30,
-          "description": "SSH keepalive interval; 0 disables it.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
-          }
-        },
-        {
-          "key": "terminal_keepalive_secs",
-          "label": "Terminal keepalive (seconds)",
-          "type": "number",
-          "binding": "config",
-          "default": 0,
-          "description": "Terminal idle keepalive; 0 disables it.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
+          "description": "Optional text for recognizing password prompts. OTP wording belongs in the OTP prompt field above — a hint filled here only ever matches password prompts.",
+          "group": {
+            "id": "twofa",
+            "label": "2FA"
           }
         },
         {
@@ -460,11 +423,10 @@
           "default": "",
           "placeholder": "LANG=zh_CN.UTF-8",
           "description": "Optional KEY=VALUE entries sent on terminal, exec, and sudo channels.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
+          "group": {
+            "id": "terminal",
+            "label": "Terminal & automation",
+            "collapsed": true
           }
         },
         {
@@ -474,11 +436,10 @@
           "binding": "config",
           "default": false,
           "description": "Enable tssh/JSON Expect rules. Off by default; saved rules stay inactive.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
+          "group": {
+            "id": "terminal",
+            "label": "Terminal & automation",
+            "collapsed": true
           }
         },
         {
@@ -494,6 +455,11 @@
             "one_of": [
               "true"
             ]
+          },
+          "group": {
+            "id": "terminal",
+            "label": "Terminal & automation",
+            "collapsed": true
           }
         },
         {
@@ -507,6 +473,11 @@
             "one_of": [
               "true"
             ]
+          },
+          "group": {
+            "id": "terminal",
+            "label": "Terminal & automation",
+            "collapsed": true
           }
         },
         {
@@ -520,6 +491,11 @@
             "one_of": [
               "true"
             ]
+          },
+          "group": {
+            "id": "terminal",
+            "label": "Terminal & automation",
+            "collapsed": true
           }
         },
         {
@@ -529,11 +505,10 @@
           "binding": "config",
           "default": "",
           "description": "Local command to fetch a missing private-key passphrase. stdout minus one final newline is used. Runs with your user privileges.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
+          "group": {
+            "id": "terminal",
+            "label": "Terminal & automation",
+            "collapsed": true
           }
         },
         {
@@ -543,11 +518,62 @@
           "binding": "config",
           "default": "",
           "description": "Run instead of the shell when a terminal opens. Empty uses a normal shell.",
-          "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
-            ]
+          "group": {
+            "id": "terminal",
+            "label": "Terminal & automation",
+            "collapsed": true
+          }
+        },
+        {
+          "key": "read_only",
+          "label": "Read-only",
+          "type": "boolean",
+          "binding": "config",
+          "default": false,
+          "description": "Reject write operations on this connection.",
+          "group": {
+            "id": "limits",
+            "label": "Timeouts, keepalive & read-only",
+            "collapsed": true
+          }
+        },
+        {
+          "key": "connect_timeout_secs",
+          "label": "SSH timeout (seconds)",
+          "type": "number",
+          "binding": "config",
+          "default": 30,
+          "description": "SSH handshake and authentication timeout.",
+          "group": {
+            "id": "limits",
+            "label": "Timeouts, keepalive & read-only",
+            "collapsed": true
+          }
+        },
+        {
+          "key": "keepalive_interval_secs",
+          "label": "SSH keepalive (seconds)",
+          "type": "number",
+          "binding": "config",
+          "default": 30,
+          "description": "SSH keepalive interval; 0 disables it.",
+          "group": {
+            "id": "limits",
+            "label": "Timeouts, keepalive & read-only",
+            "collapsed": true
+          }
+        },
+        {
+          "key": "terminal_keepalive_secs",
+          "label": "Terminal keepalive (seconds)",
+          "type": "number",
+          "binding": "config",
+          "default": 0,
+          "description": "Terminal idle keepalive; 0 disables it.",
+          "group": {
+            "id": "limits",
+            "label": "Timeouts, keepalive & read-only",
+            "collapsed": true
           }
         }
       ],
@@ -759,16 +785,26 @@
             "triggers_enabled": {
               "label": "Activar respuestas automáticas",
               "description": "Activa reglas Expect de tssh/JSON. Desactivado por defecto; las reglas guardadas permanecen inactivas."
-            },
-            "advanced_options": {
-              "label": "Mostrar opciones avanzadas",
-              "description": "Muestra los ajustes menos usados: tiempos de espera, keepalive, entorno, respuestas automáticas y solo lectura. Desactivado por defecto."
             }
           },
           "actions": {
             "quick-sudo-profiles": {
               "label": "Perfiles Quick Sudo globales",
               "description": "Muestra los perfiles Quick Sudo globales y el enlace de esta conexión."
+            }
+          },
+          "groups": {
+            "sudo": {
+              "label": "Credenciales sudo"
+            },
+            "twofa": {
+              "label": "2FA"
+            },
+            "terminal": {
+              "label": "Terminal y automatización"
+            },
+            "limits": {
+              "label": "Tiempos de espera, keepalive y solo lectura"
             }
           }
         },
@@ -938,16 +974,26 @@
             "triggers_enabled": {
               "label": "Abilita risposte automatiche",
               "description": "Abilita regole Expect tssh/JSON. Disattivato per impostazione predefinita; le regole salvate restano inattive."
-            },
-            "advanced_options": {
-              "label": "Mostra opzioni avanzate",
-              "description": "Mostra le impostazioni meno usate: timeout, keepalive, ambiente, risposte automatiche e sola lettura. Disattivato per impostazione predefinita."
             }
           },
           "actions": {
             "quick-sudo-profiles": {
               "label": "Profili Quick Sudo globali",
               "description": "Mostra i profili Quick Sudo globali e il collegamento di questa connessione."
+            }
+          },
+          "groups": {
+            "sudo": {
+              "label": "Credenziali sudo"
+            },
+            "twofa": {
+              "label": "2FA"
+            },
+            "terminal": {
+              "label": "Terminale e automazione"
+            },
+            "limits": {
+              "label": "Timeout, keepalive e sola lettura"
             }
           }
         },
@@ -1117,16 +1163,26 @@
             "triggers_enabled": {
               "label": "自動応答を有効化",
               "description": "tssh/JSON Expect ルールを有効にします。既定はオフで、保存済みルールも実行しません。"
-            },
-            "advanced_options": {
-              "label": "詳細オプションを表示",
-              "description": "タイムアウト・keepalive・環境変数・自動応答・読み取り専用などの詳細設定を表示します。既定はオフです。"
             }
           },
           "actions": {
             "quick-sudo-profiles": {
               "label": "グローバル Quick Sudo プロファイル",
               "description": "グローバル Quick Sudo プロファイルとこの接続の紐付けを表示します。"
+            }
+          },
+          "groups": {
+            "sudo": {
+              "label": "sudo 認証情報"
+            },
+            "twofa": {
+              "label": "2FA"
+            },
+            "terminal": {
+              "label": "ターミナルと自動化"
+            },
+            "limits": {
+              "label": "タイムアウト・keepalive・読み取り専用"
             }
           }
         },
@@ -1296,16 +1352,26 @@
             "triggers_enabled": {
               "label": "Ativar respostas automáticas",
               "description": "Ativa regras Expect de tssh/JSON. Desativado por padrão; regras salvas ficam inativas."
-            },
-            "advanced_options": {
-              "label": "Mostrar opções avançadas",
-              "description": "Mostra as configurações menos usadas: tempos limite, keepalive, ambiente, respostas automáticas e somente leitura. Desativado por padrão."
             }
           },
           "actions": {
             "quick-sudo-profiles": {
               "label": "Perfis Quick Sudo globais",
               "description": "Mostra os perfis Quick Sudo globais e o vínculo desta conexão."
+            }
+          },
+          "groups": {
+            "sudo": {
+              "label": "Credenciais sudo"
+            },
+            "twofa": {
+              "label": "2FA"
+            },
+            "terminal": {
+              "label": "Terminal e automação"
+            },
+            "limits": {
+              "label": "Tempos limite, keepalive e somente leitura"
             }
           }
         },
@@ -1475,16 +1541,26 @@
             "triggers_enabled": {
               "label": "启用自动应答",
               "description": "启用 tssh/JSON Expect 规则。默认关闭，已保存规则不会运行。"
-            },
-            "advanced_options": {
-              "label": "显示高级选项",
-              "description": "显示超时、保活、环境变量、自动应答与只读等进阶设置，默认关闭。"
             }
           },
           "actions": {
             "quick-sudo-profiles": {
               "label": "全局 Quick Sudo 配置",
               "description": "查看共享的全局 Quick Sudo 配置及本连接的绑定状态。"
+            }
+          },
+          "groups": {
+            "sudo": {
+              "label": "Sudo 凭据"
+            },
+            "twofa": {
+              "label": "2FA"
+            },
+            "terminal": {
+              "label": "终端与自动化"
+            },
+            "limits": {
+              "label": "超时、保活与只读"
             }
           }
         },
@@ -1654,16 +1730,26 @@
             "triggers_enabled": {
               "label": "啟用自動回應",
               "description": "啟用 tssh/JSON Expect 規則。預設關閉，已儲存規則不會執行。"
-            },
-            "advanced_options": {
-              "label": "顯示進階選項",
-              "description": "顯示逾時、保活、環境變數、自動應答與唯讀等進階設定，預設關閉。"
             }
           },
           "actions": {
             "quick-sudo-profiles": {
               "label": "全域 Quick Sudo 設定",
               "description": "檢視共用的全域 Quick Sudo 設定及本連線的綁定狀態。"
+            }
+          },
+          "groups": {
+            "sudo": {
+              "label": "Sudo 憑據"
+            },
+            "twofa": {
+              "label": "2FA"
+            },
+            "terminal": {
+              "label": "終端與自動化"
+            },
+            "limits": {
+              "label": "逾時、保活與唯讀"
             }
           }
         },

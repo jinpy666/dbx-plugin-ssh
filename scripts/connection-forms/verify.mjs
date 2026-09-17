@@ -122,49 +122,68 @@ function state(overrides) {
   };
 }
 
-assert.equal(byKey.advanced_options.type, "boolean");
-assert.equal(byKey.advanced_options.binding, "config");
-assert.equal(byKey.advanced_options.default, false, "advanced_options: must default to off");
-const advancedFields = [
-  "connect_timeout_secs", "keepalive_interval_secs",
-  "terminal_keepalive_secs", "set_env", "triggers_enabled",
-  "passphrase_command", "remote_command", "read_only",
-];
-for (const key of advancedFields) {
-  assert.deepEqual(byKey[key].visible_when, { field: "advanced_options", one_of: ["true"] },
-    `${key}: must be gated by advanced_options`);
+// The form is organized by collapsible sections (`group`, host-side
+// capability): no field hides behind a global "show advanced" switch any more,
+// because that switch is exactly what made bastion/MFA setup undiscoverable
+// (issues #17/#30) and what forced a 30-field wall once it was on.
+assert.equal(byKey.advanced_options, undefined, "the global advanced_options switch must stay retired");
+const SECTION_MEMBERS = {
+  sudo: ["sudo_source", "sudo_profile", "sudo_password", "sudo_use_pty", "sudo_whitelist"],
+  twofa: ["auth_flow_mode", "totp_secret", "totp_prompt_hint", "password_prompt_hint"],
+  terminal: ["set_env", "triggers_enabled", "triggers", "trigger_answer_1", "trigger_answer_2", "passphrase_command", "remote_command"],
+  limits: ["read_only", "connect_timeout_secs", "keepalive_interval_secs", "terminal_keepalive_secs"],
+};
+const sectionState = new Map();
+for (const [sectionId, keys] of Object.entries(SECTION_MEMBERS)) {
+  let collapsed;
+  for (const key of keys) {
+    const group = byKey[key].group;
+    assert(group, `${key}: must belong to the '${sectionId}' section`);
+    assert.equal(group.id, sectionId, `${key}: wrong section`);
+    assert(group.label?.trim(), `${key}: section label required`);
+    const fieldCollapsed = group.collapsed === true;
+    collapsed ??= fieldCollapsed;
+    assert.equal(fieldCollapsed, collapsed, `${key}: every field of '${sectionId}' must agree on 'collapsed'`);
+  }
+  sectionState.set(sectionId, collapsed);
 }
-// Sudo and 2FA are first-class entry points, not advanced trivia: hiding them
-// behind the switch is what made bastion/MFA setup undiscoverable (issues #17
-// and #30 - users could not find the TOTP field and gave up). Their *detail*
-// fields still open on demand, so the default form only gains two rows.
-assert.equal(byKey.sudo_source.visible_when, undefined, "sudo_source must stay visible without the advanced switch");
-assert.equal(byKey.sudo_source.default, "off", "sudo_source must default to Off so a new connection stays short");
+// Operational sections open by default; the rarely touched ones start folded
+// and still report their filled-field count in the heading.
+assert.equal(sectionState.get("sudo"), false, "the sudo section must start expanded");
+assert.equal(sectionState.get("twofa"), false, "the 2FA section must start expanded");
+assert.equal(sectionState.get("terminal"), true, "the terminal/automation section must start collapsed");
+assert.equal(sectionState.get("limits"), true, "the timeouts/read-only section must start collapsed");
+// Section headings are localized by id in every locale.
+for (const locale of locales) {
+  for (const sectionId of Object.keys(SECTION_MEMBERS)) {
+    const localized = manifest.localizations[locale]?.contributions?.[provider.id]?.groups?.[sectionId]?.label
+      ?? (locale === "en" ? byKey[SECTION_MEMBERS[sectionId][0]].group.label : undefined);
+    assert(localized?.trim(), `${locale}/${sectionId}: missing section label`);
+  }
+}
+// Sudo and 2FA stay first-class: their entry points are visible without any
+// switch, and only their detail fields open on demand.
+assert.equal(byKey.sudo_source.visible_when, undefined, "sudo_source must stay visible");
+// The default stays `custom`: an empty sudo password is *not* a no-op — the
+// sidecar falls back to the login password, so `custom` is the historical
+// "answer sudo prompts with my login password" default. Flipping it to `off`
+// here would silently disable that for every new connection.
+assert.equal(byKey.sudo_source.default, "custom", "sudo_source must keep its behaviour-preserving default");
 assert.deepEqual(byKey.auth_flow_mode.visible_when, { field: "sudo_source", one_of: ["custom", "off"] },
   "auth_flow_mode (2FA) must stay visible whenever sudo does not defer to a global profile");
-// Field order is the form's information architecture: the switch must sit
-// *below* the always-visible sudo/2FA rows, so it reads as "the settings below
-// this switch are optional" instead of implying sudo/2FA are optional extras.
-assert(fields.indexOf(byKey.advanced_options) > fields.indexOf(byKey.auth_flow_mode),
-  "advanced_options must be declared after the sudo/2FA block");
-assert(fields.indexOf(byKey.advanced_options) > fields.indexOf(byKey.totp_prompt_hint),
-  "advanced_options must be declared after the 2FA block it no longer gates");
-// The fine-tuning hint stays an advanced field: it only ever matters once the
-// server's prompt wording is unusual.
-assert.deepEqual(byKey.password_prompt_hint.visible_when, {
-  all_of: [
-    { field: "advanced_options", one_of: ["true"] },
-    { field: "sudo_source", one_of: ["custom", "off"] },
-  ],
-}, "password_prompt_hint must stay behind the advanced switch");
+assert.deepEqual(byKey.password_prompt_hint.visible_when, { field: "sudo_source", one_of: ["custom", "off"] },
+  "password_prompt_hint follows the sudo source, not a retired switch");
+// The global Quick Sudo picker must stay typable: `suggest` keeps the text
+// input and adds the fetched profile list instead of replacing it.
+assert.equal(byKey.sudo_profile.options_action, "sudo/profiles/options");
+assert.equal(byKey.sudo_profile.options_style, "suggest", "sudo_profile must offer input + suggestions");
 
-for (const advanced_options of [false, true]) {
-  for (const authentication of options("authentication")) {
-    for (const password_source of options("password_source")) {
-      for (const sudo_source of options("sudo_source")) {
-        for (const auth_flow_mode of options("auth_flow_mode")) {
-          for (const read_only of [false, true]) {
-            const current = state({ advanced_options, authentication, password_source, sudo_source, auth_flow_mode, read_only });
+for (const authentication of options("authentication")) {
+  for (const password_source of options("password_source")) {
+    for (const sudo_source of options("sudo_source")) {
+      for (const auth_flow_mode of options("auth_flow_mode")) {
+        for (const read_only of [false, true]) {
+            const current = state({ authentication, password_source, sudo_source, auth_flow_mode, read_only });
             const passwordAuth = ["password", "private-key-password"].includes(authentication);
             const privateKey = ["private-key", "private-key-password"].includes(authentication);
             // The login password is an explicit either-or: "Enter in this form"
@@ -186,11 +205,11 @@ for (const advanced_options of [false, true]) {
             current.visible("agent_socket", authentication === "agent");
             // Sudo details follow their source only. The obvious extra rule -
             // "hide them on read-only connections" - cannot be expressed while
-            // `read_only` itself sits behind `advanced_options`: the host's `not`
-            // requires every operand to be *visible*, so `not read_only` would
-            // evaluate false whenever the advanced switch is off and the sudo
-            // block would never show. The read-only interaction therefore stays
-            // in the field description ("ignored for read-only connections").
+            // `read_only` is itself conditional: the host's `not` requires every
+            // operand to be *visible*, so `not read_only` evaluates false
+            // whenever the operand is hidden and the block would never show. The
+            // read-only interaction therefore stays in the field description
+            // ("ignored for read-only connections").
             current.visible("sudo_source", true);
             current.visible("sudo_password", sudo_source === "custom");
             current.visible("sudo_profile", sudo_source === "global");
@@ -202,12 +221,14 @@ for (const advanced_options of [false, true]) {
             const answersOtp = ["password_then_otp", "password_plus_otp"].includes(auth_flow_mode);
             current.visible("totp_secret", sudo_source !== "global" && answersOtp);
             current.visible("totp_prompt_hint", sudo_source !== "global" && answersOtp);
-            current.visible("password_prompt_hint", advanced_options && sudo_source !== "global");
-            current.visible("triggers_enabled", advanced_options);
-            current.visible("passphrase_command", advanced_options);
-            current.visible("remote_command", advanced_options);
-            current.visible("read_only", advanced_options);
-          }
+            current.visible("password_prompt_hint", sudo_source !== "global");
+            // Sections replaced the global switch: these fields are always
+            // rendered, just folded away until the user opens their section.
+            current.visible("triggers_enabled", true);
+            current.visible("passphrase_command", true);
+            current.visible("remote_command", true);
+            current.visible("read_only", true);
+            current.visible("connect_timeout_secs", true);
         }
       }
     }
@@ -331,7 +352,7 @@ assert(
   `engines.dbx must stay a plain '>=x.y.z' floor (got '${dbxFloor}')`,
 );
 console.log(
-  `NOTE SSH connection form: 'picker' only parses on hosts that ship it — raise engines.dbx (currently ${dbxFloor}) to that release in the release commit.`,
+  `NOTE SSH connection form: 'picker', 'group' and 'options_style' only parse on hosts that ship them — raise engines.dbx (currently ${dbxFloor}) to that release in the release commit.`,
 );
 // Both halves of the either-or must keep pointing at each other in every
 // locale: the file action only makes sense if the text also names where an
@@ -397,20 +418,21 @@ for (const key of TRIGGER_FIELDS) {
     assert(localized?.description?.trim(), `${locale}/${key}: missing description`);
   }
 }
-state({ advanced_options: false, triggers_enabled: false }).visible("triggers", false);
-state({ advanced_options: false, triggers_enabled: false }).visible("trigger_answer_1", false);
-state({ advanced_options: false, triggers_enabled: false }).visible("trigger_answer_2", false);
-state({ advanced_options: true, triggers_enabled: false }).visible("triggers", false);
-state({ advanced_options: true, triggers_enabled: false }).visible("trigger_answer_1", false);
-state({ advanced_options: true, triggers_enabled: false }).visible("trigger_answer_2", false);
-state({ advanced_options: true, triggers_enabled: true }).visible("triggers", true);
-state({ advanced_options: true, triggers_enabled: true }).visible("trigger_answer_1", true);
-state({ advanced_options: true, triggers_enabled: true }).visible("trigger_answer_2", true);
-state({ advanced_options: false }).visible("passphrase_command", false);
-state({ advanced_options: true }).visible("passphrase_command", true);
-// Password command lives in the credential block now: it is driven by the
-// password source and no longer by the advanced switch.
-state({ advanced_options: false, authentication: "password", password_source: "command" }).visible("password_command", true);
-state({ advanced_options: false, authentication: "password", password_source: "direct" }).visible("password_command", false);
-state({ advanced_options: false, authentication: "private-key", password_source: "command" }).visible("password_command", false);
+state({ triggers_enabled: false }).visible("triggers", false);
+state({ triggers_enabled: false }).visible("trigger_answer_1", false);
+state({ triggers_enabled: false }).visible("trigger_answer_2", false);
+state({ triggers_enabled: true }).visible("triggers", true);
+state({ triggers_enabled: true }).visible("trigger_answer_1", true);
+state({ triggers_enabled: true }).visible("trigger_answer_2", true);
+// The section folding is a rendering concern; the fields themselves are always
+// part of the form, so only their own conditions hide them.
+state({}).visible("passphrase_command", true);
+state({}).visible("set_env", true);
+state({}).visible("remote_command", true);
+state({}).visible("read_only", true);
+// Password command lives in the credential block: it is driven by the password
+// source, never by a global switch.
+state({ authentication: "password", password_source: "command" }).visible("password_command", true);
+state({ authentication: "password", password_source: "direct" }).visible("password_command", false);
+state({ authentication: "private-key", password_source: "command" }).visible("password_command", false);
 console.log(`PASS SSH connection form: ${scenarios} combinations; field ordering and seven-language labels/options`);

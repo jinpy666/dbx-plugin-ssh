@@ -371,10 +371,6 @@ impl StoredConnection {
             .map(|secrets| credential_string(secrets, "private_key_passphrase"))
             .unwrap_or_default();
         let agent_socket = optional_string(external_config, "agent_socket");
-        let _advanced_options = external_config
-            .and_then(|config| config.get("advanced_options"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         // sudo_password 是凭据：原样读取（首尾空格合法），空白语义由
         // SudoAuth::new 的「空白即回退登录密码」兜底，不在解析层改写。
         let sudo_password = connection_secrets
@@ -974,7 +970,6 @@ mod tests {
             "private_key_passphrase",
             "private_key",
             "agent_socket",
-            "advanced_options",
             "sudo_source",
             "sudo_profile",
             "sudo_password",
@@ -984,9 +979,6 @@ mod tests {
             "totp_secret",
             "totp_prompt_hint",
             "password_prompt_hint",
-            "connect_timeout_secs",
-            "keepalive_interval_secs",
-            "terminal_keepalive_secs",
             "set_env",
             "triggers_enabled",
             "triggers",
@@ -995,6 +987,9 @@ mod tests {
             "passphrase_command",
             "remote_command",
             "read_only",
+            "connect_timeout_secs",
+            "keepalive_interval_secs",
+            "terminal_keepalive_secs",
         ];
         assert_eq!(keys, expected, "manifest field list drifted from parsing");
 
@@ -1965,87 +1960,72 @@ mod manifest_contract_tests {
         let mut blocked_without_rejection = 0usize;
         let mut blocked_samples: Vec<String> = Vec::new();
         let mut unexplained_rejections: Vec<String> = Vec::new();
-        for advanced_options in [false, true] {
-            for authentication in [
-                "password",
-                "private-key",
-                "private-key-password",
-                "agent",
-                "none",
-            ] {
-                for sudo_source in ["custom", "global", "off"] {
-                    for auth_flow_mode in [
-                        "off",
-                        "password_then_otp",
-                        "password_plus_otp",
-                        "password_only",
-                    ] {
-                        for read_only in [false, true] {
-                            for triggers_enabled in [false, true] {
-                                for password in ["", "secret"] {
-                                    for password_command in ["", "echo pw"] {
-                                        for password_source in ["direct", "command"] {
-                                            for private_key_path in ["", "~/.ssh/id_ed25519"] {
-                                                for private_key in [
-                                                    "",
-                                                    "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n",
-                                                ] {
-                                                    for private_key_passphrase in ["", "phrase"] {
-                                                        let mut values = defaults.clone();
-                                                        for (key, value) in [
-                                                            (
-                                                                "advanced_options",
-                                                                json!(advanced_options),
-                                                            ),
-                                                            (
-                                                                "authentication",
-                                                                json!(authentication),
-                                                            ),
-                                                            ("sudo_source", json!(sudo_source)),
-                                                            (
-                                                                "auth_flow_mode",
-                                                                json!(auth_flow_mode),
-                                                            ),
-                                                            ("read_only", json!(read_only)),
-                                                            (
-                                                                "triggers_enabled",
-                                                                json!(triggers_enabled),
-                                                            ),
-                                                            ("password", json!(password)),
-                                                            (
-                                                                "password_command",
-                                                                json!(password_command),
-                                                            ),
-                                                            (
-                                                                "password_source",
-                                                                json!(password_source),
-                                                            ),
-                                                            (
-                                                                "private_key_path",
-                                                                json!(private_key_path),
-                                                            ),
-                                                            ("private_key", json!(private_key)),
-                                                            (
-                                                                "private_key_passphrase",
-                                                                json!(private_key_passphrase),
-                                                            ),
-                                                        ] {
-                                                            values.insert(key.to_string(), value);
-                                                        }
-                                                        cases += 1;
-                                                        let blocked =
-                                                            form_blocking_field(&fields, &values);
-                                                        let payload =
-                                                            connection_payload(&fields, &values);
-                                                        let parsed =
-                                                            StoredConnection::from_lifecycle_params(
-                                                                &json!({ "connection": payload }),
-                                                            );
-                                                        match (&blocked, &parsed) {
-                                                            (Some(key), Ok(_)) => {
-                                                                blocked_without_rejection += 1;
-                                                                if blocked_samples.len() < 4 {
-                                                                    blocked_samples.push(format!(
+        for authentication in [
+            "password",
+            "private-key",
+            "private-key-password",
+            "agent",
+            "none",
+        ] {
+            for sudo_source in ["custom", "global", "off"] {
+                for auth_flow_mode in [
+                    "off",
+                    "password_then_otp",
+                    "password_plus_otp",
+                    "password_only",
+                ] {
+                    for read_only in [false, true] {
+                        for triggers_enabled in [false, true] {
+                            for password in ["", "secret"] {
+                                for password_command in ["", "echo pw"] {
+                                    for password_source in ["direct", "command"] {
+                                        for private_key_path in ["", "~/.ssh/id_ed25519"] {
+                                            for private_key in
+                                                ["", "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n"]
+                                            {
+                                                for private_key_passphrase in ["", "phrase"] {
+                                                    let mut values = defaults.clone();
+                                                    for (key, value) in [
+                                                        ("authentication", json!(authentication)),
+                                                        ("sudo_source", json!(sudo_source)),
+                                                        ("auth_flow_mode", json!(auth_flow_mode)),
+                                                        ("read_only", json!(read_only)),
+                                                        (
+                                                            "triggers_enabled",
+                                                            json!(triggers_enabled),
+                                                        ),
+                                                        ("password", json!(password)),
+                                                        (
+                                                            "password_command",
+                                                            json!(password_command),
+                                                        ),
+                                                        ("password_source", json!(password_source)),
+                                                        (
+                                                            "private_key_path",
+                                                            json!(private_key_path),
+                                                        ),
+                                                        ("private_key", json!(private_key)),
+                                                        (
+                                                            "private_key_passphrase",
+                                                            json!(private_key_passphrase),
+                                                        ),
+                                                    ] {
+                                                        values.insert(key.to_string(), value);
+                                                    }
+                                                    cases += 1;
+                                                    let blocked =
+                                                        form_blocking_field(&fields, &values);
+                                                    let payload =
+                                                        connection_payload(&fields, &values);
+                                                    let parsed =
+                                                        StoredConnection::from_lifecycle_params(
+                                                            &json!({ "connection": payload }),
+                                                        );
+                                                    match (&blocked, &parsed) {
+                                                        (Some(key), Ok(_)) => {
+                                                            blocked_without_rejection += 1;
+                                                            if blocked_samples.len() < 4 {
+                                                                blocked_samples.push(format!(
                                                                     "{key}: authentication={authentication} \
                                                                      password={password:?} \
                                                                      password_command={password_command:?} \
@@ -2058,34 +2038,32 @@ mod manifest_contract_tests {
                                                                         "<key>"
                                                                     }
                                                                 ));
-                                                                }
                                                             }
-                                                            (None, Err(error)) => {
-                                                                let lower = error.to_lowercase();
-                                                                // The message has to name the form
-                                                                // fields that satisfy the rule, so a
-                                                                // rejection is never a dead end.
-                                                                let actionable = (lower
-                                                                    .contains("\"password\"")
-                                                                    && lower.contains(
-                                                                        "\"password command\"",
-                                                                    ))
-                                                                    || (lower.contains(
-                                                                        "\"private key path\"",
-                                                                    ) && lower.contains(
-                                                                        "\"private key content\"",
-                                                                    ))
-                                                                    || lower.contains("ssh port");
-                                                                if !actionable
-                                                                    && unexplained_rejections.len()
-                                                                        < 4
-                                                                {
-                                                                    unexplained_rejections
-                                                                        .push(error.clone());
-                                                                }
-                                                            }
-                                                            _ => {}
                                                         }
+                                                        (None, Err(error)) => {
+                                                            let lower = error.to_lowercase();
+                                                            // The message has to name the form
+                                                            // fields that satisfy the rule, so a
+                                                            // rejection is never a dead end.
+                                                            let actionable = (lower
+                                                                .contains("\"password\"")
+                                                                && lower.contains(
+                                                                    "\"password command\"",
+                                                                ))
+                                                                || (lower.contains(
+                                                                    "\"private key path\"",
+                                                                ) && lower.contains(
+                                                                    "\"private key content\"",
+                                                                ))
+                                                                || lower.contains("ssh port");
+                                                            if !actionable
+                                                                && unexplained_rejections.len() < 4
+                                                            {
+                                                                unexplained_rejections
+                                                                    .push(error.clone());
+                                                            }
+                                                        }
+                                                        _ => {}
                                                     }
                                                 }
                                             }
@@ -2098,7 +2076,6 @@ mod manifest_contract_tests {
                 }
             }
         }
-
         assert_eq!(
             blocked_without_rejection, 0,
             "the dialog blocks {blocked_without_rejection} configuration(s) the parser accepts \
@@ -2695,7 +2672,6 @@ mod manifest_contract_tests {
             "authentication",
             "private_key_path",
             "agent_socket",
-            "advanced_options",
             "connect_timeout_secs",
             "keepalive_interval_secs",
             "terminal_keepalive_secs",

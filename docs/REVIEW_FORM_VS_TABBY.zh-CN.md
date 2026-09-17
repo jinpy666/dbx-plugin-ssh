@@ -46,6 +46,14 @@
    也改成列出内容。顺带确认：宿主已支持 `all_of`/`any_of`/`not` 复合条件，
    但 `not` 要求操作数本身**可见**，所以"只读连接隐藏 sudo 明细"这类规则在
    `read_only` 仍属高级字段时表达不出来（求值恒为假），继续以字段说明兜底。
+   **2026-09-17 第四轮（宿主分组能力落地后）**：`advanced_options` 全局开关
+   正式退役——宿主新增字段级 `group`（可折叠分区，标题常显、带已填计数）与
+   `options_style: "suggest"`（输入 + 建议，用于"全局 Quick Sudo 配置"这类
+   既可手输又可选的字段）。表单改为四分区：Sudo 凭据 / 2FA（默认展开）、
+   终端与自动化 / 超时·保活·只读（默认折叠）；`sudo_source` 默认值刻意保持
+   `custom`——空 sudo 密码会回退登录密码，改默认等于静默关掉"用登录密码应答
+   sudo 提示"，所以只改展示不改行为。字段排版问题（P3-7「21 字段平铺无分组」）
+   至此由宿主契约解决，不再需要短期文案合并的权宜手段。
 
 ### P2 功能缺口（对标差距）
 
@@ -147,9 +155,8 @@
    忽略 `required_when`，与本契约声明的行为不符。
 5. **回归网**：新增 `model.rs` 契约测试
    `form_save_state_matches_parser_acceptance`——按宿主语义穷举
-   advanced_options × authentication × password_source × sudo_source ×
-   auth_flow_mode × read_only × triggers_enabled × 六种凭据取值（30,720
-   组合），断言
+   authentication × password_source × sudo_source × auth_flow_mode ×
+   read_only × triggers_enabled × 六种凭据取值，断言
    「表单拦下 ⇒ 解析层也必须拒绝」（否则就是死锁）且「表单放行而解析层拒绝 ⇒
    报错必须点名表单字段」；`credential_requirements_are_form_satisfiable`
    锁住"凭据不得静态必填、必填必须挂在用户可切换的选择器上"；
