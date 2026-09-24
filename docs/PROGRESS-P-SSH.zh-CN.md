@@ -3411,3 +3411,20 @@ Permissions Policy 拒绝 `navigator.clipboard.readText`），读链必然断，
 应用复制粘贴）仍受宿主沙箱限制——写链靠 execCommand 兜底（未在真机证
 实），读链无解（Ctrl/Cmd+V 原生 paste 事件不受影响）；宿主侧若未来提供
 clipboard Host API，`clipboardDeps()` 无需改动即可接管。
+
+### §8.18 闭环：宿主剪贴板读取桥（t8y2/dbx#10155）已合并，插件声明 host.clipboard:read（2026-09-24）
+
+宿主侧 PR #10155（Host API 1.3：`host.clipboardRead` 桥 + `window.dbxPlugin.clipboard`
+命名空间 + 首次读取会话确认 + 每秒限流 + 200 条审计环 + 真实权限字符串 UI 展示）
+已由维护者 t8y2 合入上游 main。
+
+插件侧完成对接声明：
+- `manifest.json`：`permissions` 增加 `host.clipboard:read`，使沙箱工作台
+  在支持 Host API 1.3 的宿主上能够通过宿主桥直接读取系统剪贴板（跨应用
+  复制文本后可在终端右键直接粘贴）；
+- `frontend/src/env.d.ts`：`capabilities` 增加 `clipboardRead` 与
+  `clipboardWrite` 可选布尔位说明；
+- §8.17 引入的「插件视图复制副本」作为天然降级保留：未授权、读取被用户
+  拒绝、或运行在 Host API < 1.3 的旧宿主时，右键粘贴仍能粘贴终端内复制的
+  文本，实现两层保护。
+- `ui/index.html` 重新生成，本地验证全绿。
