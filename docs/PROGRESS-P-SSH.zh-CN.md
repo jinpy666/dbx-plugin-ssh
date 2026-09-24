@@ -3672,3 +3672,11 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **np9 并发线 ✅ 合入**：telnet-autologin（dab496b，声明式正则自动登录）、import-formats（34fd7b1，SecureCRT/FinalShell/Electerm/Termius 四解析器）、startup-commands（b673496，连接级启动命令 sidecar 偏好 + open_session 注入，remote_command 语义冲突已文档化）、docs-sync（48a29b7，NetCatty 对标/COMPARISON/候选缺口登记）。
 - **集成修复**：warp-ghost 合入的 SettingsDialog/i18n 共享闭合括号错位（两线 load 函数共用冲突块外 `}`）手工重排修复；pluginStore/spec 断言双键并保。
 - **全量**：frontend vitest **960**（91→95 文件，基线 901 只增不减：ghost 26 + spec/telnet/startup/import 各线 spec 并入）/ vue-tsc 0 / build 过（ui/ 重生成）；backend cargo **745**（startup_commands 并入后全绿）/ fmt 干净 / clippy 0。
+
+
+## M7 进度（三）（2026-09-25）
+
+- **serial-xymodem ✅ 合入**（8356403，merge 两处追加型冲突：i18n 双键块拼接 + PROTOCOL 表行并档；修复拼接时被冲突标记吞掉的 terminalGhost 合并循环闭合括号）：串口 XMODEM/YMODEM/ZMODEM 纯状态机（~1300 行，可注入时钟单测；ZDATA 保守单 ZCRCW 子包、ZRPOS 续传、ZSKIP/CAN 取消），serial/upload/start|data|cancel + progress 事件，前端 File API 流式分块（≤64KiB，总量 ≤256MiB）+ 弹窗/进度 overlay/传输中吞键入，七语。backend +35 / frontend +15；PTY 回环因 serialport-rs ENOTTY 记 SKIP（协议语义由进程内喂字节单测覆盖），smoke 5 PASS / 2 SKIP。
+- **并入确认**：warp 线 1（np8-warp-ghost 行内 ghost 建议）已由并行会话先行合入（terminalGhost 文案块在案），本次 merge 基于其上。
+- **全量（六线合并后）**：backend cargo **801**（基线 735）/ clippy 0 / fmt 干净；frontend vitest **975**（97 文件，基线 891）/ vue-tsc 0 / build 过（ui/ 重生成）。
+- **在途**：np8-e2e（walkthrough 修复）。M7 剩余：全量数字随最后一线上升后做终收口。
