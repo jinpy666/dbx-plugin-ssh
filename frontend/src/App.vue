@@ -155,6 +155,7 @@ import { advanceBatchProgress, batchProgressPercent, createBatchProgress, type B
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
 import { sanitizeCommandOutput } from "./lib/terminalOutputText";
 import { normalizeTerminalInputBytes } from "./lib/terminalInput";
+import { registerTerminalModeQueryHandlers } from "./lib/terminalModeQueries";
 import { installMacWebkitInputFallback } from "./lib/terminalWebkitInput";
 import { looksBinary } from "./lib/textSniff";
 import { formatBytes, formatRate } from "./lib/format";
@@ -889,6 +890,10 @@ let searchAddon: SearchAddon | undefined;
 // 时重挂，终端销毁时统一释放；OSC 52 只在 createTerminal 挂一次。
 let oscColorQueryDisposables: { dispose(): void }[] = [];
 let osc52Disposable: { dispose(): void } | undefined;
+// CSI 能力查询应答（kitty 键盘协议 / XTVERSION / DECRQM）：claude code 等
+// TUI 启动时探测并等待应答；xterm 内核对 `CSI ? u` 静默吞掉不回、XTVERSION
+// 无 handler，TUI 卡在 raw-mode 初始化——表现为"卡住、键盘没反应"。
+let modeQueryDisposables: { dispose(): void }[] = [];
 // 主题色解析失败时颜色查询的兜底应答（深色系常规值，仅在宿主下发非法颜色时触达）。
 const OSC_COLOR_FALLBACK = { foreground: "#c9d1d9", background: "#0d1117" };
 let terminalPasteHandler: ((event: ClipboardEvent) => void) | undefined;
@@ -1032,7 +1037,7 @@ const connectionId = computed(() => normalizeConnectionText(hostContext.value.co
 // locally generated id keeps session scoping per workbench instance (A4 W1
 // helper, spec §11: host-authoritative workbenchId; the fallback covers 1.0
 // hosts that omit the injection — see lib/pluginContext.spec.ts).
-const fallbackWorkbenchId = crypto.randomUUID();
+const fallbackWorkbenchId = randomUUID();
 const workbenchId = computed(() => resolveWorkbenchId(hostContext.value, fallbackWorkbenchId));
 const restored = computed(() => hostContext.value.restored === true);
 const connection = computed<ConnectionSummary>(() => {
@@ -1431,6 +1436,7 @@ function registerOscColorQueryHandlers() {
     if (disposable.dispose) disposable.dispose();
   }
   oscColorQueryDisposables = [];
+  registerModeQueryHandlers();
   if (!terminal) return;
   const term = terminal;
   const colors = appearance.value.colors;
@@ -1442,6 +1448,15 @@ function registerOscColorQueryHandlers() {
       handleTerminalColorQuery(term, 11, colors.background, OSC_COLOR_FALLBACK.background, data),
     ),
   );
+}
+
+// CSI 能力查询应答只在终端创建时挂一次：应答与主题无关，无需随外观重挂。
+function registerModeQueryHandlers() {
+  for (const disposable of modeQueryDisposables) disposable.dispose();
+  modeQueryDisposables = [];
+  if (!terminal) return;
+  const dispose = registerTerminalModeQueryHandlers(terminal);
+  modeQueryDisposables.push({ dispose });
 }
 
 // 字体始终跟随宿主：不写内联字体变量——内联样式会压过 themeSync 桥样式表里的
@@ -7741,6 +7756,8 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   for (const disposable of oscColorQueryDisposables) disposable.dispose();
   oscColorQueryDisposables = [];
+  for (const disposable of modeQueryDisposables) disposable.dispose();
+  modeQueryDisposables = [];
   osc52Disposable?.dispose();
   osc52Disposable = undefined;
   disposeInput?.dispose();
