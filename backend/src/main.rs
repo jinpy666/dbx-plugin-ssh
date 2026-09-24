@@ -39,6 +39,7 @@ mod telnet_session;
 mod transfer_history;
 mod triggers;
 mod vault;
+mod vnc_session;
 mod x11;
 
 use std::ffi::OsString;
@@ -65,6 +66,7 @@ struct Plugin {
     local: Arc<local_terminal::LocalTerminalRuntime>,
     telnet: Arc<telnet_session::TelnetSessionRuntime>,
     serial: Arc<serial_session::SerialSessionRuntime>,
+    vnc: Arc<vnc_session::VncSessionRuntime>,
     mcp: Arc<mcp::McpState>,
     watcher: Arc<file_watch::WatchRuntime>,
 }
@@ -86,6 +88,7 @@ impl Plugin {
             local: Arc::new(local_terminal::LocalTerminalRuntime::new()),
             telnet: Arc::new(telnet_session::TelnetSessionRuntime::new()),
             serial: Arc::new(serial_session::SerialSessionRuntime::new()),
+            vnc: Arc::new(vnc_session::VncSessionRuntime::new()),
             watcher: Arc::new(file_watch::WatchRuntime::new()),
         })
     }
@@ -513,17 +516,65 @@ impl Plugin {
                 Ok(json!({ "success": true }))
             }
             "serial/list" => Ok(self.runtime.block_on(self.serial.list())),
+            // VNC 远程桌面会话（RFB 6143 客户端，nyaterm-parity P2 2d）：入口在
+            // SSH 工作台工具栏，用户显式点击才会创建。引擎为上游 vnc-rs 0.6
+            // （尽调见 docs/SPIKE_VNC_SESSION.zh-CN.md）；仅声明 ZRLE+Raw 编码，
+            // 帧缓冲上限 3840x2160；帧以 44 字节 patch 头（RGBA）走
+            // `vnc/frame/{id}` 二进制通道，生命周期事件 `vnc/session/state`，
+            // 远端剪贴板更新走 `vnc/clipboard` 事件。classic VNC-Auth 密码
+            // ≤8 字节，仅建议在可信网络使用（None 认证为明文协议）。
+            "vnc/start" => {
+                let request: vnc_session::VncStartRequest = parse(params)?;
+                self.runtime
+                    .block_on(self.vnc.start(request, emitter.clone()))
+            }
+            // 键盘/指针事件转发（keysym 由前端映射后传入）；`vnc/write` 为
+            // 同语义别名。
+            "vnc/input" | "vnc/write" => {
+                let request: vnc_session::VncInputRequest = parse(params)?;
+                self.runtime
+                    .block_on(self.vnc.input(&request.session_id, request.event))?;
+                Ok(json!({ "success": true }))
+            }
+            // 仅前端缩放（fit/stretch/actual），不改远端分辨率。
+            "vnc/resize" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.vnc.resize(session_id))?;
+                Ok(json!({ "success": true }))
+            }
+            // 手动重连：generation 计数防串话，保留帧缓冲做整幅重绘。
+            "vnc/reconnect" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime
+                    .block_on(self.vnc.reconnect(session_id, emitter.clone()))
+            }
+            // 本地剪贴板 → 远端（Latin-1、≤1MiB）。
+            "vnc/set-clipboard" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let text = required_string(&params, "text")?.to_string();
+                self.runtime
+                    .block_on(self.vnc.set_clipboard(session_id, text))?;
+                Ok(json!({ "success": true }))
+            }
+            "vnc/close" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.vnc.close(session_id))?;
+                Ok(json!({ "success": true }))
+            }
+            "vnc/list" => Ok(self.runtime.block_on(self.vnc.list())),
             "workbench/close" => {
                 let workbench_id = required_string(&params, "workbenchId")?;
                 self.runtime
                     .block_on(self.ssh.close_workbench(workbench_id))?;
-                // Local shells and Telnet sessions belong to the closing tab
-                // too; a webview reload never calls this, so live sessions
-                // stay reattachable there.
+                // Local shells, Telnet and VNC sessions belong to the closing
+                // tab too; a webview reload never calls this, so live
+                // sessions stay reattachable there.
                 self.runtime
                     .block_on(self.local.close_workbench(workbench_id));
                 self.runtime
                     .block_on(self.telnet.close_workbench(workbench_id));
+                self.runtime
+                    .block_on(self.vnc.close_workbench(workbench_id));
                 Ok(json!({ "success": true }))
             }
             "ssh/host-key/resolve" | "connection/challenge/resolve" => {
