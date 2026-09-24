@@ -1,9 +1,11 @@
 <script setup lang="ts">
-// 会话导入向导（IMPL_PLAN P2-2）：三步流程 —— ① 来源选择（MobaXterm
-// .mxtsessions / Xshell .xts / WindTerm .sessions + 可选 user.config）
-// ② 文件选择（File API 读 ArrayBuffer → base64，WindTerm 主密码输入）
-// ③ 预览表格（勾选行 → import/commit，结果计数内联提示）。解析错误与
-// 「需要主密码」契约错误都做了可读展示；后端 parse 已脱敏（仅 hasSecret），
+// 会话导入向导（IMPL_PLAN P2-2 + M7 四来源）：三步流程 —— ① 来源选择
+// （MobaXterm .mxtsessions / Xshell .xts / WindTerm .sessions + 可选
+// user.config / SecureCRT .xml / FinalShell conn 目录打包 .zip / Electerm
+// bookmarks .json / Termius 导出 .json）② 文件选择（File API 读
+// ArrayBuffer → base64，WindTerm 主密码输入）③ 预览表格（勾选行 →
+// import/commit，结果计数内联提示）。解析错误与「需要主密码」契约错误都
+// 做了可读展示；后端 parse 已脱敏（仅 hasSecret + secretNote 原因码），
 // 前端不回传任何明文凭据。纯逻辑复用 lib/otpPanel.ts 的导入解析与参数构造。
 import { computed, ref } from "vue";
 import { FileUp, FolderInput, Loader2, PencilLine, RotateCcw } from "@lucide/vue";
@@ -28,13 +30,36 @@ interface ImportSource {
   accept: string;
   /** WindTerm 需要额外的 user.config 与主密码输入。 */
   windtermExtras: boolean;
+  /** 第二步展示的格式说明（如 FinalShell 需先把 conn 目录打成 zip）。 */
+  hintKey?: string;
 }
 
 const SOURCES: ImportSource[] = [
   { kind: "moba", labelKey: "importWizard.source.moba", accept: ".mxtsessions", windtermExtras: false },
   { kind: "xshell", labelKey: "importWizard.source.xshell", accept: ".xts", windtermExtras: false },
   { kind: "windterm", labelKey: "importWizard.source.windterm", accept: ".sessions", windtermExtras: true },
+  { kind: "securecrt", labelKey: "importWizard.source.securecrt", accept: ".xml", windtermExtras: false },
+  {
+    kind: "finalshell",
+    labelKey: "importWizard.source.finalshell",
+    accept: ".zip",
+    windtermExtras: false,
+    hintKey: "importWizard.source.finalshellHint",
+  },
+  { kind: "electerm", labelKey: "importWizard.source.electerm", accept: ".json", windtermExtras: false },
+  { kind: "termius", labelKey: "importWizard.source.termius", accept: ".json", windtermExtras: false },
 ];
+
+/** secretNote 原因码 → i18n 键（后端只回码，不回文案）。 */
+const SECRET_NOTE_KEYS: Record<string, string> = {
+  encrypted: "importWizard.note.encrypted",
+  "not-carried": "importWizard.note.notCarried",
+};
+
+function secretNoteText(session: ImportSessionView): string {
+  const key = SECRET_NOTE_KEYS[session.secretNote];
+  return key ? props.t(key) : session.secretNote;
+}
 
 const step = ref<1 | 2 | 3>(1);
 const kind = ref<ImportKind>("moba");
@@ -58,6 +83,7 @@ const userConfigInput = ref<HTMLInputElement | null>(null);
 const currentSource = computed(() => SOURCES.find((source) => source.kind === kind.value) ?? SOURCES[0]);
 const selectedIndexes = computed(() => [...selected.value].sort((left, right) => left - right));
 const allSelected = computed(() => sessions.value.length > 0 && selected.value.size === sessions.value.length);
+const hasNotedSecrets = computed(() => sessions.value.some((session) => session.secretNote));
 
 function chooseSource(source: ImportSource) {
   kind.value = source.kind;
@@ -200,6 +226,7 @@ async function commit() {
         </label>
         <p class="import-hint">{{ t("importWizard.source.windtermHint") }}</p>
       </template>
+      <p v-if="currentSource.hintKey" class="import-hint">{{ t(currentSource.hintKey) }}</p>
       <p v-if="parseErrorCode === 'masterPassword'" class="import-error">{{ t("importWizard.needMasterPassword") }}</p>
       <p v-else-if="parseError" class="import-error">{{ t("importWizard.parseFailed", { error: parseError }) }}</p>
       <p v-if="!sessions.length" class="import-hint">{{ t("importWizard.parseHint") }}</p>
@@ -219,6 +246,7 @@ async function commit() {
       <p v-if="commitError" class="import-error">{{ t("importWizard.commitFailed", { error: commitError }) }}</p>
 
       <div v-if="sessions.length" class="import-table-wrap">
+        <p v-if="hasNotedSecrets" class="import-hint">{{ t("importWizard.notesBanner") }}</p>
         <div class="import-table-tools">
           <label class="import-select-all">
             <input type="checkbox" :checked="allSelected" @change="toggleAll(($event.target as HTMLInputElement).checked)" />
@@ -253,6 +281,11 @@ async function commit() {
               <td class="import-col-group" :title="session.groupPath">{{ session.groupPath }}</td>
               <td>
                 <span class="import-auth" :title="session.hasSecret ? t('importWizard.hasSecret') : ''">{{ session.authKind || "—" }}</span>
+                <span
+                  v-if="session.secretNote"
+                  class="import-secret-flag"
+                  :title="secretNoteText(session)"
+                >•</span>
               </td>
             </tr>
           </tbody>
@@ -443,5 +476,10 @@ async function commit() {
   padding: 0 5px;
   background: var(--accent);
   color: var(--muted-foreground);
+}
+.import-secret-flag {
+  color: var(--muted-foreground);
+  font-weight: 700;
+  cursor: help;
 }
 </style>
