@@ -3663,3 +3663,12 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **telnet-autologin ✅ 合入**（5b18690，merge 零冲突）：声明式 auto_login（提示正则+凭据降级共享 Expect 引擎、成功/失败正则监督、重试预算、超限关闭会话带可读原因；密码脱敏 Debug/事件红线），TelnetConnectDialog 折叠区七语 15 键。与 NyaTerm 差异：匹配载体用共享引擎（无第二套匹配器）、未做 send_wake_enter/timeout_ms、手动输入不解除、超限改为关会话（NyaTerm 仅禁用）——差异点已记录。
 - **全量（四线合并后）**：backend cargo **766**（基线 735）/ clippy 0 / fmt 干净；frontend vitest **934**（基线 891）/ vue-tsc 0 / build 过（ui/ 重生成）。
 - **在途**：serial-xymodem、np8-e2e。
+
+
+## M8 收口（2026-09-25，Warp 对齐 + np9 并发轮）
+
+- **Warp 线 1 行内 ghost 自动建议 ✅ 合入**（parity-warp-ghost cee2c90，merge 5bf6505）：`terminalGhostSuggest.ts` 纯状态机（onData 字节分类/行尾门闩/严格前缀扩展过滤，接受字节=精确剩余后缀的 typed 等价 PTY 注入，零协议变更）+ App.vue 终端区 overlay DOM 渲染（→ 一次接受、IME/粘贴/远端命令中隐藏）+ SettingsDialog 自治开关（pluginStore 键 ssh-terminal-ghost-suggest，默认开）+ i18n 七语块 + 26 新单测。
+- **Warp 线 2 结构化补全 ✅ 合入**（parity-warp-spec，merge f12f4d3）：`lib/completions/spec.ts` schema/评分纯函数 + specs/ 精选 CLI 库 + CompletionMenu 三级下拉 + 命令条接线（spec 优先/历史回落）+ SettingsDialog 开关（键 ssh-completion-spec）+ completionMenu.* 七语。
+- **np9 并发线 ✅ 合入**：telnet-autologin（dab496b，声明式正则自动登录）、import-formats（34fd7b1，SecureCRT/FinalShell/Electerm/Termius 四解析器）、startup-commands（b673496，连接级启动命令 sidecar 偏好 + open_session 注入，remote_command 语义冲突已文档化）、docs-sync（48a29b7，NetCatty 对标/COMPARISON/候选缺口登记）。
+- **集成修复**：warp-ghost 合入的 SettingsDialog/i18n 共享闭合括号错位（两线 load 函数共用冲突块外 `}`）手工重排修复；pluginStore/spec 断言双键并保。
+- **全量**：frontend vitest **960**（91→95 文件，基线 901 只增不减：ghost 26 + spec/telnet/startup/import 各线 spec 并入）/ vue-tsc 0 / build 过（ui/ 重生成）；backend cargo **745**（startup_commands 并入后全绿）/ fmt 干净 / clippy 0。

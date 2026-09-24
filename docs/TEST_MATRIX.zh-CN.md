@@ -102,3 +102,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：spec token 切分（引号内空格/`--` terminator/`--flag=v` 内联值）、三层判定（flag/value/sub）、评分截断 20、菜单键盘导航；12 个 CLI spec 数据静态校验。
 
 已知限制：动态值（分支/文件/pod 名）只出占位 hint 不向远端枚举；spec 未覆盖的命令回落历史浮层；菜单 Enter=接受 token（fig 语义）非执行。
+
+
+## M8（Warp 对齐 + np9 并发轮，2026-09-25）
+
+单测：vitest **960/960**（95 文件；ghost 状态机 26 + completion spec/menu + telnet-autologin + startup_commands 134 行 spec + import 四解析器，基线 901 只增不减）、vue-tsc 0 错、`pnpm build` 过（ui/ 重生成）；backend cargo **745**（基线 735 只增不减：startup_commands 偏好解析/桶上限/注入器）、clippy `-D warnings` 0、fmt 干净。
+
+新增可测面：行内 ghost 建议（字节分类/门闩/前缀扩展/接受注入，Warp/fish 对标）；结构化补全三级下拉（spec 优先/历史回落）；telnet 声明式自动登录；四格式会话导入；连接级启动命令（<=20 行/<=4KiB/<=30s 延迟上限、按 connectionId 分桶、完成事件不含命令内容）。
+
+仍保持未验收（依赖真机/人工）：serial-xymodem 线在途（模块已落盘，验证中）；ghost/spec 真机输入法与宿主渲染联调；DBX 桌面端到端；RDP 评审执行。
