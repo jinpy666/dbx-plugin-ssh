@@ -6778,6 +6778,7 @@ const terminalGhostMessages: Record<string, Record<string, string>> = {
 };
 for (const locale of Object.keys(terminalGhostMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...terminalGhostMessages[locale] };
+}
 
 // ---------------------------------------------------------------------------
 // 串口文件上传（SerialUploadDialog + App.vue overlay，NyaTerm 对齐 P0-3）：
