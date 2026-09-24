@@ -6546,8 +6546,11 @@ function networkRateShare(net: { rxRate: number; txRate: number }) {
   return Math.min(100, Math.round((Math.max(net.rxRate, net.txRate) / metricsRatePeak.value) * 100));
 }
 
-const metricsProcGridStyle = { gridTemplateColumns: "48px 64px 48px 52px minmax(0, 1fr)" };
-const procGridStyle = { gridTemplateColumns: "48px 60px 48px 52px 76px minmax(0, 1fr) 132px" };
+// 列宽要放得下 7 位 PID、常见用户名与带天数的 etime（单元格 ellipsis 会截断关键值）；
+// 浮层同步放宽到 448px，满宽时命令列不窄于加宽前；终端面板窄于约 464px 时浮层被
+// calc 钳制、命令列会被压缩，属已接受行为。管理表总宽仍超浮层，横向滚动是既有状态。
+const metricsProcGridStyle = { gridTemplateColumns: "64px 80px 56px 56px minmax(0, 1fr)" };
+const procGridStyle = { gridTemplateColumns: "64px 80px 56px 56px 96px minmax(0, 1fr) 132px" };
 
 // —— F2：指标历史回填 + 进程管理 ———
 
