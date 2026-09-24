@@ -1163,9 +1163,6 @@ const serialLastSequence = ref(0);
 const serialPendingFrames = new Map<number, { stream: number; data: Uint8Array }>();
 const isSerialMode = computed(() => serialSession.value !== null);
 const serialTarget = computed(() => (serialSession.value ? `${serialSession.value.port}@${serialSession.value.baudRate}` : ""));
-<<<<<<< HEAD
-const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value);
-=======
 // VNC 会话（nyaterm-parity P2 2d）：与 SSH/本地/Telnet/串口同款互斥展示，
 // 并入 localUiMode。与终端会话不同，VNC 画面走 VncSurface 画布（xterm
 // 仍然挂着但被画布盖住），帧从 vnc/frame/{id} 二进制通道解码成 patch。
@@ -1180,10 +1177,6 @@ let vncClipboardNoticeAt = 0;
 const isVncMode = computed(() => vncSession.value !== null);
 const vncTarget = computed(() => (vncSession.value ? `${vncSession.value.host}:${vncSession.value.port}` : ""));
 const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value || isVncMode.value);
-// Bottom dock panel surface (surface=panel, host §8.3): hide the workbench identity block so the panel
-// and focus the terminal itself; multi-open/shell switching goes through the panel "+" menu (bridge openWorkbench opens another panel).
-const panelSurface = computed(() => hostContext.value.surface === "panel");
->>>>>>> codex/ssh/parity-vnc
 // —— 本地终端偏好（sidecar preferences.json 持久化；iframe 沙箱无 localStorage）——
 // shell 空串 = 跟随自动探测；integration 缺省开。
 const localShellPref = ref("");
@@ -10302,14 +10295,9 @@ onBeforeUnmount(() => {
           <span class="record-countdown-hint">{{ t("recordingCountdownHint") }}</span>
         </div>
         <!-- SSH 连接卡片：本地/串口/Telnet 会话占用的终端视图不再叠 SSH-only
-<<<<<<< HEAD
              卡片（互斥展示；Telnet 原实现漏了该分支，一并补上）。Dock panel
              surface 不再有 loading 遮罩（面板直出终端区域）。 -->
-        <div v-if="!panelSurface && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && terminalState !== 'connected' && !reconnectPending" class="terminal-overlay">
-=======
-             卡片（互斥展示；Telnet 原实现漏了该分支，一并补上）。 -->
-        <div v-if="!isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && terminalState !== 'connected' && !reconnectPending" class="terminal-overlay">
->>>>>>> codex/ssh/parity-vnc
+        <div v-if="!panelSurface && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && terminalState !== 'connected' && !reconnectPending" class="terminal-overlay">
           <ConnectingCard
             :locale="locale"
             :name="connection.name || connectionIdentity"
