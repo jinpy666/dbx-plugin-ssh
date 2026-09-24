@@ -6733,6 +6733,7 @@ const completionMenuMessages: Record<string, Record<string, string>> = {
 };
 for (const locale of Object.keys(completionMenuMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...completionMenuMessages[locale] };
+}
 
 // ---------------------------------------------------------------------------
 // 终端行内 ghost 自动建议（np8，对标 Warp/fish）：设置页开关文案。只增不改——

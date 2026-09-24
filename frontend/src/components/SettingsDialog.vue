@@ -175,6 +175,11 @@ const specCompletionEnabled = ref(true);
 function loadSpecCompletionEnabled(): boolean {
   try {
     return pluginStore.getItem(SPEC_COMPLETION_ENABLED_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
 // 终端行内 ghost 自动建议开关（np8，对标 Warp/fish）：沿用 x11 的「组件内自治
 // 读写」先例，但持久化走独立 pluginStore 键（UI 偏好单点，默认开）；与 x11 的
 // 差异只在生效语义——ghost 渲染在 App 当前会话即时生效，故写穿后经
