@@ -90,7 +90,9 @@ import {
 import { Osc7DirectoryParser } from "./lib/terminalDirectoryTracking";
 import { handleOsc52ClipboardWrite, handleTerminalColorQuery } from "./lib/terminalOsc";
 import {
+  createTerminalCopyCache,
   resolveTerminalKeyAction,
+  resolveTerminalPasteText,
   resolveTerminalRightClickAction,
   sanitizeSearchOptions,
   sanitizeSelectCopyEnabled,
@@ -144,6 +146,7 @@ import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, normal
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
 import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./lib/pluginContext";
 import { clampFontSize } from "./lib/terminalZoom";
+import { pluginStore } from "./lib/pluginStore";
 import { loadTerminalFontOverride, persistTerminalFontFamily, persistTerminalFontSize, resolveTerminalFont, type TerminalFontOverride } from "./lib/terminalFont";
 import { MIB, settingsErrorOf } from "./lib/settingsModel";
 import type { DownloadConflictPolicy } from "./lib/downloadPrefs";
@@ -411,7 +414,7 @@ const WEB_DOWNLOAD_WARNING_BYTES = 512 * MIB;
 const ZMODEM_DETECTION_TIMEOUT_MS = 5000;
 // 粘贴防护：内容含换行或达到该字符数时先确认（对齐 tiny-rdm TerminalPane 阈值）。
 const PASTE_CONFIRM_CHAR_THRESHOLD = 200;
-// SFTP 路径历史：每连接最多保留 10 条，存 localStorage（对齐 tiny-rdm pathHistory）。
+// SFTP 路径历史：每连接最多保留 10 条，存 pluginStore（宿主 host.storage；对齐 tiny-rdm pathHistory）。
 const SFTP_PATH_HISTORY_KEY = "sftp-path-history";
 const SFTP_PATH_HISTORY_LIMIT = 10;
 // 传输历史查询上限（sftp/transfer/history，后端环形 200，面板一次取 50）。
@@ -420,14 +423,14 @@ const TRANSFER_HISTORY_LIMIT = 50;
 // missing sequence; the replay path re-delivers anything dropped beyond it.
 const TERMINAL_PENDING_FRAME_LIMIT = 1024;
 const SFTP_QUICK_PATHS = ["/", "/home", "/tmp", "/etc", "/var", "/root"];
-// 命令历史 / 快速命令 / 终端字号：localStorage 持久化（敏感命令不入持久层）。
+// 命令历史 / 终端字号：pluginStore 持久化（敏感命令不入持久层；快速命令已迁 sidecar，见 QUICK_COMMANDS_KEY）。
 const COMMAND_HISTORY_KEY = "ssh-command-history";
 // 快速命令旧键：迁移到 sidecar 全局存储后仅作一次性迁移种子（见 hydrateQuickCommands）。
 const QUICK_COMMANDS_KEY = "ssh-quick-commands";
 // 终端字号/字体族键移入 lib/terminalFont.ts（issue #31 字体单独设置）统一管理。
-// SFTP 面板默认打开偏好：localStorage 全局持久化（"false" = 新工作台仅终端）。
+// SFTP 面板默认打开偏好：pluginStore 全局持久化（"false" = 新工作台仅终端）。
 const SFTP_PANE_OPEN_KEY = "ssh-sftp-pane-open";
-// 侧栏形态偏好：tree/quick tab（默认 tree）与收起状态，localStorage 全局持久化。
+// 侧栏形态偏好：tree/quick tab（默认 tree）与收起状态，pluginStore 全局持久化。
 const SFTP_SIDE_TAB_KEY = "ssh-sftp-side-tab";
 const SFTP_SIDE_COLLAPSED_KEY = "ssh-sftp-side-collapsed";
 const DOWNLOAD_DIR_KEY = "ssh-download-directory";
@@ -444,9 +447,9 @@ const downloadConflictState = ref<DownloadConflictPolicy>("rename");
 function sanitizeConflictPolicy(value: unknown): DownloadConflictPolicy {
   return value === "ask" || value === "overwrite" ? value : "rename";
 }
-// 终端交互：选中复制 + 右键粘贴（localStorage 全局偏好，默认开，"false" 关闭）。
+// 终端交互：选中复制 + 右键粘贴（pluginStore 全局偏好，默认开，"false" 关闭）。
 const SELECT_COPY_KEY = "ssh-terminal-select-copy";
-// 关键词高亮总开关（IMPL_PLAN_NETCATTY_PARITY §3-B1）：localStorage 全局持久化，
+// 关键词高亮总开关（IMPL_PLAN_NETCATTY_PARITY §3-B1）：pluginStore 全局持久化，
 // 默认开、仅显式 "false" 关（对齐 sanitizeSelectCopyEnabled 模式）；关闭时零挂钩子。
 const HIGHLIGHT_ENABLED_KEY = "ssh-keyword-highlight";
 // decoration 引擎护栏：全局在档 decoration 上限（超限停止本帧注册）。
@@ -513,7 +516,7 @@ const agentRunning = ref<AgentNoticePayload>();
 const splitRatio = ref(58);
 const paneOrder = ref<SshWorkbenchPaneOrder>("terminal-left");
 // SFTP 面板可见性：每个工作台即时开关（写入 workbenchState）；
-// 新工作台的初始值取全局"默认打开"偏好（localStorage）。
+// 新工作台的初始值取全局"默认打开"偏好（pluginStore）。
 const sftpPaneOpen = ref(loadSftpPaneDefaultOpen());
 const sftpPaneDefaultOpen = ref(loadSftpPaneDefaultOpen());
 // 侧栏导航形态偏好：tree（目录树，默认）/ quick（快捷路径）+ 收起状态。
@@ -525,6 +528,8 @@ const sftpTree = ref<DirTreeNode>(createTreeRoot("/", "/"));
 const sftpHomePath = ref("");
 // 选中复制 + 右键粘贴（终端交互偏好，全局生效，切换即持久化）。
 const termSelectCopy = ref(loadSelectCopyEnabled());
+// 沙箱宿主读不到系统剪贴板：右键粘贴的降级链靠这份插件视图内的复制副本。
+const terminalCopyCache = createTerminalCopyCache();
 const followDirectory = ref(false);
 // 终端 shell 最近一次上报的 cwd（OSC 7 / OSC 633 Cwd，无论跟随开关是否打开
 // 都记录）：终端拖拽上传的「当前目录」落点解析靠它，避免误用 SFTP 面板的
@@ -618,7 +623,7 @@ const commandRunning = ref(false);
 const commandExecId = ref("");
 const commandResult = ref<ExecResult>();
 const commandError = ref("");
-// 命令历史：内存环形 + localStorage 非敏感持久化；index 为 -1 表示未在浏览历史。
+// 命令历史：内存环形 + pluginStore 非敏感持久化；index 为 -1 表示未在浏览历史。
 const commandHistory = ref<string[]>(loadCommandHistory());
 const commandHistoryIndex = ref(-1);
 const commandHistoryBackup = ref("");
@@ -658,7 +663,7 @@ const BATCH_BAR_OPEN_KEY = "ssh-batch-bar-open";
 
 function loadBatchBarOpen(): boolean {
   try {
-    return window.localStorage.getItem(BATCH_BAR_OPEN_KEY) !== "0";
+    return pluginStore.getItem(BATCH_BAR_OPEN_KEY) !== "0";
   } catch {
     return true;
   }
@@ -777,8 +782,8 @@ const dropUploadPathInput = ref("");
 const dropUploadPathInputEl = ref<HTMLInputElement>();
 const terminalFontSize = ref(appearance.value.terminal.fontSize);
 // 终端字体单独设置（issue #31）：字体族/字号的用户覆盖，null 字段 = 跟随宿主。
-// setup 期读取安全：loadTerminalFontOverride 在函数体内 try（沙箱 opaque origin
-// 下「访问 window.localStorage 属性」本身抛错，见 lib/terminalFont.ts 说明）。
+// setup 期读取安全：loadTerminalFontOverride 经 pluginStore（内部全 guarded，
+// opaque origin 不抛错），见 lib/terminalFont.ts 说明。
 const terminalFontOverride = ref<TerminalFontOverride>(loadTerminalFontOverride());
 // 设置弹窗（独立组件 SettingsDialog）：实例 ref 用于 Esc 内联分层消费与
 // 下载草稿回填；下载偏好权威态在本组件，经适配器交给组件读写。
@@ -791,7 +796,7 @@ const downloadPrefsAdapter = {
   persistUseDefault: persistDownloadUseDefaultDir,
   persistConflict: persistDownloadConflictPolicy,
 };
-// 终端 WebGL 渲染加速（对标 iShell GPU 加速）：localStorage 全局偏好，
+// 终端 WebGL 渲染加速（对标 iShell GPU 加速）：pluginStore 全局偏好，
 // 默认开；WebGL 不可用（headless/无 context）时静默回退 DOM 渲染。只有主
 // 终端长期挂 renderer；回放弹窗保持 DOM 渲染，GIF 导出在导出期间给离屏
 // 终端临时挂载（取像素依赖 canvas），导出完随终端 dispose 释放 context。
@@ -1515,7 +1520,11 @@ function createTerminal() {
   terminal.loadAddon(new ImageAddon({ pixelLimit: 33_554_432 }));
   registerOscColorQueryHandlers();
   osc52Disposable = terminal.parser.registerOscHandler(52, (data) =>
-    handleOsc52ClipboardWrite(data, (text) => writeClipboardText(text, clipboardDeps())),
+    handleOsc52ClipboardWrite(data, (text) => {
+      // 远端主动写剪贴板同样进插件视图副本，供沙箱宿主的右键粘贴降级。
+      terminalCopyCache.set(text);
+      return writeClipboardText(text, clipboardDeps());
+    }),
   );
   terminal.attachCustomKeyEventHandler(handleTerminalKey);
   searchAddon.onDidChangeResults(({ resultCount, resultIndex }) => {
@@ -1548,9 +1557,13 @@ function createTerminal() {
   // single-byte text outside real composition through the same PTY path.
   disposeWebkitInputFallback = installMacWebkitInputFallback({ terminal, onData: routeTerminalData });
   // 选中复制（可在设置里关闭）：选择一变化即静默写入剪贴板，不弹提示。
+  // 系统剪贴板写链可能整体失败（沙箱 iframe），插件视图副本必须照记——
+  // 右键粘贴在宿主读链断掉时靠它兜底。
   disposeSelectionCopy = terminal.onSelectionChange(() => {
     if (!termSelectCopy.value || !terminal?.hasSelection()) return;
-    void writeClipboardText(terminal.getSelection(), clipboardDeps()).catch(() => undefined);
+    const selection = terminal.getSelection();
+    terminalCopyCache.set(selection);
+    void writeClipboardText(selection, clipboardDeps()).catch(() => undefined);
   });
   // BEL 视觉铃（alert 的前端惯例替代）：程序发 \x07 时面板边框短促脉冲，
   // 不依赖系统铃声；长任务完成/出错提醒在后台切回即见。
@@ -1713,7 +1726,7 @@ function openTerminalSearch() {
   terminalMenuOpen.value = false;
   // iTerm2 风格：打开搜索时用当前选区首行预填查询，并带入持久化的选项开关。
   searchSeedQuery.value = terminalSearchSeedFromSelection(terminal.getSelection() || "");
-  searchSeedOptions.value = sanitizeSearchOptions(window.localStorage.getItem(TERMINAL_SEARCH_OPTIONS_KEY));
+  searchSeedOptions.value = sanitizeSearchOptions(pluginStore.getItem(TERMINAL_SEARCH_OPTIONS_KEY));
   searchOpen.value = true;
 }
 
@@ -3524,7 +3537,7 @@ const compiledHighlightRules = computed(() => compileRules(highlightRules.value)
 
 function loadHighlightEnabled(): boolean {
   try {
-    return window.localStorage.getItem(HIGHLIGHT_ENABLED_KEY) !== "false";
+    return pluginStore.getItem(HIGHLIGHT_ENABLED_KEY) !== "false";
   } catch {
     return true;
   }
@@ -3536,7 +3549,7 @@ const highlightEnabled = ref(loadHighlightEnabled());
 function toggleHighlightEnabled() {
   highlightEnabled.value = !highlightEnabled.value;
   try {
-    window.localStorage.setItem(HIGHLIGHT_ENABLED_KEY, highlightEnabled.value ? "true" : "false");
+    pluginStore.setItem(HIGHLIGHT_ENABLED_KEY, highlightEnabled.value ? "true" : "false");
   } catch {
     // 存储不可用时仅当前会话生效。
   }
@@ -4123,7 +4136,7 @@ function toggleSftpPane() {
 function toggleSftpPaneDefaultOpen() {
   sftpPaneDefaultOpen.value = !sftpPaneDefaultOpen.value;
   try {
-    window.localStorage.setItem(SFTP_PANE_OPEN_KEY, sftpPaneDefaultOpen.value ? "true" : "false");
+    pluginStore.setItem(SFTP_PANE_OPEN_KEY, sftpPaneDefaultOpen.value ? "true" : "false");
   } catch {
     // localStorage 不可用时偏好仅对当前会话生效。
   }
@@ -4131,7 +4144,7 @@ function toggleSftpPaneDefaultOpen() {
 
 function loadSftpPaneDefaultOpen(): boolean {
   try {
-    return sanitizeSftpPaneDefaultOpen(window.localStorage.getItem(SFTP_PANE_OPEN_KEY));
+    return sanitizeSftpPaneDefaultOpen(pluginStore.getItem(SFTP_PANE_OPEN_KEY));
   } catch {
     return false;
   }
@@ -4315,16 +4328,16 @@ async function resolveDownloadConflictFor(dir: string, fileName: string): Promis
 
 function loadSelectCopyEnabled(): boolean {
   try {
-    return sanitizeSelectCopyEnabled(window.localStorage.getItem(SELECT_COPY_KEY));
+    return sanitizeSelectCopyEnabled(pluginStore.getItem(SELECT_COPY_KEY));
   } catch {
     return true;
   }
 }
 
-// 侧栏形态偏好：localStorage 全局持久化（不可用时仅当前会话生效，默认 tree/展开）。
+// 侧栏形态偏好：pluginStore 全局持久化（不可用时仅当前会话生效，默认 tree/展开）。
 function loadSftpSideTab(): "tree" | "quick" {
   try {
-    return window.localStorage.getItem(SFTP_SIDE_TAB_KEY) === "quick" ? "quick" : "tree";
+    return pluginStore.getItem(SFTP_SIDE_TAB_KEY) === "quick" ? "quick" : "tree";
   } catch {
     return "tree";
   }
@@ -4332,7 +4345,7 @@ function loadSftpSideTab(): "tree" | "quick" {
 
 function loadSftpSideCollapsed(): boolean {
   try {
-    return window.localStorage.getItem(SFTP_SIDE_COLLAPSED_KEY) === "true";
+    return pluginStore.getItem(SFTP_SIDE_COLLAPSED_KEY) === "true";
   } catch {
     return false;
   }
@@ -4340,8 +4353,8 @@ function loadSftpSideCollapsed(): boolean {
 
 function persistSftpSideShape() {
   try {
-    window.localStorage.setItem(SFTP_SIDE_TAB_KEY, sftpSideTab.value);
-    window.localStorage.setItem(SFTP_SIDE_COLLAPSED_KEY, sftpSideCollapsed.value ? "true" : "false");
+    pluginStore.setItem(SFTP_SIDE_TAB_KEY, sftpSideTab.value);
+    pluginStore.setItem(SFTP_SIDE_COLLAPSED_KEY, sftpSideCollapsed.value ? "true" : "false");
   } catch {
     // localStorage 不可用时偏好仅对当前会话生效。
   }
@@ -4362,7 +4375,7 @@ function setSftpSideCollapsed(collapsed: boolean) {
 function toggleSelectCopy() {
   termSelectCopy.value = !termSelectCopy.value;
   try {
-    window.localStorage.setItem(SELECT_COPY_KEY, termSelectCopy.value ? "true" : "false");
+    pluginStore.setItem(SELECT_COPY_KEY, termSelectCopy.value ? "true" : "false");
   } catch {
     // localStorage 不可用时偏好仅对当前会话生效。
   }
@@ -4812,7 +4825,7 @@ async function confirmDelete() {
 
 function loadPathHistories(): Record<string, string[]> {
   try {
-    const raw = window.localStorage.getItem(SFTP_PATH_HISTORY_KEY);
+    const raw = pluginStore.getItem(SFTP_PATH_HISTORY_KEY);
     const parsed = raw ? JSON.parse(raw) : null;
     return sanitizePathHistories(parsed, SFTP_PATH_HISTORY_LIMIT);
   } catch {
@@ -4822,7 +4835,7 @@ function loadPathHistories(): Record<string, string[]> {
 
 function persistPathHistories() {
   try {
-    window.localStorage.setItem(SFTP_PATH_HISTORY_KEY, JSON.stringify(pathHistories));
+    pluginStore.setItem(SFTP_PATH_HISTORY_KEY, JSON.stringify(pathHistories));
   } catch {
     // localStorage 不可用时路径历史仅保留在内存中。
   }
@@ -5808,6 +5821,7 @@ function clipboardDeps(): ClipboardDeps {
 async function copyTerminalSelection() {
   const text = terminal?.getSelection() || "";
   if (!text) return;
+  terminalCopyCache.set(text);
   try {
     await writeClipboardText(text, clipboardDeps());
     showNotice(t("terminalCopied"));
@@ -5820,14 +5834,25 @@ async function copyTerminalSelection() {
 
 async function pasteTerminal() {
   terminalMenuOpen.value = false;
+  let clipboardText: string | null = null;
+  let clipboardReadBlocked = false;
   try {
-    const text = await readClipboardText(clipboardDeps());
-    await sendConfirmedPaste(text || "");
+    clipboardText = await readClipboardText(clipboardDeps());
   } catch {
-    // 读剪贴板全链失败（宿主桥缺失 + 沙箱拒绝）：引导走原生 paste 快捷键。
+    // 宿主桥缺失 + 沙箱拒绝读：降级到插件视图内的复制副本（选中复制、
+    // 菜单复制、远端 OSC 52 都会写入），XShell 式「选中→右键」因此闭环。
+    clipboardReadBlocked = true;
+  }
+  const text = clipboardReadBlocked
+    ? resolveTerminalPasteText({ cachedText: terminalCopyCache.get(), selectionText: terminal?.getSelection() || null })
+    : clipboardText || null;
+  if (!text) {
+    // 无任何可用来源：引导走原生 paste 快捷键（Ctrl+V 走 paste 事件，不依赖读权限）。
     showError(new Error(t("terminalPasteUseShortcut")), "terminal");
     terminal?.focus();
+    return;
   }
+  await sendConfirmedPaste(text);
 }
 
 function interceptTerminalPaste(event: ClipboardEvent) {
@@ -5894,7 +5919,7 @@ function openCommandDialog() {
 
 function loadCommandHistory(): string[] {
   try {
-    return sanitizeCommandHistory(JSON.parse(window.localStorage.getItem(COMMAND_HISTORY_KEY) || "null"));
+    return sanitizeCommandHistory(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_KEY) || "null"));
   } catch {
     return [];
   }
@@ -5902,8 +5927,8 @@ function loadCommandHistory(): string[] {
 
 function persistCommandHistory() {
   try {
-    // 疑似内嵌凭据 / 超长 / 多行的命令只留在内存，不写 localStorage。
-    window.localStorage.setItem(COMMAND_HISTORY_KEY, JSON.stringify(commandHistory.value.filter(isPersistableCommand)));
+    // 疑似内嵌凭据 / 超长 / 多行的命令只留在内存，不写持久层。
+    pluginStore.setItem(COMMAND_HISTORY_KEY, JSON.stringify(commandHistory.value.filter(isPersistableCommand)));
   } catch {
     // localStorage 不可用时命令历史仅保留在内存中。
   }
@@ -6110,11 +6135,11 @@ function sendSudoRefresh() {
 // 批量发送：跨连接把命令写入多个已打开会话的交互终端（tiny-rdm batch send）
 // ---------------------------------------------------------------------------
 
-/** 命令条开关：持久化（localStorage），打开时顺带刷新目标列表。 */
+/** 命令条开关：持久化（pluginStore），打开时顺带刷新目标列表。 */
 function toggleBatchBar() {
   batchBarOpen.value = !batchBarOpen.value;
   try {
-    window.localStorage.setItem(BATCH_BAR_OPEN_KEY, batchBarOpen.value ? "1" : "0");
+    pluginStore.setItem(BATCH_BAR_OPEN_KEY, batchBarOpen.value ? "1" : "0");
   } catch {
     // 存储不可用时仅失去记忆，功能不受影响。
   }
@@ -6156,7 +6181,7 @@ function applyRemoteBatchBarState(params: { draft?: unknown; quickPickId?: unkno
   if (typeof params.open === "boolean" && params.open !== batchBarOpen.value) {
     batchBarOpen.value = params.open;
     try {
-      window.localStorage.setItem(BATCH_BAR_OPEN_KEY, batchBarOpen.value ? "1" : "0");
+      pluginStore.setItem(BATCH_BAR_OPEN_KEY, batchBarOpen.value ? "1" : "0");
     } catch {
       // 同 toggleBatchBar：存储不可用只失去记忆。
     }

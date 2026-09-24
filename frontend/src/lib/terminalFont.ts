@@ -7,11 +7,12 @@
 //   回退宿主值。
 // - 字体族为新键 ssh-terminal-font-family；trim 后非空视为有效设置，缺失/空
 //   → 跟随宿主。恢复跟随宿主 = 删键。
-// - 存储访问不得出现在默认参数位：宿主工作台 iframe 是 sandbox="allow-scripts"
-//   （opaque origin），「访问 window.localStorage 属性」本身就抛 SecurityError；
-//   读写在函数体 try 内完成（同 terminalWebgl.ts 的约定）。
+// - 存储统一走 pluginStore（宿主 host.storage → guarded localStorage → 内存）；
+//   读写在函数体 try 内完成（历史上直读 window.localStorage 在 opaque origin
+//   下「访问属性」本身就抛 SecurityError——同 terminalWebgl.ts 的约定）。
 
 import { clampFontSize } from "./terminalZoom";
+import { pluginStore } from "./pluginStore";
 
 export const TERMINAL_FONT_SIZE_KEY = "ssh-terminal-font-size";
 export const TERMINAL_FONT_FAMILY_KEY = "ssh-terminal-font-family";
@@ -51,7 +52,9 @@ export function resolveTerminalFont(override: TerminalFontOverride, host: Termin
 }
 
 function defaultStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
-  return window.localStorage;
+  // 默认走 pluginStore（宿主 host.storage → guarded localStorage → 内存），
+  // opaque origin 下不再抛 SecurityError；显式注入 storage 仅测试用。
+  return pluginStore;
 }
 
 /** 读取当前生效的用户设置（键缺失/非法/存储不可用均归一为 null = 跟随宿主）。 */

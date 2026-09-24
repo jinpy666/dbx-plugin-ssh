@@ -18,7 +18,8 @@
     "host.binary",
     "host.filesystem",
     "host.workbench",
-    "host.storage"
+    "host.storage",
+    "host.clipboard:read"
   ],
   "entrypoints": {
     "backend": {

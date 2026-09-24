@@ -1,11 +1,12 @@
 // @vitest-environment happy-dom
 // TerminalSearchPanel 组件测试：输入即查、prev/next/close 按钮、Aa|.*\|w\| 三个
-// 开关（data-state=on / aria-pressed / 持久化 localStorage / 触发重查）、Enter 与
+// 开关（data-state=on / aria-pressed / 持久化 pluginStore / 触发重查）、Enter 与
 // Shift+Enter、Esc 关闭、空查询 clear、挂载聚焦 + 选区种子即查、match/no-match 状态文案。
 import { beforeEach, describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import TerminalSearchPanel from "./TerminalSearchPanel.vue";
 import { TERMINAL_SEARCH_OPTIONS_KEY, type TerminalSearchOptions } from "../lib/terminalInteraction";
+import { pluginStore } from "../lib/pluginStore";
 
 const baseProps = {
   locale: "en",
@@ -24,7 +25,10 @@ function toggleButtons(wrapper: ReturnType<typeof mountPanel>) {
 }
 
 beforeEach(() => {
-  window.localStorage.clear();
+  // 搜索选项键已迁 pluginStore（happy-dom 下导入时即完成水合，通道为
+  // localStorage）：播种/清理/断言必须走 store 实例，直接改全局
+  // localStorage 读不到缓存值。
+  pluginStore.removeItem(TERMINAL_SEARCH_OPTIONS_KEY);
 });
 
 describe("TerminalSearchPanel", () => {
@@ -102,7 +106,7 @@ describe("TerminalSearchPanel", () => {
     expect(caseToggle.attributes("data-state")).toBe("on");
     expect(caseToggle.attributes("aria-pressed")).toBe("true");
     expect(wrapper.emitted("findNext")?.at(-1)).toEqual(["Aa", { caseSensitive: true, regex: false, wholeWord: false }]);
-    expect(JSON.parse(window.localStorage.getItem(TERMINAL_SEARCH_OPTIONS_KEY) ?? "{}")).toEqual({
+    expect(JSON.parse(pluginStore.getItem(TERMINAL_SEARCH_OPTIONS_KEY) ?? "{}")).toEqual({
       caseSensitive: true,
       regex: false,
       wholeWord: false,
@@ -117,7 +121,7 @@ describe("TerminalSearchPanel", () => {
     await toggles[1].trigger("click");
     await toggles[2].trigger("click");
     expect(wrapper.emitted("findNext")?.at(-1)).toEqual(["a.*b", { caseSensitive: false, regex: true, wholeWord: true }]);
-    expect(JSON.parse(window.localStorage.getItem(TERMINAL_SEARCH_OPTIONS_KEY) ?? "{}")).toEqual({
+    expect(JSON.parse(pluginStore.getItem(TERMINAL_SEARCH_OPTIONS_KEY) ?? "{}")).toEqual({
       caseSensitive: false,
       regex: true,
       wholeWord: true,
@@ -125,7 +129,7 @@ describe("TerminalSearchPanel", () => {
   });
 
   it("seeds the toggles from persisted initialOptions without touching storage on mount", () => {
-    window.localStorage.setItem(TERMINAL_SEARCH_OPTIONS_KEY, JSON.stringify({ caseSensitive: true, regex: true, wholeWord: false }));
+    pluginStore.setItem(TERMINAL_SEARCH_OPTIONS_KEY, JSON.stringify({ caseSensitive: true, regex: true, wholeWord: false }));
     const wrapper = mountPanel({ initialOptions: { caseSensitive: true, regex: true, wholeWord: false } });
     const [caseToggle, regexToggle, wordToggle] = toggleButtons(wrapper);
     expect(caseToggle.attributes("data-state")).toBe("on");
@@ -139,7 +143,7 @@ describe("TerminalSearchPanel", () => {
     const wrapper = mountPanel();
     await toggleButtons(wrapper)[0].trigger("click");
     expect(wrapper.emitted("findNext")).toBeUndefined();
-    expect(JSON.parse(window.localStorage.getItem(TERMINAL_SEARCH_OPTIONS_KEY) ?? "{}").caseSensitive).toBe(true);
+    expect(JSON.parse(pluginStore.getItem(TERMINAL_SEARCH_OPTIONS_KEY) ?? "{}").caseSensitive).toBe(true);
   });
 
   it("shows 'No matches' with a destructive data-state when nothing matched", () => {
