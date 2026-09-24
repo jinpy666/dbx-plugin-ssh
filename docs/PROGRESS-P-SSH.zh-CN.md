@@ -3453,3 +3453,18 @@ onDrop` 直传注册（e2018a6，早于宿主事件可用时的假设实现）�
   2. **Docker"在终端打开"升级**（M3 遗留 6）：命令经 App.vue 内部通道直填输入行（复用 M1 动作链接的 fill 通道），替代"经 sendTerminalBytes 直写 PTY"；顺带补 Docker 面板 e2e 截图。
 - 维持人工门：RDP（vendored fork+CredSSP 评审）、真机验收、PR 合入。
 - M5 完成判据：两分支合入 integration、全量绿（cargo ≥696 / vitest ≥861 只增不减）、e2e、push 后 CI 十一门 success。
+
+
+## M5 收口（2026-09-24）
+
+- **VNC 会话 ✅ 全栈合入**（backend c7d745c + frontend dc4ba51）：vnc-rs 0.6（HsuJv，MIT OR Apache-2.0，依赖评审随 PR）+ vnc_session.rs（None/VNC-Auth，密码 >8 字节在 start 即拒绝；ZRLE+Raw+DesktopSize，Tight/JPEG 矩形显式失败；帧缓冲 3840×2160、patch ≤64MiB、剪贴板 Latin-1 ≤1MiB 三重上界；generation 断线重连，认证/协议错误不重试）。协议 `vnc/start|input|resize|reconnect|set-clipboard|close|list`，44 字节 patch 帧走 `vnc/frame/{id}` 二进制通道；前端 VncConnectDialog + VncSurface 画布（localUiMode 互斥、"仅受信网络"提示、七语文案）。
+- **Docker"在终端打开"✅**（3da01f5）：命令经 App.vue fill 通道直填输入行（替代 sendTerminalBytes 直写 PTY），Docker 面板 e2e 截图补齐。
+- **X11 spike 示例收尾 ✅**（a862bdf，merge da1dda3）：x11_spike.rs 纯编译验证示例入库（文件头注明永不接入插件；check_server_key 放行仅限 spike 本体），fmt/clippy/test 全绿。
+- **集成修复**：dc4ba51 提交的 App.vue 带两处未解决冲突标记（上轮 frontend 门未含 vue-tsc，漏过）——9302f1f 取 VNC 侧并去掉与 panels 侧重复的 panelSurface 定义（保留既有 558 行），terminal-overlay 条件合并 `!panelSurface` + `!isVncMode`；ui/ 随修复重生成（84d5e56）。
+- **全量**：backend cargo **719**（M4 基线 696，只增不减；vnc_session 新增 11）/ clippy `-D warnings` 0 / fmt 干净；frontend vitest **874**（基线 861，只增不减；vncFrame 帧编解码 9）/ vue-tsc 0 / build 过。
+
+### M5 遗留（人工门）
+
+1. 真机：VNC server（None/VNC-Auth）画面/输入/剪贴板联调、X server（XQuartz/VcXsrv）转发联调、串口硬件、GPU/NPU 主机、Windows ConPTY、DBX 桌面端到端。
+2. RDP（vendored fork 链 + CredSSP 评审）——维持人工评审门，未派发。
+3. VNC MVP 已知限制：Tight/JPEG 不支持（显式报错）；VNC-Auth 仅 ≤8 字节密码；剪贴板 Latin-1。

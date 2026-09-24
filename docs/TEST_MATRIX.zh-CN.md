@@ -58,3 +58,11 @@ i18n 七语全量对齐断言、终端标记条运行中时长 tick、sudo 保�
 e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome）：连接流程 → 设置 Terminal 分类（Action links / Line numbers & timestamps 区渲染、开关→Save 持久化）→ 终端行号+时间戳双列 gutter 对齐 → 命令条造历史后输入 "ec" 建议浮层（匹配高亮 + History 来源标签）→ Downloads 分类（重复策略单选 + 并发输入）→ Server metrics GPU/NPU 卡片（双 A100 P0/P8 + 910B4/310P3 + CANN 徽标 + 空进程态 + 警戒色）→ 动作链接 host:port 下划线（与 IP 关键词高亮共存）。截图经 visual-judge 终审 **7/7 pass**（备注项：Downloads 路径说明行位置、窄卡显存 title 兜底截断，均非阻断）。
 
 仍保持未验收（依赖真机/CI）：NVIDIA/Ascend 真机采集冒烟（无卡主机，TEST_MATRIX 待补跑记录）、Windows ConPTY 下 gutter 渲染、DBX 桌面宿主端到端手测（M1 里程碑 PR 合入前人工执行）。
+
+## M5（nyaterm-parity，2026-09-24）
+
+单测：cargo **719/719**（M4 基线 696，只增不减；vnc_session 11）、vitest **874/874**（基线 861，只增不减；vncFrame 帧编解码 9）、vue-tsc 0 错、`pnpm build` 过（ui/ 已重生成）；clippy `-D warnings` 0、fmt 干净。
+
+新增可测面：`vnc/start|input|resize|reconnect|set-clipboard|close|list` 协议、44 字节 RGBA patch 帧编解码（3840×2160 / 64MiB / 步长上界）、VNC-Auth 密码长度拒绝、Tight/JPEG 矩形显式失败、generation 重连语义；前端 VNC 画布与连接对话框、Docker"在终端打开"fill 通道、x11_spike 编译示例（不参与运行）。
+
+仍保持未验收（依赖真机/CI）：VNC 真机 server（None/VNC-Auth）端到端、X server 转发真机联调、串口硬件、GPU/NPU 主机、Windows ConPTY、DBX 桌面宿主端到端；RDP 维持人工评审门（vendored fork 链 + CredSSP）。
