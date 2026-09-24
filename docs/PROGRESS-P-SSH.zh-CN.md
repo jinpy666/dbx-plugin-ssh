@@ -3601,3 +3601,10 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 2. RDP：立项材料已备（`RDP_VENDOR_FORK_PLAN` / `RDP_CREDSSP_REVIEW_CHECKLIST`），评审执行仍为人工门；串口协议升级设计稿待评审。
 3. **App.vue 偏好存储 pluginStore 全量迁移**：main 侧已迁 12 个键；integration 结构化偏好新增的前端键（终端行为/快捷键/传输并发/命令建议等）仍走 localStorage 直写，在真机 opaque origin 下静默不持久化（行为可降但偏好不保）——建议下一轮统一切 `pluginStore` 并复验真机持久化。
 4. **操作规程**：同一 integration worktree 严禁两个会话并发写——本轮独立收口会话与看护会话曾在 merge 冲突解决上交叠（PROGRESS/mockDbxHost 被外部进程先行解决），靠互斥文件域与人工核验避免撞车；看护任务启动前必须确认既有会话已全部停止。
+
+
+## M6 轮：pluginStore 全量迁移（2026-09-24，后台 agent 并发）
+
+- **遗留 3 关单 ✅**（parity-plugin-store 93bc1ea/af4f73d，merge 9a1527a）：integration 结构化偏好三键迁入 pluginStore——`ssh-terminal-behavior` / `ssh-terminal-hotkeys` / `ssh-terminal-appearance`（PLUGIN_STORE_KEYS 现 15 键），实现模式对齐 terminalFont/terminalWebgl 先例（defaultStorage 返回 store 单例、显式注入保留为测试口），App.vue 调用点零改动；LEGACY_SELECT_COPY_KEY 降级镜像随主键写穿。**不迁键固化**：transfer/suggestions 五键与下载偏好同构（sidecar preferences 权威 + localStorage 同步缓存，迁走即双权威）、quick-commands（sidecar 迁移种子）、dbx-term-diag（诊断开关非偏好）——排除理由写入 pluginStore.ts 头注释与 spec 排除断言。
+- **全量**：frontend vitest **891**（基线 886，+5 默认存储回环/不抛用例）/ vue-tsc 0 / build 过（ui/ 重生成）；backend 零改动。
+- **遗留**：真机持久化复验（三键首装靠 pluginStore 惰性搬家带入 localStorage 旧值）仍属人工门；老宿主（Host API < 1.2）降级 guarded localStorage，行为等同迁移前。

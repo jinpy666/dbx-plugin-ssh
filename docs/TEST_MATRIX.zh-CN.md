@@ -75,3 +75,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：serial ports 路径/描述规范化分离与 start 行参数严格校验（纯逻辑）；main 同步带入的交互式 MFA、重复会话认证传输复用、右键粘贴插件视图副本降级链（createTerminalCopyCache/resolveTerminalPasteText）、kitty/XTVERSION/DECRQM 能力探测应答、randomUUID shim 的既有 spec；RDP 立项材料两份与串口协议升级设计稿（评审门文档，无代码面）。
 
 仍保持未验收（依赖真机/CI）：VNC server、X server 转发、串口硬件、GPU/NPU 主机、Windows ConPTY、DBX 桌面端到端；RDP 评审执行（材料已备）。新增回归面：App.vue 结构化偏好新键（终端行为/快捷键/传输并发/命令建议）在真机 opaque origin 下的持久化——pluginStore 全量迁移待下轮（PROGRESS 遗留 3）。
+
+
+## M6（pluginStore 全量迁移，2026-09-24）
+
+单测：vitest **891/891**（基线 886，只增不减；terminalBehavior×2 / terminalHotkeys×2 / terminalAppearance×1 默认 pluginStore 回环与不抛用例，pluginStorage.spec 键清单断言扩展至 15 键并固化 transfer/suggestions 排除项）、vue-tsc 0 错、`pnpm build` 过（ui/ 重生成）。backend 零改动（无 cargo 面变化）。
+
+新增可测面：三结构化偏好键（terminal-behavior/hotkeys/appearance）经 host.storage 通道持久化、web 直连降级 guarded localStorage、键清单锁定断言。
+
+仍保持未验收（依赖真机/CI）：三键真机首装迁移（localStorage 旧值经惰性搬家入 host.storage）与跨重启持久化；老宿主降级行为抽查。VNC/X server/串口/GPU-NPU/ConPTY/DBX 桌面端到端与 RDP 评审执行等既有人工门不变。
