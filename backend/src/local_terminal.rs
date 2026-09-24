@@ -916,9 +916,17 @@ fn injection_plan(
         }
         ShellKind::PowerShell => {
             let script = dir.join("integration.ps1");
+            // -ExecutionPolicy Bypass is process-scoped: it lets the temp-dir
+            // script run on machines whose machine/user policy is Restricted
+            // (Windows client default) without touching their policy settings.
+            // Group-policy-enforced MachinePolicy/UserPolicy still win, in
+            // which case the dot-source fails the same way as before and the
+            // shell keeps its built-in prompt (fail-safe contract).
             Some((
                 vec![
                     "-NoExit".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
                     "-Command".to_string(),
                     format!(
                         "& '{}'",
@@ -1096,9 +1104,13 @@ mod tests {
 
         let pwsh = injection_plan(ShellKind::PowerShell, dir, None).expect("pwsh plan");
         assert_eq!(pwsh.0[0], "-NoExit");
-        assert_eq!(pwsh.0[1], "-Command");
+        // Restricted-policy machines (Windows client default) must still be
+        // able to run the temp-dir integration script.
+        assert_eq!(pwsh.0[1], "-ExecutionPolicy");
+        assert_eq!(pwsh.0[2], "Bypass");
+        assert_eq!(pwsh.0[3], "-Command");
         assert_eq!(
-            pwsh.0[2],
+            pwsh.0[4],
             format!(
                 "& '{}'",
                 escape_powershell_single_quoted(
