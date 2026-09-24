@@ -147,6 +147,12 @@ describe("import wizard helpers", () => {
     expect(sessions).toHaveLength(2);
     expect(sessions[0]).toMatchObject({ index: 0, name: "web-1", port: 22, hasSecret: true });
     expect(sessions[1]).toMatchObject({ index: 1, name: "no-index", port: null });
+    // secretNote 原因码随预览透传；缺失时为空串。
+    expect(sessions[0]).toMatchObject({ secretNote: "" });
+    const noted = parseImportSessions({ sessions: [
+      { index: 0, name: "fw", host: "h", port: 22, username: "root", groupPath: "", description: "", authKind: "password", hasSecret: false, secretNote: "encrypted" },
+    ] });
+    expect(noted[0]).toMatchObject({ secretNote: "encrypted", hasSecret: false });
     expect(parseImportSessions({})).toEqual([]);
     expect(parseImportSessions({ sessions: "x" })).toEqual([]);
   });
@@ -161,6 +167,10 @@ describe("import wizard helpers", () => {
     expect(importBaseParams("windterm", "QUJD", "VVNFUg==", "pw")).toEqual({ kind: "windterm", fileBase64: "QUJD", userConfigBase64: "VVNFUg==", masterPassword: "pw" });
     const commit = importCommitParams("xshell", "QUJD", "", "", [0, 2]);
     expect(commit).toEqual({ kind: "xshell", fileBase64: "QUJD", selectedIndexes: [0, 2] });
+    // M7 四来源 kind 与普通文件参数一致（无附加字段）。
+    for (const kind of ["securecrt", "finalshell", "electerm", "termius"] as const) {
+      expect(importBaseParams(kind, "QQ==", "eHg=", "pw")).toEqual({ kind, fileBase64: "QQ==" });
+    }
   });
 
   it("maps the WindTerm master-password contract error", () => {

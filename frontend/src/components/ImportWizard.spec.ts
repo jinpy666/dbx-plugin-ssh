@@ -148,4 +148,79 @@ describe("ImportWizard", () => {
     expect(wrapper.text()).not.toContain("importWizard.fileChosen");
     expect(wrapper.find(".import-nav .primary-button").attributes("disabled")).toBeDefined();
   });
+
+  it("lists the seven sources and shows the FinalShell zip hint on step 2", async () => {
+    installInvoke(() => ({ sessions: [] }));
+    const wrapper = mountWizard();
+    expect(wrapper.findAll(".import-source")).toHaveLength(7);
+    // 第 5 张卡是 FinalShell：进入第二步后展示 zip 打包提示。
+    await wrapper.findAll(".import-source").at(4)!.trigger("click");
+    expect(wrapper.text()).toContain("importWizard.source.finalshell");
+    expect(wrapper.text()).toContain("importWizard.source.finalshellHint");
+  });
+
+  it("sends the SecureCRT kind and renders the secret-note flag and banner", async () => {
+    const noted = {
+      sessions: [
+        {
+          index: 0,
+          name: "fw",
+          host: "10.0.0.9",
+          port: 22,
+          username: "root",
+          groupPath: "",
+          description: "",
+          authKind: "password",
+          hasSecret: false,
+          secretNote: "encrypted",
+        },
+      ],
+    };
+    const invokeSpy = installInvoke((method) => (method === "import/parse" ? noted : {}));
+    const wrapper = mountWizard();
+    // 第 4 张卡是 SecureCRT。
+    await wrapper.findAll(".import-source").at(3)!.trigger("click");
+    const input = wrapper.find<HTMLInputElement>("input[type=file]");
+    setFiles(input.element, new File(["<xml/>"], "sessions.xml", { type: "text/xml" }));
+    await flushPromises();
+    await wrapper.find(".import-nav .primary-button").trigger("click");
+    await flushPromises();
+    expect(invokeSpy).toHaveBeenCalledWith("import/parse", {
+      kind: "securecrt",
+      fileBase64: btoa("<xml/>"),
+    });
+    // 无凭据材料的行带 • 标记与原因文案，表格上方显示整体横幅。
+    expect(wrapper.text()).toContain("importWizard.notesBanner");
+    expect(wrapper.find(".import-secret-flag").attributes("title")).toBe(
+      "importWizard.note.encrypted",
+    );
+  });
+
+  it("parses the Electerm and Termius sources with their kinds", async () => {
+    const invokeSpy = installInvoke(() => ({ sessions: [] }));
+    const wrapper = mountWizard();
+    await wrapper.findAll(".import-source").at(5)!.trigger("click"); // electerm
+    let input = wrapper.find<HTMLInputElement>("input[type=file]");
+    setFiles(input.element, new File(["[]"], "bookmarks.json", { type: "application/json" }));
+    await flushPromises();
+    await wrapper.find(".import-nav .primary-button").trigger("click");
+    await flushPromises();
+    expect(invokeSpy).toHaveBeenCalledWith("import/parse", {
+      kind: "electerm",
+      fileBase64: btoa("[]"),
+    });
+    // 空解析结果留在第二步；回第一步换 Termius 来源后文件态已重置。
+    await wrapper.find(".import-nav .import-back").trigger("click");
+    expect(wrapper.text()).toContain("importWizard.step(current=1)");
+    await wrapper.findAll(".import-source").at(6)!.trigger("click"); // termius
+    input = wrapper.find<HTMLInputElement>("input[type=file]");
+    setFiles(input.element, new File(["{}"], "termius.json", { type: "application/json" }));
+    await flushPromises();
+    await wrapper.find(".import-nav .primary-button").trigger("click");
+    await flushPromises();
+    expect(invokeSpy).toHaveBeenCalledWith("import/parse", {
+      kind: "termius",
+      fileBase64: btoa("{}"),
+    });
+  });
 });

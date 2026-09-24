@@ -226,7 +226,7 @@ export function otpDraftError(draft: OtpDraft): "" | "issuer" | "secret" | "coun
 // 会话导入：import/parse 预览 + import/commit 参数
 // ---------------------------------------------------------------------------
 
-export type ImportKind = "moba" | "xshell" | "windterm";
+export type ImportKind = "moba" | "xshell" | "windterm" | "securecrt" | "finalshell" | "electerm" | "termius";
 
 export interface ImportSessionView {
   index: number;
@@ -238,6 +238,11 @@ export interface ImportSessionView {
   description: string;
   authKind: string;
   hasSecret: boolean;
+  /**
+   * 凭据缺失原因码（后端 preview 返回）：encrypted = 源客户端加密不可读、
+   * not-carried = 来源本身不携带可读凭据；空串表示无标注。
+   */
+  secretNote: string;
 }
 
 function parseSessionView(raw: unknown, index: number): ImportSessionView | null {
@@ -254,6 +259,7 @@ function parseSessionView(raw: unknown, index: number): ImportSessionView | null
     description: asText(view.description),
     authKind: asText(view.authKind),
     hasSecret: view.hasSecret === true,
+    secretNote: asText(view.secretNote),
   };
 }
 
