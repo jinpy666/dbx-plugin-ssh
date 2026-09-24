@@ -138,7 +138,7 @@
 - manifest 冻结：新能力一律 workbench 内面板/临时会话，不改 connection-provider（宿主 `deny_unknown_fields` 契约）。
 - 每任务 TDD：sidecar `cargo test`（当前基线 575）+ `vitest`（当前基线 698）+ `vue-tsc` + `pnpm build`；UI 改动过 headless Chrome 走查。
 - 每期交付：CHANGELOG 双语、TEST_MATRIX 增行、`docs/COMPARISON.zh-CN.md` 矩阵更新、必要时重生成 `ui/`（integrator 所有）。
-- 高风险区（watcher 事件、VNC 帧通道、X11、RDP、Telnet/串口临时会话协议）逐项评审后进独立分支 `codex/ssh/nyaterm-parity-<item>`；agents 不自合 PR。
+- 高风险区（watcher 事件、VNC 帧通道、X11、RDP、Telnet/串口临时会话协议）逐项评审后进独立分支 `codex/ssh/parity-<item>`（RDP 线按评审 F-6 统一为 `codex/ssh/parity-rdp*`）；agents 不自合 PR。
 
 ## 7. 边界与未知
 
