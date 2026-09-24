@@ -3639,3 +3639,12 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 1. 真机人工门不变：DBX 桌面端到端、VNC/X server/串口硬件/GPU-NPU/ConPTY、pluginStore 三键真机持久化复验。
 2. 场景矩阵 S1/S2 已由修复后 walkthrough 等价覆盖（fresh_review 连接态 + settings 全绿）；S3（visual.html）修复后复验随本轮 CI 后补录。
 3. CI 门禁缺口已暴露：前端 walkthrough 不在 CI——是否纳入 CI 由人工排期（涉及 CI 时长/浏览器依赖）。
+
+
+## M7 进度（2026-09-25）
+
+- **docs-sync ✅ 合入**（parity-docs-sync 7adaa73/320d290/b53cd62，merge 48a29b7）：NetCatty 对标节补入 FEATURE_PARITY（五项已实现+五项不做）、9 项候选缺口登记、tssh/iShell 节过期结论回写、COMPARISON 双语更新、NETCATTY 计划 checkbox 校准补勾、8d 翻译重启条件跟踪点。agent 自行纠正任务书三处事实偏差（审计日志无 0600 等）。遗留提示：IMPL_PLAN_NYATERM v2 重判表多行仍标"❌ 仍缺"与 M1-M5 不符——留待下轮 docs 批校准。
+- **startup-commands ✅ 合入**（11277dc，merge 无冲突）：连接级启动命令序列（Tabby Login scripts 对标）——`startup_commands` 偏好（每连接 ≤20 条/单条 ≤4KiB/延迟 ≤30s）+ open_session shell 后顺序注入（TerminalCommand::Input 通道，remote_command exec 会话跳过）+ `ssh/startup` 事件（不含命令内容）+ SettingsDialog 编辑区（七语）。backend +10 / frontend +7 / 容器 smoke 实跑 PASS。PROTOCOL 同步。
+- **import-formats ✅ 合入**（f9fed3c，merge 无冲突）：SecureCRT(.xml hex 端口优先)/FinalShell(zip+folder.json 组链，DES 密文不迁移)/Electerm(bookmarks 组父链)/Termius(加密 blob 启发式丢弃、明文 PEM 迁移) 四解析器，统一 `secret_note` 原因码 + 预览横幅七语。backend +14 / frontend +3。
+- **全量（三线合并后）**：backend cargo **759**（基线 735）/ clippy 0 / fmt 干净；frontend vitest **901**（基线 891）/ vue-tsc 0 / build 过（ui/ 重生成）。
+- **在途**：telnet-autologin、serial-xymodem、np8-e2e（walkthrough 超时修复）。
