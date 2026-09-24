@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -39,8 +39,8 @@ use crate::local_downloads;
 use crate::metrics;
 use crate::metrics_history;
 use crate::model::{
-    normalize_remote_path, path_from_sftp_uri, sftp_uri, AuthenticationMethod, SftpEntry,
-    StoredConnection, SudoSource, TerminalFrame, TerminalStream, MAX_TRANSFER_SIZE,
+    normalize_remote_path, path_from_sftp_uri, sftp_uri, AuthenticationMethod, SessionOpenRequest,
+    SftpEntry, StoredConnection, SudoSource, TerminalFrame, TerminalStream, MAX_TRANSFER_SIZE,
     TERMINAL_REPLAY_LIMIT, TRANSFER_CHUNK_SIZE,
 };
 use crate::quick_commands;
@@ -520,6 +520,80 @@ impl PromptBroker {
         error.code == -32601
             || error.code == -32602
             || (error.code == -32001 && !error.message.contains("did not answer"))
+    }
+
+    /// Asks the user for one keyboard-interactive answer without persisting
+    /// it. Automatic password/TOTP orchestration gets the first chance; this
+    /// path is only used for an answer that stayed empty (hardware token,
+    /// SMS code, custom MFA wording, and similar one-time challenges).
+    async fn request_keyboard_interactive_answer(
+        &self,
+        host: &str,
+        port: u16,
+        username: &str,
+        challenge: String,
+    ) -> Result<Option<String>, String> {
+        if !self.gateway.supports_request_user_input() {
+            return Ok(None);
+        }
+
+        let title: String = format!("动态令牌验证 — {username}@{host}:{port}")
+            .chars()
+            .take(200)
+            .collect();
+        let challenge = if challenge.trim().is_empty() {
+            "SSH 服务器要求补充身份验证信息。".to_string()
+        } else {
+            challenge
+        };
+        let prompt_text: String = format!(
+            "请输入服务器要求的当前动态令牌。本次输入仅用于此次登录，不会保存。\n\n服务器提示：\n{challenge}"
+        )
+        .chars()
+        .take(2000)
+        .collect();
+        let prompt = UserInputPrompt::secret(prompt_text)
+            .with_title(title)
+            .with_timeout_secs(HOST_KEY_CHALLENGE_WAIT.as_secs());
+
+        // `connection/test` mirrors the host's short RPC deadline. Mark the
+        // dialog before waiting so the outer probe can extend its budget just
+        // as it already does for host-key confirmation.
+        let dialog_was_already_used = self.host_dialog_used.swap(true, Ordering::Relaxed);
+        let gateway = Arc::clone(&self.gateway);
+        let answer =
+            match tokio::task::spawn_blocking(move || gateway.request_user_input(&prompt)).await {
+                Ok(Ok(answer)) => answer,
+                Ok(Err(error)) if Self::host_prompt_unavailable(&error) => {
+                    if !dialog_was_already_used {
+                        self.host_dialog_used.store(false, Ordering::Relaxed);
+                    }
+                    return Ok(None);
+                }
+                Ok(Err(error)) => {
+                    return Err(format!(
+                        "SSH keyboard-interactive prompt failed: {}",
+                        error.message
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "SSH keyboard-interactive prompt task failed: {error}"
+                    ));
+                }
+            };
+
+        match answer.action.as_str() {
+            "submit" => match answer.value.filter(|value| !value.is_empty()) {
+                Some(value) => Ok(Some(value)),
+                None => Err("SSH keyboard-interactive answer was empty".to_string()),
+            },
+            "cancel" => Err("SSH keyboard-interactive authentication was cancelled".to_string()),
+            "timeout" => {
+                Err("SSH keyboard-interactive authentication prompt timed out".to_string())
+            }
+            _ => Err("SSH keyboard-interactive authentication received no answer".to_string()),
+        }
     }
 
     // 参数就是 host-key 挑战事件的载荷字段，一一对应而非可归组的耦合。
@@ -1109,6 +1183,75 @@ impl ReplayBuffer {
 /// the server hands over a `forwarded-tcpip` channel.
 pub type RemoteForwardTable = Mutex<HashMap<(String, u32), forward::RelayTarget>>;
 
+/// Explicit users of one authenticated SSH transport: every registered
+/// session owns one use, and a copied session reserves one before its first
+/// await. That pending reservation closes the open/close race where the last
+/// old session could otherwise tear down a jump chain while the new PTY was
+/// still being created.
+struct TransportLeaseCounter(AtomicUsize);
+
+impl TransportLeaseCounter {
+    fn new() -> Self {
+        Self(AtomicUsize::new(1))
+    }
+
+    fn retain(&self) {
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .expect("SSH transport lease count overflow");
+    }
+
+    /// Returns true when the released use was the final one.
+    fn release(&self) -> bool {
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_sub(1)
+            })
+            .expect("SSH transport lease released more than once")
+            == 1
+    }
+
+    #[cfg(test)]
+    fn count(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+struct SharedTransportLease {
+    uses: TransportLeaseCounter,
+    jump_chain: Vec<Arc<Handle<SshClient>>>,
+}
+
+impl SharedTransportLease {
+    fn new(jump_chain: Vec<Arc<Handle<SshClient>>>) -> Self {
+        Self {
+            uses: TransportLeaseCounter::new(),
+            jump_chain,
+        }
+    }
+
+    fn retain(&self) {
+        self.uses.retain();
+    }
+
+    async fn release(&self) {
+        if !self.uses.release() {
+            return;
+        }
+        for jump in &self.jump_chain {
+            let _ = jump
+                .disconnect(
+                    Disconnect::ByApplication,
+                    "DBX SSH session closed",
+                    "English",
+                )
+                .await;
+        }
+    }
+}
+
 /// `workbench_id` is kept with the session so attach can only restore the
 /// session that belongs to the same workbench. A different workbench must open
 /// its own SSH session instead of stealing another tab's PTY.
@@ -1125,9 +1268,9 @@ struct SessionEntry {
     /// the sequence gives `session_id_for_connection` a true creation order.
     created_seq: u64,
     handle: Arc<Handle<SshClient>>,
-    /// Open jump-host connections that carry this session's target tunnel;
-    /// kept alive alongside the target handle.
-    jump_chain: Vec<Arc<Handle<SshClient>>>,
+    /// Reference-counted lifetime for the authenticated transport's jump
+    /// chain. Pending copied-session opens reserve a use before awaiting.
+    transport_lease: Arc<SharedTransportLease>,
     /// Live Quick Sudo / 2FA orchestration, updatable at runtime through
     /// `ssh/settings/set` and shared by the terminal and exec paths.
     orchestration: Arc<RwLock<SudoAuth>>,
@@ -1551,13 +1694,15 @@ impl SshRuntime {
 
     pub async fn open_session(
         &self,
-        connection_id: &str,
-        workbench_id: &str,
-        cols: u32,
-        rows: u32,
+        request: &SessionOpenRequest,
         operation_id: &str,
         emitter: PluginEmitter,
     ) -> Result<Value, String> {
+        let connection_id = request.connection_id.as_str();
+        let workbench_id = request.workbench_id.as_str();
+        let reuse_authenticated_transport = request.reuse_authenticated_transport;
+        let cols = request.cols;
+        let rows = request.rows;
         let connection = self
             .connections
             .read()
@@ -1565,49 +1710,134 @@ impl SshRuntime {
             .get(connection_id)
             .cloned()
             .ok_or("Connection is not active; reopen it from DBX")?;
-        eprintln!(
-            "[ssh-trace] open_session connection_id={connection_id} workbench_id={workbench_id} -> {}:{} auth={:?}",
-            connection.host, connection.port, connection.authentication
-        );
-        // D9: 拨号前解析 password_command，使取回的凭据同时作用于登录链与
-        // 本会话的 sudo 编排（下游 dial_and_authenticate 看到非空密码即不再
-        // 重复执行——单次执行语义）。
-        let connection = resolve_password_command(&connection).await;
-        let (handle, jump_chain) = self
-            .connect_authenticated(&connection, operation_id, Some(emitter.clone()))
-            .await?;
-        eprintln!("[ssh-trace] open_session dial+auth ok");
-        let handle = Arc::new(handle);
-        let jump_chain = jump_chain.into_iter().map(Arc::new).collect::<Vec<_>>();
-        let remote_shell = detect_remote_shell(&handle).await;
-        let directory_tracking_supported = remote_shell.supports_directory_tracking();
-        let mut channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|error| format!("Failed to open SSH terminal channel: {error}"))?;
-        channel
-            .request_pty(true, "xterm-256color", cols.max(1), rows.max(1), 0, 0, &[])
-            .await
-            .map_err(|error| format!("Failed to request SSH PTY: {error}"))?;
-        // Client-specified SetEnv rides on the interactive session too, in
-        // ssh(1) order: PTY first, env next, shell/exec last. A refused
-        // variable surfaces instead of half-configuring the session.
-        exec::apply_connection_env(&mut channel, &connection.set_env).await?;
-        if connection.remote_command.is_empty() {
-            channel
-                .request_shell(true)
-                .await
-                .map_err(|error| format!("Failed to start SSH shell: {error}"))?;
+        // A copied workbench gets its own PTY channel, replay buffer and
+        // terminal task, but deliberately shares the already authenticated
+        // SSH transport. This avoids replaying an MFA challenge without ever
+        // caching or reusing the OTP itself. A normal "new session" keeps the
+        // old behavior and establishes a fully independent transport.
+        let reuse_source = if reuse_authenticated_transport {
+            let sessions = self.sessions.read().await;
+            let source = if let Some(source_session_id) =
+                request.reuse_authenticated_session_id.as_deref()
+            {
+                sessions
+                    .get(source_session_id)
+                    .filter(|entry| {
+                        entry.connection_id == connection_id
+                            && entry.connected.load(Ordering::Acquire)
+                    })
+                    .cloned()
+            } else {
+                // Compatibility for direct callers that know only the older
+                // boolean contract: choose a deterministic live source.
+                sessions
+                    .values()
+                    .filter(|entry| {
+                        entry.connection_id == connection_id
+                            && entry.connected.load(Ordering::Acquire)
+                    })
+                    .min_by_key(|entry| entry.created_seq)
+                    .cloned()
+            };
+            source
+                .map(|source| {
+                    let orchestration = source
+                        .orchestration
+                        .read()
+                        .map_err(|_| "SSH authentication state is unavailable".to_string())?
+                        .clone();
+                    // Reserve while the sessions read lock still prevents
+                    // close_session from removing/releasing the source.
+                    source.transport_lease.retain();
+                    Ok::<_, String>((
+                        Arc::clone(&source.handle),
+                        Arc::clone(&source.transport_lease),
+                        orchestration,
+                    ))
+                })
+                .transpose()?
         } else {
-            // `ssh RemoteCommand`: exec the configured command instead of a
-            // shell, with the PTY still requested. Like ssh(1), every
-            // (re)connect replays the same command - a dropped session that
-            // the workbench reopens intentionally runs it again.
-            channel
-                .exec(true, connection.remote_command.as_bytes())
-                .await
-                .map_err(|error| format!("Failed to start remote command: {error}"))?;
+            None
+        };
+        if reuse_authenticated_transport && reuse_source.is_none() {
+            return Err(
+                "No live authenticated SSH connection is available to duplicate; use New session to reconnect"
+                    .to_string(),
+            );
         }
+        let (connection, handle, transport_lease, inherited_orchestration, reused_transport) =
+            if let Some((handle, transport_lease, orchestration)) = reuse_source {
+                eprintln!(
+                    "[ssh-trace] open_session connection_id={connection_id} workbench_id={workbench_id} reuse_authenticated_transport=true"
+                );
+                (
+                    connection,
+                    handle,
+                    transport_lease,
+                    Some(orchestration),
+                    true,
+                )
+            } else {
+                eprintln!(
+                    "[ssh-trace] open_session connection_id={connection_id} workbench_id={workbench_id} -> {}:{} auth={:?} reuse_authenticated_transport=false",
+                    connection.host, connection.port, connection.authentication
+                );
+                // D9: 拨号前解析 password_command，使取回的凭据同时作用于登录链与
+                // 本会话的 sudo 编排（下游 dial_and_authenticate 看到非空密码即不再
+                // 重复执行——单次执行语义）。
+                let connection = resolve_password_command(&connection).await;
+                let (handle, jump_chain) = self
+                    .connect_authenticated(&connection, operation_id, Some(emitter.clone()))
+                    .await?;
+                eprintln!("[ssh-trace] open_session dial+auth ok");
+                (
+                    connection,
+                    Arc::new(handle),
+                    Arc::new(SharedTransportLease::new(
+                        jump_chain.into_iter().map(Arc::new).collect::<Vec<_>>(),
+                    )),
+                    None,
+                    false,
+                )
+            };
+        let terminal = async {
+            let remote_shell = detect_remote_shell(&handle).await;
+            let directory_tracking_supported = remote_shell.supports_directory_tracking();
+            let mut channel = handle.channel_open_session().await.map_err(|error| {
+                if reused_transport {
+                    format!("The authenticated SSH connection can no longer be reused; use New session to reconnect: {error}")
+                } else {
+                    format!("Failed to open SSH terminal channel: {error}")
+                }
+            })?;
+            channel
+                .request_pty(true, "xterm-256color", cols.max(1), rows.max(1), 0, 0, &[])
+                .await
+                .map_err(|error| format!("Failed to request SSH PTY: {error}"))?;
+            // Client-specified SetEnv rides on the interactive session too,
+            // in ssh(1) order: PTY first, env next, shell/exec last.
+            exec::apply_connection_env(&mut channel, &connection.set_env).await?;
+            if connection.remote_command.is_empty() {
+                channel
+                    .request_shell(true)
+                    .await
+                    .map_err(|error| format!("Failed to start SSH shell: {error}"))?;
+            } else {
+                channel
+                    .exec(true, connection.remote_command.as_bytes())
+                    .await
+                    .map_err(|error| format!("Failed to start remote command: {error}"))?;
+            }
+            Ok::<_, String>((remote_shell, directory_tracking_supported, channel))
+        }
+        .await;
+        let (remote_shell, directory_tracking_supported, mut channel) = match terminal {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                transport_lease.release().await;
+                return Err(error);
+            }
+        };
 
         let session_id = Uuid::new_v4().to_string();
         let (terminal_tx, mut terminal_rx) = mpsc::channel(256);
@@ -1616,10 +1846,10 @@ impl SshRuntime {
             let store = sudo_profiles::load_store(&self.data_dir);
             effective_sudo_profile(&connection, &store)
         };
-        let orchestration = Arc::new(RwLock::new(resolved_sudo_auth(
-            &connection,
-            bound_profile.as_ref(),
-        )));
+        let orchestration =
+            Arc::new(RwLock::new(inherited_orchestration.unwrap_or_else(|| {
+                resolved_sudo_auth(&connection, bound_profile.as_ref())
+            })));
         // In-terminal Quick Sudo: answers sudo password / 2FA prompts while
         // the user keeps typing normal commands (ported from tiny-rdm). The
         // watcher is attached here and re-synced on every runtime settings
@@ -1633,7 +1863,7 @@ impl SshRuntime {
             created_at_secs: unix_now_secs(),
             created_seq: self.session_seq.fetch_add(1, Ordering::Relaxed),
             handle,
-            jump_chain,
+            transport_lease,
             orchestration: orchestration.clone(),
             auto_sudo: Arc::new(Mutex::new(None)),
             triggers: Arc::new(Mutex::new(None)),
@@ -1920,7 +2150,10 @@ impl SshRuntime {
                     "state": "disconnected"
                 }),
             );
-            sessions.write().await.remove(&task_id);
+            let removed = sessions.write().await.remove(&task_id);
+            if let Some(removed) = removed {
+                removed.transport_lease.release().await;
+            }
         });
 
         Ok(json!({
@@ -2235,6 +2468,7 @@ impl SshRuntime {
                     connection,
                     &orchestration,
                     &none,
+                    &self.prompts,
                 )
                 .await?;
             }
@@ -2256,6 +2490,7 @@ impl SshRuntime {
                             connection,
                             &orchestration,
                             true,
+                            &self.prompts,
                         )
                         .await?;
                     } else {
@@ -2271,6 +2506,7 @@ impl SshRuntime {
                         connection,
                         &orchestration,
                         &key_result,
+                        &self.prompts,
                     )
                     .await?;
                 }
@@ -2289,6 +2525,7 @@ impl SshRuntime {
                             connection,
                             &orchestration,
                             true,
+                            &self.prompts,
                         )
                         .await?;
                     }
@@ -2537,15 +2774,7 @@ impl SshRuntime {
             .remove(session_id)
             .ok_or("SSH session was not found")?;
         let _ = session.terminal_tx.send(TerminalCommand::Close).await;
-        for jump in &session.jump_chain {
-            let _ = jump
-                .disconnect(
-                    Disconnect::ByApplication,
-                    "DBX SSH session closed",
-                    "English",
-                )
-                .await;
-        }
+        session.transport_lease.release().await;
         self.cleanup_session_transfers(session_id)?;
         if let Ok(mut cache) = self.metrics_cache.lock() {
             cache.remove(session_id);
@@ -6235,6 +6464,7 @@ async fn authenticate_password_or_interactive(
     connection: &StoredConnection,
     orchestration: &SudoAuth,
     offered: &AuthResult,
+    prompts: &PromptBroker,
 ) -> Result<(), String> {
     if method_offered(offered, MethodKind::Password) {
         eprintln!("[ssh-trace] auth: password method offered, trying password");
@@ -6254,8 +6484,14 @@ async fn authenticate_password_or_interactive(
             // 密码已经提交过一次：接下来的 keyboard-interactive 就是第二因子
             // （koko/JumpServer 用 partial success 通知 MFA，PAM 栈甚至不置该位），
             // 因此 OTP 提问必须能应答，而不是被判成"密码还没到"。
-            return authenticate_keyboard_interactive(session, connection, orchestration, true)
-                .await;
+            return authenticate_keyboard_interactive(
+                session,
+                connection,
+                orchestration,
+                true,
+                prompts,
+            )
+            .await;
         }
         return Err("SSH password authentication was rejected".to_string());
     }
@@ -6269,6 +6505,7 @@ async fn authenticate_password_or_interactive(
             connection,
             orchestration,
             auth_partial_success(offered),
+            prompts,
         )
         .await;
     }
@@ -6325,6 +6562,21 @@ fn keyboard_interactive_guidance(asked: &[String], answered: bool) -> String {
     message
 }
 
+/// Builds the text shown in the one-time input dialog from server-controlled
+/// keyboard-interactive fields. Every component is normalized and capped by
+/// the same sanitizer used for diagnostics; duplicate lines are omitted.
+fn keyboard_interactive_manual_challenge(context: &str, prompt: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for text in [context, prompt] {
+        let text = exec::sanitize_prompt_hint(text);
+        if text.is_empty() || parts.iter().any(|existing| existing == &text) {
+            continue;
+        }
+        parts.push(text);
+    }
+    parts.join("\n")
+}
+
 /// Drives a keyboard-interactive handshake, answering each round from the
 /// orchestration config (password plus optional TOTP follow-ups).
 /// `first_factor_accepted` says whether the preceding auth step already
@@ -6335,6 +6587,7 @@ async fn authenticate_keyboard_interactive(
     connection: &StoredConnection,
     orchestration: &SudoAuth,
     first_factor_accepted: bool,
+    prompt_broker: &PromptBroker,
 ) -> Result<(), String> {
     let timeout = Duration::from_secs(connection.connect_timeout_secs);
     let mut state = if first_factor_accepted {
@@ -6379,12 +6632,34 @@ async fn authenticate_keyboard_interactive(
                         asked.push(display);
                     }
                 }
-                let answers = exec::keyboard_interactive_answers(
+                let mut answers = exec::keyboard_interactive_answers(
                     orchestration,
                     &mut state,
                     &context,
                     &prompts,
                 );
+                // Values available from the connection (login password or a
+                // configured TOTP seed) stay automatic. Any answer that is
+                // still empty is a genuine keyboard-interactive question:
+                // ask the user at connection time so rotating hardware/app
+                // tokens never need to be stored as a fake static secret.
+                for (answer, prompt) in answers.iter_mut().zip(prompts.iter()) {
+                    if !answer.is_empty() {
+                        continue;
+                    }
+                    let challenge = keyboard_interactive_manual_challenge(&context, &prompt.prompt);
+                    if let Some(value) = prompt_broker
+                        .request_keyboard_interactive_answer(
+                            &connection.host,
+                            connection.port,
+                            &connection.username,
+                            challenge,
+                        )
+                        .await?
+                    {
+                        *answer = value;
+                    }
+                }
                 if answers.iter().any(|answer| !answer.is_empty()) {
                     answered = true;
                 }
@@ -9221,9 +9496,10 @@ matrix-ed25519";
     /// "只问 MFA"、"一个合并提问"四种提问形态。
     mod koko_login {
         use super::*;
+        use dbx_plugin_sdk::PluginTransport;
         use russh::keys::ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey};
-        use russh::server::{Auth, Response, Server as _, Session};
-        use russh::{MethodKind, MethodSet};
+        use russh::server::{Auth, ChannelOpenHandle, Msg, Response, Server as _, Session};
+        use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
         use std::net::SocketAddr;
 
         const LOGIN_PASSWORD: &str = "jump-pw";
@@ -9290,6 +9566,54 @@ matrix-ed25519";
 
         impl russh::server::Handler for MockKokoSession {
             type Error = russh::Error;
+
+            async fn channel_open_session(
+                &mut self,
+                _channel: Channel<Msg>,
+                reply: ChannelOpenHandle,
+                _session: &mut Session,
+            ) -> Result<(), Self::Error> {
+                reply.accept().await;
+                Ok(())
+            }
+
+            async fn exec_request(
+                &mut self,
+                channel: ChannelId,
+                _data: &[u8],
+                session: &mut Session,
+            ) -> Result<(), Self::Error> {
+                session.channel_success(channel)?;
+                session.data(channel, b"/bin/bash".to_vec())?;
+                session.eof(channel)?;
+                session.close(channel)?;
+                Ok(())
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            async fn pty_request(
+                &mut self,
+                channel: ChannelId,
+                _term: &str,
+                _col_width: u32,
+                _row_height: u32,
+                _pix_width: u32,
+                _pix_height: u32,
+                _modes: &[(Pty, u32)],
+                session: &mut Session,
+            ) -> Result<(), Self::Error> {
+                session.channel_success(channel)?;
+                Ok(())
+            }
+
+            async fn shell_request(
+                &mut self,
+                channel: ChannelId,
+                session: &mut Session,
+            ) -> Result<(), Self::Error> {
+                session.channel_success(channel)?;
+                Ok(())
+            }
 
             async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
                 Ok(Auth::reject())
@@ -9447,6 +9771,280 @@ matrix-ed25519";
         fn test_runtime() -> SshRuntime {
             let data_dir = std::env::temp_dir().join(format!("dbx-koko-e2e-{}", Uuid::new_v4()));
             SshRuntime::new(data_dir).with_auto_trust_keys()
+        }
+
+        fn test_emitter() -> PluginEmitter {
+            let output: Arc<Mutex<Box<dyn std::io::Write + Send>>> =
+                Arc::new(Mutex::new(Box::new(Vec::<u8>::new())));
+            PluginEmitter::for_tests(output, PluginTransport::JsonLines)
+        }
+
+        struct ManualOtpGateway {
+            answer: UserInputAnswer,
+            prompts_seen: Mutex<Vec<Value>>,
+        }
+
+        impl ManualOtpGateway {
+            fn submitting(code: &str) -> Self {
+                Self {
+                    answer: UserInputAnswer {
+                        action: "submit".into(),
+                        value: Some(code.into()),
+                    },
+                    prompts_seen: Mutex::new(Vec::new()),
+                }
+            }
+
+            fn cancelling() -> Self {
+                Self {
+                    answer: UserInputAnswer {
+                        action: "cancel".into(),
+                        value: None,
+                    },
+                    prompts_seen: Mutex::new(Vec::new()),
+                }
+            }
+        }
+
+        impl HostPromptGateway for ManualOtpGateway {
+            fn supports_request_user_input(&self) -> bool {
+                true
+            }
+
+            fn request_user_input(
+                &self,
+                prompt: &UserInputPrompt,
+            ) -> Result<UserInputAnswer, PluginError> {
+                self.prompts_seen
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::to_value(prompt).unwrap());
+                Ok(self.answer.clone())
+            }
+        }
+
+        #[tokio::test]
+        async fn unknown_chinese_mfa_prompt_requests_current_code_from_user() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::PasswordThenMfa, "请输入6位数字。", "[MFA认证]：").await;
+            let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
+            let mut runtime = test_runtime();
+            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            let connection = koko_connection(
+                port,
+                json!({}),
+                json!({
+                    "authentication": "password",
+                    "auth_flow_mode": "password_then_otp",
+                }),
+            );
+
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+
+            result.expect("unanswered MFA challenge must open a one-time secret prompt");
+            assert_eq!(answers.lock().unwrap().as_slice(), [MFA_CODE.to_string()]);
+            let prompts = gateway.prompts_seen.lock().unwrap();
+            assert_eq!(prompts.len(), 1, "exactly one OTP dialog is expected");
+            assert_eq!(prompts[0]["echo"], false, "the OTP input must be masked");
+            assert!(prompts[0]["title"]
+                .as_str()
+                .unwrap()
+                .starts_with("动态令牌验证"));
+            assert!(prompts[0]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("本次输入仅用于此次登录，不会保存"));
+            assert!(prompts[0]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("请输入6位数字。"));
+            assert!(prompts[0]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("[MFA认证]："));
+        }
+
+        #[tokio::test]
+        async fn configured_totp_keeps_login_automatic_without_user_prompt() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
+            let gateway = Arc::new(ManualOtpGateway::submitting("should-not-be-used"));
+            let mut runtime = test_runtime();
+            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            let connection = koko_connection(
+                port,
+                json!({ "totp_secret": MFA_CODE }),
+                json!({
+                    "authentication": "password",
+                    "auth_flow_mode": "password_then_otp",
+                }),
+            );
+
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+
+            result.expect("configured TOTP must keep the existing automatic login path");
+            assert_eq!(answers.lock().unwrap().as_slice(), [MFA_CODE.to_string()]);
+            assert!(
+                gateway.prompts_seen.lock().unwrap().is_empty(),
+                "automatic TOTP must not open a redundant dialog"
+            );
+        }
+
+        #[tokio::test]
+        async fn cancelling_manual_mfa_prompt_fails_closed() {
+            let (port, answers, server) =
+                spawn_mock_koko(Shape::PasswordThenMfa, "请输入6位数字。", "[MFA认证]：").await;
+            let gateway = Arc::new(ManualOtpGateway::cancelling());
+            let mut runtime = test_runtime();
+            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            let connection = koko_connection(
+                port,
+                json!({}),
+                json!({
+                    "authentication": "password",
+                    "auth_flow_mode": "password_then_otp",
+                }),
+            );
+
+            let result = runtime.connect_headless(&connection).await;
+            server.abort();
+
+            assert_eq!(
+                result.err().as_deref(),
+                Some("SSH keyboard-interactive authentication was cancelled")
+            );
+            assert!(
+                answers.lock().unwrap().is_empty(),
+                "cancelled prompts must not send an empty or guessed answer"
+            );
+            assert_eq!(gateway.prompts_seen.lock().unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn second_terminal_session_reuses_authenticated_transport() {
+            let (port, answers, server) = spawn_mock_koko(
+                Shape::PasswordThenMfa,
+                "Please enter 6 digits.",
+                "[MFA auth]:",
+            )
+            .await;
+            let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
+            let mut runtime = test_runtime();
+            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            let connection = koko_connection(
+                port,
+                json!({}),
+                json!({
+                    "authentication": "password",
+                    "auth_flow_mode": "off",
+                }),
+            );
+            runtime.store_connection(connection).unwrap();
+
+            let first = runtime
+                .open_session(
+                    &SessionOpenRequest {
+                        connection_id: "koko-login".into(),
+                        workbench_id: "workbench-1".into(),
+                        reuse_authenticated_transport: false,
+                        reuse_authenticated_session_id: None,
+                        cols: 80,
+                        rows: 24,
+                    },
+                    "open-1",
+                    test_emitter(),
+                )
+                .await
+                .expect("first terminal session");
+            let second = runtime
+                .open_session(
+                    &SessionOpenRequest {
+                        connection_id: "koko-login".into(),
+                        workbench_id: "workbench-2".into(),
+                        reuse_authenticated_transport: true,
+                        reuse_authenticated_session_id: first["sessionId"]
+                            .as_str()
+                            .map(str::to_string),
+                        cols: 80,
+                        rows: 24,
+                    },
+                    "open-2",
+                    test_emitter(),
+                )
+                .await
+                .expect("second terminal session");
+
+            assert_eq!(
+                gateway.prompts_seen.lock().unwrap().len(),
+                1,
+                "a second PTY on the same live connection must not ask for MFA again"
+            );
+            assert_eq!(
+                answers.lock().unwrap().as_slice(),
+                [MFA_CODE.to_string()],
+                "the bastion must authenticate only the first SSH transport"
+            );
+
+            for opened in [first, second] {
+                let session_id = opened["sessionId"].as_str().unwrap();
+                runtime.close_session(session_id).await.unwrap();
+            }
+            server.abort();
+        }
+
+        #[test]
+        fn pending_copy_reservation_keeps_transport_alive_before_session_registration() {
+            let uses = TransportLeaseCounter::new();
+            uses.retain(); // pending copied-session open
+
+            assert_eq!(uses.count(), 2);
+            assert!(
+                !uses.release(),
+                "closing the source must not release a transport reserved by a pending copy"
+            );
+            assert_eq!(uses.count(), 1);
+            assert!(
+                uses.release(),
+                "the final copied session owns the last transport lease"
+            );
+        }
+
+        #[tokio::test]
+        async fn copied_session_without_a_live_transport_does_not_reprompt_for_mfa() {
+            let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
+            let mut runtime = test_runtime();
+            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            runtime
+                .store_connection(koko_connection(
+                    1,
+                    json!({}),
+                    json!({
+                        "authentication": "password",
+                        "auth_flow_mode": "off",
+                    }),
+                ))
+                .unwrap();
+
+            let error = runtime
+                .open_session(
+                    &SessionOpenRequest {
+                        connection_id: "koko-login".into(),
+                        workbench_id: "copied-workbench".into(),
+                        reuse_authenticated_transport: true,
+                        reuse_authenticated_session_id: Some("missing-session".into()),
+                        cols: 80,
+                        rows: 24,
+                    },
+                    "copy-without-source",
+                    test_emitter(),
+                )
+                .await
+                .expect_err("copying without a live source must fail before authentication");
+
+            assert!(error.contains("use New session to reconnect"));
+            assert!(gateway.prompts_seen.lock().unwrap().is_empty());
         }
 
         #[tokio::test]

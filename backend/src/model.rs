@@ -816,6 +816,15 @@ pub struct SessionOpenRequest {
     pub connection_id: String,
     #[serde(default)]
     pub workbench_id: String,
+    /// Open another PTY channel over a live authenticated SSH transport.
+    /// False keeps the long-standing "new session" reconnect semantics.
+    #[serde(default)]
+    pub reuse_authenticated_transport: bool,
+    /// Session whose authenticated transport should be reused. Newer
+    /// workbenches send this explicitly so "duplicate" follows the window
+    /// the user clicked instead of an arbitrary same-connection session.
+    #[serde(default)]
+    pub reuse_authenticated_session_id: Option<String>,
     #[serde(default = "default_cols")]
     pub cols: u32,
     #[serde(default = "default_rows")]

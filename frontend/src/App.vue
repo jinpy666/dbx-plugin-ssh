@@ -108,7 +108,13 @@ import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/t
 import { createTerminalInputQueue } from "./lib/terminalInputQueue";
 import { describeReconnectCountdown, describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS, type ReconnectCountdown } from "./lib/terminalReconnect";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
-import { decideConnectRetry } from "./lib/connectRetry";
+import { decideConnectRetry, isDuplicatedTransportUnavailableError } from "./lib/connectRetry";
+import {
+  createSessionTransportReuseState,
+  fallbackToFreshTransport,
+  markSessionTransportOpenSucceeded,
+  sessionTransportOpenParams,
+} from "./lib/sessionTransportReuse";
 import { createConnectLog } from "./lib/connectLog";
 import { pickModalFocusTarget } from "./lib/modalFocus";
 import { createZmodemSentry, sendZmodemFiles, type ZmodemUploadProgress } from "./lib/terminalZmodem";
@@ -459,6 +465,7 @@ const uploadInput = ref<HTMLInputElement>();
 const zmodemInput = ref<HTMLInputElement>();
 const trzszInput = ref<HTMLInputElement>();
 const hostContext = ref<Record<string, unknown>>({});
+let transportReuseState = createSessionTransportReuseState({});
 // Bottom dock panel surface (surface=panel, host §8.3): hide the workbench identity block so the panel
 // and focus the terminal itself; multi-open/shell switching goes through the panel "+" menu (bridge openWorkbench opens another panel).
 // Declared early: the batch bar / sftp pane initializers below must know the surface at setup time.
@@ -2605,6 +2612,7 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     const info = await window.dbxPlugin.invoke<SessionInfo>("ssh/session/open", {
       connectionId: connectionId.value,
       workbenchId: workbenchId.value,
+      ...sessionTransportOpenParams(transportReuseState),
       cols: terminal?.cols || 120,
       rows: terminal?.rows || 32,
     }, { timeoutMs: attemptTimeoutMs });
@@ -2615,6 +2623,11 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
       connectLog.push("warn", t("connectCard.log.orphanClosed"));
       return;
     }
+    // Duplicate is an open-time intent, not a permanent reconnect policy.
+    // Once its PTY exists, this tab owns an ordinary session; a later network
+    // drop must be able to run a fresh login instead of replaying the old
+    // source session id forever.
+    markSessionTransportOpenSucceeded(transportReuseState, info.sessionId);
     activeTerminalSessionId = info.sessionId;
     lastSequence = 0;
     // A fresh session restarts sequence numbering: buffered frames from the
@@ -2660,6 +2673,17 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     connectSucceeded.value = false;
     // 用户已取消：不重试、不呈现错误，卡片停在已取消态等 Connect 重新发起。
     if (connectCancelled.value) return;
+    // The selected source may close between opening the child workbench and
+    // its first sidecar call. Downgrade once, explicitly, to a normal login;
+    // subsequent failures follow the ordinary permanent-error policy.
+    if (
+      isDuplicatedTransportUnavailableError(cause)
+      && fallbackToFreshTransport(transportReuseState)
+    ) {
+      connectLog.push("warn", t("connectCard.log.duplicateFallback"));
+      await openSession(false, bootRestore, true);
+      return;
+    }
     const attemptMs = Date.now() - attemptStarted;
     // "Connection is not active"：sidecar 连接注册表还没有该连接。boot 恢复
     // 场景（宿主启动时为恢复的插件 tab 重放 connect 生命周期）这是暂时态，
@@ -3117,16 +3141,35 @@ async function reconnectNow() {
 // 旧宿主忽略第三参，退化为原查重行为。connectionId 显式写入 context：宿主的
 // 重推凭据（reinit re-push）与 hostContext 合并都键在 context.connectionId 上，
 // 不能依赖宿主已把它合进 context（旧宿主没有那层合并）。
-function openNewSessionTab() {
-  const api = window.dbxPlugin;
-  if (!api.openWorkbench || !connectionId.value) return;
-  const context: Record<string, unknown> = { ...hostContext.value, connectionId: connectionId.value, workbenchId: randomUUID() };
+function sessionTabContext(reuseAuthenticatedTransport: boolean): Record<string, unknown> {
+  const context: Record<string, unknown> = {
+    ...hostContext.value,
+    connectionId: connectionId.value,
+    workbenchId: randomUUID(),
+    reuseAuthenticatedTransport,
+    reuseAuthenticatedSessionId: reuseAuthenticatedTransport ? session.value?.sessionId : undefined,
+  };
   const persisted = context.workbenchState;
   if (persisted && typeof persisted === "object") {
     const { sessionId: _sessionId, terminalSequence: _terminalSequence, ...rest } = persisted as Record<string, unknown>;
     context.workbenchState = rest;
   }
-  void api.openWorkbench("io.dbx.ssh.workbench", context, { forceNew: true });
+  return context;
+}
+
+function openNewSessionTab() {
+  const api = window.dbxPlugin;
+  if (!api.openWorkbench || !connectionId.value) return;
+  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(false), { forceNew: true });
+}
+
+// 复制会话：新 tab 仍拥有独立 PTY、回放缓冲和 workbenchId，但后端在当前
+// 已认证 SSH transport 上另开 channel，因此堡垒机不会再次发起 MFA。这里不
+// 复制或缓存 OTP；若原 transport 已失效，后端会要求走“新建会话”重新连接。
+function openCopiedSessionTab() {
+  const api = window.dbxPlugin;
+  if (!api.openWorkbench || !connectionId.value || !connected.value) return;
+  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(true), { forceNew: true });
 }
 
 async function restoreTransfers() {
@@ -7478,6 +7521,7 @@ async function initialize() {
     api.ready,
     api.request<Record<string, unknown>>("host.getContext"),
   ]);
+  transportReuseState = createSessionTransportReuseState(hostContext.value);
   locale.value = api.locale || "zh-CN";
   restoreUiState();
   const appearanceAppliedAtBoot = Boolean(api.appearance || api.theme);
@@ -7732,6 +7776,7 @@ onBeforeUnmount(() => {
         <button class="icon-button" :title="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
         <button class="icon-button" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><SquarePlus /></button>
+        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('copySessionTab')" :disabled="!connectionId || !connected" @click="openCopiedSessionTab"><Copy /></button>
         <!-- 本地终端：sidecar 所在机器的登录 shell。与 SSH 会话互斥展示，
              已连接时经确认先关 SSH；退出态由终端覆盖层提供重开出口。 -->
         <button class="icon-button icon-violet" :class="{ 'is-active': localUiMode }" :title="localUiMode && !localShellRestored ? t('localTerminal.close') : t('localTerminal.open')" @click="toggleLocalTerminal"><TerminalIcon /></button>
@@ -9447,5 +9492,3 @@ onBeforeUnmount(() => {
 /* 拖拽过程中全局光标 */
 body.resizing-col { cursor: col-resize !important; user-select: none; }
 </style>
-
-

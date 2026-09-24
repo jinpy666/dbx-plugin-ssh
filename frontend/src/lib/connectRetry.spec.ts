@@ -18,6 +18,8 @@ describe("isPermanentConnectError", () => {
     expect(isPermanentConnectError(new Error("SSH connection failed: Permission denied (publickey)"))).toBe(true);
     expect(isPermanentConnectError("SSH connection failed: UnknownKey")).toBe(true);
     expect(isPermanentConnectError(new Error("SSH handshake completed without presenting a host key"))).toBe(true);
+    expect(isPermanentConnectError(new Error("No live authenticated SSH connection is available to duplicate; use New session to reconnect"))).toBe(true);
+    expect(isPermanentConnectError(new Error("The authenticated SSH connection can no longer be reused; use New session to reconnect"))).toBe(true);
   });
 
   it("treats transient transport failures as retryable", () => {

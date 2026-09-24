@@ -44,6 +44,7 @@ connections, terminal, files, and automation share the same DBX connection conte
 - Password, private-key, SSH Agent, keyboard-interactive, and passwordless authentication.
 - Interactive PTY terminal with resize, session recovery, clipboard support,
   remote-directory tracking, and batch input.
+- **Duplicate session** opens an independent terminal over the current authenticated SSH transport without asking for MFA again; **New session** still creates and authenticates a fresh transport.
 - SFTP browsing, sorting, preview, upload, download, rename, create, drag and drop,
   and recursive delete. Focus the SFTP pane and press Ctrl/Cmd+V to upload local
   files from the system clipboard into the current directory.
@@ -51,7 +52,9 @@ connections, terminal, files, and automation share the same DBX connection conte
 - Known Hosts verification, changed-key rejection, read-only mode, and directory disk usage.
 - ProxyJump chains up to three hops, keepalive, cancellable remote commands, chmod,
   and Quick Sudo.
-- TOTP and keyboard-interactive two-factor authentication, plus MCP tools for automation clients.
+- TOTP and keyboard-interactive two-factor authentication. Rotating app, hardware-token,
+  or SMS codes can be entered in a masked connection-time dialog instead of being saved.
+  MCP tools are also available for automation clients.
 - Simplified Chinese, Traditional Chinese, English, Spanish, Italian, Japanese,
   and Portuguese UI.
 
@@ -118,8 +121,9 @@ safety model, see the [MCP guide](docs/MCP_USAGE.en.md) and the
 ## Security
 
 Passwords, private-key passphrases, TOTP secrets, and sudo credentials are managed
-through DBX host secret bindings. The plugin does not write credentials to config
-files, logs, or exports. For production connections, enable strict Known Hosts
+through DBX host secret bindings. A manually entered login token is used only for that
+authentication attempt and is not persisted or logged. The plugin does not write credentials
+to config files, logs, or exports. For production connections, enable strict Known Hosts
 verification and use read-only mode or a sudo command allowlist when appropriate.
 
 ## Installation

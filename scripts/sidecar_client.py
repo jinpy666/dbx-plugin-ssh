@@ -105,6 +105,8 @@ class SidecarClient:
 
         on_event(message) may return a dict (sent as a follow-up request,
         e.g. resolving a host-key challenge) to keep flows single-threaded.
+        A ``{"__host_response__": json_rpc_response}`` return value answers a
+        plugin-initiated Host API request such as ``host/requestUserInput``.
         """
         deadline = time.monotonic() + self.timeout
         while True:
@@ -129,6 +131,11 @@ class SidecarClient:
             if on_event is not None:
                 reply = on_event(message)
                 if isinstance(reply, dict):
+                    host_response = reply.get("__host_response__")
+                    if isinstance(host_response, dict):
+                        self._send_raw(FRAME_JSON, json.dumps(host_response).encode())
+                        deadline = time.monotonic() + self.timeout
+                        continue
                     sub = {"jsonrpc": "2.0", "id": self.next_id, "method": reply["method"],
                            "params": reply.get("params", {})}
                     self.next_id += 1
@@ -139,10 +146,16 @@ class SidecarClient:
 
     # -- protocol ------------------------------------------------------------
 
-    def initialize(self) -> dict:
+    def initialize(self, enable_user_input: bool = False) -> dict:
+        host = {"protocolVersions": [PROTOCOL_VERSION]}
+        if enable_user_input:
+            host.update({
+                "hostApiVersion": "1.1.0",
+                "features": ["host.requestUserInput"],
+            })
         return self.request(
             "plugin/initialize",
-            {"host": {"protocolVersions": [PROTOCOL_VERSION]}},
+            {"host": host},
         )
 
     def request(self, method: str, params: dict | None = None, timeout: float | None = None,
@@ -225,6 +238,11 @@ class SidecarClient:
                 if on_event is not None:
                     reply = on_event(message)
                     if isinstance(reply, dict):
+                        host_response = reply.get("__host_response__")
+                        if isinstance(host_response, dict):
+                            self._send_raw(FRAME_JSON, json.dumps(host_response).encode())
+                            deadline = time.monotonic() + total_timeout
+                            continue
                         sub = {"jsonrpc": "2.0", "id": self.next_id, "method": reply["method"],
                                "params": reply.get("params", {})}
                         self.next_id += 1
