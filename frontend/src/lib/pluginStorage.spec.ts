@@ -29,6 +29,7 @@ describe("ssh pluginStore wiring", () => {
         "ssh-terminal-behavior",
         "ssh-terminal-hotkeys",
         "ssh-terminal-appearance",
+        "ssh-terminal-ghost-suggest",
       ].sort(),
     );
     for (const banned of [

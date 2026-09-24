@@ -38,6 +38,7 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-terminal-behavior",
   "ssh-terminal-hotkeys",
   "ssh-terminal-appearance",
+  "ssh-terminal-ghost-suggest",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);
