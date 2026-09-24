@@ -25,6 +25,7 @@ mod otp_store;
 mod preferences;
 mod quick_commands;
 mod serial_session;
+mod serial_xmodem;
 mod session_recording;
 mod sftp_bookmarks;
 mod sftp_copy;
@@ -513,6 +514,53 @@ impl Plugin {
                 Ok(json!({ "success": true }))
             }
             "serial/list" => Ok(self.runtime.block_on(self.serial.list())),
+            // 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：引擎是纯
+            // 状态机，由串口读线程喂数据/取输出；文件字节由前端 File API
+            // 分块（≤64KiB）送入，sidecar 不落盘（web/docker 浏览器兜底）。
+            "serial/upload/start" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let protocol =
+                    serial_xmodem::UploadProtocol::parse(required_string(&params, "protocol")?)?;
+                let file_name = required_string(&params, "fileName")?;
+                let total_size = params
+                    .get("totalSize")
+                    .and_then(Value::as_u64)
+                    .ok_or("serial/upload/start: totalSize is required")?;
+                self.runtime.block_on(self.serial.upload_start(
+                    session_id,
+                    protocol,
+                    file_name.to_string(),
+                    total_size,
+                    emitter,
+                ))
+            }
+            "serial/upload/data" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let data_base64 = required_string(&params, "dataBase64")?;
+                let data = serial_session::decode_write_payload(data_base64)?;
+                if data.len() > serial_xmodem::UPLOAD_CHUNK_LIMIT {
+                    return Err(format!(
+                        "serial/upload/data: chunk of {} bytes exceeds the {} byte limit",
+                        data.len(),
+                        serial_xmodem::UPLOAD_CHUNK_LIMIT
+                    ));
+                }
+                let final_chunk = params
+                    .get("final")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.runtime.block_on(self.serial.upload_data(
+                    session_id,
+                    data,
+                    final_chunk,
+                    emitter,
+                ))
+            }
+            "serial/upload/cancel" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime
+                    .block_on(self.serial.upload_cancel(session_id, emitter))
+            }
             // VNC 远程桌面会话（RFB 6143 客户端，nyaterm-parity P2 2d）：入口在
             // SSH 工作台工具栏，用户显式点击才会创建。引擎为上游 vnc-rs 0.6
             // （尽调见 docs/SPIKE_VNC_SESSION.zh-CN.md）；仅声明 ZRLE+Raw 编码，

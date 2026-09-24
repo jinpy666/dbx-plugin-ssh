@@ -6394,3 +6394,105 @@ const vncMessages: Record<string, Record<string, string>> = {
 for (const locale of Object.keys(vncMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...vncMessages[locale] };
 }
+
+// ---------------------------------------------------------------------------
+// 串口文件上传（SerialUploadDialog + App.vue overlay，NyaTerm 对齐 P0-3）：
+// 追加文案块走 supplemental 平铺 dotted key 合并，七语键集与占位符完全一致
+// （workbench.spec.ts 与 i18nKeyReferences.spec.ts 双向校验）。
+// ---------------------------------------------------------------------------
+const serialUploadMessages: Record<string, Record<string, string>> = {
+  en: {
+    "serial.upload.open": "Send a file over the serial port",
+    "serial.upload.title": "Send file over serial",
+    "serial.upload.file": "File",
+    "serial.upload.choose": "Choose a file…",
+    "serial.upload.protocol": "Protocol",
+    "serial.upload.start": "Start transfer",
+    "serial.upload.tooLarge": "Files over 256 MiB cannot be sent over the serial port.",
+    "serial.upload.hint": "Start the receiver on the device first (e.g. rx/sz -X/rz), then start the transfer. Keystrokes are paused while the transfer runs.",
+    "serial.upload.running": "Transferring {name}… {percent}%",
+    "serial.upload.complete": "Transfer complete: {name}",
+    "serial.upload.failed": "Serial transfer failed: {reason}",
+  },
+  "zh-CN": {
+    "serial.upload.open": "通过串口发送文件",
+    "serial.upload.title": "串口发送文件",
+    "serial.upload.file": "文件",
+    "serial.upload.choose": "选择文件…",
+    "serial.upload.protocol": "协议",
+    "serial.upload.start": "开始传输",
+    "serial.upload.tooLarge": "超过 256 MiB 的文件无法通过串口发送。",
+    "serial.upload.hint": "请先在对端启动接收程序（如 rx / sz -X / rz），再开始传输。传输期间键入将暂停。",
+    "serial.upload.running": "传输中 {name}… {percent}%",
+    "serial.upload.complete": "传输完成：{name}",
+    "serial.upload.failed": "串口传输失败：{reason}",
+  },
+  "zh-TW": {
+    "serial.upload.open": "透過序列埠傳送檔案",
+    "serial.upload.title": "序列埠傳送檔案",
+    "serial.upload.file": "檔案",
+    "serial.upload.choose": "選擇檔案…",
+    "serial.upload.protocol": "協定",
+    "serial.upload.start": "開始傳輸",
+    "serial.upload.tooLarge": "超過 256 MiB 的檔案無法透過序列埠傳送。",
+    "serial.upload.hint": "請先在對端啟動接收程式（如 rx / sz -X / rz），再開始傳輸。傳輸期間鍵入將暫停。",
+    "serial.upload.running": "傳輸中 {name}… {percent}%",
+    "serial.upload.complete": "傳輸完成：{name}",
+    "serial.upload.failed": "序列埠傳輸失敗：{reason}",
+  },
+  es: {
+    "serial.upload.open": "Enviar un archivo por el puerto serie",
+    "serial.upload.title": "Enviar archivo por serie",
+    "serial.upload.file": "Archivo",
+    "serial.upload.choose": "Elegir un archivo…",
+    "serial.upload.protocol": "Protocolo",
+    "serial.upload.start": "Iniciar transferencia",
+    "serial.upload.tooLarge": "No se pueden enviar archivos de más de 256 MiB por el puerto serie.",
+    "serial.upload.hint": "Inicia primero el receptor en el dispositivo (p. ej. rx / sz -X / rz) y después inicia la transferencia. La escritura queda en pausa durante la transferencia.",
+    "serial.upload.running": "Transfiriendo {name}… {percent}%",
+    "serial.upload.complete": "Transferencia completada: {name}",
+    "serial.upload.failed": "Error en la transferencia serie: {reason}",
+  },
+  it: {
+    "serial.upload.open": "Invia un file tramite porta seriale",
+    "serial.upload.title": "Invia file via seriale",
+    "serial.upload.file": "File",
+    "serial.upload.choose": "Scegli un file…",
+    "serial.upload.protocol": "Protocollo",
+    "serial.upload.start": "Avvia trasferimento",
+    "serial.upload.tooLarge": "I file oltre 256 MiB non possono essere inviati tramite porta seriale.",
+    "serial.upload.hint": "Avvia prima il ricevente sul dispositivo (es. rx / sz -X / rz), poi avvia il trasferimento. La digitazione è sospesa durante il trasferimento.",
+    "serial.upload.running": "Trasferimento di {name}… {percent}%",
+    "serial.upload.complete": "Trasferimento completato: {name}",
+    "serial.upload.failed": "Trasferimento seriale non riuscito: {reason}",
+  },
+  ja: {
+    "serial.upload.open": "シリアルポートでファイルを送信",
+    "serial.upload.title": "シリアルでファイルを送信",
+    "serial.upload.file": "ファイル",
+    "serial.upload.choose": "ファイルを選択…",
+    "serial.upload.protocol": "プロトコル",
+    "serial.upload.start": "転送を開始",
+    "serial.upload.tooLarge": "256 MiB を超えるファイルはシリアルポートから送信できません。",
+    "serial.upload.hint": "まず対向デバイスで受信プログラム（rx / sz -X / rz など）を起動してから転送を開始してください。転送中はキー入力が一時停止されます。",
+    "serial.upload.running": "転送中 {name}… {percent}%",
+    "serial.upload.complete": "転送完了：{name}",
+    "serial.upload.failed": "シリアル転送に失敗しました：{reason}",
+  },
+  "pt-BR": {
+    "serial.upload.open": "Enviar um arquivo pela porta serial",
+    "serial.upload.title": "Enviar arquivo pela serial",
+    "serial.upload.file": "Arquivo",
+    "serial.upload.choose": "Escolher um arquivo…",
+    "serial.upload.protocol": "Protocolo",
+    "serial.upload.start": "Iniciar transferência",
+    "serial.upload.tooLarge": "Arquivos com mais de 256 MiB não podem ser enviados pela porta serial.",
+    "serial.upload.hint": "Inicie primeiro o receptor no dispositivo (ex.: rx / sz -X / rz) e depois inicie a transferência. A digitação fica pausada durante a transferência.",
+    "serial.upload.running": "Transferindo {name}… {percent}%",
+    "serial.upload.complete": "Transferência concluída: {name}",
+    "serial.upload.failed": "Falha na transferência serial: {reason}",
+  },
+};
+for (const locale of Object.keys(serialUploadMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...serialUploadMessages[locale] };
+}

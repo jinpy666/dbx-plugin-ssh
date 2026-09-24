@@ -70,6 +70,7 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `local/shells/list` | 本机可启动 shell 清单（用户登录 shell 置顶，含 `isDefault`/`isUserShell`/`injectable` 标记——最后一项表示该 shell 是否支持 integration 注入，不支持的在选择器中灰掉开关；Unix 读 `/etc/shells`+`dscl`，Windows 枚举 PATH 下的 pwsh/PowerShell/cmd/wsl），工作台 shell 选择器数据源 |
 | `local/session/list`、`local/session/close` | 本地终端会话清单（webview 重载后接回）与关闭 |
 | `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
+| `serial/upload/start`、`serial/upload/data`、`serial/upload/cancel` | 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：协议状态机在 sidecar（`backend/src/serial_xmodem.rs` 纯状态机，由串口读线程喂数据/取输出），文件字节由前端 File API 分块（≤64KiB）经 `data` 送入，sidecar 不落盘；单次上传总量上限 256 MiB；进度事件 `serial/upload/progress`（`sent`/`total`，不含文件内容）；同一会话同一时刻至多一个上传（并发第二次 `start` 报错），见「串口文件上传（X/Y/ZMODEM）」节 |
 
 ## 运行时设置
 
@@ -529,6 +530,17 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 - `local/session/list` 供 webview 重载后接回仍活着的 shell；`workbench/close` 会回收该工作台的本地会话；sidecar 退出即全部终止（本地 PTY 生命周期 = sidecar 生命周期）。
 - 安全语义：入口为工作台显式按钮（未连接也可用；SSH 会话在连时经确认先关闭），无自动开启路径；manifest 权限集不变（复用 `host.binary`），本机命令执行能力与用户自身终端同级，无提权。
 - 偏好（`local/preferences/*` 白名单新增）：`localShell`（字符串 ≤200，空=自动探测）、`localShellIntegration`（布尔，缺省 true）。shell 选择器在工作台本地终端按钮旁的设置菜单（`local/shells/list` 发现 + 注入开关），徽标显示 `Local · <shell>`，重开按钮在本地会话存活时保持可用（restart 语义：关当前 → 按新偏好重开）。
+
+## 串口文件上传（X/Y/ZMODEM）
+
+串口会话（RS-232 控制台）支持向对端设备发送文件，三协议引擎为纯状态机（输入=对端字节流，输出=待写字节序列），由串口读线程在既有泵循环内驱动；对端响应既驱动协议也照常上屏（NyaTerm 语义），上传期间的键入由前端拦截（控制字符窗口），sidecar 拒绝并发第二次上传。
+
+- `serial/upload/start {sessionId, protocol, fileName, totalSize}` → `{sessionId, protocol, totalSize}`。`protocol ∈ "xmodem" | "ymodem" | "zmodem"`（拼写为 `zmodem`）；`fileName` 仅作标签与协议头负载，不落盘；`totalSize` 超过 256 MiB、YMODEM 头元数据（name\0size）超过 128 字节、或该会话已有上传在跑时直接报错。
+- `serial/upload/data {sessionId, dataBase64, final}` → `{received, final}`。前端 File API 分块（≤64KiB）送入；未收尾（`final: false`）时部分数据不会被视为文件尾，引擎在协议请求越过已到数据且未收尾时保持等待（超时时钟暂停），因此文件可在协议握手的同时流式灌入。
+- `serial/upload/cancel {sessionId}` → `{success}`。X/Y 发 CAN×8、ZMODEM 发 ZDLE×5+BS×5 取消序列并落 `failed` 进度事件；幂等。
+- 事件 `serial/upload/progress`（notify）：`{sessionId, protocol, fileName, fileIndex, sent, total, state, reason?}`，`state ∈ "running" | "file_complete" | "complete" | "failed"`；`sent` 为对端已确认（ZMODEM）或已确认收到（X/Y ACK）的字节数，不含文件内容；事件按 ≥4KiB 增量或 200ms 窗口限流，状态变化强制上报。
+
+协议语义（对齐 NyaTerm 及其 vendor zmodem2 发送端行为，代码手写）：XMODEM 128B 块 + CRC16（`C` 握手）或 8-bit checksum（`NAK` 握手）、CPM-EOF 尾填充、EOT 先 NAK 后 ACK；YMODEM 批形态（块 0 头 `name\0size` 零填充、固定 CRC、EOT 后收尾全零头块）；ZMODEM ZRQINIT(hex)→ZRINIT→ZFILE(bin32+CRCW 子包)→ZRPOS→ZDATA（每帧单 ZCRCW 子包等待落盘确认，子包按对端 ZRINIT 声明的接收缓冲截断，上限 8KiB）→ZEOF→ZRINIT→ZFIN(hex)→`OO`，支持 ZRPOS 断点续传与 ZSKIP 拒收；对端连续取消字节（X/Y CAN×2、Z ZDLE×5）判远端取消，静默 10s 重发最后一帧、10 次后失败。
 
 ## 主机密钥确认通道(requestUserInput)
 
