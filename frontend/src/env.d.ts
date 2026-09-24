@@ -49,6 +49,14 @@ interface DbxPluginApi {
   readonly appearance?: DbxPluginAppearance;
   readonly theme?: DbxPluginTheme;
   readonly locale: string;
+  /** 宿主能力位（Host API 1.2 起）；storage 缺失表示该宿主无持久化桥，clipboard* 在 Host API 1.3 起引入。 */
+  readonly capabilities?: { storage?: boolean; clipboardRead?: boolean; clipboardWrite?: boolean };
+  /** 持久化 UI 状态桥（单值 256 KiB / 总量 1 MiB）；配 capabilities.storage 使用，经 shared/frontend/pluginStorage 读写。 */
+  readonly storage?: {
+    get(key: string): Promise<unknown>;
+    set(key: string, value: unknown): Promise<unknown>;
+    delete(key: string): Promise<unknown>;
+  };
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
   invoke<T = unknown>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T>;
   notify(method: string, params?: unknown): Promise<void>;

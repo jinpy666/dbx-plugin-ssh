@@ -296,6 +296,8 @@ describe("mockDbxHost fixture", () => {
     const plugin = await loadMock("");
     await plugin.openWorkbench!("io.dbx.ssh.workbench", {
       plugin: { mode: "local-terminal" },
+      reuseAuthenticatedTransport: true,
+      reuseAuthenticatedSessionId: "source-session",
       workbenchId: "plugin-forged-id",
       restored: true,
       surface: "panel",
@@ -306,6 +308,8 @@ describe("mockDbxHost fixture", () => {
     const ctx = calls[0].context;
     // The plugin payload is preserved verbatim; reserved fields are overridden by the host identity.
     expect(ctx.plugin).toEqual({ mode: "local-terminal" });
+    expect(ctx.reuseAuthenticatedTransport).toBe(true);
+    expect(ctx.reuseAuthenticatedSessionId).toBe("source-session");
     expect(ctx.workbenchId).not.toBe("plugin-forged-id");
     expect(String(ctx.workbenchId)).toMatch(/^mock-workbench-/);
     expect(ctx.restored).toBe(false);

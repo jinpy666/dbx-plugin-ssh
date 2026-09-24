@@ -3,15 +3,19 @@ const binaryListeners = new Set<(event: DbxPluginBinaryEvent) => void>();
 const appearanceListeners = new Set<(appearance: DbxPluginAppearance) => void>();
 const contextListeners = new Set<(context: Record<string, unknown>) => void>();
 
+import { pluginStore } from "./lib/pluginStore";
+
 const fixtureParams = new URLSearchParams(location.search);
-// ?render=dom 强制关闭终端 WebGL 加速（localStorage 偏好）：mock walkthrough
-// 的终端断言读 DOM 文本，WebGL 渲染下文本只存在于 GPU canvas，必须锁定
-// DOM 渲染器路径（WebGL 自身的成功/回退由 terminalWebgl 单测覆盖）。
+// ?render=dom 强制关闭终端 WebGL 加速（pluginStore 偏好，见 lib/pluginStore.ts）：
+// mock walkthrough 的终端断言读 DOM 文本，WebGL 渲染下文本只存在于 GPU canvas，
+// 必须锁定 DOM 渲染器路径（WebGL 自身的成功/回退由 terminalWebgl 单测覆盖）。
+// 种子必须走 pluginStore（写缓存 + 写穿持久档）：App 经 store 首读，直写
+// localStorage 会被水合时序吃掉（宿主档水合发生在种子写入之后也读不到）。
 if (fixtureParams.get("render") === "dom") {
   // 快速输入诊断（#33/#71）：默认强制 DOM 渲染器。要复刻真实工作台的
-  // WebGL 渲染路径时，把下行改为 setItem("ssh-terminal-webgl", "1")
+  // WebGL 渲染路径时，把下行改为 pluginStore.setItem("ssh-terminal-webgl", "1")
   //（注意：Safari 的 vite fixture 下 WebGL 终端渲染为空白，仅 Chromium 可用）。
-  try { localStorage.setItem("ssh-terminal-webgl", "0"); } catch { /* noop */ }
+  pluginStore.setItem("ssh-terminal-webgl", "0");
 }
 // ?rw=1 模拟可写连接（默认只读），供拖放上传等写路径 UI 验证。
 const writable = fixtureParams.get("rw") === "1";
@@ -1058,6 +1062,49 @@ window.dbxPlugin = {
     onDragState: () => () => undefined,
     onDrop: () => () => undefined,
   },
+  // 宿主 host.storage mock（Host API 1.2，pluginHostBridge storage 命名空间同形）：
+  // 与真实 web 宿主同形由 localStorage 兜底（键名不变；字符串值原样、对象 JSON
+  // 编码），刷新/重开不丢——?render=dom / mock 走查依赖该语义；opaque origin
+  // 等不可用场景退化为内存 Map。get 未命中返回 null，set(undefined) 归一化为 null。
+  capabilities: { storage: true },
+  storage: (() => {
+    let ls: Storage | null = null;
+    try {
+      window.localStorage.setItem("__dbx_mock_storage_probe__", "1");
+      window.localStorage.removeItem("__dbx_mock_storage_probe__");
+      ls = window.localStorage;
+    } catch {
+      ls = null;
+    }
+    const mem = new Map<string, string>();
+    const write = (key: string, value: unknown) => {
+      const raw = typeof value === "string" ? value : JSON.stringify(value);
+      if (ls) ls.setItem(key, raw);
+      else mem.set(key, raw);
+    };
+    const read = (key: string): unknown => {
+      const raw = ls ? ls.getItem(key) : (mem.get(key) ?? null);
+      if (raw === null) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed !== null && typeof parsed === "object" ? parsed : raw;
+      } catch {
+        return raw;
+      }
+    };
+    return {
+      get: async (key: string) => read(key),
+      set: async (key: string, value: unknown) => {
+        write(key, value === undefined ? null : value);
+        return null;
+      },
+      delete: async (key: string) => {
+        if (ls) ls.removeItem(key);
+        else mem.delete(key);
+        return null;
+      },
+    };
+  })(),
 };
 
 // mock 专有调试入口（真实桥无此字段）：切换 locale 并推送 onLocaleChange

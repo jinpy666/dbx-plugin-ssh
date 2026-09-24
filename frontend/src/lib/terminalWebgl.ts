@@ -13,15 +13,19 @@
 //   不报错——xterm DOM 渲染器始终在底层可用。传入恢复选项的调用方（主终端）
 //   会在有限预算内重建 renderer（Tabby 同款策略），预算耗尽静默留在 DOM；
 //   不传选项保持旧行为（一次性 dispose，GIF 导出的离屏终端等短命场景）。
-// - 存储访问不得出现在默认参数位：宿主工作台 iframe 是
-//   sandbox="allow-scripts"（opaque origin），「访问 window.localStorage
-//   属性」本身就抛 SecurityError；默认参数在函数体 try 之外求值，写在
-//   参数位会让 setup 期崩溃、整个工作台空白（2026-09-14 修复的回归）。
+// - 存储统一走 pluginStore（宿主 host.storage → guarded localStorage → 内存）；
+//   默认参数位同样安全（适配器内部全 guarded，opaque origin 不抛错；历史上
+//   直读 window.localStorage 曾因「访问属性即抛」导致 setup 期崩溃、整个
+//   工作台空白，2026-09-14 修复的回归——保持存储访问不在 try 之外裸露）。
+
+import { pluginStore } from "./pluginStore";
 
 const WEBGL_ENABLED_KEY = "ssh-terminal-webgl";
 
 function defaultStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
-  return window.localStorage;
+  // 默认走 pluginStore（宿主 host.storage → guarded localStorage → 内存），
+  // opaque origin 下不再抛 SecurityError；显式注入 storage 仅测试用。
+  return pluginStore;
 }
 
 export function loadWebglEnabled(storage?: Pick<Storage, "getItem">): boolean {

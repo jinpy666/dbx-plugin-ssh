@@ -293,10 +293,7 @@ impl Plugin {
                 let operation_id = operation_id(&params);
                 let request: SessionOpenRequest = parse(params)?;
                 self.runtime.block_on(self.ssh.open_session(
-                    &request.connection_id,
-                    &request.workbench_id,
-                    request.cols,
-                    request.rows,
+                    &request,
                     &operation_id,
                     emitter.clone(),
                 ))

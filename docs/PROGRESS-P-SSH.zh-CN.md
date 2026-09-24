@@ -3268,7 +3268,6 @@ kafka 现网动态包按预期拦——修复后 CI 重建即静态）。CI 模�
 （rust:1-bookworm + 同款 wrapper + 官方 CLI 0.1.3 打包）产出 linux dbxp
 端到端复验。桌面 macOS/Windows 产物不受影响，无需重发。
 
-<<<<<<< HEAD
 ## 用户级端口映射 -L/-R（2026-09-22）
 
 **决策翻转**：FEATURE_PARITY 原 2026-09-07「端口转发 ❌ 不做」的三个理由（宿主无
@@ -3324,7 +3323,7 @@ OpenSSH 服务端未验证）；`-D`/映射持久化（跨会话记忆表单）�
 - **验证**：sidecar 单测 13 例、vitest 524 例全绿；容器 smoke 新增冲突
   （重复 + 通配）与探测（回环存在）用例全过；浏览器 fixture 验收非法主
   机提示/冲突提示/网卡选取回填三交互。
-=======
+
 ## 宿主 OS 级拖放上传接线收口 + 双注册修复（2026-09-22）
 
 **背景**：桌面宿主在 webview 层捕获 OS 拖放（HTML5 drop 事件到不了沙箱
@@ -3468,3 +3467,108 @@ onDrop` 直传注册（e2018a6，早于宿主事件可用时的假设实现）�
 1. 真机：VNC server（None/VNC-Auth）画面/输入/剪贴板联调、X server（XQuartz/VcXsrv）转发联调、串口硬件、GPU/NPU 主机、Windows ConPTY、DBX 桌面端到端。
 2. RDP（vendored fork 链 + CredSSP 评审）——维持人工评审门，未派发。
 3. VNC MVP 已知限制：Tight/JPEG 不支持（显式报错）；VNC-Auth 仅 ≤8 字节密码；剪贴板 Latin-1。
+
+### 前端持久化迁移 host.storage（2026-09-24）
+
+- **背景**：工作台 iframe 是 sandbox="allow-scripts"（opaque origin），
+  localStorage 访问即抛 SecurityError——所有前端 UI 偏好键在真机上全部
+  静默失效（偏好只活到当前会话结束）。宿主 Host API 1.2 起提供
+  window.dbxPlugin.storage（get/set/delete，能力位 capabilities.storage，
+  manifest 需声明 host.storage 权限），桌面端落 plugin-data/<id>/
+  ui-storage.json。迁移走 shared/frontend/pluginStorage 适配器（与 files
+  插件同一公共层），通道降级：宿主桥 storage → guarded localStorage
+  （web 直连/dev/老宿主）→ 内存（仅当前会话）；读全部同步（启动水合 +
+  写穿缓存），调用点保持 getItem/setItem/removeItem 语义，零 async 改造；
+  宿主档水合时对 localStorage 旧值做一次性惰性搬家。
+- **改动**：新增 `frontend/src/lib/pluginStore.ts`（键集合声明 + store
+  单例）；App.vue 全部迁键调用点 `window.localStorage.*` →
+  `pluginStore.*`（键名不变）；`lib/terminalWebgl.ts`/`lib/terminalFont.ts`
+  的 `defaultStorage()` 与 `lib/terminalInteraction.ts` 的
+  `persistSearchOptions` 默认存储改走 pluginStore（显式注入 storage 仍为
+  测试口）；`main.ts` 挂载前 `await pluginStore.ready`；`env.d.ts` 内联
+  capabilities/storage 声明；mockDbxHost 补 storage mock + 
+  capabilities.storage（镜像真实桥：get 未命中 null、set(undefined)→null、
+  内存 Map），`?render=dom` 的 webgl 种子改写 pluginStore 实例（直写
+  localStorage 会被水合时序吃掉）；manifest permissions 增加
+  "host.storage"（版本号未动）。
+- **迁移键清单**（12 个，进 pluginStore）：`sftp-path-history`、
+  `ssh-command-history`、`ssh-sftp-pane-open`、`ssh-sftp-side-tab`、
+  `ssh-sftp-side-collapsed`、`ssh-terminal-select-copy`、
+  `ssh-keyword-highlight`、`ssh-batch-bar-open`、
+  `ssh-terminal-search-options`、`ssh-terminal-webgl`、
+  `ssh-terminal-font-size`、`ssh-terminal-font-family`。
+- **不迁键清单**（保持直读 localStorage 原样）：
+  - `ssh-download-directory` / `ssh-download-use-default-dir` /
+    `ssh-download-conflict-policy`：权威在 sidecar preferences.json
+    （`local/preferences/*`），localStorage 仅作 web 浏览器直连场景的
+    同步缓存（App.vue cachePrefs/hydratePrefs），迁走反而出现双权威。
+  - `ssh-quick-commands`：已迁 sidecar 全局存储，localStorage 旧键仅作
+    一次性迁移种子（loadQuickCommands/hydrateQuickCommands），残留键
+    保持原样不动（web 缓存/死键语义不变）。
+- **spec 修复**：TerminalSearchPanel.spec.ts 的播种/断言从全局
+  localStorage 改走 pluginStore 实例（happy-dom 下 store 模块导入时即
+  完成水合，之后直改 localStorage 读不到缓存值）；新增
+  `lib/pluginStorage.spec.ts` 薄 spec（锁定迁键清单 + 排除 sidecar 类
+  键、node 环境 channel==="memory"、注入桥水合/写穿回路）。
+- **验证**：`vue-tsc --noEmit` 0 错；`vitest run` 65 文件 569 用例全绿。
+- **回归面提示**：真机（DBX 桌面宿主 opaque origin）需复验偏好读写——
+  首装迁移（localStorage 旧值搬家）、面板/侧栏/字体/WebGL/高亮/命令条
+  开关跨重启保持、web 直连与 dev fixture（?render=dom、mock=1 形态）
+  行为不回归；老宿主（Host API < 1.2）自动降级 guarded localStorage，
+  行为等同迁移前。
+
+- **mock 兜底语义修正（收尾统一改动）**：storage mock 初版为纯内存 Map，
+  页面刷新即丢，背离真实宿主（web 宿主由顶层 localStorage 兜底、桌面端落
+  `plugin-data/<id>/ui-storage.json`）——ldap ui_test walkthrough 的
+  「expanding the compact bar … persists」用例即因此失败（用例 109 行裸
+  localStorage 断言，且 walkthrough 共用 page 导致后续 builder 用例连坐，
+  一度 30/35）。统一改为 localStorage 兜底（键名不变；字符串值原样、对象
+  JSON 编码；opaque origin 不可用时退化内存），dev/`?mock=1` 恢复刷新持久化，
+  walkthrough 断言无需改动；修正后 本插件 vitest 65 文件 569 用例复验全绿（?render=dom 的 webgl 种子走 pluginStore 语义不变）。
+
+### §8.17 修复：右键粘贴在真实宿主无效果——插件视图复制副本降级链（纯前端轮，2026-09-24）
+
+用户报告「选中复制 · 右键粘贴」开关在 DBX 真机没有效果。定位结论：功能
+本体早已实现并随 0.4.88 出货（bundle 特征串可证），真机失效的根因是沙箱
+iframe 的剪贴板读边界——右键粘贴走 `readClipboardText` 三级降级（宿主桥
+`window.dbxPlugin.clipboard` 现网宿主不提供 + opaque origin 被
+Permissions Policy 拒绝 `navigator.clipboard.readText`），读链必然断，
+只会弹「请用 Ctrl+V」toast；而功能验收全在 mock/浏览器环境做（mock 宿主
+补了 clipboard 桩），真机剪贴板链路从未被覆盖。
+
+修复（纯前端，零协议改动）：
+
+- `lib/terminalInteraction.ts`：新增 `createTerminalCopyCache`（插件视图
+  内的复制副本，200k 字符尾部截断，空写入不覆盖上一次有效副本）与
+  `resolveTerminalPasteText`（取文优先级：系统剪贴板 → 视图副本 → 终端
+  当前选区；空白是合法候选，仅空串视为无来源）。
+- App.vue：三处复制入口（选中复制 onSelectionChange、菜单/快捷键
+  `copyTerminalSelection`、远端 OSC 52 写剪贴板）都写入视图副本——系统
+  剪贴板写链失败也照记；`pasteTerminal` 只在「读链确认被拒」时降级到
+  副本/当前选区，宿主可读剪贴板时仍以系统剪贴板为准（含空）。XShell 式
+  「选中 → 右键」在沙箱宿主从此闭环；多行/危险命令仍过既有粘贴确认。
+- 单测 +3（降级链优先级、空白候选语义、缓存截断/空写不清除），vitest
+  全绿；typecheck/build 过（ui/index.html 同步再生成，CI 的 freshness
+  门禁依赖提交产物）。
+
+剩余风险：真机「选中 → 右键」闭环已由降级链保证，但系统剪贴板本身（跨
+应用复制粘贴）仍受宿主沙箱限制——写链靠 execCommand 兜底（未在真机证
+实），读链无解（Ctrl/Cmd+V 原生 paste 事件不受影响）；宿主侧若未来提供
+clipboard Host API，`clipboardDeps()` 无需改动即可接管。
+
+### §8.18 闭环：宿主剪贴板读取桥（t8y2/dbx#10155）已合并，插件声明 host.clipboard:read（2026-09-24）
+
+宿主侧 PR #10155（Host API 1.3：`host.clipboardRead` 桥 + `window.dbxPlugin.clipboard`
+命名空间 + 首次读取会话确认 + 每秒限流 + 200 条审计环 + 真实权限字符串 UI 展示）
+已由维护者 t8y2 合入上游 main。
+
+插件侧完成对接声明：
+- `manifest.json`：`permissions` 增加 `host.clipboard:read`，使沙箱工作台
+  在支持 Host API 1.3 的宿主上能够通过宿主桥直接读取系统剪贴板（跨应用
+  复制文本后可在终端右键直接粘贴）；
+- `frontend/src/env.d.ts`：`capabilities` 增加 `clipboardRead` 与
+  `clipboardWrite` 可选布尔位说明；
+- §8.17 引入的「插件视图复制副本」作为天然降级保留：未授权、读取被用户
+  拒绝、或运行在 Host API < 1.3 的旧宿主时，右键粘贴仍能粘贴终端内复制的
+  文本，实现两层保护。
+- `ui/index.html` 重新生成，本地验证全绿。

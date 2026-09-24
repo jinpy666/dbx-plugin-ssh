@@ -2,7 +2,7 @@
 // 右键/粘贴/响铃等终端行为在 terminalBehavior.spec.ts。本文件只覆盖不可配置的
 // 门禁与搜索辅助逻辑。
 import { describe, expect, it } from "vitest";
-import { canAcceptFileDrop, canAcceptTerminalDrop, isApplePlatform, isTerminalSelectAllShortcut, normalizeDropTargetDir, resolveDropTargetDir, resolveTerminalKeyAction, resolveTerminalRightClickAction, sanitizeSearchOptions, sanitizeSelectCopyEnabled, terminalSearchSeedFromSelection } from "./terminalInteraction";
+import { canAcceptFileDrop, canAcceptTerminalDrop, createTerminalCopyCache, isApplePlatform, isTerminalSelectAllShortcut, normalizeDropTargetDir, resolveDropTargetDir, resolveTerminalKeyAction, resolveTerminalPasteText, resolveTerminalRightClickAction, sanitizeSearchOptions, sanitizeSelectCopyEnabled, terminalSearchSeedFromSelection } from "./terminalInteraction";
 
 describe("terminal interaction preferences (select-to-copy / right-click-paste)", () => {
   it("defaults select-to-copy to enabled and only honors an explicit 'false'", () => {
@@ -20,6 +20,38 @@ describe("terminal interaction preferences (select-to-copy / right-click-paste)"
     // Mode off: right-click always opens the menu (historical behavior).
     expect(resolveTerminalRightClickAction({ selectCopy: false, shiftKey: false })).toBe("menu");
     expect(resolveTerminalRightClickAction({ selectCopy: false, shiftKey: true })).toBe("menu");
+  });
+});
+
+describe("right-click paste fallback chain (sandboxed-host clipboard)", () => {
+  it("prefers the system clipboard, then the plugin-view copy cache, then the live selection", () => {
+    expect(resolveTerminalPasteText({ clipboardText: "cb", cachedText: "cache", selectionText: "sel" })).toBe("cb");
+    expect(resolveTerminalPasteText({ clipboardText: null, cachedText: "cache", selectionText: "sel" })).toBe("cache");
+    expect(resolveTerminalPasteText({ clipboardText: null, cachedText: "", selectionText: "sel" })).toBe("sel");
+    // No source at all: the caller shows the use-shortcut guidance.
+    expect(resolveTerminalPasteText({})).toBeNull();
+    expect(resolveTerminalPasteText({ clipboardText: "", cachedText: "", selectionText: "" })).toBeNull();
+  });
+
+  it("keeps whitespace-only copies as real paste candidates", () => {
+    // Copying indentation is legitimate; only the empty string means "absent".
+    expect(resolveTerminalPasteText({ cachedText: "  " })).toBe("  ");
+  });
+});
+
+describe("plugin-view terminal copy cache", () => {
+  it("stores the latest copy, caps to the tail, and never clobbers with an empty write", () => {
+    const cache = createTerminalCopyCache(16);
+    cache.set("first");
+    expect(cache.get()).toBe("first");
+    cache.set("second-copy");
+    expect(cache.get()).toBe("second-copy");
+    cache.set("x".repeat(20));
+    expect(cache.get()).toBe("x".repeat(16));
+    cache.set("");
+    expect(cache.get()).toBe("x".repeat(16));
+    cache.clear();
+    expect(cache.get()).toBe("");
   });
 });
 

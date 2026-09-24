@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.dbx.ssh",
   "name": "SSH Terminal",
-  "version": "0.7.0-beta.3",
+  "version": "0.7.0",
   "publisher": "jinpy",
   "description": "A secure SSH terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
   "source": "https://github.com/jinpy666/dbx-plugin-ssh",
@@ -18,7 +18,8 @@
     "host.binary",
     "host.filesystem",
     "host.workbench",
-    "host.storage"
+    "host.storage",
+    "host.clipboard:read"
   ],
   "entrypoints": {
     "backend": {
@@ -335,7 +336,7 @@
               "label": "Password only"
             }
           ],
-          "description": "How login and sudo prompts handle OTP. Pick \"Password + OTP combined\" for hosts that ask for the code first or merge password and code into one prompt. Off never auto-answers OTP, so hosts that require MFA at login cannot sign in. Existing connections keep their saved mode."
+          "description": "Controls automatic OTP answers for login and sudo. Pick \"Password + OTP combined\" for hosts that ask for the code first or merge password and code into one prompt. Off disables automatic OTP answers; unanswered keyboard-interactive login questions are requested in a masked connection-time dialog when the DBX host supports it. Existing connections keep their saved mode."
         },
         {
           "key": "totp_secret",
@@ -349,7 +350,7 @@
               "password_plus_otp"
             ]
           },
-          "description": "One per line: otpauth:// URI, base32 key, or static code. Used for sudo prompts and for login-time MFA (bastions that ask for a code over keyboard-interactive)."
+          "description": "One per line: an otpauth:// URI or base32 key for automatic codes, or a static recovery code. Leave this blank to enter a rotating app, hardware-token, or SMS code in the connection-time dialog; do not save a current six-digit code here."
         },
         {
           "key": "totp_prompt_hint",
@@ -792,11 +793,11 @@
             },
             "totp_secret": {
               "label": "Secretos TOTP",
-              "description": "Uno por línea: URI otpauth://, clave base32 o código estático. Se usa en prompts de sudo y en el MFA del inicio de sesión (bastiones que piden un código por keyboard-interactive)."
+              "description": "Uno por línea: URI otpauth:// o clave base32 para códigos automáticos, o un código de recuperación estático. Déjalo vacío para introducir un código rotatorio de app, token físico o SMS al conectar; no guardes aquí el código actual de seis dígitos."
             },
             "auth_flow_mode": {
               "label": "2FA",
-              "description": "Cómo tratar el OTP en el inicio de sesión y en sudo. Elige «Contraseña y OTP combinados» para hosts que piden el código primero o unen contraseña y código en un solo prompt. Desactivado nunca responde al OTP: los hosts que exigen MFA en el inicio de sesión no podrán entrar. Las conexiones existentes conservan su modo guardado.",
+              "description": "Controla las respuestas OTP automáticas para el inicio de sesión y sudo. Elige «Contraseña y OTP combinados» para hosts que piden el código primero o unen contraseña y código. Desactivado solo deshabilita la respuesta automática; las preguntas keyboard-interactive sin respuesta se muestran en un diálogo enmascarado al conectar cuando el host DBX lo admite. Las conexiones existentes conservan su modo guardado.",
               "options": {
                 "off": "Desactivado (nunca responder al OTP)",
                 "password_then_otp": "Primero contraseña, después OTP",
@@ -971,7 +972,7 @@
               "description": "Allowlist opzionale dei comandi sudo, uno per riga. Vuota consente tutti i comandi."
             },
             "auth_flow_mode": {
-              "description": "Come gestire gli OTP per accesso e sudo. Scegli «Password e OTP combinati» per host che chiedono prima il codice o uniscono password e codice in un unico prompt. Disattivato non risponde mai all'OTP: gli host che richiedono MFA all'accesso non potranno entrare. Le connessioni esistenti mantengono il modo salvato.",
+              "description": "Controlla le risposte OTP automatiche per accesso e sudo. Scegli «Password e OTP combinati» per host che chiedono prima il codice o uniscono password e codice. Disattivato blocca solo la risposta automatica; le domande keyboard-interactive senza risposta vengono mostrate in una finestra mascherata durante la connessione quando l'host DBX lo supporta. Le connessioni esistenti mantengono il modo salvato.",
               "label": "2FA",
               "options": {
                 "off": "Disattivato (non rispondere all'OTP)",
@@ -990,7 +991,7 @@
             },
             "totp_secret": {
               "label": "Segreti TOTP",
-              "description": "Uno per riga: URI otpauth://, chiave base32 o codice statico. Usato per i prompt sudo e per l'MFA dell'accesso (bastion che chiedono un codice via keyboard-interactive)."
+              "description": "Uno per riga: URI otpauth:// o chiave base32 per codici automatici, oppure un codice di recupero statico. Lascia vuoto per inserire al momento della connessione un codice variabile da app, token hardware o SMS; non salvare qui il codice attuale di sei cifre."
             },
             "password_prompt_hint": {
               "label": "Prompt password",
@@ -1168,11 +1169,11 @@
             },
             "totp_secret": {
               "label": "TOTP シークレット",
-              "description": "1 行に 1 件：otpauth:// URI、base32 キー、または静的コード。sudo プロンプトと、ログイン時の MFA（keyboard-interactive でコードを求める踏み台）に使われます。"
+              "description": "1 行に 1 件：自動コード用の otpauth:// URI または base32 キー、あるいは静的なリカバリーコード。アプリ、ハードウェアトークン、SMS の変動コードは空欄にして接続時のダイアログで入力し、現在の 6 桁コードをここに保存しないでください。"
             },
             "auth_flow_mode": {
               "label": "2FA",
-              "description": "ログインと sudo の OTP 処理を選択します。コードを先に聞くホストや、パスワードとコードを 1 つのプロンプトにまとめるホストでは「パスワードと OTP を連結」を選んでください。オフは OTP を自動応答しないため、ログイン時に MFA を要求するホストにはログインできません。既存の接続は保存済みのモードを保持します。",
+              "description": "ログインと sudo の OTP 自動応答を制御します。コードを先に聞くホストや、パスワードとコードを 1 つのプロンプトにまとめるホストでは「パスワードと OTP を連結」を選んでください。オフは自動応答だけを無効にし、DBX ホストが対応していれば未回答の keyboard-interactive 質問を接続時のマスク入力ダイアログで尋ねます。既存の接続は保存済みのモードを保持します。",
               "options": {
                 "off": "オフ（OTP を自動応答しない）",
                 "password_then_otp": "パスワードの後に OTP",
@@ -1347,7 +1348,7 @@
               "description": "Lista opcional de comandos sudo, um por linha. Vazia permite todos."
             },
             "auth_flow_mode": {
-              "description": "Como tratar OTP no login e no sudo. Escolha «Senha e OTP combinados» para hosts que pedem o código primeiro ou juntam senha e código em um único prompt. Desativado nunca responde OTP: hosts que exigem MFA no login não conseguirão entrar. Conexões existentes mantêm o modo salvo.",
+              "description": "Controla as respostas OTP automáticas no login e no sudo. Escolha «Senha e OTP combinados» para hosts que pedem o código primeiro ou juntam senha e código. Desativado só desliga a resposta automática; perguntas keyboard-interactive sem resposta aparecem em uma caixa mascarada durante a conexão quando o host DBX oferece suporte. Conexões existentes mantêm o modo salvo.",
               "label": "2FA",
               "options": {
                 "off": "Desativado (nunca responder OTP)",
@@ -1366,7 +1367,7 @@
             },
             "totp_secret": {
               "label": "Segredos TOTP",
-              "description": "Um por linha: URI otpauth://, chave base32 ou código estático. Usado em prompts de sudo e no MFA do login (bastiões que pedem um código via keyboard-interactive)."
+              "description": "Um por linha: URI otpauth:// ou chave base32 para códigos automáticos, ou um código de recuperação estático. Deixe em branco para inserir um código rotativo de aplicativo, token físico ou SMS na conexão; não salve aqui o código atual de seis dígitos."
             },
             "password_prompt_hint": {
               "label": "Prompt de senha",
@@ -1544,11 +1545,11 @@
             },
             "totp_secret": {
               "label": "TOTP 密钥",
-              "description": "每行一条：otpauth:// URI、base32 密钥或静态码。用于 sudo 提问，也用于登录期 MFA（经 keyboard-interactive 问验证码的堡垒机）。"
+              "description": "每行一条：用于自动生成验证码的 otpauth:// URI 或 base32 密钥，也可填写静态恢复码。手机、硬件令牌或短信中的动态码请留空，连接时会弹窗输入；不要把当前六位动态码长期保存在这里。"
             },
             "auth_flow_mode": {
               "label": "2FA",
-              "description": "选择登录与 sudo 如何处理 OTP。先问验证码、或把密码与验证码合并成一条提问的主机请选「密码与 OTP 组合」；关闭则永不自动应答 OTP，需要 MFA 登录的主机将无法登录。已有连接保留原设置。",
+              "description": "控制登录与 sudo 的 OTP 自动应答。先问验证码、或把密码与验证码合并成一条提问的主机请选「密码与 OTP 组合」；关闭仅禁用自动应答，登录期仍会在 DBX 宿主支持时通过密文弹窗询问未回答的 keyboard-interactive 提问。已有连接保留原设置。",
               "options": {
                 "off": "关闭（不自动应答 OTP）",
                 "password_then_otp": "先密码，再 OTP",
@@ -1732,11 +1733,11 @@
             },
             "totp_secret": {
               "label": "TOTP 金鑰",
-              "description": "每行一條：otpauth:// URI、base32 金鑰或靜態碼。用於 sudo 提問，也用於登入期 MFA（經 keyboard-interactive 問驗證碼的堡壘機）。"
+              "description": "每行一條：用於自動產生驗證碼的 otpauth:// URI 或 base32 金鑰，也可填寫靜態復原碼。手機、硬體權杖或簡訊中的動態碼請留空，連線時會彈窗輸入；不要把目前六位動態碼長期儲存在這裡。"
             },
             "auth_flow_mode": {
               "label": "2FA",
-              "description": "選擇登入與 sudo 如何處理 OTP。先問驗證碼、或把密碼與驗證碼合併成一條提問的主機請選「密碼與 OTP 組合」；關閉則永不自動應答 OTP，需要 MFA 登入的主機將無法登入。現有連線保留原設定。",
+              "description": "控制登入與 sudo 的 OTP 自動應答。先問驗證碼、或把密碼與驗證碼合併成一條提問的主機請選「密碼與 OTP 組合」；關閉僅停用自動應答，登入時仍會在 DBX 主程式支援時，以遮罩彈窗詢問尚未回答的 keyboard-interactive 提問。現有連線保留原設定。",
               "options": {
                 "off": "關閉（不自動應答 OTP）",
                 "password_then_otp": "先密碼，再 OTP",
