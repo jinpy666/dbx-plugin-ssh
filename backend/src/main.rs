@@ -10,6 +10,7 @@ mod host_key;
 mod keys;
 mod local_downloads;
 mod local_fs;
+mod local_terminal;
 mod mcp;
 mod mcp_safety;
 mod metrics;
@@ -52,6 +53,7 @@ use crate::ssh::{connection_id_param, filesystem_path, PromptDecision, SshRuntim
 struct Plugin {
     runtime: Runtime,
     ssh: Arc<SshRuntime>,
+    local: Arc<local_terminal::LocalTerminalRuntime>,
     mcp: Arc<mcp::McpState>,
 }
 
@@ -65,6 +67,7 @@ impl Plugin {
             runtime,
             mcp: Arc::new(mcp::McpState::shared(ssh.clone())),
             ssh,
+            local: Arc::new(local_terminal::LocalTerminalRuntime::new()),
         })
     }
 
@@ -123,10 +126,7 @@ impl Plugin {
                 let operation_id = operation_id(&params);
                 let request: SessionOpenRequest = parse(params)?;
                 self.runtime.block_on(self.ssh.open_session(
-                    &request.connection_id,
-                    &request.workbench_id,
-                    request.cols,
-                    request.rows,
+                    &request,
                     &operation_id,
                     emitter.clone(),
                 ))
@@ -239,10 +239,53 @@ impl Plugin {
                 ))?;
                 Ok(replay)
             }
+            // 本地终端：sidecar 所在机器上的交互式登录 shell。入口在 SSH
+            // 工作台内，用户显式点击才会创建（默认行为零改变）；注入的
+            // shell integration 只做装饰/cwd 跟踪，绝不执行其数据。
+            "local/terminal/start" => {
+                let request: local_terminal::LocalTerminalStartRequest = parse(params)?;
+                self.runtime
+                    .block_on(self.local.start(request, emitter.clone()))
+            }
+            "local/terminal/resize" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let cols = required_u32(&params, "cols")?;
+                let rows = required_u32(&params, "rows")?;
+                self.runtime
+                    .block_on(self.local.resize(session_id, cols, rows))?;
+                Ok(json!({ "success": true }))
+            }
+            "local/terminal/replay" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let after_sequence = params
+                    .get("afterSequence")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let replay = self.runtime.block_on(self.local.replay(
+                    session_id,
+                    after_sequence,
+                    emitter,
+                ))?;
+                Ok(replay)
+            }
+            "local/session/close" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.local.close(session_id))?;
+                Ok(json!({ "success": true }))
+            }
+            "local/session/list" => Ok(self.runtime.block_on(self.local.list())),
+            // 本地终端 shell 发现：工作台选择器用（多平台 shell 设置）。
+            "local/shells/list" => Ok(self.local.shells()),
+            // PR-A4 generic launch-options contract: picker entries for the dock "+".
+            "local/terminal/launch-options" => Ok(self.local.launch_options()),
             "workbench/close" => {
                 let workbench_id = required_string(&params, "workbenchId")?;
                 self.runtime
                     .block_on(self.ssh.close_workbench(workbench_id))?;
+                // Local shells belong to the closing tab too; a webview reload
+                // never calls this, so live shells stay reattachable there.
+                self.runtime
+                    .block_on(self.local.close_workbench(workbench_id));
                 Ok(json!({ "success": true }))
             }
             "ssh/host-key/resolve" | "connection/challenge/resolve" => {
@@ -1067,16 +1110,11 @@ impl PluginHandler for Plugin {
         emitter: &PluginEmitter,
     ) -> Result<(), PluginError> {
         if let Some(session_id) = channel.strip_prefix("ssh/terminal/in/") {
-            if data.len() < 8 {
-                return Err(to_plugin_error(
-                    "SSH terminal input is missing its sequence".to_string(),
-                ));
-            }
-            let sequence =
-                u64::from_be_bytes(data[..8].try_into().map_err(|_| {
-                    to_plugin_error("Invalid SSH terminal input sequence".to_string())
-                })?);
-            if let Err(error) = self.ssh.write_terminal(session_id, data[8..].to_vec()) {
+            let (sequence, payload) = match decode_sequenced_input(&data) {
+                Ok(split) => split,
+                Err(error) => return Err(to_plugin_error(error)),
+            };
+            if let Err(error) = self.ssh.write_terminal(session_id, payload) {
                 // Binary handler failures are only logged by the SDK loop, so a
                 // workbench typing into a dead session (host-pushed disconnect,
                 // sidecar restart) would otherwise learn nothing: the tab keeps
@@ -1090,6 +1128,26 @@ impl PluginHandler for Plugin {
             }
             emitter.event(
                 "ssh/terminal/inputAck",
+                json!({ "sessionId": session_id, "sequence": sequence }),
+            )?;
+            return Ok(());
+        }
+        if let Some(session_id) = channel.strip_prefix("local/terminal/in/") {
+            let (sequence, payload) = match decode_sequenced_input(&data) {
+                Ok(split) => split,
+                Err(error) => return Err(to_plugin_error(error)),
+            };
+            if let Err(error) = self.local.write_input(session_id, payload) {
+                // Mirror the SSH branch: without an event the tab keeps
+                // looking alive while every keystroke is swallowed.
+                let _ = emitter.event(
+                    "local/terminal/error",
+                    json!({ "sessionId": session_id, "error": error }),
+                );
+                return Err(to_plugin_error(error));
+            }
+            emitter.event(
+                "local/terminal/inputAck",
                 json!({ "sessionId": session_id, "sequence": sequence }),
             )?;
             return Ok(());
@@ -1117,6 +1175,21 @@ impl PluginHandler for Plugin {
 
 fn parse<T: DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|error| format!("Invalid request parameters: {error}"))
+}
+
+/// Terminal binary input frames carry an 8-byte BE sequence ahead of the
+/// keystrokes; the sequence is only echoed in the inputAck event for the
+/// workbench's bookkeeping — ordering comes from the SDK's per-channel lane.
+fn decode_sequenced_input(data: &[u8]) -> Result<(u64, Vec<u8>), String> {
+    if data.len() < 8 {
+        return Err("terminal input is missing its sequence".to_string());
+    }
+    let sequence = u64::from_be_bytes(
+        data[..8]
+            .try_into()
+            .map_err(|_| "invalid terminal input sequence".to_string())?,
+    );
+    Ok((sequence, data[8..].to_vec()))
 }
 
 fn trigger_input_format(raw: Option<&Value>) -> &'static str {

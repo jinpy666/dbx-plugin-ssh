@@ -7,6 +7,8 @@
 export interface BatchSendTarget {
   sessionId: string;
   connectionId: string;
+  /** 本地终端会话（local/session/list）：无 connectionId，发送走本地 PTY 通道。 */
+  local?: boolean;
   workbenchId?: string;
   connected?: boolean;
   readOnly?: boolean;
@@ -71,6 +73,31 @@ export function normalizeBatchTargets(raw: unknown): BatchSendTarget[] {
       port: optionalNumber(record, "port"),
       username: optionalString(record, "username"),
       createdAt: optionalNumber(record, "createdAt"),
+    });
+  }
+  return targets;
+}
+
+/**
+ * 归一 `local/session/list` 返回为批量目标：本地 shell 与 SSH 会话同一发送语义
+ * （向 PTY 键盘写入），connectionId 留空、行标签用 `Local · <shell>`。
+ */
+export function normalizeLocalBatchTargets(raw: unknown): BatchSendTarget[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const targets: BatchSendTarget[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const sessionId = stringField(record, "sessionId");
+    if (!sessionId || seen.has(sessionId)) continue;
+    seen.add(sessionId);
+    const shell = stringField(record, "shell") || "shell";
+    targets.push({
+      sessionId,
+      connectionId: "",
+      local: true,
+      host: `Local · ${shell.split(/[\\/]/).pop() || shell}`,
     });
   }
   return targets;

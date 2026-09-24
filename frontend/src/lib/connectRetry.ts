@@ -34,12 +34,34 @@ export const INACTIVE_RETRY_MAX = 10;
 export const INACTIVE_RETRY_DELAY_MS = 3000;
 
 /**
+ * Preconnected panel boot: the host pre-dialed when the dock entry was created
+ * (context.connectionPreconnected), so an inactive error just means
+ * `ssh/session/open` beat the host's connect push by a few hundred
+ * milliseconds. Polling at a fixed short cadence turns that race into a
+ * no-op wait; the 2s backoff ladder instead ate the whole preconnect win.
+ * 40 rounds ≈ 10s bounded window, aligned with INACTIVE_RETRY_MAX's intent.
+ */
+export const PRECONNECT_RETRY_MAX = 40;
+export const PRECONNECT_RETRY_DELAY_MS = 250;
+
+/**
+ * A duplicate-session source cannot reappear by retrying the same immutable
+ * source id. The caller may explicitly downgrade once to a fresh login, but
+ * the ordinary timed retry ladder must never replay this error.
+ */
+export function isDuplicatedTransportUnavailableError(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : String(cause ?? "");
+  return /No live authenticated SSH connection is available to duplicate|authenticated SSH connection can no longer be reused/i.test(message);
+}
+
+/**
  * Permanent connect-error kinds. Auth and host-key rejections fail within
  * milliseconds and can never self-heal by retrying — the user must fix the
  * credential or the known-hosts entry first — so they skip the retry ladder
  * entirely and surface the friendly message plus the Reconnect button.
  */
 export function isPermanentConnectError(cause: unknown): boolean {
+  if (isDuplicatedTransportUnavailableError(cause)) return true;
   const message = cause instanceof Error ? cause.message : String(cause ?? "");
   const kind = classifyConnectError(message);
   return kind === "auth" || kind === "hostKey";
@@ -58,6 +80,8 @@ export function decideConnectRetry(options: {
   /** The sidecar reported "Connection is not active" (registry race). */
   inactive: boolean;
   bootRestore: boolean;
+  /** Host marked the panel pre-dialed (connectionPreconnected) — race the connect push at a short fixed cadence. */
+  preconnect?: boolean;
 }): ConnectRetryDecision {
   // "Connection is not active" means the sidecar lost the connection registry
   // (e.g. sidecar restart); the host only refills it when the user reopens the
@@ -68,6 +92,13 @@ export function decideConnectRetry(options: {
   if (options.inactive && !options.bootRestore) {
     if (options.attempt >= INACTIVE_RETRY_MAX) return { kind: "fail" };
     return { kind: "retry", attempt: options.attempt + 1, delayMs: INACTIVE_RETRY_DELAY_MS };
+  }
+  // Preconnected panel boot racing the host's in-flight connect push: the dial
+  // is already underway, so wait at a short fixed cadence instead of the
+  // 2s×N ladder that squandered the pre-dial head start.
+  if (options.inactive && options.preconnect) {
+    if (options.attempt >= PRECONNECT_RETRY_MAX) return { kind: "fail" };
+    return { kind: "retry", attempt: options.attempt + 1, delayMs: PRECONNECT_RETRY_DELAY_MS };
   }
   if (isPermanentConnectError(options.cause)) return { kind: "fail" };
   if (options.attempt >= options.maxAttempts) return { kind: "fail" };

@@ -22,6 +22,12 @@ fn sanitize_download_dir(value: &Value) -> Option<String> {
     Some(dir.chars().take(MAX_DOWNLOAD_DIR_LEN).collect())
 }
 
+/// 本地终端 shell 偏好：程序路径或可解析名，空串=跟随自动探测。
+fn sanitize_local_shell(value: &Value) -> Option<String> {
+    let shell = value.as_str()?.trim();
+    Some(shell.chars().take(200).collect())
+}
+
 /// 冲突策略白名单：自动重命名（默认）/ 询问我 / 覆盖已有文件。
 fn sanitize_conflict_policy(value: &Value) -> Option<&'static str> {
     match value.as_str()? {
@@ -65,6 +71,15 @@ pub fn load_preferences(data_dir: &Path) -> Value {
             Value::String(policy.to_string()),
         );
     }
+    if let Some(shell) = map.get("localShell").and_then(sanitize_local_shell) {
+        prefs.insert("localShell".to_string(), Value::String(shell));
+    }
+    if let Some(integration) = map.get("localShellIntegration").and_then(Value::as_bool) {
+        prefs.insert(
+            "localShellIntegration".to_string(),
+            Value::Bool(integration),
+        );
+    }
     Value::Object(prefs)
 }
 
@@ -94,6 +109,20 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
             Value::String(policy.to_string()),
         );
     }
+    if let Some(value) = params.get("localShell") {
+        let shell =
+            sanitize_local_shell(value).ok_or_else(|| "localShell must be a string".to_string())?;
+        map.insert("localShell".to_string(), Value::String(shell));
+    }
+    if let Some(value) = params.get("localShellIntegration") {
+        let integration = value
+            .as_bool()
+            .ok_or_else(|| "localShellIntegration must be a boolean".to_string())?;
+        map.insert(
+            "localShellIntegration".to_string(),
+            Value::Bool(integration),
+        );
+    }
     let path = store_path(data_dir);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -114,6 +143,28 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_terminal_prefs_roundtrip_with_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 空偏好：两键都不出现（前端按缺省处理）。
+        let prefs = load_preferences(dir.path());
+        assert!(prefs.get("localShell").is_none());
+        assert!(prefs.get("localShellIntegration").is_none());
+        // 写入 + 读回；空串 shell 归一为空串（=自动探测）。
+        save_preferences(
+            dir.path(),
+            &serde_json::json!({ "localShell": "  /opt/homebrew/bin/fish  ", "localShellIntegration": false }),
+        )
+        .expect("save");
+        let prefs = load_preferences(dir.path());
+        assert_eq!(prefs["localShell"], "/opt/homebrew/bin/fish");
+        assert_eq!(prefs["localShellIntegration"], false);
+        // 非法类型报错且不落盘污染。
+        let error = save_preferences(dir.path(), &serde_json::json!({ "localShell": 42 }))
+            .expect_err("must reject");
+        assert!(error.contains("localShell"));
+    }
 
     #[test]
     fn roundtrip_merges_and_normalizes() {

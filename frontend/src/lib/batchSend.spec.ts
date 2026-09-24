@@ -3,6 +3,7 @@ import {
   batchTargetLabel,
   deriveBatchCommandName,
   normalizeBatchTargets,
+  normalizeLocalBatchTargets,
   quickPickCommandById,
   selectBatchTargets,
   summarizeBatchResults,
@@ -121,5 +122,31 @@ describe("quickPickCommandById", () => {
   it("returns empty for unknown or empty ids", () => {
     expect(quickPickCommandById(commands, "missing")).toBe("");
     expect(quickPickCommandById(commands, "")).toBe("");
+  });
+});
+
+describe("normalizeLocalBatchTargets", () => {
+  it("maps local sessions to local batch targets labeled by shell", () => {
+    expect(
+      normalizeLocalBatchTargets([
+        { sessionId: "l1", workbenchId: "wb1", shell: "/bin/zsh" },
+        { sessionId: "l2", shell: "C:\\PowerShell\\pwsh.exe" },
+      ]),
+    ).toEqual([
+      { sessionId: "l1", connectionId: "", local: true, host: "Local · zsh" },
+      { sessionId: "l2", connectionId: "", local: true, host: "Local · pwsh.exe" },
+    ]);
+  });
+
+  it("drops invalid rows, dedups ids and tolerates a missing shell", () => {
+    expect(
+      normalizeLocalBatchTargets([
+        { sessionId: "", shell: "/bin/bash" },
+        { sessionId: "l1", shell: "" },
+        { sessionId: "l1", shell: "/bin/bash" },
+        "nope",
+      ]),
+    ).toEqual([{ sessionId: "l1", connectionId: "", local: true, host: "Local · shell" }]);
+    expect(normalizeLocalBatchTargets("nope")).toEqual([]);
   });
 });

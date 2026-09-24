@@ -6,6 +6,8 @@ import {
   isPermanentConnectError,
   OPEN_RETRY_BASE_DELAY_MS,
   OPEN_RETRY_FAST_FAIL_WINDOW_MS,
+  PRECONNECT_RETRY_DELAY_MS,
+  PRECONNECT_RETRY_MAX,
 } from "./connectRetry";
 
 const BASE = { attempt: 0, maxAttempts: 3, attemptMs: 100, inactive: false, bootRestore: false };
@@ -16,6 +18,8 @@ describe("isPermanentConnectError", () => {
     expect(isPermanentConnectError(new Error("SSH connection failed: Permission denied (publickey)"))).toBe(true);
     expect(isPermanentConnectError("SSH connection failed: UnknownKey")).toBe(true);
     expect(isPermanentConnectError(new Error("SSH handshake completed without presenting a host key"))).toBe(true);
+    expect(isPermanentConnectError(new Error("No live authenticated SSH connection is available to duplicate; use New session to reconnect"))).toBe(true);
+    expect(isPermanentConnectError(new Error("The authenticated SSH connection can no longer be reused; use New session to reconnect"))).toBe(true);
   });
 
   it("treats transient transport failures as retryable", () => {
@@ -64,5 +68,19 @@ describe("decideConnectRetry", () => {
   it("keeps the regular backoff ladder for inactive errors during boot restore", () => {
     const restored = decideConnectRetry({ ...BASE, inactive: true, bootRestore: true, cause: new Error("Connection is not active") });
     expect(restored).toEqual({ kind: "retry", attempt: 1, delayMs: OPEN_RETRY_BASE_DELAY_MS });
+  });
+
+  it("polls inactive errors at the short preconnect cadence while waiting for the host pre-dial", () => {
+    const first = decideConnectRetry({ ...BASE, inactive: true, bootRestore: true, preconnect: true, cause: new Error("Connection is not active") });
+    expect(first).toEqual({ kind: "retry", attempt: 1, delayMs: PRECONNECT_RETRY_DELAY_MS });
+    const last = decideConnectRetry({ ...BASE, attempt: PRECONNECT_RETRY_MAX - 1, inactive: true, bootRestore: true, preconnect: true, cause: new Error("Connection is not active") });
+    expect(last).toEqual({ kind: "retry", attempt: PRECONNECT_RETRY_MAX, delayMs: PRECONNECT_RETRY_DELAY_MS });
+    const exhausted = decideConnectRetry({ ...BASE, attempt: PRECONNECT_RETRY_MAX, inactive: true, bootRestore: true, preconnect: true, cause: new Error("Connection is not active") });
+    expect(exhausted).toEqual({ kind: "fail" });
+  });
+
+  it("ignores the preconnect flag without an inactive error (regular ladder applies)", () => {
+    const decision = decideConnectRetry({ ...BASE, bootRestore: true, preconnect: true, cause: new Error("boot race") });
+    expect(decision).toEqual({ kind: "retry", attempt: 1, delayMs: OPEN_RETRY_BASE_DELAY_MS });
   });
 });

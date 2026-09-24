@@ -74,6 +74,9 @@ interface DbxPluginApi {
   readonly fileTransfer?: DbxPluginFileTransferApi;
   readonly workbenchState?: { set(state: Record<string, unknown>): Promise<void> };
   readonly clipboard?: { readText(): Promise<string>; writeText(text: string): Promise<void> };
+  /** §8.3 workbench/close 两段式关闭：宿主拆除 webview 前通知插件释放 workbench scope
+   * （PTY 会话、订阅、临时状态）；监听器 settle 后 SDK 自动回 ack。Host API 1.2+；旧宿主无此方法。 */
+  readonly workbench?: { onClose(listener: () => void | Promise<void>): () => void };
 }
 
 interface DbxGifSaveFileHandle {

@@ -8,6 +8,10 @@
  * exercises the batch-send dialog and the global quick-commands CRUD against
  * the mock bridge, and saves screenshots for the docs.
  *
+ * The PR-A4 section at the end asserts the local-terminal passthrough against
+ * the TARGET contract ({ plugin: { mode: "local-terminal" } } + the
+ * ?local=1&restored=1 fixture, W1 branch) and SKIPs until the mock serves it.
+ *
  * Dependency policy: playwright-core is installed OUTSIDE the repo
  * (/tmp/dbx-ui-mock, same pattern as the A-LDAP walkthrough) — the project
  * package.json stays dependency-frozen. If playwright-core or Chrome is
@@ -221,6 +225,82 @@ try {
   page.once("dialog", (dialog) => void dialog.accept());
   await page.click(".quick-command-row button.icon-button:last-child");
   await expectText(page, ".quick-commands-popover .empty.compact", "No quick commands yet", "quick commands empty after delete");
+
+  // --- PR-A4 local-terminal anchors (written against the TARGET contract) ---
+  // W1（codex/ssh/a4-webview-contract）把本地终端直通 context 从
+  // { localTerminal: true } 迁到 { plugin: { mode: "local-terminal" } }，并为
+  // mock 增加 ?local=1&restored=1 夹具（restored 不自动起 shell，显示退出外
+  // 壳）。本节断言按目标契约编写：探测到旧形状时整节 SKIP（exit 0），W1 合并
+  // 后自动生效——提前合入本脚本不会让 test.sh 变红。
+  console.log("==> PR-A4 local-terminal anchors");
+  // mock 层打桩：拦下 mockDbxHost 对 window.dbxPlugin 的赋值（在 App 挂载前
+  // 同步发生），给 invoke 包一层计数器统计 local/terminal/start 调用次数。
+  const installStartCallCounter = () => `
+    (() => {
+      let api;
+      Object.defineProperty(window, "dbxPlugin", {
+        configurable: true,
+        get: () => api,
+        set(next) {
+          api = next;
+          if (!next || next.__a4CountsLocalStart) return;
+          Object.defineProperty(next, "__a4CountsLocalStart", { value: true });
+          const raw = next.invoke.bind(next);
+          next.invoke = (method, ...rest) => {
+            if (method === "local/terminal/start") {
+              window.__a4LocalStartCalls = (window.__a4LocalStartCalls || 0) + 1;
+            }
+            return raw(method, ...rest);
+          };
+        },
+      });
+    })()
+  `;
+  const newPage = async (url) => {
+    const a4Page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    a4Page.on("pageerror", (err) => pageError.push(String(err)));
+    await a4Page.addInitScript(installStartCallCounter());
+    await a4Page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await sleep(2_500); // let the mock bridge wire the workbench
+    return a4Page;
+  };
+  // restored 夹具页先探目标契约是否已由 W1 落地（新 context 形状 + restored
+  // 字段同时存在才放行断言，避免旧形状下误报），放行后就在本页跑断言。
+  const restoredPage = await newPage(`${baseUrl}?render=dom&local=1&restored=1`);
+  const contract = await restoredPage.evaluate(() => {
+    const ctx = window.dbxPlugin?.context;
+    return {
+      pluginMode: ctx?.plugin?.mode === "local-terminal",
+      restoredFixture: ctx?.restored === true,
+    };
+  });
+  if (!contract.pluginMode || !contract.restoredFixture) {
+    console.log(
+      `  SKIP PR-A4 anchors: mock still serves the pre-A4 local context ` +
+      `(pluginMode=${contract.pluginMode}, restoredFixture=${contract.restoredFixture}) — ` +
+      `W1 (codex/ssh/a4-webview-contract) pending; assertions target the new contract and activate after it merges`,
+    );
+    await restoredPage.close();
+  } else {
+    // ?local=1&restored=1：恢复外壳不重放——0 次 local/terminal/start，退出
+    // 覆盖层（"已退出 + 重新打开"）可见。
+    const restoredStarts = await restoredPage.evaluate(() => window.__a4LocalStartCalls || 0);
+    check("restored tab issues zero local/terminal/start calls", restoredStarts === 0, `calls=${restoredStarts}`);
+    await expectText(restoredPage, ".terminal-overlay", "Local terminal has exited", "restored exit-shell overlay");
+    await expect(restoredPage, ".terminal-overlay button.primary-button", "restored reopen button");
+    await restoredPage.close();
+
+    // ?local=1 直通：本地徽标、无 SSH 连接卡片、恰好一次自动启动。
+    const localPage = await newPage(`${baseUrl}?render=dom&local=1`);
+    const localStarts = await localPage.evaluate(() => window.__a4LocalStartCalls || 0);
+    check("passthrough tab auto-starts the local shell exactly once", localStarts === 1, `calls=${localStarts}`);
+    await expect(localPage, ".session-pill.session-local", "local session badge");
+    for (const text of ["Production SSH", "192.168.1.64", "demo@server.demo.internal"]) {
+      const hits = await localPage.locator(`text=${text}`).count();
+      check(`no SSH connection artifact "${text}" in local passthrough`, hits === 0, `${hits} hit(s)`);
+    }
+    await localPage.close();
+  }
 
   if (pageError.length) {
     failures.push(`page errors: ${pageError.slice(0, 3).join(" | ")}`);

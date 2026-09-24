@@ -18,6 +18,9 @@ Why a mock server instead of the usual docker container: koko 的登录流程是
   7. 只问 MFA + 密码 + OTP 合并模式                     -> 登录成功
   8. 一条合并提问（密码与验证码同一行）+ 合并模式       -> 应答为登录口令 + 验证码
   9. global 全局 Quick Sudo 配置提供登录期 MFA 凭据     -> 登录成功
+ 10. 提问文案仅在挑战 instructions 中                   -> 仍可识别并自动回码
+ 11. 未保存动态码 + 中文 MFA 提问                        -> 宿主密文弹窗输入当前码后登录成功
+ 12. 复制会话复用已认证 transport                        -> 独立 PTY，不再次要求 MFA
 
 paramiko 未安装、或旧 sidecar 未注册 `connection/test` 时 SKIP（不判失败）。
 主机密钥/私钥均为本机运行时生成，不涉及任何真实凭据或生产主机。
@@ -110,6 +113,10 @@ class MockKoko:
         with self._lock:
             return list(self.answers)
 
+    def connection_count(self) -> int:
+        with self._lock:
+            return self._sessions
+
     def _accept_loop(self) -> None:
         while not self._stopped:
             try:
@@ -126,8 +133,19 @@ class MockKoko:
         transport.add_server_key(self.host_key)
         try:
             transport.start_server(server=self._interface(session_id))
+            # Keep the server-side Transport and accepted session channels
+            # alive long enough for remote-shell detection and both PTYs.
+            # Authentication-only scenarios simply sit here until the
+            # sidecar closes the connection.
+            channels = []
+            while transport.is_active() and not self._stopped:
+                channel = transport.accept(timeout=0.2)
+                if channel is not None:
+                    channels.append(channel)
         except Exception:  # noqa: BLE001 - mock harness
             pass
+        finally:
+            transport.close()
 
     def stop(self) -> None:
         self._stopped = True
@@ -165,6 +183,35 @@ class MockKoko:
                     return "password,publickey,keyboard-interactive"
                 # 只开 KI 的形态：客户端走 keyboard-interactive 分支
                 return "keyboard-interactive"
+
+            def check_channel_request(self, kind, chanid):
+                return (
+                    paramiko.OPEN_SUCCEEDED
+                    if kind == "session"
+                    else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+                )
+
+            def check_channel_exec_request(self, channel, command):
+                # `ssh/session/open` probes `$SHELL` on a short exec channel
+                # before opening the terminal PTY.
+                def reply():
+                    try:
+                        channel.sendall(b"/bin/bash")
+                        channel.send_exit_status(0)
+                        channel.close()
+                    except Exception:  # noqa: BLE001 - mock teardown race
+                        pass
+
+                threading.Thread(target=reply, daemon=True).start()
+                return True
+
+            def check_channel_pty_request(
+                self, channel, term, width, height, pixelwidth, pixelheight, modes
+            ):
+                return True
+
+            def check_channel_shell_request(self, channel):
+                return True
 
             def check_auth_interactive(self, username, submethods):
                 self.username = username
@@ -226,6 +273,35 @@ def auto_accept_challenge(event: dict) -> dict | None:
     }
 
 
+def host_interaction(answer: str | None, prompts_seen: list[dict]):
+    """Accept host keys and answer plugin-initiated user-input requests."""
+
+    def handle(event: dict) -> dict | None:
+        challenge_reply = auto_accept_challenge(event)
+        if challenge_reply is not None:
+            return challenge_reply
+        if event.get("method") != "host/requestUserInput" or answer is None:
+            return None
+        params = event.get("params") or {}
+        # With Host API 1.1 enabled, unknown host keys use the same request
+        # channel before login MFA. Resolve the explicit choice first; only a
+        # free-form secret prompt is the one-time token dialog under test.
+        if params.get("options"):
+            value = "remember"
+        else:
+            prompts_seen.append(params)
+            value = answer
+        return {
+            "__host_response__": {
+                "jsonrpc": "2.0",
+                "id": event.get("id"),
+                "result": {"action": "submit", "value": value},
+            }
+        }
+
+    return handle
+
+
 def connection_payload(port: int, secrets: dict, external: dict) -> dict:
     return {
         "id": "login-mfa-smoke",
@@ -248,15 +324,17 @@ def run_scenario(
     instruction: str = MFA_INSTRUCTION,
     prompt: str = MFA_QUESTION,
     prepare=None,
-) -> tuple[bool, str, list[str]]:
-    """Returns (ok, message, answers the mock received, in order)."""
+    manual_answer: str | None = None,
+) -> tuple[bool, str, list[str], list[dict]]:
+    """Returns success, message, server answers, and host input prompts."""
     server = MockKoko(shape, instruction, prompt)
     client = None
+    prompts_seen: list[dict] = []
     try:
         client = SidecarClient.start(
             binary, data_dir=tempfile.mkdtemp(prefix="dbx-login-mfa-"), timeout=45
         )
-        client.initialize()
+        client.initialize(enable_user_input=manual_answer is not None)
         if prepare is not None:
             prepare(client)
         try:
@@ -264,16 +342,84 @@ def run_scenario(
                 "connection/test",
                 lifecycle_params(connection_payload(server.port, secrets, external)),
                 timeout=45,
-                on_event=auto_accept_challenge,
+                on_event=host_interaction(manual_answer, prompts_seen),
             )
             ok, message = True, "connection/test succeeded"
         except SidecarError as exc:
             ok, message = False, str(exc)
         answers = server.take_answers()
-        return ok, message, answers
+        return ok, message, answers, prompts_seen
     finally:
         if client is not None:
             # sidecar 退出后才能读 stderr（否则 read() 会一直阻塞）。
+            client.close()
+        server.stop()
+
+
+def run_duplicate_session_scenario(binary: str) -> tuple[bool, str]:
+    """Open two independent PTYs while authenticating the transport once."""
+    server = MockKoko(PASSWORD_THEN_MFA, "请输入6位数字。", "[MFA认证]：")
+    client = None
+    prompts_seen: list[dict] = []
+    handler = host_interaction(MFA_CODE, prompts_seen)
+    try:
+        client = SidecarClient.start(
+            binary, data_dir=tempfile.mkdtemp(prefix="dbx-copy-session-"), timeout=45
+        )
+        client.initialize(enable_user_input=True)
+        payload = connection_payload(
+            server.port,
+            {},
+            {"authentication": "password", "auth_flow_mode": "off"},
+        )
+        client.request("connection/connect", lifecycle_params(payload), timeout=15)
+        first = client.request(
+            "ssh/session/open",
+            {
+                "connectionId": payload["id"],
+                "workbenchId": "copy-smoke-original",
+                "reuseAuthenticatedTransport": False,
+                "cols": 80,
+                "rows": 24,
+            },
+            timeout=45,
+            on_event=handler,
+        )
+        second = client.request(
+            "ssh/session/open",
+            {
+                "connectionId": payload["id"],
+                "workbenchId": "copy-smoke-duplicate",
+                "reuseAuthenticatedTransport": True,
+                "reuseAuthenticatedSessionId": first.get("sessionId"),
+                "cols": 80,
+                "rows": 24,
+            },
+            timeout=15,
+            on_event=handler,
+        )
+        first_id = first.get("sessionId")
+        second_id = second.get("sessionId")
+        if not first_id or not second_id or first_id == second_id:
+            return False, f"copied sessions were not independent: {first!r}, {second!r}"
+        if server.take_answers() != [MFA_CODE]:
+            return False, f"server answers were {server.take_answers()!r}, expected one MFA code"
+        if len(prompts_seen) != 1:
+            return False, f"host received {len(prompts_seen)} MFA prompts, expected one"
+        if server.connection_count() != 1:
+            return False, f"server accepted {server.connection_count()} transports, expected one"
+        client.request("ssh/session/close", {"sessionId": first_id}, timeout=10)
+        # Closing the original PTY must leave the copied PTY independently
+        # registered and usable on the shared authenticated transport.
+        inventory = client.request("ssh/sessions/list", {}, timeout=10).get("sessions") or []
+        if second_id not in {row.get("sessionId") for row in inventory}:
+            return False, "closing the original session removed the copied session"
+        client.request("ssh/session/close", {"sessionId": second_id}, timeout=10)
+        return True, "one authenticated transport, two independent PTYs"
+    except SidecarError as exc:
+        return False, str(exc)
+    finally:
+        if client is not None:
             client.close()
         server.stop()
 
@@ -309,6 +455,8 @@ class Scenario:
     prompt: str = MFA_QUESTION
     needs_key: bool = False
     prepare: object = None
+    manual_answer: str | None = None
+    expect_manual_prompt: str | None = None
     extra: dict = field(default_factory=dict)
 
 
@@ -414,6 +562,18 @@ def scenario_matrix() -> list[Scenario]:
             expect_answers=[MFA_CODE],
             prompt="Code: ",
         ),
+        Scenario(
+            "11. 中文动态令牌由连接期密文弹窗输入",
+            PASSWORD_THEN_MFA,
+            {},
+            {"authentication": "password", "auth_flow_mode": "off"},
+            True,
+            expect_answers=[MFA_CODE],
+            instruction="请输入6位数字。",
+            prompt="[MFA认证]：",
+            manual_answer=MFA_CODE,
+            expect_manual_prompt="[MFA认证]：",
+        ),
     ]
 
 
@@ -443,7 +603,7 @@ def main() -> None:
         if scenario.needs_key:
             payload_secrets["private_key"] = key_text
         try:
-            ok, message, answers = run_scenario(
+            ok, message, answers, prompts_seen = run_scenario(
                 binary,
                 scenario.shape,
                 payload_secrets,
@@ -451,6 +611,7 @@ def main() -> None:
                 instruction=scenario.instruction,
                 prompt=scenario.prompt,
                 prepare=scenario.prepare,
+                manual_answer=scenario.manual_answer,
             )
         except SidecarError as exc:
             report.note_skip(scenario.title, f"sidecar unavailable: {exc}")
@@ -469,6 +630,23 @@ def main() -> None:
                     f"answers were {answers!r}, expected {scenario.expect_answers!r}",
                 )
                 continue
+            if scenario.expect_manual_prompt is not None:
+                if len(prompts_seen) != 1:
+                    report.note_fail(
+                        scenario.title,
+                        f"host received {len(prompts_seen)} input prompts, expected one",
+                    )
+                    continue
+                host_prompt = prompts_seen[0]
+                if host_prompt.get("echo") is not False:
+                    report.note_fail(scenario.title, "manual MFA prompt was not masked")
+                    continue
+                if scenario.expect_manual_prompt not in str(host_prompt.get("prompt", "")):
+                    report.note_fail(
+                        scenario.title,
+                        f"manual prompt omitted server text: {host_prompt!r}",
+                    )
+                    continue
             report.note_pass(scenario.title)
         else:
             if ok:
@@ -486,6 +664,15 @@ def main() -> None:
                 )
                 continue
             report.note_pass(scenario.title)
+
+    duplicate_title = "12. 复制会话复用已认证 transport，不重复 MFA"
+    duplicate_ok, duplicate_message = run_duplicate_session_scenario(binary)
+    if duplicate_ok:
+        report.note_pass(duplicate_title)
+    elif is_method_missing(duplicate_message):
+        report.note_skip(duplicate_title, "session reuse is not registered (older sidecar)")
+    else:
+        report.note_fail(duplicate_title, duplicate_message)
 
     elapsed = time.monotonic() - started
     print(

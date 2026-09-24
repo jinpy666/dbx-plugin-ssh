@@ -4,6 +4,12 @@
 
 Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`sessionId` 或 `taskId` 为键。`connection/connect` 只接收并缓存宿主注入的连接配置；`connection/disconnect` 会关闭该连接下的终端、SFTP 子系统和传输任务。工作台不会接收密码字段。
 
+工作台的“新建会话”保持独立 transport 语义，会重新完成 SSH 认证（堡垒机可再次要求 MFA）；“复制会话（免再次验证）”则向 `ssh/session/open` 传 `reuseAuthenticatedTransport: true` 和当前 `reuseAuthenticatedSessionId`，在用户所点窗口当前存活且已认证的 transport 上新开独立 PTY channel。复制会话拥有独立 `sessionId`、`workbenchId`、回放缓冲和终端任务，不复制或缓存 OTP。打开复制 channel 前会先预占共享 transport 引用，因此源会话在 channel/PTY/shell 建立期间关闭也不会提前释放跳板链；关闭任一复制会话只关闭自己的 channel，最后一个共享引用释放后才断开跳板链。每个复制会话都会额外占用一个 SSH channel，数量受服务端 `MaxSessions` 限制（OpenSSH 常见默认值为 10）；超过限制时 `open` 返回 channel 建立失败。
+
+显式传入 `reuseAuthenticatedSessionId` 时严格 fail closed：指定来源不存在、已关闭或连接不匹配都会返回 `No live authenticated SSH connection`。前端收到该错误后只降级一次，以普通“新建会话”语义重新登录，允许堡垒机再次要求 MFA；该错误同时属于永久重试错误，不进入对同一失效 sessionId 的退避重试。只传 `reuseAuthenticatedTransport: true` 的旧调用方保留兼容行为：后端会从同一连接中确定性选取最早创建的存活会话，因此 transport 来源不保证对应调用方当前显示的窗口。
+
+复制会话继承来源会话在连接时解析出的内存态 sudo 编排快照（`SudoAuth`），包括 `password_command` 当时的解析结果；复制时不会再次运行 `password_command`。会话建立后的设置同步仍按各会话现有更新机制独立生效。
+
 第一阶段不声明 `test` 能力。真实 SSH 握手在 `ssh/session/open` 发起，主机密钥确认完成前不会调用密码认证。
 
 `connection/test`（宿主发起，带 RPC 截止 = 宿主有效连接超时）的拨号预算与宿主截止对齐并留 1s 余量：`connect_timeout_secs` 显式时预算 = 该值 − 1s；缺省时宿主按 dbx-core `default_connect_timeout_secs()` 回退 10s（`crates/dbx-core/src/models/connection.rs:501`，stored 0 → 宿主 10s，与本插件 manifest 默认 30s 分叉），预算取 9s，超时错误附带「高级选项调大 SSH timeout」的指引。工作台 `ssh/session/open` 由插件前端发起、无宿主截止，仍按连接配置的完整超时拨号。
@@ -12,7 +18,7 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 
 | 方法 | 作用 |
 | --- | --- |
-| `ssh/session/open`、`ssh/session/close` | 创建、关闭 PTY 会话（连接 `remote_command` 非空时 exec 该命令替代 shell，`set_env` 随会话注入；连接配置 `triggers` 时挂载自动交互触发器引擎，命中发 `ssh/trigger` 事件，见「自动交互触发器（Expect）与外部密码管理器」节） |
+| `ssh/session/open`、`ssh/session/close` | 创建、关闭 PTY 会话（`open` 可选 `reuseAuthenticatedTransport` + `reuseAuthenticatedSessionId`，复用指定同连接存活会话的认证 transport 并新开独立 channel；显式 ID 不可用时 fail closed，只有布尔参数时兼容选择同连接最早存活会话；复用会继承来源会话已解析的 sudo 编排快照；连接 `remote_command` 非空时 exec 该命令替代 shell，`set_env` 随会话注入；连接配置 `triggers` 时挂载自动交互触发器引擎，命中发 `ssh/trigger` 事件，见「自动交互触发器（Expect）与外部密码管理器」节） |
 | `ssh/terminal/resize` | 调整 PTY 行列 |
 | `ssh/terminal/replay` | 从指定序号补发终端输出 |
 | `ssh/host-key/resolve` | 处理工作台内的主机密钥确认 |
@@ -60,6 +66,9 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `ssh/quickCommands/list`、`ssh/quickCommands/save`、`ssh/quickCommands/delete` | 全局快速命令管理（用户自定义常用命令片段，插件数据目录持久化，所有连接/工作台共享） |
 | `ssh/terminal/batchInput` | 批量发送：把同一条命令写入多个已打开会话的交互终端（PTY 键盘语义），返回逐会话发送结果 |
 | `ssh/batchBar/state`（notify） | 批量发送命令条的跨工作台状态同步：工作台把 `{ source, draft, quickPickId, open }` 以通知送达 sidecar，sidecar 原样以同名事件广播给所有插件 webview，各端按 `source` 过滤自己的回声；纯转发不落存储，旧版 sidecar 未注册时调用方静默降级 |
+| `local/terminal/start`、`local/terminal/resize`、`local/terminal/replay` | 本地终端：sidecar 所在机器的交互式登录 shell（工作台显式入口触发，见「本地终端」节；`start` 支持显式 `shell` 与继承用的 `cwd`） |
+| `local/shells/list` | 本机可启动 shell 清单（用户登录 shell 置顶，含 `isDefault`/`isUserShell`/`injectable` 标记——最后一项表示该 shell 是否支持 integration 注入，不支持的在选择器中灰掉开关；Unix 读 `/etc/shells`+`dscl`，Windows 枚举 PATH 下的 pwsh/PowerShell/cmd/wsl），工作台 shell 选择器数据源 |
+| `local/session/list`、`local/session/close` | 本地终端会话清单（webview 重载后接回）与关闭 |
 | `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
 
 ## 运行时设置
@@ -216,7 +225,7 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 ## 登录期 2FA（keyboard-interactive）
 
-密码认证被拒绝或服务器未开放 `password` 方法时，自动降级 keyboard-interactive（PAM）认证：每一轮提示按 Quick Sudo 的同一套编排配置自动应答（密码 / TOTP / 组合提示，遵循 `auth_flow_mode`），未知提示留空交由服务器处理，最多 4 轮，复用连接超时。覆盖 `PasswordAuthentication no` + PAM 2FA 的主机，以及 JumpServer/koko 的"密码或私钥 + 动态口令"登录；密钥+密码（`private-key-password`）回退路径同样适用。
+密码认证被拒绝或服务器未开放 `password` 方法时，自动降级 keyboard-interactive（PAM）认证：每一轮提示先按 Quick Sudo 的同一套编排配置自动应答（密码 / TOTP / 组合提示，遵循 `auth_flow_mode`）；仍未回答的提示在宿主支持 Host API 1.1 `host.requestUserInput` 时打开一次性密文弹窗，展示净化后的服务器 `name` / `instructions` / 提问文本，由用户输入当前动态令牌。弹窗答案只用于本次认证，不写配置、不进日志；取消、超时或空值均 fail closed。旧宿主不支持该接口时保持兼容：未知提示留空交由服务器处理并在失败信息中给出配置指引。最多 4 轮，复用连接超时。覆盖 `PasswordAuthentication no` + PAM 2FA 的主机，以及 JumpServer/koko 的"密码或私钥 + 动态口令"登录；密钥+密码（`private-key-password`）回退路径同样适用。
 
 **首因子判定（2026-09-16，issue #17 / #30）**：`password_then_otp` 只在"首因子已经过掉"时才自动回 OTP 验证码。除同一次 KI 交换里答过密码提问外，以下两种情形同样算首因子已满足——① 密码方法已尝试、服务器要求继续认证（koko/JumpServer 用 partial success 表示"密码通过、还差 MFA"；即使服务器未置该位，密码已提交这一事实同样成立）；② 公钥 / SSH Agent 身份被服务器接受但要求后续认证（partial success 且剩余方法只有 keyboard-interactive，私钥/agent 路径据此续答 KI，不再直接报"认证被拒"）。既没有 password 方法、也没提交过密码的纯 KI 主机保持原保护：裸 OTP 提问不自动应答。
 
@@ -224,9 +233,9 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 **凭据来源与密码半边（2026-09-16）**：登录期 KI 用的流程模式 / TOTP 密钥 / 提示词与 Quick Sudo 同源——`global` 模式下连接表单隐藏 2FA 四件套（凭据整体由全局配置接管），登录提问因此也读该配置的 `authFlowMode` / `totpSecret` / hints；`custom` 模式下连接自身配置优先，绑定（0.4.x 遗留）只补齐连接留空的项；`off` 不提升全局配置。**密码半边始终是登录口令**（含 `password_command` 解析结果）：登录提问若回一个单独的 sudo 口令只会认证失败，还会把特权口令平白送给对端。
 
-**选型指引**：主机先问 MFA、再问密码时用「密码 + OTP 合并」模式——该模式不设"先密码"门槛，裸 MFA 提问也会被应答；「先密码，再 OTP」对裸 MFA 提问保持留空（保护），失败信息会点名提问与配置入口。**合并提问**（一条提问里同时要密码与验证码，如 `Password: OTP Code: `）两种 OTP 模式都拼接应答（只回密码半边必然失败）；`password_only` / `off` 仍只回密码半边。终端内的合并提问同样处理，但需命中密码类内置模式（`[sudo] password for` / `password:`）或配置了自定义提示词，避免误答其他交互程序。
+**选型指引**：有稳定的 `otpauth://` URI / base32 密钥时可配置自动回码；手机、硬件令牌或短信里不断变化的六位码不要保存到 `TOTP 密钥`，把该字段留空，连接时在密文弹窗输入当前码。主机先问 MFA、再问密码且需要自动应答时用「密码 + OTP 合并」模式——该模式不设"先密码"门槛，裸 MFA 提问也会被应答；「先密码，再 OTP」对裸 MFA 提问保持留空（保护），随后由宿主弹窗询问。**合并提问**（一条提问里同时要密码与验证码，如 `Password: OTP Code: `）两种 OTP 模式都拼接应答（只回密码半边必然失败）；`password_only` / `off` 仍只自动回密码半边，未回答部分可由连接期弹窗补充。终端内的合并提问同样处理，但需命中密码类内置模式（`[sudo] password for` / `password:`）或配置了自定义提示词，避免误答其他交互程序。
 
-**诊断**：认证失败时错误信息带上服务器实际提问（`name` / `instructions` / 提问文本，去控制字符并截断，绝不包含凭据），并指路"配置该连接的 TOTP 密钥或 OTP 提示词"；`auth_flow_mode=off` 不自动回码时同样点名提问，便于用户知道该配哪里。端到端回归见 `scripts/smoke_login_mfa_test.py`（本机 mock 堡垒机 + 真 sidecar，paramiko 缺失时 SKIP）。
+**诊断**：认证失败时错误信息带上服务器实际提问（`name` / `instructions` / 提问文本，去控制字符并截断，绝不包含凭据）。支持 Host API 1.1 的 DBX 会先弹出密文输入框；旧宿主则指路配置 TOTP 密钥或 OTP 提示词。`auth_flow_mode=off` 只关闭自动回码，不关闭连接期人工输入。端到端回归见 `scripts/smoke_login_mfa_test.py`（本机 mock 堡垒机 + 真 sidecar，paramiko 缺失时 SKIP）。
 
 ## 终端内 Quick Sudo
 
@@ -487,6 +496,8 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 - `ssh/terminal/in/{sessionId}`：原始终端输入。
 - `ssh/terminal/out/{sessionId}`：首字节为流类型，随后为大端 `u64` 单调序号，再后为终端数据。
+- `local/terminal/in/{sessionId}`：本地终端输入，与 `ssh/terminal/in` 同形（8 字节大端序号 + 数据）；确认事件为 `local/terminal/inputAck`，死会话镜像 `local/terminal/error`。
+- `local/terminal/out/{sessionId}`：本地终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + u64 序号）；stdout/stderr 在 PTY 内合流，数据帧恒为流 0。
 - `sftp/upload/{taskId}`：大端 `u64` 文件偏移加最多 256 KiB 数据；偏移必须等于服务端期待值。
 - `sftp/download/{taskId}`：大端 `u64` 文件偏移加最多 256 KiB 数据（树任务该偏移为整树聚合字节位置；队列耗尽后的 eof 应答携带 0 字节数据）。
 
@@ -507,6 +518,17 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 - `sftp/transfer/list`：参数 `sessionId`。返回 `{ tasks: [...] }`——该会话进行中的上传 / 下载与近期历史（每个会话独立记录），元素结构 `{ taskId, sessionId, direction, fileName, size, transferred, status }`，`status` 取 `running` / `completed` / `cancelled`。
 - `sftp/transfer/status`：参数 `taskId`。返回单个任务的同构状态对象；任务不存在时先查历史，仍无则报错。
 - `sftp/transfer/history`：参数 `sessionId?`（可选过滤）、`limit?`（默认 50，上限 200）。返回 `{ tasks: [...] }`——持久化传输历史（`transfer-history.json`，环形上限 200 条，跨 sidecar 重启保留）与内存 live 任务按 `taskId` 去重合并、新→旧排序，元素结构 `{ taskId, sessionId, connectionId, direction, fileName, size, transferred, status, startedAt, finishedAt, error? }`（时间戳 Unix 毫秒；`status` 同上并含 `failed`）。无活动连接也可查询；仅状态跃迁落盘，逐块进度不落盘；跨进程（embedded 与 stdio `--mcp`）last-writer-wins；重启后遗留 `running` 呈现为 `failed`（不回写文件）。不进 MCP 工具面。
+
+## 本地终端
+
+工作台内的本机 shell 入口（sidecar 所在机器，非 SSH 远端）。与 SSH 终端共用二进制帧协议、序号重放（2 MiB 环形缓存）与输出管线，但独立会话表，不依赖任何 SSH 连接：
+
+- `local/terminal/start {workbenchId, cols, rows, shell?, shellIntegration?, cwd?}` → `{sessionId, shell, shellIntegration}`。`shell` 来自选择器偏好（`localShell`，空=自动探测）；`cwd` 供重开继承上次跟踪目录（VS Code 惯例），非法/已删目录静默回落家目录。shell 解析顺序：显式 `shell` 参数 → macOS Directory Services `UserShell`（`dscl`）→ `$SHELL` → 平台缺省（macOS `/bin/zsh`、Linux `/bin/bash`、Windows `powershell.exe`）；`nologin`/`false` 一类登录不可用 shell 视为未设置。Unix 侧一律以**登录 shell** 启动（macOS GUI 进程 PATH 不全，Ghostty/Warp 惯例），cwd 为用户家目录，`TERM=xterm-256color`、`COLORTERM=truecolor`、`TERM_PROGRAM=dbx`。会话关闭先落 master 让 shell 收到 EOF/HUP 干净退出（zsh/bash 仅在干净退出时保存命令历史），5s 宽限后才 SIGKILL 兜底（再给 2s 收取退出码）。
+- shell integration 注入（`shellIntegration: false` 可关闭；脚本落盘/包装失败时静默回退裸 shell）：自带精简脚本集（zsh 经 `ZDOTDIR` 包装链，保留用户 `.zprofile`/`.zshrc`/`.zlogin` 与登录语义；bash 走 `--rcfile` 包装自建 profile 链；fish `-C`；PowerShell `-Command`），每步 fail-safe，用户 rc 损坏不阻断 shell。脚本发射 OSC `133;A/C/D;exit`、`633;E;命令行`、`633;P;Cwd=…` 与 OSC 7（Windows 为 OSC 9;9），前端复用既有命令标记/目录解析渲染运行中命令、退出码与 cwd。**注入数据仅用于装饰与 cwd 跟踪，绝不进入任何执行路径**（VS Code shell integration RCE 前车之鉴）。
+- 输出帧同 `ssh/terminal/out`；会话结束发流 2 State 帧 `local-terminal-exited` 并伴随事件 `local/session/state {sessionId, workbenchId, state: "exited", exitCode}`（`exitCode` 为 null 表示未能取得，如进程被杀）。输入通道失配镜像 `local/terminal/error {sessionId, error}` + `local/terminal/inputAck` 确认，语义与 SSH 同构。
+- `local/session/list` 供 webview 重载后接回仍活着的 shell；`workbench/close` 会回收该工作台的本地会话；sidecar 退出即全部终止（本地 PTY 生命周期 = sidecar 生命周期）。
+- 安全语义：入口为工作台显式按钮（未连接也可用；SSH 会话在连时经确认先关闭），无自动开启路径；manifest 权限集不变（复用 `host.binary`），本机命令执行能力与用户自身终端同级，无提权。
+- 偏好（`local/preferences/*` 白名单新增）：`localShell`（字符串 ≤200，空=自动探测）、`localShellIntegration`（布尔，缺省 true）。shell 选择器在工作台本地终端按钮旁的设置菜单（`local/shells/list` 发现 + 注入开关），徽标显示 `Local · <shell>`，重开按钮在本地会话存活时保持可用（restart 语义：关当前 → 按新偏好重开）。
 
 ## 主机密钥确认通道(requestUserInput)
 

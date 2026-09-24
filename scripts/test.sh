@@ -68,6 +68,11 @@ fi
 echo "==> MCP stdio smoke"
 python3 scripts/smoke_mcp.py --binary backend/target/release/dbx-plugin-ssh
 
+# 本地终端冒烟：驱动本机登录 shell（spawn/注入标记/回显/关闭），不需要
+# SSH 容器；二进制缺失时脚本自 SKIP。放 docker 小节之外，任何机器都跑。
+echo "==> local terminal smoke"
+python3 scripts/smoke_local_terminal.py --binary backend/target/release/dbx-plugin-ssh
+
 # Live-container smokes + perf baseline: each script SKIPs its cases when the
 # test container is unavailable; the whole section is skipped when docker or
 # the dbx-ssh-test container is absent so the suite stays green everywhere.

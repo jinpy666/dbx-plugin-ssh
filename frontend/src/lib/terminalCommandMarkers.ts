@@ -199,7 +199,11 @@ function updateStateFromOscFrame(state: Osc633ParserState, payload: string): Osc
     state.commandActive = type !== "A";
     if (type === "A") {
       state.lastExitCode = null;
-      updates.lastExitCode = null;
+      // updates 是按标记合并进 chunk 级结果的（last-write-wins）：真实 shell 的
+      // precmd 先发 D（上一命令退出码）再发 A（新提示符），同一段数据里 A 若
+      // 携带 lastExitCode=null 会把 D 已写入的退出码覆写掉，退出码标记就永远
+      // 显示不出来。applyCommandMarker 对 null 本就不复位（旧值语义），所以 A
+      // 干脆不携带该字段。
       updates.commandPhase = "prompt";
     } else {
       updates.commandPhase = state.commandPhase;
