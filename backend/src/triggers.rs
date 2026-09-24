@@ -953,6 +953,19 @@ fn compile_pattern(text: &str, error_prefix: &str) -> Result<Regex, String> {
     Regex::new(text).map_err(|error| format!("{error_prefix}: {error}"))
 }
 
+/// Shared pattern gate for consumers that build on the engine without going
+/// through `parse_triggers` (the Telnet declarative auto-login): same length
+/// ceiling, same regex dialect, bare error so the caller can prefix its own
+/// field name. One compile path — no second validation vocabulary.
+pub(crate) fn validate_pattern_text(text: &str) -> Result<(), String> {
+    if text.len() > MAX_PATTERN_LEN {
+        return Err(format!("pattern exceeds {MAX_PATTERN_LEN} characters"));
+    }
+    Regex::new(text)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Resolves a `sendSecretKey`/`caseSendSecretKey` reference against the
 /// connection's secret slots (contract D5: exactly two known slots; an
 /// unfilled slot is a configuration error, D7).
@@ -1328,6 +1341,15 @@ impl TriggerEngine {
     fn reset_stage(&mut self, now_ms: u64) {
         self.stage_cursor = 0;
         self.stage_since_ms = Some(now_ms);
+    }
+
+    /// Re-arms the engine at stage 1 immediately. The Telnet declarative
+    /// auto-login calls this on a failure-retry round (NyaTerm resets its
+    /// `sent_username`/`sent_password` flags): after a rejection the host
+    /// re-prompts from the first stage, so the next prompt must answer with
+    /// the username again instead of waiting out the mid-sequence timeout.
+    pub fn reset(&mut self, now_ms: u64) {
+        self.reset_stage(now_ms);
     }
 
     fn try_case_match(&mut self, now_ms: u64) -> Option<TriggerDecision> {
@@ -1992,6 +2014,30 @@ mod tests {
         // 超时后游标归零：stage 1 的 pattern 可以直接再次命中。
         let again = engine.observe("login:", 2_100).expect("re-armed");
         assert_eq!(again.stage, 1);
+    }
+
+    #[test]
+    fn engine_reset_rearms_stage_one_immediately() {
+        // Telnet 声明式自动登录的失败重试：游标停在 stage 2 等密码提示时，
+        // reset() 立即归位，宿主重印 login: 无需等超时即从用户名重答。
+        let mut engine = TriggerEngine::new(
+            parse_config(json!({
+                "stages": [
+                    { "pattern": "login:", "sendText": "user\\r" },
+                    { "pattern": "password:", "sendSecret": "pw" }
+                ]
+            })),
+            CommandPlaceholders::new("h", "u", 22, "n"),
+        );
+        assert!(engine.observe("login:", 1_000).is_some(), "stage 1");
+        // 游标已在 stage 2：login: 不再命中。
+        assert!(engine.observe("login:", 1_500).is_none());
+        engine.reset(1_600);
+        let decision = engine
+            .observe("login:", 1_700)
+            .expect("stage 1 re-answered");
+        assert_eq!(decision.stage, 1);
+        assert_eq!(decision.kind, TriggerKind::Text);
     }
 
     #[test]

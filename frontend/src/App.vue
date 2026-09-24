@@ -3357,6 +3357,17 @@ function handleEvent(event: DbxPluginEvent) {
     showNotice(t(payload.kind === "timeout" ? "telnet.triggerTimeout" : "telnet.triggerAnswered", { stage }));
     return;
   }
+  // 声明式自动登录监督（P0-1）：sidecar 只带 status/attempt（无内容，
+  // D6 语义），成功/重试文案在这里本地化；重试超限走既有退出覆盖层。
+  if (event.method === "telnet/auto_login" && event.params.sessionId === telnetSession.value?.sessionId) {
+    const payload = event.params as { status?: string; attempt?: number };
+    if (payload.status === "success") {
+      showNotice(t("telnet.declSuccessNotice"));
+    } else if (payload.status === "retry") {
+      showNotice(t("telnet.declRetryNotice", { attempt: Math.max(1, Number(payload.attempt) || 1) }));
+    }
+    return;
+  }
   if (event.method === "ssh/agent/prompt" && event.params.sessionId === session.value?.sessionId) {
     agentPromptQueue.value = enqueueAgentPrompt(agentPromptQueue.value, event.params as unknown as AgentPromptPayload);
     return;
@@ -3855,14 +3866,17 @@ function drainTelnetFrames() {
 async function startTelnetSession(options: TelnetConnectOptions) {
   // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
   if (telnetSession.value && telnetState.value !== "closed") await closeTelnetSession();
-  // 自动应答：规则 + 密文槽打包进 autoLogin（sidecar 复用 triggers 校验，
-  // 槽值只进发送计划、不落日志）。
-  const autoLogin = options.rules
-    ? {
-        rules: options.rules,
-        secrets: [options.secret1 ?? "", options.secret2 ?? ""],
-      }
-    : undefined;
+  // 自动登录两种形态互斥：声明式（提示正则 + 凭据，sidecar 落内置默认正则）
+  // 优先；否则走 Expect 规则 + 密文槽。凭据只进 start 载荷与发送计划，
+  // sidecar 侧不落日志/事件。
+  const autoLogin = options.declarative
+    ? { declarative: options.declarative }
+    : options.rules
+      ? {
+          rules: options.rules,
+          secrets: [options.secret1 ?? "", options.secret2 ?? ""],
+        }
+      : undefined;
   try {
     const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("telnet/start", {
       workbenchId: workbenchId.value,
