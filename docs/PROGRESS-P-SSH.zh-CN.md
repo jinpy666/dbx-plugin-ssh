@@ -3656,3 +3656,10 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - 冲突：SettingsDialog 与 M7 startup-commands 块追加型冲突（保留双方）。
 - **全量**：backend cargo **766**（M5.5 基线 735，M7 三线 + spec）/ clippy 0 / fmt 干净；frontend vitest **934**（94 文件）/ vue-tsc 0 / build 过（ui/ 重生成）。
 - 在途：Warp 线 1（ghost 行内建议，np8-warp-ghost）、e2e 修复线（np8-e2e）、M7 剩余（telnet-autologin / serial-xymodem）。
+
+
+## M7 进度（二）（2026-09-25）
+
+- **telnet-autologin ✅ 合入**（5b18690，merge 零冲突）：声明式 auto_login（提示正则+凭据降级共享 Expect 引擎、成功/失败正则监督、重试预算、超限关闭会话带可读原因；密码脱敏 Debug/事件红线），TelnetConnectDialog 折叠区七语 15 键。与 NyaTerm 差异：匹配载体用共享引擎（无第二套匹配器）、未做 send_wake_enter/timeout_ms、手动输入不解除、超限改为关会话（NyaTerm 仅禁用）——差异点已记录。
+- **全量（四线合并后）**：backend cargo **766**（基线 735）/ clippy 0 / fmt 干净；frontend vitest **934**（基线 891）/ vue-tsc 0 / build 过（ui/ 重生成）。
+- **在途**：serial-xymodem、np8-e2e。
