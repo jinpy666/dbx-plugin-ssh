@@ -1,6 +1,8 @@
 // 终端外观偏好纯逻辑单测：设置归一化、持久化容错、亮暗槽位解析、底色来源
-// 策略、xterm 选项补丁、内边距变量与主题命中判定。存储统一注入假实现。
-import { describe, expect, it } from "vitest";
+// 策略、xterm 选项补丁、内边距变量与主题命中判定。存储统一注入假实现；
+// 默认存储（pluginStore）回环单列一节。
+import { afterEach, describe, expect, it } from "vitest";
+import { pluginStore } from "./pluginStore";
 import {
   CUSTOM_SCHEME_LIMIT,
   DEFAULT_TERMINAL_APPEARANCE_SETTINGS,
@@ -33,6 +35,11 @@ function memoryStorage(seed?: Record<string, string>) {
     dump: () => Object.fromEntries(store),
   };
 }
+
+// 默认存储是共享单例（node 环境为内存档）：默认存储用例写键后清理。
+afterEach(() => {
+  pluginStore.removeItem(TERMINAL_APPEARANCE_KEY);
+});
 
 const CUSTOM_SCHEME: TerminalColorScheme = {
   id: "my-scheme",
@@ -154,6 +161,13 @@ describe("状态持久化", () => {
     };
     persistTerminalAppearance(state, storage);
     expect(loadTerminalAppearance(storage)).toEqual(state);
+  });
+
+  it("不注入 storage 时读写经默认 pluginStore 回环", () => {
+    const state = stateWith({ schemeSource: "custom", darkSchemeId: "dracula", lineHeight: 1.4 }, [CUSTOM_SCHEME]);
+    persistTerminalAppearance(state);
+    expect(pluginStore.getItem(TERMINAL_APPEARANCE_KEY)).not.toBeNull();
+    expect(loadTerminalAppearance()).toEqual(state);
   });
 
   it("自定义方案数量超限时截断", () => {

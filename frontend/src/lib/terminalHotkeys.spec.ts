@@ -1,7 +1,8 @@
 // 快捷键注册表纯逻辑单测：平台默认键位、code 归一化（大小写/标点/Shift 可分辨）、
 // 组合串解析与规范化、显示格式化、持久化容错、匹配与冲突检测。
-// 存储统一注入，不触碰真实 localStorage。
-import { describe, expect, it } from "vitest";
+// 存储统一注入假实现；默认存储（pluginStore）回环单列一节。
+import { afterEach, describe, expect, it } from "vitest";
+import { pluginStore } from "./pluginStore";
 import {
   ACTION_IDS,
   TERMINAL_HOTKEYS_KEY,
@@ -220,6 +221,24 @@ describe("loadTerminalHotkeys / persistTerminalHotkeys", () => {
         },
       }),
     ).not.toThrow();
+  });
+});
+
+describe("默认存储走 pluginStore", () => {
+  afterEach(() => {
+    // 默认存储是共享单例（node 环境为内存档）：用后清键，避免污染后续用例。
+    pluginStore.removeItem(TERMINAL_HOTKEYS_KEY);
+  });
+
+  it("不注入 storage 时读写经 pluginStore 回环", () => {
+    const bindings = sanitizeTerminalHotkeys({ clear: ["ctrl+shift+k"] }, false);
+    persistTerminalHotkeys(bindings);
+    expect(JSON.parse(pluginStore.getItem(TERMINAL_HOTKEYS_KEY) ?? "{}").clear).toEqual(["Ctrl+Shift+K"]);
+    expect(loadTerminalHotkeys(false).clear).toEqual(["Ctrl+Shift+K"]);
+  });
+
+  it("无持久化值时回平台默认（node/无桥环境下默认档为内存，不抛 SecurityError）", () => {
+    expect(loadTerminalHotkeys(true)).toEqual(defaultTerminalHotkeys(true));
   });
 });
 
