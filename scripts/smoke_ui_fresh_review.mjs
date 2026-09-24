@@ -95,6 +95,9 @@ try {
   await page.screenshot({ path: `${shots}/round4-settings-failed.png` });
   await page.evaluate(() => { window.__freshReview.pending = false; });
   await page.locator('.settings-modal [role="alert"] button').click();
+  // Tabby-parity category reorder moved the credential source off the dialog's
+  // default tab ("Appearance") into the "Quick Sudo" pane — select it first.
+  await page.locator(".settings-modal .settings-nav-item", { hasText: "Quick Sudo" }).click();
   await page.locator(".settings-modal .credential-source-row").waitFor();
   assert.equal(await save.isDisabled(), false);
   await save.click();
@@ -141,25 +144,36 @@ try {
   // 粘贴组合键（mod+V）keydown 不 preventDefault 是有意设计：放行浏览器原生
   // paste 事件（自带真实 clipboardData），由 terminalHost 捕获拦截器统一走风险
   // 确认（App.vue interceptTerminalPaste）；keydown 只 stopPropagation + 让 xterm
-  // 跳过。故逐键分开断言：搜索/缩放键 cancelled，粘贴键不 cancelled 但不冒泡。
-  for (const [key, modifiers, expected] of [
-    ["f", { ctrlKey: true }, { cancelled: true, bubbled: false }],
-    ["Escape", {}, { cancelled: true, bubbled: false }],
-    ["f", { metaKey: true }, { cancelled: true, bubbled: false }],
-    ["Escape", {}, { cancelled: true, bubbled: false }],
-    ["0", { ctrlKey: true }, { cancelled: true, bubbled: false }],
-    ["v", { metaKey: true }, { cancelled: false, bubbled: false }],
-    ["V", { ctrlKey: true, shiftKey: true }, { cancelled: false, bubbled: false }],
+  // 跳过。快捷键注册表（lib/terminalHotkeys.ts）默认表按平台分：macOS 占 Cmd 系，
+  // 其余平台占 Ctrl(+Shift) 系，且刻意不绑裸 Ctrl+F / Esc（留给远端 readline），
+  // Esc 只在搜索面板打开时被消费。故按平台取默认绑定逐键断言。
+  const APPLE = await page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform));
+  const SEARCH = APPLE ? { metaKey: true } : { ctrlKey: true, shiftKey: true };
+  const UNOWNED_SEARCH = APPLE ? { ctrlKey: true } : { metaKey: true };
+  const RESET_ZOOM = APPLE ? { metaKey: true } : { ctrlKey: true };
+  const PASTE = APPLE ? { metaKey: true } : { ctrlKey: true };
+  // keyComboFromEvent folds events by KeyboardEvent.code, so synthetic events
+  // must carry the code (a bare { key } leaves code="" and every chord misses).
+  for (const [key, code, modifiers, expected] of [
+    ["f", "KeyF", SEARCH, { cancelled: true, bubbled: false }],
+    // Search is open after the previous row: Esc is consumed closing it.
+    ["Escape", "Escape", {}, { cancelled: true, bubbled: false }],
+    // Search closed again: an off-table chord is not claimed by the app and
+    // reaches the shell (terminalHotkeys.ts keeps Ctrl+F / Cmd-F split per
+    // platform on purpose).
+    ["f", "KeyF", UNOWNED_SEARCH, { cancelled: false, bubbled: true }],
+    ["0", "Digit0", RESET_ZOOM, { cancelled: true, bubbled: false }],
+    ["v", "KeyV", PASTE, { cancelled: false, bubbled: false }],
   ]) {
-    const result = await page.evaluate(({ key, modifiers }) => {
+    const result = await page.evaluate(({ key, code, modifiers }) => {
       let bubbled = false;
       const listener = () => { bubbled = true; };
       document.addEventListener("keydown", listener);
-      const event = new KeyboardEvent("keydown", { key, ...modifiers, bubbles: true, cancelable: true });
+      const event = new KeyboardEvent("keydown", { key, code, ...modifiers, bubbles: true, cancelable: true });
       document.querySelector(".xterm-helper-textarea").dispatchEvent(event);
       document.removeEventListener("keydown", listener);
       return { cancelled: event.defaultPrevented, bubbled };
-    }, { key, modifiers });
+    }, { key, code, modifiers });
     assert.deepEqual(result, expected, `owned shortcut ${key}`);
   }
   // 粘贴链路的另一端：原生 paste 事件必须在捕获阶段被拦截（取消默认 + 不冒泡），
