@@ -38,7 +38,7 @@
       "label": "SSH server",
       "icon": "assets/plugin.svg",
       "database_type": "ssh",
-      "description": "SSH terminal and SFTP connection with password, private key, agent, or no authentication.",
+      "description": "SSH, Telnet, or VNC connection with protocol-appropriate authentication.",
       "fields": [
         {
           "key": "display_name",
@@ -47,6 +47,28 @@
           "binding": "name",
           "required": true,
           "default": "SSH server"
+        },
+        {
+          "key": "protocol",
+          "label": "Protocol",
+          "type": "select",
+          "binding": "config",
+          "default": "ssh",
+          "options": [
+            {
+              "label": "SSH",
+              "value": "ssh"
+            },
+            {
+              "label": "Telnet",
+              "value": "telnet"
+            },
+            {
+              "label": "VNC",
+              "value": "vnc"
+            }
+          ],
+          "description": "Session protocol carried by this connection. Telnet and VNC connections open their own session view in the workbench (per-protocol options live there); RDP is not offered yet."
         },
         {
           "key": "host",
@@ -63,7 +85,7 @@
           "binding": "port",
           "required": true,
           "default": 22,
-          "description": "TCP port, 1-65535 (default 22). The host refuses to connect when this is 0 or out of range."
+          "description": "TCP port, 1-65535. Defaults per protocol: SSH 22, Telnet 23, VNC 5900."
         },
         {
           "key": "username",
@@ -71,7 +93,14 @@
           "type": "text",
           "binding": "username",
           "required": true,
-          "default": "root"
+          "default": "root",
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "ssh",
+              "telnet"
+            ]
+          }
         },
         {
           "key": "authentication",
@@ -101,7 +130,13 @@
               "value": "none"
             }
           ],
-          "description": "Choose how to sign in to the server: password, private key, SSH agent, or none."
+          "description": "Choose how to sign in to the server: password, private key, SSH agent, or none.",
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "ssh"
+            ]
+          }
         },
         {
           "key": "password_source",
@@ -121,10 +156,20 @@
           ],
           "description": "Where the login password comes from. \"Enter in this form\" requires the Password field; \"Local command\" requires Password command, which runs with your user privileges at connect time.",
           "visible_when": {
-            "field": "authentication",
-            "one_of": [
-              "password",
-              "private-key-password"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "authentication",
+                "one_of": [
+                  "password",
+                  "private-key-password"
+                ]
+              }
             ]
           }
         },
@@ -135,9 +180,19 @@
           "binding": "password",
           "description": "Password for \"Password\" and \"Private key, then password\", used when Password source is \"Enter in this form\". Switch Password source to \"Local command\" to fetch it with a local command instead.",
           "visible_when": {
-            "field": "password_source",
-            "one_of": [
-              "direct"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "password_source",
+                "one_of": [
+                  "direct"
+                ]
+              }
             ]
           },
           "required_when": {
@@ -155,9 +210,19 @@
           "default": "",
           "description": "Local command to fetch the login password. stdout minus one final newline is used. Required when Password source is \"Local command\"; runs with your user privileges.",
           "visible_when": {
-            "field": "password_source",
-            "one_of": [
-              "command"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "password_source",
+                "one_of": [
+                  "command"
+                ]
+              }
             ]
           },
           "required_when": {
@@ -178,10 +243,20 @@
           },
           "description": "Type the key path, or pick one: the suggestion list (desktop) and the file button both fill this field; in Web/Docker builds the file button uploads the key into Private key content below and clears this field. Path or content - at least one of the two.",
           "visible_when": {
-            "field": "authentication",
-            "one_of": [
-              "private-key",
-              "private-key-password"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "authentication",
+                "one_of": [
+                  "private-key",
+                  "private-key-password"
+                ]
+              }
             ]
           }
         },
@@ -192,10 +267,20 @@
           "binding": "secret",
           "description": "Passphrase that unlocks the private key file; it is separate from the account password.",
           "visible_when": {
-            "field": "authentication",
-            "one_of": [
-              "private-key",
-              "private-key-password"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "authentication",
+                "one_of": [
+                  "private-key",
+                  "private-key-password"
+                ]
+              }
             ]
           }
         },
@@ -207,10 +292,20 @@
           "required": false,
           "description": "Paste the private key contents (OpenSSH, PEM, or PPK); in Web/Docker builds the file button above uploads them here. Non-empty content wins over the key path, is kept in the secret store and never displayed again; choosing a file above clears this field.",
           "visible_when": {
-            "field": "authentication",
-            "one_of": [
-              "private-key",
-              "private-key-password"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "authentication",
+                "one_of": [
+                  "private-key",
+                  "private-key-password"
+                ]
+              }
             ]
           }
         },
@@ -221,9 +316,19 @@
           "binding": "config",
           "description": "Optional SSH_AUTH_SOCK override. Leave empty for the environment default or Windows Pageant.",
           "visible_when": {
-            "field": "authentication",
-            "one_of": [
-              "agent"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "authentication",
+                "one_of": [
+                  "agent"
+                ]
+              }
             ]
           }
         },
@@ -247,7 +352,13 @@
               "label": "Off"
             }
           ],
-          "description": "Choose where sudo credentials come from: keep it Off unless this host needs sudo, then pick Custom (this connection) or a shared global Quick Sudo profile. Ignored for read-only connections. Off disables sudo credential handling; the 2FA field below still serves login-time MFA."
+          "description": "Choose where sudo credentials come from: keep it Off unless this host needs sudo, then pick Custom (this connection) or a shared global Quick Sudo profile. Ignored for read-only connections. Off disables sudo credential handling; the 2FA field below still serves login-time MFA.",
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "ssh"
+            ]
+          }
         },
         {
           "key": "sudo_profile",
@@ -256,9 +367,19 @@
           "binding": "config",
           "options_action": "sudo/profiles/options",
           "visible_when": {
-            "field": "sudo_source",
-            "one_of": [
-              "global"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "sudo_source",
+                "one_of": [
+                  "global"
+                ]
+              }
             ]
           },
           "description": "Optional global Quick Sudo profile."
@@ -269,9 +390,19 @@
           "type": "password",
           "binding": "secret",
           "visible_when": {
-            "field": "sudo_source",
-            "one_of": [
-              "custom"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "sudo_source",
+                "one_of": [
+                  "custom"
+                ]
+              }
             ]
           },
           "description": "Password for sudo; empty reuses the login password."
@@ -283,9 +414,19 @@
           "binding": "config",
           "default": false,
           "visible_when": {
-            "field": "sudo_source",
-            "one_of": [
-              "custom"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "sudo_source",
+                "one_of": [
+                  "custom"
+                ]
+              }
             ]
           },
           "description": "Request a TTY for sudo prompts."
@@ -297,10 +438,20 @@
           "binding": "config",
           "default": "",
           "visible_when": {
-            "field": "sudo_source",
-            "one_of": [
-              "custom",
-              "global"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "sudo_source",
+                "one_of": [
+                  "custom",
+                  "global"
+                ]
+              }
             ]
           },
           "description": "Optional sudo command allowlist, one entry per line. Empty allows all commands."
@@ -312,10 +463,20 @@
           "binding": "config",
           "default": "off",
           "visible_when": {
-            "field": "sudo_source",
-            "one_of": [
-              "custom",
-              "off"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "sudo_source",
+                "one_of": [
+                  "custom",
+                  "off"
+                ]
+              }
             ]
           },
           "options": [
@@ -344,10 +505,20 @@
           "type": "textarea",
           "binding": "secret",
           "visible_when": {
-            "field": "auth_flow_mode",
-            "one_of": [
-              "password_then_otp",
-              "password_plus_otp"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "auth_flow_mode",
+                "one_of": [
+                  "password_then_otp",
+                  "password_plus_otp"
+                ]
+              }
             ]
           },
           "description": "One per line: an otpauth:// URI or base32 key for automatic codes, or a static recovery code. Leave this blank to enter a rotating app, hardware-token, or SMS code in the connection-time dialog; do not save a current six-digit code here."
@@ -358,10 +529,20 @@
           "type": "text",
           "binding": "config",
           "visible_when": {
-            "field": "auth_flow_mode",
-            "one_of": [
-              "password_then_otp",
-              "password_plus_otp"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "auth_flow_mode",
+                "one_of": [
+                  "password_then_otp",
+                  "password_plus_otp"
+                ]
+              }
             ]
           },
           "description": "Optional extra text for recognizing OTP prompts. Built-in patterns already cover common wording such as \"[OTP Code]\" or \"Please Enter MFA Code.\" — only add a hint when the server asks differently."
@@ -373,6 +554,12 @@
           "binding": "config",
           "visible_when": {
             "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
               {
                 "field": "sudo_source",
                 "one_of": [
@@ -397,7 +584,13 @@
           "type": "boolean",
           "binding": "config",
           "default": false,
-          "description": "Show the less-used settings: timeouts, keepalive, environment, automatic replies, and read-only. Off by default."
+          "description": "Show the less-used settings: timeouts, keepalive, environment, automatic replies, and read-only. Off by default.",
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "ssh"
+            ]
+          }
         },
         {
           "key": "read_only",
@@ -407,9 +600,19 @@
           "default": false,
           "description": "Reject write operations on this connection.",
           "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "advanced_options",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -421,9 +624,19 @@
           "default": 30,
           "description": "SSH handshake and authentication timeout.",
           "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "advanced_options",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -435,9 +648,19 @@
           "default": 30,
           "description": "SSH keepalive interval; 0 disables it.",
           "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "advanced_options",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -449,9 +672,19 @@
           "default": 0,
           "description": "Terminal idle keepalive; 0 disables it.",
           "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "advanced_options",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -464,9 +697,19 @@
           "placeholder": "LANG=zh_CN.UTF-8",
           "description": "Optional KEY=VALUE entries sent on terminal, exec, and sudo channels.",
           "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "advanced_options",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -478,9 +721,19 @@
           "default": false,
           "description": "Enable tssh/JSON Expect rules. Off by default; saved rules stay inactive.",
           "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "advanced_options",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -493,9 +746,19 @@
           "placeholder": "#!! ExpectCount 1\n#!! ExpectPattern1 (?i)verification code\n#!! ExpectSendText1 654321\\r",
           "description": "tssh/JSON Expect rules for automatic replies. A server can spoof prompts and receive configured replies. Empty disables.",
           "visible_when": {
-            "field": "triggers_enabled",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "triggers_enabled",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -506,9 +769,19 @@
           "binding": "secret",
           "description": "Secret sent when referenced by sendSecretKey. A server can spoof the prompt.",
           "visible_when": {
-            "field": "triggers_enabled",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "triggers_enabled",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -519,9 +792,19 @@
           "binding": "secret",
           "description": "Secret sent when referenced by sendSecretKey. A server can spoof the prompt.",
           "visible_when": {
-            "field": "triggers_enabled",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "triggers_enabled",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         },
@@ -534,6 +817,12 @@
           "description": "Local command to fetch a missing private-key passphrase. stdout minus one final newline is used. Runs with your user privileges.",
           "visible_when": {
             "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
               {
                 "field": "advanced_options",
                 "one_of": [
@@ -558,9 +847,19 @@
           "default": "",
           "description": "Run instead of the shell when a terminal opens. Empty uses a normal shell.",
           "visible_when": {
-            "field": "advanced_options",
-            "one_of": [
-              "true"
+            "all_of": [
+              {
+                "field": "protocol",
+                "one_of": [
+                  "ssh"
+                ]
+              },
+              {
+                "field": "advanced_options",
+                "one_of": [
+                  "true"
+                ]
+              }
             ]
           }
         }
@@ -682,6 +981,15 @@
           "fields": {
             "display_name": {
               "label": "Nombre de conexión"
+            },
+            "protocol": {
+              "label": "Protocolo",
+              "options": {
+                "ssh": "SSH",
+                "telnet": "Telnet",
+                "vnc": "VNC"
+              },
+              "description": "Protocolo de sesión de esta conexión. Las conexiones Telnet y VNC abren su propia vista de sesión en el espacio de trabajo (las opciones por protocolo están ahí); RDP no está disponible todavía."
             },
             "host": {
               "label": "Host"
@@ -871,6 +1179,15 @@
             "display_name": {
               "label": "Nome connessione"
             },
+            "protocol": {
+              "label": "Protocollo",
+              "options": {
+                "ssh": "SSH",
+                "telnet": "Telnet",
+                "vnc": "VNC"
+              },
+              "description": "Protocollo di sessione di questa connessione. Le connessioni Telnet e VNC aprono la propria vista sessione nel workbench (le opzioni per protocollo si trovano lì); RDP non è ancora disponibile."
+            },
             "host": {
               "label": "Host"
             },
@@ -1058,6 +1375,15 @@
           "fields": {
             "display_name": {
               "label": "接続名"
+            },
+            "protocol": {
+              "label": "プロトコル",
+              "options": {
+                "ssh": "SSH",
+                "telnet": "Telnet",
+                "vnc": "VNC"
+              },
+              "description": "この接続が扱うセッションプロトコル。Telnet と VNC 接続はワークベンチ内で各自のセッションビューを開きます（プロトコル固有の設定もそこにあります）。RDP は未対応です。"
             },
             "host": {
               "label": "ホスト"
@@ -1247,6 +1573,15 @@
             "display_name": {
               "label": "Nome da conexão"
             },
+            "protocol": {
+              "label": "Protocolo",
+              "options": {
+                "ssh": "SSH",
+                "telnet": "Telnet",
+                "vnc": "VNC"
+              },
+              "description": "Protocolo de sessão desta conexão. Conexões Telnet e VNC abrem sua própria visualização de sessão no workbench (as opções por protocolo ficam lá); RDP ainda não é oferecido."
+            },
             "host": {
               "label": "Host"
             },
@@ -1435,6 +1770,15 @@
             "display_name": {
               "label": "连接名称"
             },
+            "protocol": {
+              "label": "协议",
+              "options": {
+                "ssh": "SSH",
+                "telnet": "Telnet",
+                "vnc": "VNC"
+              },
+              "description": "此连接承载的会话协议。Telnet 与 VNC 连接会在工作台内打开各自的会话视图（协议选项在工作台内设置）；暂不提供 RDP。"
+            },
             "host": {
               "label": "主机"
             },
@@ -1622,6 +1966,15 @@
           "fields": {
             "display_name": {
               "label": "連線名稱"
+            },
+            "protocol": {
+              "label": "協議",
+              "options": {
+                "ssh": "SSH",
+                "telnet": "Telnet",
+                "vnc": "VNC"
+              },
+              "description": "此連線承載的會話協議。Telnet 與 VNC 連線會在工作台內開啟各自的會話檢視（協議選項在工作台內設定）；暫不提供 RDP。"
             },
             "host": {
               "label": "主機"
