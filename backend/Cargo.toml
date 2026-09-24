@@ -62,6 +62,14 @@ notify = "6"
 # libudev — glibc CI needs the libudev-dev apt package (ci.yml "Install
 # native dependencies").
 serialport = "4"
+# VNC sessions (nyaterm-parity P2 2d, src/vnc_session.rs). crates.io name is
+# "vnc-rs" (lib name `vnc`), HsuJv/vnc-rs. 0.6.0 (2026-09-21, MIT OR
+# Apache-2.0) upstreamed the NyaTerm fork hardening: zero unsafe, typed
+# network errors, per-message decoder limits (8.3MP / 8192px / 64MiB
+# compressed / 1MiB clipboard / 4096B names) and handshake regression tests.
+# Plugin-side bounds stay tighter (3840x2160 framebuffer, <=8-byte classic
+# VNC password) — due diligence in docs/SPIKE_VNC_SESSION.zh-CN.md.
+vnc-rs = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2"
