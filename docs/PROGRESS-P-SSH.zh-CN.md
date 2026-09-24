@@ -3622,3 +3622,20 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **在途**：np8-e2e（smoke_ui_settings 超时修复，已见 terminalModeQueries/smoke_ui_fresh_review 改动）；cron 每 10 分钟看护（交付标准五条）。
 - 维持人工门：RDP 评审执行、串口协议升级评审、真机验收矩阵、PR #98 合入。
 - M7 完成判据：五分支合入 integration、全量绿（cargo ≥735 / vitest ≥891 只增不减）、e2e walkthrough 绿、push 后 CI 十一门 success。
+
+
+## M7 收口（2026-09-25，并发验证轮：实例测试 / 真机模拟 / e2e 修复）
+
+**P0 回归修复 ✅**（parity-e2e-fix 9fcb326/f305b2f，merge 见 HEAD）：M5.5 从 main 合入的 `terminalModeQueries.ts`（837fbc7）把 XTVERSION 注册成 `{ prefix: ">", intermediates: "q" }`——`q`(0x71) 超出 xterm 合法 intermediates 区间 0x20..0x2f，`registerCsiHandler` 注册期抛错 → createTerminal 失败 → connected 永不可达 → 全部连接态 UI disabled（真实宿主同炸）。修复：XTVERSION 按真实线格式注册 `{ prefix: ">", final: "q" }` + 回调校验 params（空或 `[0]===0`）；kitty/DECRQM 两 handler 核查无同类问题；**spec 加固：fake parser 镜像 xterm 的 prefix/intermediates/final 区间校验，注册参数形态从此被 vitest 锁定**。同族 walkthrough `smoke_ui_fresh_review.mjs` 陈旧断言修正（凭据行迁 Quick Sudo 页签、键盘断言对齐按平台默认表与 KeyboardEvent.code）。
+
+**并发验证矩阵（三 agent 线）**：
+- 实例测试（8 项）：smoke_test 全链路 / smoke_fs 68 / smoke_mcp 33 工具 / smoke_login_mfa 13 / terminal_burst 737 帧 / validate_repo / connection-forms 502 组合全 PASS；smoke_forward 初跑 FAIL 归因容器 `AllowTcpForwarding no`，重建容器（双端口监听 + HUP 生效）复验 **6 用例全过（15.2s）**——插件转发无回归。
+- 真机模拟：干净容器首装挑战流 PASS（fs 的 sudo 组 3 项为新容器无 NOPASSWD sudoers 的环境前置，非回归）；浏览器场景矩阵抓出上 P0 回归（S1/S2/S3 同根因）。
+- e2e walkthrough：`smoke_ui_settings` 46 ok 全绿（修复前 20s 超时）、`smoke_ui_mock` 全绿、`smoke_ui_fresh_review` 4/4。
+
+**全量**：frontend vitest **891** / vue-tsc 0 / build 过（ui/ 重生成）；backend 零改动。
+
+### M7 遗留
+1. 真机人工门不变：DBX 桌面端到端、VNC/X server/串口硬件/GPU-NPU/ConPTY、pluginStore 三键真机持久化复验。
+2. 场景矩阵 S1/S2 已由修复后 walkthrough 等价覆盖（fresh_review 连接态 + settings 全绿）；S3（visual.html）修复后复验随本轮 CI 后补录。
+3. CI 门禁缺口已暴露：前端 walkthrough 不在 CI——是否纳入 CI 由人工排期（涉及 CI 时长/浏览器依赖）。

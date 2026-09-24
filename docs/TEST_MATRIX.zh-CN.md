@@ -84,3 +84,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：三结构化偏好键（terminal-behavior/hotkeys/appearance）经 host.storage 通道持久化、web 直连降级 guarded localStorage、键清单锁定断言。
 
 仍保持未验收（依赖真机/CI）：三键真机首装迁移（localStorage 旧值经惰性搬家入 host.storage）与跨重启持久化；老宿主降级行为抽查。VNC/X server/串口/GPU-NPU/ConPTY/DBX 桌面端到端与 RDP 评审执行等既有人工门不变。
+
+
+## M7（并发验证轮：P0 回归修复 + 三线矩阵，2026-09-25）
+
+单测：vitest **891/891**（基线持平；terminalModeQueries.spec 加固——fake parser 镜像 xterm prefix/intermediates/final 区间校验，XTVERSION query/Ps=0/非零放行三形态）、vue-tsc 0 错、`pnpm build` 过（ui/ 重生成）。backend 零改动。
+
+新增可测面（实例/模拟层）：smoke 家族 8 项矩阵全绿（含 forward 容器复验 6 用例）；干净容器首装挑战流 PASS；浏览器场景矩阵 13 场景（10 PASS + 3 FAIL 已随 P0 修复转绿，等价覆盖见 walkthrough）。P0 修复：XTVERSION CSI 注册参数（`{prefix:">",final:"q"}` + params 校验），同类注册形态从此被 vitest 锁定。
+
+仍保持未验收（依赖真机/人工）：DBX 桌面端到端、VNC/X server/串口硬件/GPU-NPU/ConPTY、pluginStore 真机持久化、S3 visual.html 修复后补录、前端 walkthrough 纳入 CI 的人工排期。
