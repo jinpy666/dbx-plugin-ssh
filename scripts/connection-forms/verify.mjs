@@ -130,29 +130,32 @@ const advancedFields = [
   "terminal_keepalive_secs", "set_env", "triggers_enabled",
   "remote_command", "read_only",
 ];
+const PROTOCOL_SSH = { field: "protocol", one_of: ["ssh"] };
 for (const key of advancedFields) {
-  assert.deepEqual(byKey[key].visible_when, { field: "advanced_options", one_of: ["true"] },
-    `${key}: must be gated by advanced_options`);
+  assert.deepEqual(byKey[key].visible_when, { all_of: [PROTOCOL_SSH, { field: "advanced_options", one_of: ["true"] }] },
+    `${key}: must be gated by protocol=ssh + advanced_options`);
 }
 // The passphrase command only feeds key decryption: with password or agent
 // auth it would be dead UI, so it additionally requires key-based auth.
 assert.deepEqual(byKey.passphrase_command.visible_when, {
   all_of: [
+    PROTOCOL_SSH,
     { field: "advanced_options", one_of: ["true"] },
     { field: "authentication", one_of: ["private-key", "private-key-password"] },
   ],
-}, "passphrase_command must combine the advanced switch with key-based auth");
+}, "passphrase_command must combine protocol=ssh, the advanced switch and key-based auth");
 // Sudo and 2FA are first-class entry points, not advanced trivia: hiding them
 // behind the switch is what made bastion/MFA setup undiscoverable (issues #17
 // and #30 - users could not find the TOTP field and gave up). Their *detail*
 // fields still open on demand, so the default form only gains two rows.
-assert.equal(byKey.sudo_source.visible_when, undefined, "sudo_source must stay visible without the advanced switch");
+assert.deepEqual(byKey.sudo_source.visible_when, PROTOCOL_SSH, "sudo_source is SSH-only and must stay visible without the advanced switch");
 // Empty sudo password is not a no-op: the sidecar falls back to the login
 // password, so defaulting to Off would silently stop answering sudo prompts
 // for every new connection (`1a07ed3` flipped it, `de5ee09` flipped it back).
 assert.equal(byKey.sudo_source.default, "custom", "sudo_source must keep the custom default - Off would stop sudo orchestration on new connections");
-assert.deepEqual(byKey.auth_flow_mode.visible_when, { field: "sudo_source", one_of: ["custom", "off"] },
-  "auth_flow_mode (2FA) must stay visible whenever sudo does not defer to a global profile");
+assert.deepEqual(byKey.auth_flow_mode.visible_when, {
+  all_of: [PROTOCOL_SSH, { field: "sudo_source", one_of: ["custom", "off"] }],
+}, "auth_flow_mode (2FA) must stay visible whenever sudo does not defer to a global profile");
 // Field order is the form's information architecture: the switch must sit
 // *below* the always-visible sudo/2FA rows, so it reads as "the settings below
 // this switch are optional" instead of implying sudo/2FA are optional extras.
@@ -168,6 +171,7 @@ assert(fields.indexOf(byKey.advanced_options) > fields.indexOf(byKey.totp_prompt
 // the auth_flow_mode clause follow automatically there.
 assert.deepEqual(byKey.password_prompt_hint.visible_when, {
   all_of: [
+    PROTOCOL_SSH,
     { field: "sudo_source", one_of: ["custom", "off"] },
     { field: "auth_flow_mode", one_of: ["password_then_otp", "password_plus_otp"] },
   ],
@@ -261,9 +265,13 @@ assert.equal(byKey.password_source.binding, "config");
 assert.equal(byKey.password_source.default, "direct", "password_source: must default to the common case");
 assert.deepEqual(options("password_source").sort(), ["command", "direct"]);
 assert.deepEqual(byKey.password.required_when, { field: "password_source", one_of: ["direct"] });
-assert.deepEqual(byKey.password.visible_when, { field: "password_source", one_of: ["direct"] });
+assert.deepEqual(byKey.password.visible_when, {
+  all_of: [PROTOCOL_SSH, { field: "password_source", one_of: ["direct"] }],
+});
 assert.deepEqual(byKey.password_command.required_when, { field: "password_source", one_of: ["command"] });
-assert.deepEqual(byKey.password_command.visible_when, { field: "password_source", one_of: ["command"] });
+assert.deepEqual(byKey.password_command.visible_when, {
+  all_of: [PROTOCOL_SSH, { field: "password_source", one_of: ["command"] }],
+});
 // Every password_source option must be covered by exactly one required branch:
 // a gap means a save that the parser then rejects, an overlap means a dead end.
 assert.deepEqual(
@@ -403,10 +411,13 @@ for (const key of TRIGGER_FIELDS) {
     `${key}: must sit near set_env (before remote_command)`);
 }
 assert.equal(byKey.triggers_enabled.default, false, "triggers_enabled: must default to off");
-assert.deepEqual(byKey.triggers.visible_when, { field: "triggers_enabled", one_of: ["true"] });
+assert.deepEqual(byKey.triggers.visible_when, {
+  all_of: [PROTOCOL_SSH, { field: "triggers_enabled", one_of: ["true"] }],
+});
 for (const key of ["triggers", "trigger_answer_1", "trigger_answer_2"]) {
-  assert.deepEqual(byKey[key].visible_when, { field: "triggers_enabled", one_of: ["true"] },
-    `${key}: must be gated by triggers_enabled`);
+  assert.deepEqual(byKey[key].visible_when, {
+    all_of: [PROTOCOL_SSH, { field: "triggers_enabled", one_of: ["true"] }],
+  }, `${key}: must be gated by protocol=ssh + triggers_enabled`);
 }
 // The triggers placeholder must be a usable tssh (trzsz-ssh) text example so
 // copy-paste just works (the backend parses tssh text rules natively; the

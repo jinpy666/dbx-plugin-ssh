@@ -158,6 +158,7 @@ import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, normal
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
 import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./lib/pluginContext";
 import { clampFontSize } from "./lib/terminalZoom";
+import { loadLastConnectParams } from "./lib/connectLastParams";
 import { pluginStore } from "./lib/pluginStore";
 import { loadTerminalFontOverride, persistTerminalFontFamily, persistTerminalFontSize, resolveTerminalFont, type TerminalFontOverride } from "./lib/terminalFont";
 import { MIB, settingsErrorOf } from "./lib/settingsModel";
@@ -445,6 +446,8 @@ interface ConnectionSummary {
   username?: string;
   color?: string;
   readOnly?: boolean;
+  /** 宿主连接表单的 protocol 字段（缺省 ssh）：非 SSH 连接在 openSession 里路由到各自会话。 */
+  protocol?: "ssh" | "telnet" | "vnc";
 }
 
 interface DownloadInfo {
@@ -1448,7 +1451,14 @@ const connection = computed<ConnectionSummary>(() => {
     username: normalizeConnectionText(raw.username),
     color: normalizeConnectionText(raw.color),
     readOnly: raw.readOnly === true,
+    protocol: raw.protocol === "telnet" || raw.protocol === "vnc" ? raw.protocol : "ssh",
   };
+});
+// 连接协议（对标 Tabby profile）：宿主连接表单的 protocol 字段，缺省 ssh。
+// 非 SSH 连接由 openSession 路由到各自的会话视图，不建立 SSH 会话。
+const connectionProtocol = computed<"ssh" | "telnet" | "vnc">(() => {
+  const protocol = connection.value.protocol;
+  return protocol === "telnet" || protocol === "vnc" ? protocol : "ssh";
 });
 const canWrite = computed(() => !connection.value.readOnly && !connectionReadOnly.value);
 const selectedEntry = computed(() => entries.value.find((entry) => entry.uri === selectedPath.value));
@@ -3778,6 +3788,16 @@ function waitForTransferCompletion(taskId: string) {
 
 async function openSession(forceNew = false, bootRestore = false, isRetry = false) {
   if (!connectionId.value || !workbenchId.value) return;
+  // 协议路由（对标 Tabby profile）：Telnet/VNC 连接不建 SSH 会话，直接驱动
+  // 各自的会话启动；启动失败回落连接弹窗（预填 host/port，可改后重试）。
+  if (connectionProtocol.value === "telnet") {
+    if (!(await startTelnetFromConnection())) telnetDialogOpen.value = true;
+    return;
+  }
+  if (connectionProtocol.value === "vnc") {
+    if (!(await startVncFromConnection())) vncDialogOpen.value = true;
+    return;
+  }
   window.clearTimeout(reconnectTimer);
   reconnectAttempt = 0;
   // Boot-time tab restore can race the host's plugin activation and fail the
@@ -4145,7 +4165,7 @@ function drainTelnetFrames() {
   }
 }
 
-async function startTelnetSession(options: TelnetConnectOptions) {
+async function startTelnetSession(options: TelnetConnectOptions): Promise<boolean> {
   // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
   if (telnetSession.value && telnetState.value !== "closed") await closeTelnetSession();
   // 自动登录两种形态互斥：声明式（提示正则 + 凭据，sidecar 落内置默认正则）
@@ -4172,7 +4192,7 @@ async function startTelnetSession(options: TelnetConnectOptions) {
     });
     if (disposed) {
       void window.dbxPlugin.invoke("telnet/close", { sessionId: info.sessionId }).catch(() => undefined);
-      return;
+      return false;
     }
     telnetSession.value = { sessionId: info.sessionId, host: info.host, port: info.port };
     telnetState.value = "connecting";
@@ -4183,8 +4203,10 @@ async function startTelnetSession(options: TelnetConnectOptions) {
     await nextTick();
     scheduleFit();
     terminal?.focus();
+    return true;
   } catch (cause) {
     showError(cause, "terminal");
+    return false;
   }
 }
 
@@ -4209,7 +4231,7 @@ function markVncClosed(error: string | null) {
   if (error !== null) vncError.value = error;
 }
 
-async function startVncSession(options: VncConnectOptions) {
+async function startVncSession(options: VncConnectOptions): Promise<boolean> {
   // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
   if (vncSession.value && vncState.value !== "closed") await closeVncSession();
   try {
@@ -4222,7 +4244,7 @@ async function startVncSession(options: VncConnectOptions) {
     });
     if (disposed) {
       void window.dbxPlugin.invoke("vnc/close", { sessionId: info.sessionId }).catch(() => undefined);
-      return;
+      return false;
     }
     vncSession.value = { sessionId: info.sessionId, host: info.host, port: info.port };
     vncScaleMode.value = options.scaleMode;
@@ -4231,9 +4253,38 @@ async function startVncSession(options: VncConnectOptions) {
     vncSurface.value?.reset();
     await nextTick();
     vncSurface.value?.$el?.querySelector("canvas")?.focus();
+    return true;
   } catch (cause) {
     showError(cause, "terminal");
+    return false;
   }
+}
+
+// —— 连接驱动的会话启动（对标 Tabby profile 打开）：非 SSH 连接从宿主
+// 连接表单直启各自会话；参数 = 连接 host/port + 上次使用记忆的偏好。
+// 凭据不随连接持久化，需要自动登录/VNC 密码时从工具栏弹窗进入；直启
+// 失败回落弹窗（预填 host/port，可改后重试）。
+async function startTelnetFromConnection(): Promise<boolean> {
+  const conn = connection.value;
+  if (!conn.host) return false;
+  const last = loadLastConnectParams<TelnetConnectOptions>("telnet-connect-last");
+  return startTelnetSession({
+    host: conn.host,
+    port: conn.port && conn.port > 0 ? conn.port : 23,
+    enterMode: last.enterMode === "cr" || last.enterMode === "lf" ? last.enterMode : "crlf",
+    backspaceMode: last.backspaceMode === "ctrl_h" ? "ctrl_h" : "del",
+  });
+}
+
+async function startVncFromConnection(): Promise<boolean> {
+  const conn = connection.value;
+  if (!conn.host) return false;
+  const last = loadLastConnectParams<VncConnectOptions>("vnc-connect-last");
+  return startVncSession({
+    host: conn.host,
+    port: conn.port && conn.port > 0 ? conn.port : 5900,
+    scaleMode: last.scaleMode === "stretch" || last.scaleMode === "actual" ? last.scaleMode : "fit",
+  });
 }
 
 async function closeVncSession() {
