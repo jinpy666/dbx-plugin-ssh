@@ -3648,3 +3648,11 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **import-formats ✅ 合入**（f9fed3c，merge 无冲突）：SecureCRT(.xml hex 端口优先)/FinalShell(zip+folder.json 组链，DES 密文不迁移)/Electerm(bookmarks 组父链)/Termius(加密 blob 启发式丢弃、明文 PEM 迁移) 四解析器，统一 `secret_note` 原因码 + 预览横幅七语。backend +14 / frontend +3。
 - **全量（三线合并后）**：backend cargo **759**（基线 735）/ clippy 0 / fmt 干净；frontend vitest **901**（基线 891）/ vue-tsc 0 / build 过（ui/ 重生成）。
 - **在途**：telnet-autologin、serial-xymodem、np8-e2e（walkthrough 超时修复）。
+
+
+## M7-Warp 进度（2026-09-25）：结构化补全 spec 下拉 ✅ 合入
+
+- **Warp 对齐线 2 ✅**（parity-warp-spec 9717fa1，merge f12f4d3）：`lib/completions/spec.ts`（fig 思路裁剪 schema + token 切分/层级匹配/评分纯函数）+ 首批 12 个精选 CLI spec（git 28 子命令含二级树/docker 28/kubectl 21/ssh/systemctl/tmux/cargo/npm/pnpm/yarn/curl/grep）+ `CompletionMenu.vue` 三级下拉（flag/子命令/值候选，动态值出 `<branch>` hint 不枚举）。命令条接线：spec 优先、历史浮层回落并存；SettingsDialog"结构化补全"开关（默认开，pluginStore 键 `ssh-completion-spec`）；i18n `completionMenu.*` 七语。零 AI、零运行时依赖。
+- 冲突：SettingsDialog 与 M7 startup-commands 块追加型冲突（保留双方）。
+- **全量**：backend cargo **766**（M5.5 基线 735，M7 三线 + spec）/ clippy 0 / fmt 干净；frontend vitest **934**（94 文件）/ vue-tsc 0 / build 过（ui/ 重生成）。
+- 在途：Warp 线 1（ghost 行内建议，np8-warp-ghost）、e2e 修复线（np8-e2e）、M7 剩余（telnet-autologin / serial-xymodem）。

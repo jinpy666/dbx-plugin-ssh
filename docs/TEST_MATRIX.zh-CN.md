@@ -93,3 +93,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面（实例/模拟层）：smoke 家族 8 项矩阵全绿（含 forward 容器复验 6 用例）；干净容器首装挑战流 PASS；浏览器场景矩阵 13 场景（10 PASS + 3 FAIL 已随 P0 修复转绿，等价覆盖见 walkthrough）。P0 修复：XTVERSION CSI 注册参数（`{prefix:">",final:"q"}` + params 校验），同类注册形态从此被 vitest 锁定。
 
 仍保持未验收（依赖真机/人工）：DBX 桌面端到端、VNC/X server/串口硬件/GPU-NPU/ConPTY、pluginStore 真机持久化、S3 visual.html 修复后补录、前端 walkthrough 纳入 CI 的人工排期。
+
+
+## M7-Warp（结构化补全 spec 下拉，2026-09-25）
+
+单测：vitest **934/934**（spec 纯函数 23 + CompletionMenu 组件 5 + M7 三线增量）、cargo **766/766**（含 M7 startup-commands/import-formats backend 增量）、vue-tsc 0、build 过（ui/ 重生成）。
+
+新增可测面：spec token 切分（引号内空格/`--` terminator/`--flag=v` 内联值）、三层判定（flag/value/sub）、评分截断 20、菜单键盘导航；12 个 CLI spec 数据静态校验。
+
+已知限制：动态值（分支/文件/pod 名）只出占位 hint 不向远端枚举；spec 未覆盖的命令回落历史浮层；菜单 Enter=接受 token（fig 语义）非执行。
