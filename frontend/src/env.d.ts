@@ -72,6 +72,10 @@ interface DbxPluginApi {
   decodeBase64(value: string): Uint8Array;
   encodeBase64(value: Uint8Array | ArrayBuffer): string;
   readonly fileTransfer?: DbxPluginFileTransferApi;
+  /** 宿主单次落盘桥（Host API 1.1+，早于 fileTransfer）：字节交宿主顶层页面保存——
+   * 沙箱 iframe 自身点击 <a download> 会被浏览器静默丢弃（issue #93）。
+   * 宿主上限 512 MiB；桌面端走原生保存对话框，取消返回 null。 */
+  saveFile?(options: { fileName: string; contentType?: string }, data: Uint8Array | ArrayBuffer | string): Promise<{ path: string } | null>;
   readonly workbenchState?: { set(state: Record<string, unknown>): Promise<void> };
   readonly clipboard?: { readText(): Promise<string>; writeText(text: string): Promise<void> };
   /** §8.3 workbench/close 两段式关闭：宿主拆除 webview 前通知插件释放 workbench scope

@@ -214,6 +214,8 @@ describe("workbench localization", () => {
       "errors.downloadEmptyChunk",
       "errors.hostBridgeMissing",
       "errors.localFileShortRead",
+      "errors.localSaveTooLarge",
+      "errors.localSaveUnavailable",
       "errors.permissionDenied",
       "errors.probeOutput",
       "errors.remoteNotFound",
@@ -798,5 +800,42 @@ describe("App.vue popover/modal wiring structural guard", () => {
       const body = appScript.slice(start, appScript.indexOf("\n}", start));
       expect(body, `${name}() 未走 closeToolbarPopovers 统一收口`).toContain("closeToolbarPopovers()");
     }
+  });
+});
+
+// issue #93 防线：下载落盘不允许回退到插件 iframe 内的 <a download>。
+// sandbox="allow-scripts" 下浏览器会静默丢弃该动作（无报错、无下载事件），
+// 表现为「提示已下载但本机没有文件」。唯一可靠兜底是宿主 host.saveFile
+// （顶层页面落盘）；本组用例从 App.vue 源码反向锁定该约束，防复发。
+describe("issue #93 download fallback policy", () => {
+  it("never creates in-iframe anchor downloads in any save path", () => {
+    // 主链路（SFTP 下载 / trzsz / GIF 导出）不得出现 document.createElement("a")+
+    // click() 的浏览器兜底——历史函数 saveBrowserDownload 曾三处引用。
+    expect(appScript).not.toContain("saveBrowserDownload");
+    expect(appScript).not.toContain("anchor.download");
+  });
+
+  it("routes the no-fileTransfer fallback through the host saveFile bridge", () => {
+    const start = appScript.indexOf("async function saveHostFile(");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const body = appScript.slice(start, appScript.indexOf("\n}", start));
+    // 必须走宿主桥、检查存在性、超限明确报错、取消显式抛错。
+    expect(body).toContain("window.dbxPlugin.saveFile");
+    expect(body).toContain('errors.localSaveUnavailable');
+    expect(body).toContain("errors.localSaveTooLarge");
+    expect(body).toContain('if (!saved)');
+  });
+
+  it("aborts the whole download when beginSave resolves null (user cancel)", () => {
+    // beginSave 契约：用户取消原生保存框返回 null。旧代码只判 truthy，
+    // null 会让分块循环滑进「只推进度不写盘」分支并最终提示下载成功。
+    const start = appScript.indexOf("async function downloadEntry(");
+    const body = appScript.slice(start, appScript.indexOf("\n  } catch (cause)", start));
+    expect(body).toContain("?? undefined");
+    expect(body).toContain("transferStatus.cancelled");
+    // trzsz 批量路径同样不得忽略 null 句柄。
+    const trzszStart = appScript.indexOf("async function saveTrzszDownloadedFiles(");
+    const trzszBody = appScript.slice(trzszStart, appScript.indexOf("\n  for (const file of saving) {\n    const target = await fileTransfer.beginSave", trzszStart));
+    expect(trzszBody).toContain("if (!target)");
   });
 });
