@@ -48,6 +48,7 @@ import {
   ListChecks,
   Loader2,
   Lock,
+  MonitorPlay,
   Network,
   PackageOpen,
   Palette,
@@ -282,6 +283,11 @@ import TerminalContextMenu, {
 import PortForwardDialog from "./components/PortForwardDialog.vue";
 import TelnetConnectDialog, { type TelnetConnectOptions } from "./components/TelnetConnectDialog.vue";
 import SerialConnectDialog, { type SerialConnectOptions } from "./components/SerialConnectDialog.vue";
+// VNC 会话（nyaterm-parity P2 2d）：连接表单 + 画布表面，帧通道在
+// handleBinary 的 vnc/frame/{id} 分支接入。
+import VncConnectDialog, { type VncConnectOptions } from "./components/VncConnectDialog.vue";
+import VncSurface from "./components/VncSurface.vue";
+import type { VncInputEvent } from "./lib/vncFrame";
 import { ToastAction, ToastClose, ToastProvider, ToastRoot, ToastViewport } from "./components/ui/toast";
 
 interface SessionInfo {
@@ -1142,7 +1148,20 @@ const serialLastSequence = ref(0);
 const serialPendingFrames = new Map<number, { stream: number; data: Uint8Array }>();
 const isSerialMode = computed(() => serialSession.value !== null);
 const serialTarget = computed(() => (serialSession.value ? `${serialSession.value.port}@${serialSession.value.baudRate}` : ""));
-const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value);
+// VNC 会话（nyaterm-parity P2 2d）：与 SSH/本地/Telnet/串口同款互斥展示，
+// 并入 localUiMode。与终端会话不同，VNC 画面走 VncSurface 画布（xterm
+// 仍然挂着但被画布盖住），帧从 vnc/frame/{id} 二进制通道解码成 patch。
+const vncSession = ref<{ sessionId: string; host: string; port: number } | null>(null);
+const vncDialogOpen = ref(false);
+const vncConfirmOpen = ref(false);
+const vncState = ref<"idle" | "connecting" | "running" | "closed">("idle");
+const vncError = ref("");
+const vncScaleMode = ref<VncConnectOptions["scaleMode"]>("fit");
+const vncSurface = ref<InstanceType<typeof VncSurface> | null>(null);
+let vncClipboardNoticeAt = 0;
+const isVncMode = computed(() => vncSession.value !== null);
+const vncTarget = computed(() => (vncSession.value ? `${vncSession.value.host}:${vncSession.value.port}` : ""));
+const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value || isVncMode.value);
 // Bottom dock panel surface (surface=panel, host §8.3): hide the workbench identity block so the panel
 // and focus the terminal itself; multi-open/shell switching goes through the panel "+" menu (bridge openWorkbench opens another panel).
 const panelSurface = computed(() => hostContext.value.surface === "panel");
@@ -1277,6 +1296,8 @@ const sessionPillText = computed(() => {
   if (isSerialMode.value) return `${t("serial.pillPrefix")} · ${serialTarget.value}`;
   // Telnet 徽标显示明文目标（Telnet · host:port），提示这是非 SSH 连接。
   if (isTelnetMode.value) return telnetState.value === "connecting" ? t("telnet.connecting") : `${t("telnet.pillPrefix")} · ${telnetTarget.value}`;
+  // VNC 徽标显示远端桌面目标（VNC · host:port）。
+  if (isVncMode.value) return vncState.value === "connecting" ? t("vnc.connecting") : `${t("vnc.pillPrefix")} · ${vncTarget.value}`;
   if (!isLocalMode.value || !localSession.value) return t(`sessionStatus.${sessionStatus.value}`);
   const kind = localSession.value.shell.split(/[\\/]/).pop() || localSession.value.shell;
   return `${t("sessionStatus.local")} · ${kind}`;
@@ -1350,6 +1371,7 @@ const connectionIdentity = computed(() => {
   if (localUiMode.value && !connectionId.value) {
     if (isSerialMode.value) return `${t("serial.pillPrefix")} ${serialTarget.value}`;
     if (isTelnetMode.value) return `${t("telnet.pillPrefix")} ${telnetTarget.value}`;
+    if (isVncMode.value) return `${t("vnc.pillPrefix")} ${vncTarget.value}`;
     return t("localTerminal.active");
   }
   const host = connection.value.host || connection.value.name || connectionId.value || "–";
@@ -2980,6 +3002,16 @@ function handleBinary(event: DbxPluginBinaryEvent) {
     drainSerialFrames();
     return;
   }
+  if (event.channel.startsWith("vnc/frame/")) {
+    // VNC 帧补丁（44 字节头 + RGBA payload，sidecar 单调递增 sequence）。
+    // 交给 VncSurface 解码 + rAF 合帧绘制；乱序帧在组件内丢弃。
+    const vncId = event.channel.slice("vnc/frame/".length);
+    if (!vncSession.value || vncId !== vncSession.value.sessionId) return;
+    const payload = bridgeBinaryBytes(event, window.dbxPlugin.decodeBase64);
+    if (vncState.value !== "running") vncState.value = "running";
+    vncSurface.value?.acceptFrame(payload);
+    return;
+  }
   const sessionId = activeTerminalSessionId || session.value?.sessionId;
   if (sessionId && event.channel === `ssh/terminal/out/${sessionId}`) {
     const payload = bridgeBinaryBytes(event, window.dbxPlugin.decodeBase64);
@@ -3222,6 +3254,36 @@ function handleEvent(event: DbxPluginEvent) {
   }
   if (event.method === "telnet/terminal/error" && event.params.sessionId === telnetSession.value?.sessionId) {
     markTelnetClosed(null);
+    return;
+  }
+  // VNC 生命周期：connecting → connected → closed/error（error 附带原因）。
+  // 远端剪贴板更新回写本地（iframe 沙箱可能拒绝剪贴板写，尽力而为）。
+  if (event.method === "vnc/session/state" && event.params.sessionId === vncSession.value?.sessionId) {
+    const state = String(event.params.state || "");
+    if (state === "connected") {
+      vncState.value = "running";
+      vncError.value = "";
+    } else if (state === "connecting") {
+      vncState.value = "connecting";
+    } else if (state === "closed" || state === "error") {
+      markVncClosed(state === "error" ? String(event.params.error || "") : "");
+    }
+    return;
+  }
+  if (event.method === "vnc/clipboard" && event.params.sessionId === vncSession.value?.sessionId) {
+    const text = typeof event.params.text === "string" ? event.params.text : "";
+    if (text) {
+      void navigator.clipboard
+        ?.writeText(text)
+        .then(() => {
+          // 远端复制频繁时节流提示（8s 内只提示一次）。
+          if (Date.now() - vncClipboardNoticeAt > 8000) {
+            vncClipboardNoticeAt = Date.now();
+            showNotice(t("vnc.clipboardReceived"));
+          }
+        })
+        .catch(() => undefined);
+    }
     return;
   }
   // 串口生命周期：start 成功即 running；sidecar 只发 closed（主动关闭）与
@@ -3764,6 +3826,86 @@ async function closeTelnetSession() {
   terminal?.focus();
 }
 
+// —— VNC 会话生命周期（nyaterm-parity P2 2d，与 Telnet 同款互斥展示）——
+// 画面走 VncSurface 画布；帧/输入/剪贴板各走独立通道。退出覆盖层展示
+// sidecar 带回的原因文本（认证失败/服务端强制 Tight 等）。
+function markVncClosed(error: string | null) {
+  if (!vncSession.value || vncState.value === "closed") return;
+  vncState.value = "closed";
+  if (error !== null) vncError.value = error;
+}
+
+async function startVncSession(options: VncConnectOptions) {
+  // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
+  if (vncSession.value && vncState.value !== "closed") await closeVncSession();
+  try {
+    const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("vnc/start", {
+      workbenchId: workbenchId.value,
+      host: options.host,
+      port: options.port,
+      scaleMode: options.scaleMode,
+      ...(options.password ? { password: options.password } : {}),
+    });
+    if (disposed) {
+      void window.dbxPlugin.invoke("vnc/close", { sessionId: info.sessionId }).catch(() => undefined);
+      return;
+    }
+    vncSession.value = { sessionId: info.sessionId, host: info.host, port: info.port };
+    vncScaleMode.value = options.scaleMode;
+    vncState.value = "connecting";
+    vncError.value = "";
+    vncSurface.value?.reset();
+    await nextTick();
+    vncSurface.value?.$el?.querySelector("canvas")?.focus();
+  } catch (cause) {
+    showError(cause, "terminal");
+  }
+}
+
+async function closeVncSession() {
+  const sessionId = vncSession.value?.sessionId;
+  vncSession.value = null;
+  vncState.value = "idle";
+  vncError.value = "";
+  vncConfirmOpen.value = false;
+  if (!sessionId) return;
+  await window.dbxPlugin.invoke("vnc/close", { sessionId }).catch(() => undefined);
+  terminal?.focus();
+}
+
+function sendVncInput(event: VncInputEvent) {
+  const sessionId = vncSession.value?.sessionId;
+  if (!sessionId) return;
+  void window.dbxPlugin.invoke("vnc/input", { sessionId, ...event }).catch(() => undefined);
+}
+
+function sendVncClipboard(text: string) {
+  const sessionId = vncSession.value?.sessionId;
+  if (!sessionId || !text) return;
+  void window.dbxPlugin.invoke("vnc/set-clipboard", { sessionId, text }).catch(() => undefined);
+  showNotice(t("vnc.clipboardSent"));
+}
+
+// 工具栏 VNC 入口：SSH/本地/Telnet/串口占用终端视图时先经确认。
+function requestVnc() {
+  if (isVncMode.value) return;
+  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || serialSession.value) {
+    vncConfirmOpen.value = true;
+    return;
+  }
+  vncDialogOpen.value = true;
+}
+
+// 确认后：关掉占用终端视图的会话，再弹 VNC 连接表单。
+async function confirmVncOpen() {
+  vncConfirmOpen.value = false;
+  await closeSession();
+  if (localSession.value) await closeLocalTerminal();
+  if (telnetSession.value) await closeTelnetSession();
+  if (serialSession.value) await closeSerialSession();
+  vncDialogOpen.value = true;
+}
+
 // —— 串口会话生命周期（P3，与 Telnet 同款互斥展示；无 replay，掉帧仅按
 // pending 上限清空兜底）——
 // 退出态统一入口：error 为 null 表示 sidecar 未带原因（主动关闭），
@@ -3837,19 +3979,20 @@ async function closeSerialSession() {
 // 与 Telnet 入口同款流程。
 function requestSerial() {
   if (isSerialMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value) {
+  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || vncSession.value) {
     serialConfirmOpen.value = true;
     return;
   }
   serialDialogOpen.value = true;
 }
 
-// 确认后：关掉占用终端视图的 SSH/本地/Telnet 会话，再弹串口连接表单。
+// 确认后：关掉占用终端视图的 SSH/本地/Telnet/VNC 会话，再弹串口连接表单。
 async function confirmSerialOpen() {
   serialConfirmOpen.value = false;
   await closeSession();
   if (localSession.value) await closeLocalTerminal();
   if (telnetSession.value) await closeTelnetSession();
+  if (vncSession.value) await closeVncSession();
   serialDialogOpen.value = true;
 }
 
@@ -3857,18 +4000,19 @@ async function confirmSerialOpen() {
 // 与本地终端入口同款流程。
 function requestTelnet() {
   if (isTelnetMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value) {
+  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || vncSession.value || serialSession.value) {
     telnetConfirmOpen.value = true;
     return;
   }
   telnetDialogOpen.value = true;
 }
 
-// 确认后：关掉占用终端视图的 SSH/本地会话，再弹 Telnet 连接表单。
+// 确认后：关掉占用终端视图的 SSH/本地/VNC 会话，再弹 Telnet 连接表单。
 async function confirmTelnetOpen() {
   telnetConfirmOpen.value = false;
   await closeSession();
   if (localSession.value) await closeLocalTerminal();
+  if (vncSession.value) await closeVncSession();
   telnetDialogOpen.value = true;
 }
 
@@ -3884,12 +4028,14 @@ if (window.dbxPlugin.workbench?.onClose) {
       ["ssh/session/close", session.value?.sessionId],
       ["telnet/close", telnetSession.value?.sessionId],
       ["serial/close", serialSession.value?.sessionId],
+      ["vnc/close", vncSession.value?.sessionId],
     ].filter((pair): pair is [string, string] => typeof pair[1] === "string" && !!pair[1]);
     await Promise.allSettled(ownedSessions.map(([method, sessionId]) => window.dbxPlugin.notify(method, { sessionId })));
     localSession.value = null;
     session.value = undefined;
     telnetSession.value = null;
     serialSession.value = null;
+    vncSession.value = null;
   });
 }
 
@@ -3905,6 +4051,10 @@ function dismissRestoredLocalShell() {
 // Toolbar local-terminal button: running -> close; restored shell -> reopen directly (nothing to close, skipping
 // SSH confirm flow); serial/telnet mode -> close that session; an SSH state walks the existing confirm flow.
 function toggleLocalTerminal() {
+  if (isVncMode.value) {
+    void closeVncSession();
+    return;
+  }
   if (isSerialMode.value) {
     void closeSerialSession();
     return;
@@ -3942,8 +4092,8 @@ async function restartLocalTerminal() {
 // connecting 途中放行会让在途 ssh/session/open 成功后与本地会话抢同一终端
 // 视图），再开本地终端。
 function requestLocalTerminal() {
-  // 串口/Telnet 会话占用终端视图时不开本地终端（互斥展示）。
-  if (isSerialMode.value || isTelnetMode.value) return;
+  // 串口/Telnet/VNC 会话占用终端视图时不开本地终端（互斥展示）。
+  if (isSerialMode.value || isTelnetMode.value || isVncMode.value) return;
   if (isLocalMode.value || localState.value === "starting") return;
   if (session.value || reconnectPending.value || terminalState.value === "connecting") {
     localOpenConfirmOpen.value = true;
@@ -9166,6 +9316,8 @@ const modalOpenStates = computed(() => [
   telnetDialogOpen.value,
   serialConfirmOpen.value,
   serialDialogOpen.value,
+  vncConfirmOpen.value,
+  vncDialogOpen.value,
   folderPickerTarget.value !== null,
   previewOpen.value,
   pasteConfirm.value,
@@ -9677,12 +9829,14 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><SquarePlus /></button>
         <!-- Telnet 明文会话入口（P2-3）：与 SSH/本地终端互斥，占用终态先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-amber" :title="t('telnet.open')" @click="requestTelnet"><Globe /></button>
+        <!-- VNC 远程桌面入口（nyaterm-parity P2 2d）：与其它会话互斥，占用先经确认。 -->
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('vnc.open')" @click="requestVnc"><MonitorPlay /></button>
         <!-- 串口会话入口（P3）：与 SSH/本地/Telnet 互斥，占用终态先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('serial.open')" @click="requestSerial"><Usb /></button>
         <!-- 本地终端：sidecar 所在机器的登录 shell。与 SSH 会话互斥展示，
              已连接时经确认先关 SSH；退出态由终端覆盖层提供重开出口。 -->
-        <button class="icon-button icon-violet" :class="{ 'is-active': localUiMode }" :title="isSerialMode ? t('serial.disconnect') : isTelnetMode ? t('telnet.disconnect') : localUiMode && !localShellRestored ? t('localTerminal.close') : t('localTerminal.open')" @click="toggleLocalTerminal"><TerminalIcon /></button>
-        <div v-if="!isTelnetMode && !isSerialMode">
+        <button class="icon-button icon-violet" :class="{ 'is-active': localUiMode }" :title="isVncMode ? t('vnc.disconnect') : isSerialMode ? t('serial.disconnect') : isTelnetMode ? t('telnet.disconnect') : localUiMode && !localShellRestored ? t('localTerminal.close') : t('localTerminal.open')" @click="toggleLocalTerminal"><TerminalIcon /></button>
+        <div v-if="!isTelnetMode && !isSerialMode && !isVncMode">
           <!-- 本地终端设置：多平台 shell 选择（local/shells/list 发现）+ 注入开关，
                记入 sidecar 偏好（iframe 沙箱无 localStorage）。 -->
           <Popover :open="localMenuOpen" @update:open="(open) => { if (!open) localMenuOpen = false; }">
@@ -10002,6 +10156,10 @@ onBeforeUnmount(() => {
              不遮文本；drop-overlay/搜索面板/诊断浮层定位不受影响。 -->
         <TerminalGutter v-if="gutterVisible" :rows="gutterRows" :width="gutterWidth" />
         <div ref="terminalHost" class="terminal-host" :class="{ 'bell-flash': terminalBellFlash }" @mousedown.middle="handleTerminalMiddleClick" />
+        <!-- VNC 画布（nyaterm-parity P2 2d）：盖在 xterm 之上（z-index 2），
+             帧从 vnc/frame/{id} 二进制通道进入；键盘/鼠标由画布采集后经
+             keysym 映射发 vnc/input。连接态/退出覆盖层沿用 terminal-overlay。 -->
+        <VncSurface v-if="isVncMode" ref="vncSurface" class="vnc-surface" :scale-mode="vncScaleMode" @input="sendVncInput" @clipboard-out="sendVncClipboard" />
         <!-- P1-2 动作链接命令预览浮签：悬停 / Alt+点击时显示建议命令文本。 -->
         <div v-if="actionLinkHint" class="action-link-hint mono" :style="{ left: `${actionLinkHint.x}px`, top: `${actionLinkHint.y}px` }">{{ actionLinkHint.text }}</div>
         <!-- #33/#71 快速输入丢失诊断浮层：Ctrl/Cmd+Shift+D 切换。keys=onData
@@ -10056,7 +10214,7 @@ onBeforeUnmount(() => {
         </div>
         <!-- SSH 连接卡片：本地/串口/Telnet 会话占用的终端视图不再叠 SSH-only
              卡片（互斥展示；Telnet 原实现漏了该分支，一并补上）。 -->
-        <div v-if="!isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && terminalState !== 'connected' && !reconnectPending" class="terminal-overlay">
+        <div v-if="!isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && terminalState !== 'connected' && !reconnectPending" class="terminal-overlay">
           <ConnectingCard
             :locale="locale"
             :name="connection.name || connectionIdentity"
@@ -10107,6 +10265,18 @@ onBeforeUnmount(() => {
             <span v-if="serialError" class="mono local-exit-code">{{ serialError }}</span>
             <div class="local-exit-actions">
               <button @click="closeSerialSession">{{ t("serial.close") }}</button>
+            </div>
+          </div>
+        </div>
+        <!-- VNC 退出覆盖层（认证失败/服务端强制 Tight/对端断开）：给出关闭
+             出口，展示 sidecar 带回的原因文本；明文/经典认证告警在连接弹窗。 -->
+        <div v-if="isVncMode && vncState === 'closed'" class="terminal-overlay">
+          <div class="local-exit-card" role="status">
+            <TriangleAlert class="local-exit-icon" />
+            <strong>{{ t("vnc.closed") }}</strong>
+            <span v-if="vncError" class="mono local-exit-code">{{ vncError }}</span>
+            <div class="local-exit-actions">
+              <button @click="closeVncSession">{{ t("vnc.close") }}</button>
             </div>
           </div>
         </div>
@@ -11248,6 +11418,23 @@ onBeforeUnmount(() => {
 
     <!-- 串口连接表单（P3）：端口发现/波特率/数据位/校验/停止位/退格。 -->
     <SerialConnectDialog :locale="locale" :open="serialDialogOpen" @update:open="(open) => (serialDialogOpen = open)" @connect="startSerialSession" />
+
+    <VncConnectDialog :locale="locale" :open="vncDialogOpen" @update:open="(open) => (vncDialogOpen = open)" @connect="startVncSession" />
+
+    <!-- VNC 确认：SSH/本地/Telnet/串口会话仍占用终端视图时先关闭再弹连接表单 -->
+    <Dialog :open="vncConfirmOpen" @update:open="(open) => { if (!open) vncConfirmOpen = false; }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <header>
+          <DialogTitle>{{ t("vnc.openConfirmTitle") }}</DialogTitle>
+          <button :title="t('close')" class="icon-button" @click="vncConfirmOpen = false"><X /></button>
+        </header>
+        <p class="muted">{{ t("vnc.openConfirm") }}</p>
+        <footer>
+          <button @click="vncConfirmOpen = false">{{ t("cancel") }}</button>
+          <button class="primary-button" @click="confirmVncOpen">{{ t("vnc.open") }}</button>
+        </footer>
+      </DialogContent>
+    </Dialog>
 
     <!-- Telnet 确认：SSH 会话仍连着（或本地终端占用）时先关闭再弹连接表单 -->
     <Dialog :open="telnetConfirmOpen" @update:open="(open) => { if (!open) telnetConfirmOpen = false; }">
