@@ -299,6 +299,18 @@ import TerminalContextMenu, {
 import PortForwardDialog from "./components/PortForwardDialog.vue";
 import TelnetConnectDialog, { type TelnetConnectOptions } from "./components/TelnetConnectDialog.vue";
 import SerialConnectDialog, { type SerialConnectOptions } from "./components/SerialConnectDialog.vue";
+// 串口文件上传（NyaTerm 对齐 P0-3）：弹窗 + overlay 状态机在 lib/serialUpload。
+import SerialUploadDialog from "./components/SerialUploadDialog.vue";
+import {
+  initialSerialUploadState,
+  reduceSerialUpload,
+  serialUploadActive,
+  serialUploadPercent,
+  streamSerialUploadFile,
+  type SerialUploadProgress,
+  type SerialUploadProtocol,
+  type SerialUploadUiState,
+} from "./lib/serialUpload";
 // VNC 会话（nyaterm-parity P2 2d）：连接表单 + 画布表面，帧通道在
 // handleBinary 的 vnc/frame/{id} 分支接入。
 import VncConnectDialog, { type VncConnectOptions } from "./components/VncConnectDialog.vue";
@@ -1289,6 +1301,20 @@ const serialLastSequence = ref(0);
 const serialPendingFrames = new Map<number, { stream: number; data: Uint8Array }>();
 const isSerialMode = computed(() => serialSession.value !== null);
 const serialTarget = computed(() => (serialSession.value ? `${serialSession.value.port}@${serialSession.value.baudRate}` : ""));
+// 串口文件上传 overlay 状态：进度由 sidecar 的 serial/upload/progress 事件
+// 驱动；running 期间吞掉键入（协议控制字符窗口）且禁止并发第二次 upload。
+const serialUpload = ref<SerialUploadUiState>(initialSerialUploadState());
+const serialUploadDialogOpen = ref(false);
+let serialUploadAbortRequested = false;
+const serialUploadBusy = computed(() => serialUploadActive(serialUpload.value));
+const serialUploadOverlayVisible = computed(() => serialUpload.value.phase !== "idle");
+const serialUploadPercentValue = computed(() => serialUploadPercent(serialUpload.value));
+const serialUploadStatusLabel = computed(() => {
+  const upload = serialUpload.value;
+  if (upload.phase === "complete") return t("serial.upload.complete", { name: upload.fileName });
+  if (upload.phase === "failed") return t("serial.upload.failed", { reason: upload.reason });
+  return t("serial.upload.running", { name: upload.fileName, percent: serialUploadPercentValue.value });
+});
 // VNC 会话（nyaterm-parity P2 2d）：与 SSH/本地/Telnet/串口同款互斥展示，
 // 并入 localUiMode。与终端会话不同，VNC 画面走 VncSurface 画布（xterm
 // 仍然挂着但被画布盖住），帧从 vnc/frame/{id} 二进制通道解码成 patch。
@@ -2782,6 +2808,9 @@ function sendTerminalBytes(data: Uint8Array) {
   // 队列。取舍：串口无高速键盘场景，逐键 JSON 往返可接受；sidecar 暂无
   // serial/terminal/in 二进制通道，后续需要吞吐时再加并切回同款队列。
   if (serialSession.value) {
+    // 上传进行中吞掉键入：X/Y/ZMODEM 的 ACK/NAK/CAN 控制字符窗口内，
+    // 用户字节会污染协议流（进度状态在终端 overlay 上提示"传输中"）。
+    if (serialUploadBusy.value) return;
     const dataBase64 = window.dbxPlugin.encodeBase64(normalizeTerminalInputBytes(data));
     void window.dbxPlugin.invoke("serial/write", { sessionId: serialSession.value.sessionId, dataBase64 }).catch((cause) => showError(cause, "terminal"));
     return;
@@ -3599,6 +3628,11 @@ function handleEvent(event: DbxPluginEvent) {
     }
     return;
   }
+  // 串口文件上传进度（NyaTerm 对齐 P0-3）：sidecar 引擎事件 → overlay 状态。
+  if (event.method === "serial/upload/progress" && event.params.sessionId === serialSession.value?.sessionId) {
+    serialUpload.value = reduceSerialUpload(serialUpload.value, event.params as unknown as SerialUploadProgress);
+    return;
+  }
   if (event.method === "telnet/trigger" && event.params.sessionId === telnetSession.value?.sessionId) {
     const payload = event.params as { sessionId?: string; stage?: number; kind?: string };
     const stage = Math.max(1, Number(payload.stage) || 1);
@@ -4310,9 +4344,59 @@ async function closeSerialSession() {
   serialError.value = "";
   serialPendingFrames.clear();
   serialConfirmOpen.value = false;
+  // 上传挂在会话上：随会话关闭一并终止（sidecar cancel 幂等）。
+  if (serialUpload.value.phase !== "idle") {
+    serialUploadAbortRequested = true;
+    if (sessionId) void window.dbxPlugin.invoke("serial/upload/cancel", { sessionId }).catch(() => undefined);
+    serialUpload.value = initialSerialUploadState();
+  }
   if (!sessionId) return;
   await window.dbxPlugin.invoke("serial/close", { sessionId }).catch(() => undefined);
   terminal?.focus();
+}
+
+// —— 串口文件上传（NyaTerm 对齐 P0-3）——————————————————————————
+// 起点：SerialUploadDialog 选好文件/协议；文件字节经 File API 分块
+// （≤64KiB）送入 sidecar，协议时序完全由 sidecar 引擎驱动。
+async function startSerialUpload(request: { file: File; protocol: SerialUploadProtocol }) {
+  const sessionId = serialSession.value?.sessionId;
+  if (!sessionId || serialUploadBusy.value) return;
+  serialUploadAbortRequested = false;
+  serialUpload.value = {
+    phase: "running",
+    fileName: request.file.name,
+    protocol: request.protocol,
+    sent: 0,
+    total: request.file.size,
+    reason: "",
+  };
+  try {
+    await streamSerialUploadFile(request.file, {
+      sessionId,
+      protocol: request.protocol,
+      fileName: request.file.name,
+      bridge: window.dbxPlugin,
+      readChunk: async (start, end) => new Uint8Array(await request.file.slice(start, end).arrayBuffer()),
+      shouldAbort: () => serialUploadAbortRequested,
+    });
+  } catch (cause) {
+    if ((cause as Error)?.message === "tooLarge") {
+      showError(t("serial.upload.tooLarge"), "terminal");
+    } else {
+      showError(cause, "terminal");
+    }
+    serialUpload.value = { ...initialSerialUploadState(), phase: "failed", reason: String((cause as Error)?.message ?? cause) };
+  }
+}
+
+// overlay 上的取消：中断本地送数并让 sidecar 发协议取消序列（X/Y: CAN×8，
+// Z: ZDLE×5+BS×5），引擎落 Failed 事件后由 progress 归并到 overlay。
+function cancelSerialUpload() {
+  if (!serialUploadBusy.value) return;
+  const sessionId = serialSession.value?.sessionId;
+  serialUploadAbortRequested = true;
+  if (sessionId) void window.dbxPlugin.invoke("serial/upload/cancel", { sessionId }).catch(() => undefined);
+  serialUpload.value = { ...serialUpload.value, phase: "failed", reason: "cancelled" };
 }
 
 // 工具栏串口入口：SSH 会话仍在（或连接中/本地终端/Telnet 占用）时先经确认，
@@ -9732,6 +9816,7 @@ const modalOpenStates = computed(() => [
   telnetDialogOpen.value,
   serialConfirmOpen.value,
   serialDialogOpen.value,
+  serialUploadDialogOpen.value,
   vncConfirmOpen.value,
   vncDialogOpen.value,
   folderPickerTarget.value !== null,
@@ -10266,6 +10351,8 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('vnc.open')" @click="requestVnc"><MonitorPlay /></button>
         <!-- 串口会话入口（P3）：与 SSH/本地/Telnet 互斥，占用终态先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('serial.open')" @click="requestSerial"><Usb /></button>
+        <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
+        <button v-if="isSerialMode" class="icon-button icon-emerald" :title="t('serial.upload.open')" :disabled="serialUploadBusy" @click="serialUploadDialogOpen = true"><FileUp /></button>
         <!-- 本地终端：sidecar 所在机器的登录 shell。与 SSH 会话互斥展示，
              已连接时经确认先关 SSH；退出态由终端覆盖层提供重开出口。 -->
         <button class="icon-button icon-violet" :class="{ 'is-active': localUiMode }" :title="isVncMode ? t('vnc.disconnect') : isSerialMode ? t('serial.disconnect') : isTelnetMode ? t('telnet.disconnect') : localUiMode && !localShellRestored ? t('localTerminal.close') : t('localTerminal.open')" @click="toggleLocalTerminal"><TerminalIcon /></button>
@@ -10766,6 +10853,17 @@ onBeforeUnmount(() => {
           <span v-if="trzszPhase === 'transferring' && trzszFileCount > 1" class="trzsz-count mono">{{ trzszFileIndex }}/{{ trzszFileCount }}</span>
           <span v-if="trzszPhase === 'transferring' && trzszSpeed" class="trzsz-speed">{{ formatBytes(trzszSpeed) }}/s</span>
           <button v-if="trzszBusy" class="trzsz-cancel" :title="t('cancel')" @click="cancelTrzszTransfer"><X /></button>
+        </div>
+        <!-- 串口文件上传进度（NyaTerm 对齐 P0-3）：running 吞键入 + 可取消；
+             complete/failed 保留展示，由用户点 × 收起。 -->
+        <div v-if="serialUploadOverlayVisible" class="zmodem-status trzsz-status" role="status" :class="{ 'trzsz-done': serialUpload.phase === 'complete', 'trzsz-failed': serialUpload.phase === 'failed' }">
+          <Loader2 v-if="serialUploadBusy" class="spinning" />
+          <TriangleAlert v-else-if="serialUpload.phase === 'failed'" />
+          <span class="trzsz-label">{{ serialUploadStatusLabel }}</span>
+          <progress v-if="serialUploadBusy" :value="serialUploadPercentValue" max="100" />
+          <span class="trzsz-count mono">{{ serialUpload.protocol.toUpperCase() }}</span>
+          <button v-if="serialUploadBusy" class="trzsz-cancel" :title="t('cancel')" @click="cancelSerialUpload"><X /></button>
+          <button v-else class="trzsz-cancel" :title="t('close')" @click="serialUpload = initialSerialUploadState()"><X /></button>
         </div>
         <section v-if="metricsOpen" class="metrics-float">
           <header>
@@ -11877,6 +11975,7 @@ onBeforeUnmount(() => {
 
     <!-- 串口连接表单（P3）：端口发现/波特率/数据位/校验/停止位/退格。 -->
     <SerialConnectDialog :locale="locale" :open="serialDialogOpen" @update:open="(open) => (serialDialogOpen = open)" @connect="startSerialSession" />
+    <SerialUploadDialog :locale="locale" :open="serialUploadDialogOpen" :busy="serialUploadBusy" @update:open="(open) => (serialUploadDialogOpen = open)" @start="startSerialUpload" />
 
     <VncConnectDialog :locale="locale" :open="vncDialogOpen" @update:open="(open) => (vncDialogOpen = open)" @connect="startVncSession" />
 

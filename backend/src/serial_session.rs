@@ -20,13 +20,16 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dbx_plugin_sdk::PluginEmitter;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::model::{TerminalFrame, TerminalStream};
+use crate::serial_xmodem::{
+    self, Output, ProgressState, TransferProgress, UploadEngine, UploadProtocol,
+};
 
 const READ_BUFFER: usize = 4096;
 /// The blocking read timeout also bounds how long a close can stall.
@@ -177,6 +180,41 @@ pub(crate) struct SerialSession {
     write: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     cmd_tx: mpsc::UnboundedSender<SerialCommand>,
     backspace: BackspaceMode,
+    /// 进行中的文件上传（每会话至多一个；上传期间的键入由前端拦下）。
+    upload: Mutex<Option<SerialUploadJob>>,
+}
+
+/// 一次串口文件上传的运行时状态：引擎 + 进度限流。
+pub(crate) struct SerialUploadJob {
+    engine: UploadEngine,
+    gate: ProgressGate,
+}
+
+/// 进度事件限流：Running 态按字节增量/时间窗口折叠，状态变化强制上报。
+struct ProgressGate {
+    last_emit: Option<(Instant, u64)>,
+}
+
+impl ProgressGate {
+    fn allows(&mut self, progress: &TransferProgress) -> bool {
+        if progress.state != ProgressState::Running {
+            self.last_emit = Some((Instant::now(), progress.sent));
+            return true;
+        }
+        let now = Instant::now();
+        match self.last_emit {
+            Some((at, sent))
+                if progress.sent.saturating_sub(sent) < serial_xmodem::PROGRESS_DELTA_BYTES
+                    && now.duration_since(at) < serial_xmodem::PROGRESS_INTERVAL =>
+            {
+                false
+            }
+            _ => {
+                self.last_emit = Some((now, progress.sent));
+                true
+            }
+        }
+    }
 }
 
 pub(crate) enum SerialCommand {
@@ -346,13 +384,20 @@ impl SerialSessionRuntime {
             write: Arc::clone(&port),
             cmd_tx,
             backspace,
+            upload: Mutex::new(None),
         });
         self.sessions
             .write()
             .expect("serial session registry poisoned")
             .insert(session_id.clone(), Arc::clone(&session));
 
-        spawn_reader(session_id.clone(), Arc::clone(&port), cmd_rx, emitter);
+        spawn_reader(
+            session_id.clone(),
+            Arc::clone(&session),
+            Arc::clone(&port),
+            cmd_rx,
+            emitter,
+        );
         Ok(json!({
             "sessionId": session_id,
             "port": port_name,
@@ -374,11 +419,17 @@ impl SerialSessionRuntime {
     /// only for the driver call.
     pub fn write_input(&self, session: &SerialSession, data: &[u8]) -> Result<(), String> {
         let payload = session.backspace.rewrite(data);
+        self.write_raw(session, &payload)
+    }
+
+    /// Writes raw bytes (protocol frames) without the erase mapping — upload
+    /// engines must not have their NAK/ACK bytes rewritten.
+    fn write_raw(&self, session: &SerialSession, data: &[u8]) -> Result<(), String> {
         let mut port = session
             .write
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        port.write_all(&payload)
+        port.write_all(data)
             .and_then(|_| port.flush())
             .map_err(|error| format!("serial write failed: {error}"))
     }
@@ -411,13 +462,249 @@ impl SerialSessionRuntime {
             .collect();
         json!({ "sessions": rows })
     }
+
+    // —— 串口文件上传（X/Y/ZMODEM）——————————————————————————————
+
+    /// 注册一次上传并让引擎发出初始输出（ZMODEM 的 ZRQINIT；X/Y 静默等
+    /// 握手）。并发第二次 upload 直接拒绝（协议无法仲裁两个发送端）。
+    pub async fn upload_start(
+        &self,
+        session_id: &str,
+        protocol: UploadProtocol,
+        file_name: String,
+        total_size: u64,
+        emitter: &PluginEmitter,
+    ) -> Result<Value, String> {
+        if file_name.is_empty() {
+            return Err("serial/upload/start: fileName is required".to_string());
+        }
+        if file_name.len() > 256 {
+            return Err("serial/upload/start: fileName is too long".to_string());
+        }
+        if total_size > serial_xmodem::MAX_UPLOAD_BYTES {
+            return Err(format!(
+                "serial/upload/start: totalSize {total_size} exceeds the {} byte limit",
+                serial_xmodem::MAX_UPLOAD_BYTES
+            ));
+        }
+        // YMODEM 头块约束：name\0size 必须放进 128 字节块（对齐 NyaTerm）。
+        if protocol == UploadProtocol::Ymodem {
+            let meta_len = file_name.len() + 1 + total_size.to_string().len();
+            if meta_len > 128 {
+                return Err(format!(
+                    "serial/upload/start: YMODEM file name is too long ({meta_len} bytes of header metadata)"
+                ));
+            }
+        }
+        let session = self.session(session_id).await?;
+        let mut guard = session
+            .upload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.is_some() {
+            return Err("Serial upload is already in progress".to_string());
+        }
+        let (engine, initial) =
+            UploadEngine::new(protocol, file_name.clone(), total_size, Instant::now());
+        let mut job = SerialUploadJob {
+            engine,
+            gate: ProgressGate { last_emit: None },
+        };
+        let mut outputs = initial;
+        // 初始进度（sent=0）不计入限流窗口，前端立即可显示总大小。
+        outputs.push(Output::Progress(TransferProgress {
+            protocol,
+            file_name,
+            file_index: 0,
+            sent: 0,
+            total: total_size,
+            state: ProgressState::Running,
+            reason: None,
+        }));
+        let result = apply_upload_outputs(&session, &mut job, outputs, session_id, emitter);
+        *guard = Some(job);
+        // 端口写出错时保留 Failed 任务意义有限：直接清掉，让用户可立即重试。
+        if result.is_err() {
+            *guard = None;
+        }
+        result?;
+        Ok(json!({
+            "sessionId": session_id,
+            "protocol": protocol.as_str(),
+            "totalSize": total_size,
+        }))
+    }
+
+    /// 前端分块到货；可能解锁引擎挂起的读请求（输出立即写往串口）。
+    pub async fn upload_data(
+        &self,
+        session_id: &str,
+        data: Vec<u8>,
+        final_chunk: bool,
+        emitter: &PluginEmitter,
+    ) -> Result<Value, String> {
+        let session = self.session(session_id).await?;
+        let mut guard = session
+            .upload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(job) = guard.as_mut() else {
+            return Err("No serial upload is in progress".to_string());
+        };
+        let outputs = job.engine.append_data(&data, final_chunk)?;
+        let received = job.engine.source().received();
+        let done = job.engine.is_done();
+        apply_upload_outputs(&session, job, outputs, session_id, emitter)?;
+        if done {
+            *guard = None;
+        }
+        Ok(json!({ "received": received, "final": final_chunk }))
+    }
+
+    /// 用户取消：发取消序列、落 Failed 事件并清掉任务（幂等）。
+    pub async fn upload_cancel(
+        &self,
+        session_id: &str,
+        emitter: &PluginEmitter,
+    ) -> Result<Value, String> {
+        let session = self.session(session_id).await?;
+        let mut guard = session
+            .upload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(job) = guard.as_mut() else {
+            return Ok(json!({ "success": true }));
+        };
+        let outputs = job.engine.cancel();
+        let result = apply_upload_outputs(&session, job, outputs, session_id, emitter);
+        *guard = None;
+        result?;
+        Ok(json!({ "success": true }))
+    }
+
+    /// 读线程喂入对端字节（终端照常上屏，引擎并行消费）。
+    pub(crate) fn pump_upload_feed(
+        session: &SerialSession,
+        session_id: &str,
+        bytes: &[u8],
+        emitter: &PluginEmitter,
+    ) {
+        let mut guard = session
+            .upload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(job) = guard.as_mut() else {
+            return;
+        };
+        let outputs = job.engine.feed(bytes);
+        let done = job.engine.is_done();
+        if let Err(error) = apply_upload_outputs(session, job, outputs, session_id, emitter) {
+            // 端口写失败：终止上传（读线程自身也会因 IO 错误退出发 error 态）。
+            let _ = emitter.event(
+                "serial/session/state",
+                json!({ "sessionId": session_id, "state": "error", "error": error }),
+            );
+            *guard = None;
+            return;
+        }
+        if done {
+            *guard = None;
+        }
+    }
+
+    /// 读线程空闲滴答：驱动引擎的静默重发/失败判定。
+    pub(crate) fn pump_upload_tick(
+        session: &SerialSession,
+        session_id: &str,
+        emitter: &PluginEmitter,
+    ) {
+        let mut guard = session
+            .upload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(job) = guard.as_mut() else {
+            return;
+        };
+        let outputs = job.engine.tick();
+        let done = job.engine.is_done();
+        if let Err(error) = apply_upload_outputs(session, job, outputs, session_id, emitter) {
+            let _ = emitter.event(
+                "serial/session/state",
+                json!({ "sessionId": session_id, "state": "error", "error": error }),
+            );
+            *guard = None;
+            return;
+        }
+        if done {
+            *guard = None;
+        }
+    }
+}
+
+/// 引擎输出统一处理：写串口（不带退格改写）+ 进度事件（限流）。
+/// 端口写错误只报第一个，剩余写输出丢弃（协议随后会终止）。
+fn apply_upload_outputs(
+    session: &SerialSession,
+    job: &mut SerialUploadJob,
+    outputs: Vec<Output>,
+    session_id: &str,
+    emitter: &PluginEmitter,
+) -> Result<(), String> {
+    let mut write_error = None;
+    for output in outputs {
+        match output {
+            Output::Write(bytes) => {
+                if write_error.is_none() {
+                    let mut port = session
+                        .write
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Err(error) = port.write_all(&bytes).and_then(|_| port.flush()) {
+                        write_error = Some(format!("serial write failed: {error}"));
+                    }
+                }
+            }
+            Output::Progress(progress) => {
+                if job.gate.allows(&progress) {
+                    emit_upload_progress(emitter, session_id, progress);
+                }
+            }
+        }
+    }
+    match write_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// 进度事件负载（camelCase，不含文件内容）。
+fn emit_upload_progress(emitter: &PluginEmitter, session_id: &str, progress: TransferProgress) {
+    let mut payload = json!({
+        "sessionId": session_id,
+        "protocol": progress.protocol.as_str(),
+        "fileName": progress.file_name,
+        "fileIndex": progress.file_index,
+        "sent": progress.sent,
+        "total": progress.total,
+        "state": progress.state.as_str(),
+    });
+    if let Some(reason) = progress.reason {
+        payload["reason"] = Value::String(reason);
+    }
+    let _ = emitter.event("serial/upload/progress", payload);
 }
 
 /// Dedicated blocking read thread: forwards port bytes to the pump channel
 /// and honours `Close` by simply exiting (dropping its port clone closes the
 /// handle on the writer side too — the OS closes the last reference).
+///
+/// While a file upload is active the same read chunk drives the upload
+/// engine (peer responses feed the protocol AND still render on the
+/// terminal, NyaTerm semantics); idle cycles tick the engine's retry
+/// deadlines.
 fn spawn_reader(
     session_id: String,
+    session: Arc<SerialSession>,
     port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     mut cmd_rx: mpsc::UnboundedReceiver<SerialCommand>,
     emitter: PluginEmitter,
@@ -438,15 +725,26 @@ fn spawn_reader(
                 port.read(&mut buffer)
             };
             match read {
-                Ok(0) => std::thread::sleep(READ_TIMEOUT),
+                Ok(0) => {
+                    std::thread::sleep(READ_TIMEOUT);
+                    SerialSessionRuntime::pump_upload_tick(&session, &session_id, &emitter);
+                }
                 Ok(n) => {
                     sequence += 1;
                     let _ = emitter.binary(
                         &format!("serial/terminal/out/{session_id}"),
                         &encode_frame(sequence, TerminalStream::Stdout, &buffer[..n]),
                     );
+                    SerialSessionRuntime::pump_upload_feed(
+                        &session,
+                        &session_id,
+                        &buffer[..n],
+                        &emitter,
+                    );
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    SerialSessionRuntime::pump_upload_tick(&session, &session_id, &emitter);
+                }
                 Err(error) => {
                     let _ = emitter.event(
                         "serial/session/state",
