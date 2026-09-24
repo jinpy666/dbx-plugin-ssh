@@ -5,6 +5,7 @@
 // 纯 UI：不做连接编排，App.vue 持有会话状态。
 import { reactive, ref, watch } from "vue";
 import { workbenchMessage } from "../lib/i18n";
+import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 
 export interface SerialConnectOptions {
@@ -36,6 +37,22 @@ const form = reactive({
   stopBits: "1" as SerialConnectOptions["stopBits"],
   backspaceMode: "del" as SerialConnectOptions["backspaceMode"],
 });
+
+// 上次连接参数记忆（pluginStore，跨会话保留；串口参数无凭据可全量记忆）。
+const SERIAL_LAST_KEY = "serial-connect-last";
+for (const [key, value] of Object.entries(loadLastConnectParams<SerialConnectOptions>(SERIAL_LAST_KEY))) {
+  if (typeof value === "string" && key in form) (form as unknown as Record<string, unknown>)[key] = value;
+}
+function persistLastSerialForm() {
+  persistLastConnectParams(SERIAL_LAST_KEY, {
+    port: form.port,
+    baudRate: form.baudRate,
+    dataBits: form.dataBits,
+    parity: form.parity,
+    stopBits: form.stopBits,
+    backspaceMode: form.backspaceMode,
+  });
+}
 const ports = ref<string[]>([]);
 const portsLoading = ref(false);
 const portError = ref(false);
@@ -67,6 +84,7 @@ function submit() {
     return;
   }
   const baud = Number.parseInt(form.baudRate, 10);
+  persistLastSerialForm();
   emit("update:open", false);
   emit("connect", {
     portName: port,

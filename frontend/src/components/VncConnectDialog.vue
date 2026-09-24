@@ -5,6 +5,7 @@
 import { reactive, ref, watch } from "vue";
 import { TriangleAlert } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
+import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 
 export interface VncConnectOptions {
@@ -30,6 +31,19 @@ const form = reactive({
   password: "",
   scaleMode: "fit" as VncConnectOptions["scaleMode"],
 });
+
+// 上次连接参数记忆（pluginStore，跨会话保留；VNC 密码不落盘）。
+const VNC_LAST_KEY = "vnc-connect-last";
+for (const [key, value] of Object.entries(loadLastConnectParams<VncConnectOptions>(VNC_LAST_KEY))) {
+  if (typeof value === "string" && key in form) (form as unknown as Record<string, unknown>)[key] = value;
+}
+function persistLastVncForm() {
+  persistLastConnectParams(VNC_LAST_KEY, {
+    host: form.host,
+    port: form.port,
+    scaleMode: form.scaleMode,
+  });
+}
 const hostError = ref(false);
 const passwordError = ref(false);
 
@@ -55,6 +69,7 @@ function submit() {
     return;
   }
   const port = Number.parseInt(form.port, 10);
+  persistLastVncForm();
   emit("update:open", false);
   emit("connect", {
     host,

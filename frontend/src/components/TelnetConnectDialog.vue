@@ -9,6 +9,7 @@
 import { reactive, ref, watch } from "vue";
 import { TriangleAlert, X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
+import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Switch } from "./ui/switch";
 
@@ -52,6 +53,20 @@ const form = reactive({
   secret1: "",
   secret2: "",
 });
+
+// 上次连接参数记忆（pluginStore，跨会话保留；凭据类字段一律不落盘）。
+const TELNET_LAST_KEY = "telnet-connect-last";
+for (const [key, value] of Object.entries(loadLastConnectParams<TelnetConnectOptions>(TELNET_LAST_KEY))) {
+  if (typeof value === "string" && key in form) (form as unknown as Record<string, unknown>)[key] = value;
+}
+function persistLastTelnetForm() {
+  persistLastConnectParams(TELNET_LAST_KEY, {
+    host: form.host,
+    port: form.port,
+    enterMode: form.enterMode,
+    backspaceMode: form.backspaceMode,
+  });
+}
 // 声明式自动登录：enabled 为提交开关；正则留空 = 用 sidecar 内置默认。
 const decl = reactive({
   enabled: false,
@@ -111,6 +126,7 @@ function submit() {
   const declarative = buildDeclarative();
   if (decl.enabled && !declarative) return;
   const port = Number.parseInt(form.port, 10);
+  persistLastTelnetForm();
   emit("update:open", false);
   emit("connect", {
     host,
