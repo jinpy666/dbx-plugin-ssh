@@ -1,7 +1,8 @@
 // 终端行为偏好（对标 Tabby「Terminal」页）纯逻辑单测：默认值保持既有行为、
 // 逐字段归一化/钳制、旧 select-copy 键迁移、右键四档解析、粘贴变换、存储容错。
-// 存储统一注入，不触碰真实 localStorage。
-import { describe, expect, it } from "vitest";
+// 存储统一注入假实现；默认存储（pluginStore）回环单列一节。
+import { afterEach, describe, expect, it } from "vitest";
+import { pluginStore } from "./pluginStore";
 import {
   BELL_MODES,
   LEGACY_SELECT_COPY_KEY,
@@ -143,6 +144,26 @@ describe("loadTerminalBehavior / persistTerminalBehavior", () => {
         },
       }),
     ).not.toThrow();
+  });
+});
+
+describe("默认存储走 pluginStore", () => {
+  afterEach(() => {
+    // 默认存储是共享单例（node 环境为内存档）：用后清键，避免污染后续用例。
+    pluginStore.removeItem(TERMINAL_BEHAVIOR_KEY);
+    pluginStore.removeItem(LEGACY_SELECT_COPY_KEY);
+  });
+
+  it("不注入 storage 时读写经 pluginStore 回环", () => {
+    persistTerminalBehavior(settings({ bell: "audible", scrollbackLines: 800, copyOnSelect: false }));
+    expect(JSON.parse(pluginStore.getItem(TERMINAL_BEHAVIOR_KEY) ?? "{}").scrollbackLines).toBe(800);
+    // 旧 select-copy 镜像同样写入 store（键已在 PLUGIN_STORE_KEYS 声明）。
+    expect(pluginStore.getItem(LEGACY_SELECT_COPY_KEY)).toBe("false");
+    expect(loadTerminalBehavior()).toEqual(settings({ bell: "audible", scrollbackLines: 800, copyOnSelect: false }));
+  });
+
+  it("无持久化值时回默认（node/无桥环境下默认档为内存，不抛 SecurityError）", () => {
+    expect(loadTerminalBehavior()).toEqual(TERMINAL_BEHAVIOR_DEFAULTS);
   });
 });
 

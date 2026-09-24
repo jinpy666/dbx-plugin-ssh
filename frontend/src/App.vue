@@ -621,7 +621,8 @@ const sftpTree = ref<DirTreeNode>(createTreeRoot("/", "/"));
 // sftp/home 探测结果：quick tab 置顶展示（获取失败时该项隐藏）。
 const sftpHomePath = ref("");
 // 终端行为偏好（对标 Tabby「Terminal」页）：右键语义、剪贴板、响铃、渲染细项，
-// 单键 localStorage 持久化；选中复制是其一个字段。
+// 单键 pluginStore 持久化（宿主 host.storage → localStorage 降级）；选中复制
+// 是其一个字段（旧键镜像保降级，见 LEGACY_SELECT_COPY_KEY）。
 const terminalBehavior = ref<TerminalBehaviorSettings>(loadTerminalBehavior());
 /** 选中复制（既有消费点：选区变更钩子与设置页开关）。 */
 const termSelectCopy = computed(() => terminalBehavior.value.copyOnSelect);

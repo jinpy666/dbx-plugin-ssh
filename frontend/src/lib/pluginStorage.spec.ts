@@ -10,7 +10,8 @@ describe("ssh pluginStore wiring", () => {
   it("declares every migrated UI-state key (sidecar-backed keys stay out)", () => {
     // 迁移键 = 活的前端 UI 偏好（键名与迁移前 localStorage 一致）。
     // 不在此列：ssh-download-*（sidecar preferences.json 权威的 web 缓存）、
-    // ssh-quick-commands（已迁 sidecar，旧键仅作一次性迁移种子）。
+    // ssh-transfer-* / ssh-history-suggestion-*（同 download-*：sidecar 权威
+    // 的同步缓存）、ssh-quick-commands（已迁 sidecar，旧键仅作一次性迁移种子）。
     expect([...PLUGIN_STORE_KEYS].sort()).toEqual(
       [
         "sftp-path-history",
@@ -25,9 +26,22 @@ describe("ssh pluginStore wiring", () => {
         "ssh-terminal-webgl",
         "ssh-terminal-font-size",
         "ssh-terminal-font-family",
+        "ssh-terminal-behavior",
+        "ssh-terminal-hotkeys",
+        "ssh-terminal-appearance",
       ].sort(),
     );
-    for (const banned of ["ssh-download-directory", "ssh-download-use-default-dir", "ssh-download-conflict-policy", "ssh-quick-commands"]) {
+    for (const banned of [
+      "ssh-download-directory",
+      "ssh-download-use-default-dir",
+      "ssh-download-conflict-policy",
+      "ssh-transfer-concurrency",
+      "ssh-transfer-duplicate-policy",
+      "ssh-history-suggestions-enabled",
+      "ssh-history-suggestion-min-chars",
+      "ssh-history-suggestion-max-chars",
+      "ssh-quick-commands",
+    ]) {
       expect(PLUGIN_STORE_KEYS).not.toContain(banned);
     }
   });

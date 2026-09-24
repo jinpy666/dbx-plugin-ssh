@@ -16,6 +16,8 @@
  * reaches the remote as SIGINT, while Windows/Linux use the Ctrl+Shift forms.
  */
 
+import { pluginStore } from "./pluginStore";
+
 export const TERMINAL_HOTKEYS_KEY = "ssh-terminal-hotkeys";
 
 export type TerminalHotkeyActionId =
@@ -245,10 +247,17 @@ export function sanitizeTerminalHotkeys(raw: unknown, applePlatform: boolean): T
   return bindings;
 }
 
-export function loadTerminalHotkeys(applePlatform: boolean, storage: Pick<Storage, "getItem"> | undefined = window.localStorage): TerminalHotkeyBindings {
+function defaultStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
+  // Defaults to pluginStore (host host.storage → guarded localStorage →
+  // memory); on the opaque-origin workbench this no longer throws
+  // SecurityError. Explicitly injected storage is a test seam only.
+  return pluginStore;
+}
+
+export function loadTerminalHotkeys(applePlatform: boolean, storage?: Pick<Storage, "getItem">): TerminalHotkeyBindings {
   let parsed: unknown;
   try {
-    const raw = storage?.getItem(TERMINAL_HOTKEYS_KEY) ?? null;
+    const raw = (storage ?? defaultStorage()).getItem(TERMINAL_HOTKEYS_KEY) ?? null;
     parsed = raw == null ? undefined : JSON.parse(raw);
   } catch {
     parsed = undefined;
@@ -256,11 +265,11 @@ export function loadTerminalHotkeys(applePlatform: boolean, storage: Pick<Storag
   return sanitizeTerminalHotkeys(parsed, applePlatform);
 }
 
-export function persistTerminalHotkeys(bindings: TerminalHotkeyBindings, storage: Pick<Storage, "setItem"> | undefined = window.localStorage): void {
+export function persistTerminalHotkeys(bindings: TerminalHotkeyBindings, storage?: Pick<Storage, "setItem">): void {
   try {
-    storage?.setItem(TERMINAL_HOTKEYS_KEY, JSON.stringify(bindings));
+    (storage ?? defaultStorage()).setItem(TERMINAL_HOTKEYS_KEY, JSON.stringify(bindings));
   } catch {
-    // localStorage unavailable: the bindings stay session-scoped.
+    // Storage unavailable: the bindings stay session-scoped.
   }
 }
 

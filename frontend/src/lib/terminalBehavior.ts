@@ -3,7 +3,8 @@
  * (Rendering / Keyboard / Mouse / Clipboard / Sound).
  *
  * Pure front-end: no sidecar involvement, so the whole object persists in one
- * localStorage key. Every default deliberately reproduces the behavior this
+ * pluginStore key (host host.storage → guarded localStorage → memory; see
+ * pluginStore.ts). Every default deliberately reproduces the behavior this
  * plugin already had before the settings existed, so simply upgrading changes
  * nothing; the Tabby defaults are cited next to each field and any deliberate
  * divergence is called out in a comment.
@@ -19,6 +20,8 @@
  *   through Node built-ins and crashes this plugin's sandboxed iframe, so there
  *   is no honest toggle to offer.
  */
+
+import { pluginStore } from "./pluginStore";
 
 export const TERMINAL_BEHAVIOR_KEY = "ssh-terminal-behavior";
 
@@ -130,19 +133,25 @@ export function sanitizeTerminalBehavior(raw: unknown, legacySelectCopy?: boolea
   };
 }
 
+function defaultStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
+  // Defaults to pluginStore (host host.storage → guarded localStorage →
+  // memory); on the opaque-origin workbench this no longer throws
+  // SecurityError. Explicitly injected storage is a test seam only.
+  return pluginStore;
+}
+
 /**
- * Read the stored behavior. Storage access sits inside the function body:
- * the workbench iframe is `sandbox="allow-scripts"` (opaque origin), so a
- * `window.localStorage` touch in a default-parameter position throws
- * `SecurityError`. A read failure degrades to defaults rather than throwing.
+ * Read the stored behavior. Storage access sits inside the function body so a
+ * failing injected storage degrades to defaults rather than throwing.
  */
-export function loadTerminalBehavior(storage: Pick<Storage, "getItem"> | undefined = window.localStorage): TerminalBehaviorSettings {
+export function loadTerminalBehavior(storage?: Pick<Storage, "getItem">): TerminalBehaviorSettings {
   let parsed: unknown;
   let legacy: boolean | undefined;
   try {
-    const raw = storage?.getItem(TERMINAL_BEHAVIOR_KEY) ?? null;
+    const target = storage ?? defaultStorage();
+    const raw = target.getItem(TERMINAL_BEHAVIOR_KEY) ?? null;
     parsed = raw == null ? undefined : JSON.parse(raw);
-    const legacyRaw = storage?.getItem(LEGACY_SELECT_COPY_KEY) ?? null;
+    const legacyRaw = target.getItem(LEGACY_SELECT_COPY_KEY) ?? null;
     legacy = legacyRaw == null ? undefined : legacyRaw !== "false";
   } catch {
     parsed = undefined;
@@ -152,12 +161,13 @@ export function loadTerminalBehavior(storage: Pick<Storage, "getItem"> | undefin
 }
 
 /** Persist the behavior; the legacy mirror keeps a downgrade from losing select-to-copy. */
-export function persistTerminalBehavior(settings: TerminalBehaviorSettings, storage: Pick<Storage, "setItem"> | undefined = window.localStorage): void {
+export function persistTerminalBehavior(settings: TerminalBehaviorSettings, storage?: Pick<Storage, "setItem">): void {
   try {
-    storage?.setItem(TERMINAL_BEHAVIOR_KEY, JSON.stringify(settings));
-    storage?.setItem(LEGACY_SELECT_COPY_KEY, settings.copyOnSelect ? "true" : "false");
+    const target = storage ?? defaultStorage();
+    target.setItem(TERMINAL_BEHAVIOR_KEY, JSON.stringify(settings));
+    target.setItem(LEGACY_SELECT_COPY_KEY, settings.copyOnSelect ? "true" : "false");
   } catch {
-    // localStorage unavailable: the settings stay session-scoped.
+    // Storage unavailable: the settings stay session-scoped.
   }
 }
 
