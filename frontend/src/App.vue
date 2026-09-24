@@ -1037,7 +1037,7 @@ const connectionId = computed(() => normalizeConnectionText(hostContext.value.co
 // locally generated id keeps session scoping per workbench instance (A4 W1
 // helper, spec §11: host-authoritative workbenchId; the fallback covers 1.0
 // hosts that omit the injection — see lib/pluginContext.spec.ts).
-const fallbackWorkbenchId = crypto.randomUUID();
+const fallbackWorkbenchId = randomUUID();
 const workbenchId = computed(() => resolveWorkbenchId(hostContext.value, fallbackWorkbenchId));
 const restored = computed(() => hostContext.value.restored === true);
 const connection = computed<ConnectionSummary>(() => {
