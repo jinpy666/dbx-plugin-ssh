@@ -16,23 +16,41 @@
 //!   completed from the next chunk (state machine, not per-chunk scans).
 //!
 //! Auto-login reuses the SSH expect-rule engine (`triggers.rs`) verbatim —
-//! `parse_triggers` accepts the same tssh/JSON rule text and the same
-//! `sendSecretKey` slots, resolved here from the start request's `secrets`
-//! array instead of the connection vault. The decision/segment protocol is
-//! byte-identical to the SSH read loop (command answers run locally through
-//! `run_credential_command`; `ssh/trigger` becomes `telnet/trigger` and never
-//! carries answer content).
+//! two input forms lower onto the same engine, so there is exactly one
+//! matcher, one validator and one secret policy:
+//! - **Rule form** (`autoLogin.rules`): the same tssh/JSON rule text the SSH
+//!   side accepts, with `sendSecretKey` slots resolved from the start
+//!   request's `secrets` array instead of the connection vault.
+//! - **Declarative form** (`autoLogin.declarative`, NyaTerm-parity P0-1):
+//!   username/password prompt regexes plus the credentials, success/failure
+//!   regexes and a retry budget. The prompts become engine stages (username
+//!   as plaintext `sendText`, password through the `trigger_answer_1` secret
+//!   slot so it never appears in logs, events or `Debug`), while success and
+//!   failure are supervised by [`DeclarativeWatch`] in the read loop: a
+//!   failure hit re-arms answering against the retry budget (the host
+//!   re-prompts; the engine cursor already wraps), a success hit after any
+//!   answer publishes `telnet/auto_login {status:"success"}` (the workbench
+//!   localizes the notice), and a failure hit past the budget closes the
+//!   session into the existing exit overlay with a readable, content-free
+//!   reason. Blank regex fields fall back to NyaTerm's built-in prompt
+//!   vocabulary; every regex compiles through the shared `triggers` gate so
+//!   an invalid pattern fails `telnet/start` with a readable error (D7).
+//!
+//! The decision/segment protocol is byte-identical to the SSH read loop
+//! (`ssh/trigger` becomes `telnet/trigger` and never carries answer content).
 //!
 //! Safety note: Telnet is cleartext — credentials typed into it travel
 //! unencrypted. The plugin surfaces that warning in the UI and never logs
 //! keystrokes or auto-login answers.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
 use dbx_plugin_sdk::PluginEmitter;
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -261,7 +279,7 @@ impl TelnetParser {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelnetStartRequest {
     pub workbench_id: String,
@@ -274,21 +292,102 @@ pub struct TelnetStartRequest {
     /// real size right after start anyway.
     pub cols: Option<u32>,
     pub rows: Option<u32>,
-    /// Optional expect-style auto-login. Rules reuse the SSH trigger grammar;
-    /// `secrets` fills the two `sendSecretKey` slots from the request (never
-    /// the connection vault).
+    /// Optional auto-login, in exactly one of two forms (both validated
+    /// before the dial — D7: invalid configuration fails the start with a
+    /// readable error and never degrades silently).
     pub auto_login: Option<AutoLoginSpec>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Auto-login request: either expect `rules` (tssh/JSON grammar) or the
+/// NyaTerm-style `declarative` prompt/credential form — mutually exclusive.
+/// Secrets travel as request values only; `Debug` redacts them so no log or
+/// panic message can ever carry a credential.
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoLoginSpec {
     /// tssh text form, JSON string form or raw JSON object form — exactly the
     /// shapes `triggers/validate` accepts.
-    pub rules: Value,
+    pub rules: Option<Value>,
     /// Slot values for `trigger_answer_1` / `trigger_answer_2`, in order.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Declarative form (P0-1): prompt regexes + credentials + success /
+    /// failure detection + retry budget.
+    pub declarative: Option<DeclarativeAutoLogin>,
+}
+
+impl fmt::Debug for AutoLoginSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AutoLoginSpec")
+            .field("rules", &self.rules)
+            .field("secrets", &"<redacted>")
+            .field("declarative", &self.declarative)
+            .finish()
+    }
+}
+
+/// NyaTerm-parity declarative login config (`TelnetAutoLoginConfig` minus the
+/// knobs the dialog does not expose). Regexes are optional — blank falls back
+/// to the built-in prompt vocabulary ([`DECL_USERNAME_PROMPT_DEFAULT`] and
+/// friends). `Debug` redacts the password.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclarativeAutoLogin {
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub username_prompt_regex: Option<String>,
+    pub password_prompt_regex: Option<String>,
+    pub success_regex: Option<String>,
+    pub failure_regex: Option<String>,
+    pub max_retries: Option<u8>,
+}
+
+impl fmt::Debug for DeclarativeAutoLogin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeclarativeAutoLogin")
+            .field("username", &self.username.as_ref().map(|_| "<set>"))
+            .field("password", &"<redacted>")
+            .field("usernamePromptRegex", &self.username_prompt_regex)
+            .field("passwordPromptRegex", &self.password_prompt_regex)
+            .field("successRegex", &self.success_regex)
+            .field("failureRegex", &self.failure_regex)
+            .field("maxRetries", &self.max_retries)
+            .finish()
+    }
+}
+
+/// Built-in prompt vocabulary, mirroring NyaTerm's default regexes so a
+/// declarative config works without any pattern field filled in. Matched
+/// with the same regex engine the expect stages use (substring `find`
+/// semantics over a rolling tail).
+const DECL_USERNAME_PROMPT_DEFAULT: &str = r#"(?i)(?:user\s*name|username|login|logon|account|userid|user\s*id|用户名|帐号|账号|登录|登入)\s*[:：>]"#;
+const DECL_PASSWORD_PROMPT_DEFAULT: &str =
+    r#"(?i)(?:password|passwd|passcode|passphrase|pin|密码|口令)\s*[:：>]"#;
+const DECL_SUCCESS_DEFAULT: &str = r#"[$#>]\s*$"#;
+const DECL_FAILURE_DEFAULT: &str =
+    r#"(?i)(login\s+incorrect|authentication\s+failed|access\s+denied|密码错误|认证失败)"#;
+/// Retry budget ceiling: NyaTerm is `u8`-unbounded; the plugin caps the
+/// abuse surface (each retry re-sends credentials).
+const DECL_MAX_RETRIES: u8 = 10;
+/// Watch rolling tail cap in chars: enough context for prompt/failure
+/// regexes without unbounded growth on chatty banners.
+const DECL_WATCH_TAIL_CHARS: usize = 4096;
+
+/// A parsed auto-login request: the expect-engine configuration (both forms
+/// lower onto it) plus, for the declarative form, the success/failure/retry
+/// supervision the engine itself does not model.
+#[derive(Debug)]
+pub struct AutoLoginPlan {
+    pub triggers: triggers::TriggersConfig,
+    pub watch: Option<DeclarativeWatch>,
+}
+
+/// Per-connection auto-login runtime owned by the read loop.
+struct AutoLoginRuntime {
+    engine: triggers::TriggerEngine,
+    watch: Option<DeclarativeWatch>,
 }
 
 enum TelnetCommand {
@@ -310,17 +409,248 @@ pub struct TelnetSessionRuntime {
     sessions: Arc<RwLock<HashMap<String, Arc<TelnetSession>>>>,
 }
 
-/// Resolves the auto-login spec into a validated trigger config. The secrets
-/// closure maps the protocol's fixed slot names onto the request-provided
-/// values (slot `trigger_answer_N` = `secrets[N-1]`), so the shared
-/// `parse_triggers` validation (unknown slot, empty slot) applies unchanged.
-pub fn parse_auto_login(spec: &AutoLoginSpec) -> Result<Option<triggers::TriggersConfig>, String> {
+/// Resolves the auto-login spec into a validated [`AutoLoginPlan`]. The rule
+/// form maps its secrets closure onto the protocol's fixed slot names
+/// (`trigger_answer_N` = `secrets[N-1]`) so the shared `parse_triggers`
+/// validation (unknown slot, empty slot) applies unchanged; the declarative
+/// form is lowered in [`parse_declarative_auto_login`]. The two forms are
+/// mutually exclusive — sending both is a configuration error (D7).
+pub fn parse_auto_login(spec: &AutoLoginSpec) -> Result<Option<AutoLoginPlan>, String> {
+    if spec.rules.is_some() && spec.declarative.is_some() {
+        return Err(
+            "telnet/start: autoLogin.rules and autoLogin.declarative are mutually exclusive"
+                .to_string(),
+        );
+    }
+    if let Some(declarative) = &spec.declarative {
+        return parse_declarative_auto_login(declarative);
+    }
     let slots = spec.secrets.clone();
-    triggers::parse_triggers(Some(&spec.rules), &move |key| match key {
-        "trigger_answer_1" => slots.first().filter(|value| !value.is_empty()).cloned(),
-        "trigger_answer_2" => slots.get(1).filter(|value| !value.is_empty()).cloned(),
-        _ => None,
-    })
+    Ok(
+        triggers::parse_triggers(spec.rules.as_ref(), &move |key| match key {
+            "trigger_answer_1" => slots.first().filter(|value| !value.is_empty()).cloned(),
+            "trigger_answer_2" => slots.get(1).filter(|value| !value.is_empty()).cloned(),
+            _ => None,
+        })?
+        .map(|triggers| AutoLoginPlan {
+            triggers,
+            watch: None,
+        }),
+    )
+}
+
+/// Lowers the NyaTerm-style declarative form onto the shared expect engine:
+/// username → plaintext stage, password → `trigger_answer_1` secret stage
+/// (redacted in `Debug`, never logged, its value only ever lives in the send
+/// plan). Prompt regexes compile through the shared triggers gate so invalid
+/// patterns fail the start with a readable error naming the dialog field;
+/// success/failure regexes build the [`DeclarativeWatch`].
+fn parse_declarative_auto_login(
+    declarative: &DeclarativeAutoLogin,
+) -> Result<Option<AutoLoginPlan>, String> {
+    let username = declarative.username.as_deref().unwrap_or("").trim();
+    let password = declarative.password.as_deref().unwrap_or("");
+    if username.is_empty() && password.is_empty() {
+        return Err(
+            "telnet/start: autoLogin.declarative needs at least a username or a password to send"
+                .to_string(),
+        );
+    }
+    let max_retries = declarative.max_retries.unwrap_or(0);
+    if max_retries > DECL_MAX_RETRIES {
+        return Err(format!(
+            "telnet/start: autoLogin.maxRetries must be between 0 and {DECL_MAX_RETRIES}, got {max_retries}"
+        ));
+    }
+    let username_pattern = decl_pattern_text(
+        declarative.username_prompt_regex.as_deref(),
+        "usernamePromptRegex",
+        DECL_USERNAME_PROMPT_DEFAULT,
+    )?;
+    let password_pattern = decl_pattern_text(
+        declarative.password_prompt_regex.as_deref(),
+        "passwordPromptRegex",
+        DECL_PASSWORD_PROMPT_DEFAULT,
+    )?;
+
+    let mut stages = Vec::new();
+    if !username.is_empty() {
+        stages.push(json!({
+            "pattern": username_pattern,
+            "sendText": format!("{username}\r"),
+        }));
+    }
+    if !password.is_empty() {
+        stages.push(json!({
+            "pattern": password_pattern,
+            "sendSecretKey": "trigger_answer_1",
+        }));
+    }
+    // Username or password is non-empty above, so the stage list can never
+    // be empty and `parse_triggers` cannot answer `Ok(None)` here.
+    let password_slot = password.to_string();
+    let triggers_config = triggers::parse_triggers(Some(&json!({ "stages": stages })), &|key| {
+        match key {
+            "trigger_answer_1" if !password_slot.is_empty() => Some(password_slot.clone()),
+            _ => None,
+        }
+    })?
+    .ok_or_else(|| "telnet/start: autoLogin.declarative lowered to no login stages".to_string())?;
+
+    let success = decl_regex(
+        declarative.success_regex.as_deref(),
+        "successRegex",
+        DECL_SUCCESS_DEFAULT,
+    )?;
+    let failure = decl_regex(
+        declarative.failure_regex.as_deref(),
+        "failureRegex",
+        DECL_FAILURE_DEFAULT,
+    )?;
+
+    Ok(Some(AutoLoginPlan {
+        triggers: triggers_config,
+        watch: Some(DeclarativeWatch::new(success, failure, max_retries)),
+    }))
+}
+
+/// Resolves one optional declarative pattern field to its effective text:
+/// blank/absent falls back to the built-in default, a custom value passes the
+/// shared [`triggers::validate_pattern_text`] gate (length ceiling + regex
+/// dialect) so an invalid pattern fails with the field name prefixed.
+fn decl_pattern_text(value: Option<&str>, field: &str, default: &str) -> Result<String, String> {
+    match value.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => triggers::validate_pattern_text(text)
+            .map(|_| text.to_string())
+            .map_err(|error| format!("telnet/start: autoLogin.{field}: {error}")),
+        None => Ok(default.to_string()),
+    }
+}
+
+/// Compiles one optional watch regex (success/failure): same blank-falls-back
+/// to the NyaTerm default rule as [`decl_pattern_text`].
+fn decl_regex(value: Option<&str>, field: &str, default: &str) -> Result<Regex, String> {
+    let custom = match value.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => {
+            triggers::validate_pattern_text(text)
+                .map_err(|error| format!("telnet/start: autoLogin.{field}: {error}"))?;
+            Some(text)
+        }
+        None => None,
+    };
+    let pattern = custom.map_or_else(|| default.to_string(), str::to_string);
+    Regex::new(&pattern).map_err(|error| format!("telnet/start: autoLogin.{field}: {error}"))
+}
+
+/// What the declarative supervision decided after one output chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchEvent {
+    /// Success regex matched after at least one prompt answer: the login is
+    /// complete, supervision and answering stop.
+    Success,
+    /// Failure regex matched within budget: the host will re-prompt and the
+    /// engine re-answers; `attempt` is the 1-based re-send round.
+    Retry { attempt: u8 },
+    /// Failure hit past the retry budget: the session closes into the exit
+    /// overlay with a readable reason.
+    Exhausted,
+}
+
+/// Success/failure/retry supervision for the declarative form (NyaTerm
+/// `TelnetAutoLogin` semantics with prompt answering delegated to the shared
+/// expect engine). A small rolling tail gives anchored success patterns like
+/// `[$#>]\s*$` a stable end-of-buffer to match against; failure detection
+/// runs regardless of whether an answer went out, success only after one did
+/// (NyaTerm's `sent_username || sent_password` guard).
+pub struct DeclarativeWatch {
+    success: Regex,
+    failure: Regex,
+    max_retries: u8,
+    retries: u8,
+    tail: String,
+    state: WatchState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchState {
+    Active,
+    Completed,
+    Failed,
+}
+
+impl fmt::Debug for DeclarativeWatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The tail holds host output only, but it is still terminal content —
+        // report its size, never its text.
+        formatter
+            .debug_struct("DeclarativeWatch")
+            .field("max_retries", &self.max_retries)
+            .field("retries", &self.retries)
+            .field("tail_chars", &self.tail.chars().count())
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl DeclarativeWatch {
+    fn new(success: Regex, failure: Regex, max_retries: u8) -> Self {
+        Self {
+            success,
+            failure,
+            max_retries,
+            retries: 0,
+            tail: String::new(),
+            state: WatchState::Active,
+        }
+    }
+
+    /// Feeds one output chunk. `answered` tells whether at least one prompt
+    /// answer went out this session (arms the success check).
+    pub fn observe(&mut self, text: &str, answered: bool) -> Option<WatchEvent> {
+        if self.state != WatchState::Active {
+            return None;
+        }
+        self.push_tail(text);
+        // Failure takes precedence over success/prompts (NyaTerm order): a
+        // rejection banner that happens to end in a prompt must count as a
+        // failure, not re-trigger an answer into a dead session.
+        if self.failure.is_match(&self.tail) {
+            if self.retries < self.max_retries {
+                self.retries += 1;
+                // Clear the tail so the same failure text cannot re-count on
+                // every subsequent chunk (NyaTerm clears its window too).
+                self.tail.clear();
+                return Some(WatchEvent::Retry {
+                    attempt: self.retries,
+                });
+            }
+            self.state = WatchState::Failed;
+            return Some(WatchEvent::Exhausted);
+        }
+        if answered && self.success.is_match(&self.tail) {
+            self.state = WatchState::Completed;
+            return Some(WatchEvent::Success);
+        }
+        None
+    }
+
+    /// Initial attempt plus the re-send rounds used so far; the readable
+    /// close reason reports this when the budget is exhausted.
+    pub fn attempts_used(&self) -> u8 {
+        self.retries.saturating_add(1)
+    }
+
+    fn push_tail(&mut self, text: &str) {
+        self.tail.push_str(text);
+        let overflow = self
+            .tail
+            .chars()
+            .count()
+            .saturating_sub(DECL_WATCH_TAIL_CHARS);
+        if overflow > 0 {
+            self.tail = self.tail.chars().skip(overflow).collect();
+        }
+    }
 }
 
 impl TelnetSessionRuntime {
@@ -350,10 +680,10 @@ impl TelnetSessionRuntime {
         let rows = request.rows.unwrap_or(32).clamp(2, u16::MAX as u32) as u16;
         let enter_mode = request.enter_mode.unwrap_or_default();
         let backspace_mode = request.backspace_mode.unwrap_or_default();
-        // Invalid rules fail the start (SSH D7 contract: never degrade
-        // silently) — and the error text is configuration feedback, it never
-        // includes secret values.
-        let triggers_config = match &request.auto_login {
+        // Invalid auto-login configuration fails the start (SSH D7 contract:
+        // never degrade silently) — and the error text is configuration
+        // feedback, it never includes secret values.
+        let auto_login_plan = match &request.auto_login {
             Some(spec) => parse_auto_login(spec)?,
             None => None,
         };
@@ -380,7 +710,7 @@ impl TelnetSessionRuntime {
             rows,
             enter_mode,
             backspace_mode,
-            triggers_config,
+            auto_login_plan,
             cmd_rx,
             replay,
             emitter,
@@ -598,7 +928,7 @@ fn spawn_pump(
     rows: u16,
     enter_mode: EnterMode,
     backspace_mode: BackspaceMode,
-    triggers_config: Option<triggers::TriggersConfig>,
+    auto_login_plan: Option<AutoLoginPlan>,
     mut cmd_rx: mpsc::Receiver<TelnetCommand>,
     replay: Arc<tokio::sync::Mutex<ReplayBuffer>>,
     emitter: PluginEmitter,
@@ -664,12 +994,18 @@ fn spawn_pump(
         });
 
         let mut parser = TelnetParser::new();
-        let mut engine = triggers_config.map(|config| {
-            triggers::TriggerEngine::new(
-                config,
-                triggers::CommandPlaceholders::new(&host, "", port, &host),
-            )
-        });
+        let mut auto_login: Option<AutoLoginRuntime> =
+            auto_login_plan.map(|plan| AutoLoginRuntime {
+                engine: triggers::TriggerEngine::new(
+                    plan.triggers,
+                    triggers::CommandPlaceholders::new(&host, "", port, &host),
+                ),
+                watch: plan.watch,
+            });
+        // Armed once the first prompt answer goes out: the declarative watch
+        // only treats a success pattern as "logged in" after we answered
+        // something (NyaTerm's `sent_username || sent_password` guard).
+        let mut answered_stages = false;
         let mut closing_reason: Option<String> = None;
         loop {
             tokio::select! {
@@ -695,9 +1031,56 @@ fn spawn_pump(
                         &emitter,
                     )
                     .await;
-                    if let Some(engine) = engine.as_mut() {
-                        let hit = engine.observe(&chunk_text, unix_now_ms()).map(|decision| {
-                            (decision, engine.placeholders().clone(), engine.pacing())
+                    // Declarative supervision first: failure takes precedence
+                    // over answering further prompts (NyaTerm order), so a
+                    // rejection banner never feeds the expect engine.
+                    let watch_event = auto_login
+                        .as_mut()
+                        .and_then(|runtime| runtime.watch.as_mut())
+                        .and_then(|watch| watch.observe(&chunk_text, answered_stages));
+                    match watch_event {
+                        // D6: the event carries the outcome only — never the
+                        // matched text, never an answer.
+                        Some(WatchEvent::Retry { attempt }) => {
+                            // 重试轮次立即把引擎游标归位到第一阶段（NyaTerm
+                            // 重置 sent_username/sent_password 的对应物）：
+                            // 失败可能发生在序列中途（用户名已发、密码未达），
+                            // 归位后宿主重印 login: 即从用户名重新应答。
+                            if let Some(runtime) = auto_login.as_mut() {
+                                runtime.engine.reset(unix_now_ms());
+                            }
+                            let _ = emitter.event(
+                                "telnet/auto_login",
+                                json!({ "sessionId": session_id, "status": "retry", "attempt": attempt }),
+                            );
+                        }
+                        Some(WatchEvent::Success) => {
+                            let _ = emitter.event(
+                                "telnet/auto_login",
+                                json!({ "sessionId": session_id, "status": "success" }),
+                            );
+                            // Login complete: stop answering and supervising
+                            // (NyaTerm's Complete state), the user takes over.
+                            auto_login = None;
+                        }
+                        Some(WatchEvent::Exhausted) => {
+                            let attempts = auto_login
+                                .as_ref()
+                                .and_then(|runtime| runtime.watch.as_ref())
+                                .map(DeclarativeWatch::attempts_used)
+                                .unwrap_or(1);
+                            closing_reason.get_or_insert_with(|| {
+                                format!(
+                                    "auto-login failed: host rejected the login after {attempts} attempt(s)"
+                                )
+                            });
+                            break;
+                        }
+                        None => {}
+                    }
+                    if let Some(runtime) = auto_login.as_mut() {
+                        let hit = runtime.engine.observe(&chunk_text, unix_now_ms()).map(|decision| {
+                            (decision, runtime.engine.placeholders().clone(), runtime.engine.pacing())
                         });
                         if let Some((decision, placeholders, pacing)) = hit {
                             match apply_trigger_decision(
@@ -710,6 +1093,7 @@ fn spawn_pump(
                             {
                                 // D6: the event never carries answer content.
                                 Ok(true) => {
+                                    answered_stages = true;
                                     let _ = emitter.event(
                                         "telnet/trigger",
                                         json!({
@@ -924,29 +1308,53 @@ mod tests {
         );
     }
 
-    // —— 自动登录（复用 triggers 规则引擎）—————————————————
+    // —— 自动登录（规则形态复用 triggers 规则引擎）———————————
+    // 与声明式形态（NyaTerm 对齐）共用 parse_auto_login → AutoLoginPlan。
 
     fn slot_secrets() -> Vec<String> {
         vec!["s3cret-one".to_string(), "s3cret-two".to_string()]
+    }
+
+    fn rule_spec(rules: serde_json::Value) -> AutoLoginSpec {
+        AutoLoginSpec {
+            rules: Some(rules),
+            secrets: slot_secrets(),
+            declarative: None,
+        }
+    }
+
+    /// 声明式规格构造：正则全部留空 → 走内置默认提示词表。
+    fn decl_spec(username: &str, password: &str, max_retries: u8) -> AutoLoginSpec {
+        AutoLoginSpec {
+            rules: None,
+            secrets: Vec::new(),
+            declarative: Some(DeclarativeAutoLogin {
+                username: (!username.is_empty()).then(|| username.to_string()),
+                password: (!password.is_empty()).then(|| password.to_string()),
+                username_prompt_regex: None,
+                password_prompt_regex: None,
+                success_regex: None,
+                failure_regex: None,
+                max_retries: Some(max_retries),
+            }),
+        }
     }
 
     #[test]
     fn auto_login_parses_rules_and_answers_fake_output() {
         // JSON 对象形态：明文 + 密文槽两阶段（sendSecretKey 槽引用）。
         // JSON 形态按 D7 严格校验（`*assword` 只在 tssh 文本形态有字面量兜底）。
-        let spec = AutoLoginSpec {
-            rules: json!(
-                r#"{"stages":[{"pattern":"ogin:","sendText":"myuser\r"},{"pattern":"assword","sendSecretKey":"trigger_answer_1"}]}"#
-            ),
-            secrets: slot_secrets(),
-        };
-        let config = parse_auto_login(&spec)
+        let spec = rule_spec(json!(
+            r#"{"stages":[{"pattern":"ogin:","sendText":"myuser\r"},{"pattern":"assword","sendSecretKey":"trigger_answer_1"}]}"#
+        ));
+        let plan = parse_auto_login(&spec)
             .expect("rules parse")
             .expect("enabled");
-        assert_eq!(config.stages.len(), 2);
+        assert_eq!(plan.triggers.stages.len(), 2);
+        assert!(plan.watch.is_none(), "rule form has no declarative watch");
 
         let mut engine = triggers::TriggerEngine::new(
-            config,
+            plan.triggers,
             triggers::CommandPlaceholders::new("bbs.example", "", 23, "bbs.example"),
         );
         // 喂假输出流：login 提示命中阶段 1，明文应答。
@@ -973,17 +1381,14 @@ mod tests {
     fn auto_login_accepts_the_tssh_text_form() {
         // tssh 文本形态同样全量可用（Expect* 指令）；注意 tssh 语法里没有
         // sendSecretKey——槽引用属于 JSON 形态的 sendSecretKey 字段。
-        let spec = AutoLoginSpec {
-            rules: json!(
-                "#!! ExpectCount 1\n#!! ExpectPattern1 ogin:\n#!! ExpectSendText1 myuser\\r"
-            ),
-            secrets: slot_secrets(),
-        };
-        let config = parse_auto_login(&spec)
+        let spec = rule_spec(json!(
+            "#!! ExpectCount 1\n#!! ExpectPattern1 ogin:\n#!! ExpectSendText1 myuser\\r"
+        ));
+        let plan = parse_auto_login(&spec)
             .expect("rules parse")
             .expect("enabled");
         let mut engine = triggers::TriggerEngine::new(
-            config,
+            plan.triggers,
             triggers::CommandPlaceholders::new("bbs", "", 23, "bbs"),
         );
         let decision = engine.observe("login: ", 1_000).expect("stage 1");
@@ -992,17 +1397,14 @@ mod tests {
 
     #[test]
     fn auto_login_maps_both_secret_slots() {
-        let spec = AutoLoginSpec {
-            rules: json!(
-                r#"{"stages":[{"pattern":"a","sendSecretKey":"trigger_answer_1"},{"pattern":"b","sendSecretKey":"trigger_answer_2"}]}"#
-            ),
-            secrets: slot_secrets(),
-        };
-        let config = parse_auto_login(&spec)
+        let spec = rule_spec(json!(
+            r#"{"stages":[{"pattern":"a","sendSecretKey":"trigger_answer_1"},{"pattern":"b","sendSecretKey":"trigger_answer_2"}]}"#
+        ));
+        let plan = parse_auto_login(&spec)
             .expect("rules parse")
             .expect("enabled");
         let mut engine = triggers::TriggerEngine::new(
-            config,
+            plan.triggers,
             triggers::CommandPlaceholders::new("h", "", 23, "h"),
         );
         let decision = engine.observe("aaa", 1_000).expect("stage 1");
@@ -1014,25 +1416,226 @@ mod tests {
     #[test]
     fn auto_login_rejects_invalid_rules_and_empty_slots() {
         // 非法 JSON 且不含 Expect 指令 → 沿用 triggers 的 JSON 报错。
-        let spec = AutoLoginSpec {
-            rules: json!("{not json"),
-            secrets: slot_secrets(),
-        };
+        let spec = rule_spec(json!("{not json"));
         let error = parse_auto_login(&spec).expect_err("must fail");
         assert!(error.contains("invalid JSON"), "{error}");
         // 槽位为空 = 配置错误（D7 同款）。
         let spec = AutoLoginSpec {
-            rules: json!(r#"{"stages":[{"pattern":"a","sendSecretKey":"trigger_answer_1"}]}"#),
+            rules: Some(json!(
+                r#"{"stages":[{"pattern":"a","sendSecretKey":"trigger_answer_1"}]}"#
+            )),
             secrets: Vec::new(),
+            declarative: None,
         };
         let error = parse_auto_login(&spec).expect_err("must fail");
         assert!(error.contains("is empty"), "{error}");
         // ExpectCount 0 = 显式关闭。
-        let spec = AutoLoginSpec {
-            rules: json!("ExpectCount 0\nExpectPattern1 a\nExpectSendText1 x"),
-            secrets: slot_secrets(),
-        };
+        let spec = rule_spec(json!("ExpectCount 0\nExpectPattern1 a\nExpectSendText1 x"));
         assert!(parse_auto_login(&spec).expect("rules parse").is_none());
+    }
+
+    // —— 自动登录（声明式形态，NyaTerm 对齐 P0-1）————————————
+
+    #[test]
+    fn declarative_builds_stages_and_watch_supervises_success() {
+        let spec = AutoLoginSpec {
+            rules: None,
+            secrets: Vec::new(),
+            declarative: Some(DeclarativeAutoLogin {
+                username: Some("myuser".to_string()),
+                password: Some("s3cret-pass".to_string()),
+                username_prompt_regex: Some("ogin:".to_string()),
+                password_prompt_regex: Some("assword".to_string()),
+                success_regex: Some(r"\$ $".to_string()),
+                failure_regex: Some("incorrect".to_string()),
+                max_retries: Some(2),
+            }),
+        };
+        let mut plan = parse_auto_login(&spec)
+            .expect("declarative parse")
+            .expect("enabled");
+        assert_eq!(plan.triggers.stages.len(), 2);
+        let mut watch = plan.watch.take().expect("declarative form has a watch");
+
+        // 提示应答走共享引擎：用户名明文阶段 + 密码密文槽阶段。
+        let mut engine = triggers::TriggerEngine::new(
+            plan.triggers,
+            triggers::CommandPlaceholders::new("host", "", 23, "host"),
+        );
+        let decision = engine
+            .observe("Welcome!\r\nlogin: ", 1_000)
+            .expect("stage 1");
+        assert_eq!(decision.kind, triggers::TriggerKind::Text);
+        assert_eq!(decision.segments, vec![(b"myuser\r".to_vec(), 0)]);
+        let decision = engine.observe("Password: ", 2_000).expect("stage 2");
+        assert_eq!(decision.kind, triggers::TriggerKind::Secret);
+        assert_eq!(
+            decision.segments,
+            triggers::pass_sleep_segments("s3cret-pass", 100, triggers::PassSleep::None)
+        );
+
+        // 未发出任何应答前，成功正则不生效（NyaTerm sent_* 守卫）。
+        assert!(watch.observe("$ ", false).is_none());
+        // 发出应答后命中成功正则 → Success，之后停止监督。
+        assert_eq!(
+            watch.observe("user@host:~$ ", true),
+            Some(WatchEvent::Success)
+        );
+        assert!(watch.observe("anything", true).is_none());
+    }
+
+    #[test]
+    fn declarative_defaults_cover_common_prompts() {
+        let plan = parse_auto_login(&decl_spec("dev", "pw", 0))
+            .expect("declarative parse")
+            .expect("enabled");
+        // 内置用户名提示默认：英文与中文。每次用全新引擎，避免上一提示命中
+        // 后游标停在密码阶段。
+        for prompt in ["login: ", "Username: ", "用户名：", "帐号:"] {
+            let mut engine = triggers::TriggerEngine::new(
+                plan.triggers.clone(),
+                triggers::CommandPlaceholders::new("host", "", 23, "host"),
+            );
+            let decision = engine
+                .observe(prompt, 1_000)
+                .unwrap_or_else(|| panic!("default username prompt must match {prompt:?}"));
+            assert_eq!(
+                decision.segments,
+                vec![(b"dev\r".to_vec(), 0)],
+                "{prompt:?}"
+            );
+        }
+        // 内置密码提示默认：密码-only 规格（引擎游标从密码阶段开始）。
+        let plan = parse_auto_login(&decl_spec("", "pw", 0))
+            .expect("declarative parse")
+            .expect("enabled");
+        assert_eq!(
+            plan.triggers.stages.len(),
+            1,
+            "password-only keeps one stage"
+        );
+        let mut engine = triggers::TriggerEngine::new(
+            plan.triggers,
+            triggers::CommandPlaceholders::new("host", "", 23, "host"),
+        );
+        let decision = engine
+            .observe("Password: ", 2_000)
+            .expect("password prompt");
+        assert_eq!(decision.kind, triggers::TriggerKind::Secret);
+        // 内置失败默认 + max_retries=0：首次失败即耗尽。
+        let mut watch = plan.watch.expect("watch present");
+        assert_eq!(
+            watch.observe("Login incorrect", false),
+            Some(WatchEvent::Exhausted)
+        );
+        // 内置成功默认（发出应答后生效）。
+        let plan = parse_auto_login(&decl_spec("dev", "pw", 0))
+            .expect("declarative parse")
+            .expect("enabled");
+        let mut watch = plan.watch.expect("watch present");
+        assert_eq!(
+            watch.observe("dev@host:~$ ", true),
+            Some(WatchEvent::Success)
+        );
+    }
+
+    #[test]
+    fn declarative_tail_refills_after_retry_so_each_failure_counts_once() {
+        let mut plan = parse_auto_login(&decl_spec("dev", "pw", 1))
+            .expect("declarative parse")
+            .expect("enabled");
+        let mut watch = plan.watch.take().expect("watch present");
+        assert_eq!(
+            watch.observe("Login incorrect", false),
+            Some(WatchEvent::Retry { attempt: 1 })
+        );
+        // tail 已清空后同文本再次到达 = 宿主再次拒绝 → 重新计数并立即耗尽
+        // （budget=1）。
+        assert_eq!(
+            watch.observe("Login incorrect", false),
+            Some(WatchEvent::Exhausted)
+        );
+        assert_eq!(watch.attempts_used(), 2, "初始 1 次 + 重试 1 次");
+        // 断言清空语义的另一半：失败文本被无关输出稀释时不得连击。
+        let mut plan = parse_auto_login(&decl_spec("dev", "pw", 1))
+            .expect("declarative parse")
+            .expect("enabled");
+        let mut watch = plan.watch.take().expect("watch present");
+        assert_eq!(
+            watch.observe("Login incorrect", false),
+            Some(WatchEvent::Retry { attempt: 1 })
+        );
+        assert!(watch.observe("welcome banner", false).is_none());
+    }
+
+    #[test]
+    fn declarative_retry_budget_exhausts_and_reports_attempts() {
+        let mut plan = parse_auto_login(&decl_spec("dev", "pw", 2))
+            .expect("declarative parse")
+            .expect("enabled");
+        let mut watch = plan.watch.take().expect("watch present");
+        assert_eq!(
+            watch.observe("Authentication failed", false),
+            Some(WatchEvent::Retry { attempt: 1 })
+        );
+        assert!(watch.observe("ok", false).is_none());
+        assert_eq!(
+            watch.observe("Authentication failed", false),
+            Some(WatchEvent::Retry { attempt: 2 })
+        );
+        assert_eq!(
+            watch.observe("Authentication failed", false),
+            Some(WatchEvent::Exhausted)
+        );
+        assert_eq!(watch.attempts_used(), 3);
+    }
+
+    #[test]
+    fn declarative_rejects_invalid_config_before_start() {
+        // 非法成功正则 → 可读错误带字段名。
+        let mut spec = decl_spec("dev", "pw", 0);
+        spec.declarative.as_mut().unwrap().success_regex = Some("(unclosed".to_string());
+        let error = parse_auto_login(&spec).expect_err("invalid success regex must fail");
+        assert!(error.contains("autoLogin.successRegex"), "{error}");
+        // 非法用户名提示正则同理。
+        let mut spec = decl_spec("dev", "pw", 0);
+        spec.declarative.as_mut().unwrap().username_prompt_regex = Some("[".to_string());
+        let error = parse_auto_login(&spec).expect_err("invalid prompt regex must fail");
+        assert!(error.contains("autoLogin.usernamePromptRegex"), "{error}");
+        // 无凭据可发 = 配置错误。
+        let error = parse_auto_login(&decl_spec("", "", 0)).expect_err("no credentials must fail");
+        assert!(error.contains("username or a password"), "{error}");
+        // 重试预算超上限。
+        let error = parse_auto_login(&decl_spec("dev", "pw", 11)).expect_err("retries cap");
+        assert!(error.contains("autoLogin.maxRetries"), "{error}");
+        // 两种形态互斥。
+        let spec = AutoLoginSpec {
+            rules: Some(json!({"stages": []})),
+            secrets: Vec::new(),
+            declarative: Some(DeclarativeAutoLogin {
+                username: Some("dev".to_string()),
+                password: None,
+                username_prompt_regex: None,
+                password_prompt_regex: None,
+                success_regex: None,
+                failure_regex: None,
+                max_retries: None,
+            }),
+        };
+        let error = parse_auto_login(&spec).expect_err("both forms must fail");
+        assert!(error.contains("mutually exclusive"), "{error}");
+    }
+
+    #[test]
+    fn declarative_credentials_never_reach_debug_output() {
+        // 安全红线：密码/密文槽值不得出现在任何 Debug 输出（日志/panic 的载体）。
+        let spec = decl_spec("dev", "s3cret-pass", 1);
+        assert!(!format!("{spec:?}").contains("s3cret-pass"));
+        let plan = parse_auto_login(&spec).expect("parse").expect("enabled");
+        // TriggersConfig 的 Debug 对 Secret 脱敏，Watch 不含凭据。
+        assert!(!format!("{plan:?}").contains("s3cret-pass"));
+        let rendered = format!("{:?}", plan.triggers.stages[1].answer);
+        assert!(rendered.contains("redacted"), "{rendered}");
     }
 
     #[test]
