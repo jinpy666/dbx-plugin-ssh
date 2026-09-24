@@ -3,6 +3,11 @@
 > **执行方式**：并发双工作包（A 后端 / B 前端，文件所有权不相交）+ 主会话收口（C）。
 > 任务用 checkbox 跟踪；每个任务自带验证循环；契约以 §2 为准，A/B 不得自行改契约，
 > 有异议回主会话裁决。
+>
+> **勾选状态注记（2026-09-25）**：checkbox 已按 `docs/PROGRESS-P-SSH.zh-CN.md` 的实际
+> 完成记录校准——A1/A2/A3/A5/B1/B2 各项已勾（2026-09-12/13 批次落地与全绿回归）；
+> A0（regex 依赖检查，实现走「后端仅形状校验」路线）、A4（审计改由并行批次
+> `audit_log.rs` 承担，本批 §1.1 审计契约作废）、B3 收尾确认与 C 系收口保持未勾。
 
 **目标**：落地 Netcatty 对标审阅（2026-09-11）用户选定五项——
 ① MCP 权限档（confirm）+ 连接作用域；② `ssh_multi_exec` / `ssh_terminal_input`
@@ -169,15 +174,15 @@ fail-closed 例外：confirm 模式下 `emitter` 为 None（stdio 独立会话�
 `backend/src/ssh.rs`（agent 挑战复用，锚点 :737 `agent_challenges`、:2156 起审批函数）、
 `backend/src/main.rs`（无新方法臂，`mcp/settings/*` 既有臂透传新字段）。
 
-- [ ] **A1-T1 单测先行**（`mcp.rs` `#[cfg(test)]`）：settings roundtrip 携带
+- [x] **A1-T1 单测先行**（`mcp.rs` `#[cfg(test)]`）：settings roundtrip 携带
   `execPermissionMode`/`connectionScope`（默认值、持久化、坏 JSON 降级默认）；
   mode 非法值 `settings/set` 报错；scope 条目 trim/上限 20/单条 ≤120 校验。
-- [ ] **A1-T2** 实现 `McpLimits` 两字段（serde default）+ `settings_get/set` 透传
+- [x] **A1-T2** 实现 `McpLimits` 两字段（serde default）+ `settings_get/set` 透传
   与校验 + `effective_permission_mode()` / `effective_scope()`（env 覆盖优先，
   env 读取经可注入闭包以便单测，参照 `resolve_plugin_data_dir` 模式）。
-- [ ] **A1-T3 单测先行**：`connection_in_scope(resolved, scope)` 匹配矩阵
+- [x] **A1-T3 单测先行**：`connection_in_scope(resolved, scope)` 匹配矩阵
   （id 命中 / 名称精确 / host 大小写不敏感 / 空作用域恒 true / 大小写敏感的 id 不匹配）。
-- [ ] **A1-T4** 作用域门实现，三处生效点：
+- [x] **A1-T4** 作用域门实现，三处生效点：
   ① `call_tool` 在 `registered_connection_by_ref` 归一化后立即校验（越界报错
   `"Connection … is outside the MCP connection scope"`）；
   ② `ssh_list_connections` 结果过滤（bridge 列表与 session registry 两来源都过滤，
@@ -196,7 +201,7 @@ fail-closed 例外：confirm 模式下 `emitter` 为 None（stdio 独立会话�
   tool, command, timeoutSecs}`；挑战一次性、超时即拒，与既有语义同构）；
   `is_write_tool`（:2165）扩为 `is_gated_by_confirm(name)`（写类 ∪ exec 三工具 ∪
   `ssh_terminal_input`——`ssh_terminal_input` 由 A2 提供名单，先留位）。
-- [ ] **A1-T7** 跑 `cargo test` 全绿 + `cargo clippy` 无新告警。
+- [x] **A1-T7** 跑 `cargo test` 全绿 + `cargo clippy` 无新告警。（2026-09-12 §1.3 权限档落地批回归 cargo 363/363 核实）
 
 ### A2. `ssh_multi_exec` + `ssh_terminal_input`
 
@@ -205,11 +210,11 @@ fail-closed 例外：confirm 模式下 `emitter` 为 None（stdio 独立会话�
 `runs_under_sudo` :53 复用）、`backend/src/ssh.rs`（:1558 `batch_terminal_input`
 底层复用）、`backend/src/main.rs`（无工作台新方法——两工具均 MCP-only）。
 
-- [ ] **A2-T1 单测先行**（mcp_safety）：`assess_terminal_input(input) -> CommandRisk`
+- [x] **A2-T1 单测先行**（mcp_safety）：`assess_terminal_input(input) -> CommandRisk`
   ——纯控制序列 Low、拆 `\r` 行取最大风险、灾难行命中、`sudo …` 行
   `runs_under_sudo` 命中、8 KiB 截断行为。
-- [ ] **A2-T2** 实现 `assess_terminal_input` + `is_control_only_input(input)`。
-- [ ] **A2-T3 单测先行**（mcp.rs）：targets 归一化/去重保序、>10 拒绝、
+- [x] **A2-T2** 实现 `assess_terminal_input` + `is_control_only_input(input)`。
+- [x] **A2-T3 单测先行**（mcp.rs）：targets 归一化/去重保序、>10 拒绝、
   sequential+stopOnError 首败短路语义（用可注入的 per-target 执行闭包单测，
   不连 SSH）、results 聚合结构。
 - [x] **A2-T4** 实现 `ssh_multi_exec` handler（2026-09-12：targets 全量归一化/去重保序/上限 10 + 保存连接全量预解析（任一未解析整体拒绝）→ 并发 `join_all` 递归 helper（tokio 原生，无 futures 依赖）/ sequential stopOnError 短路 → 聚合响应 `{ok, sent, failed, results:[{target, connectionId, host, port, username, ok, output, exitCode, error?}]}`；命令门 `multi_exec::command_gate` 纯函数（sudo 整体拒绝、灾难确认、只读白名单）；单测 4（A2-T3）+ schema/工具清单入列；smoke_mcp live 段 saved-ref 引导 + 灾难门负例：targets 全量归一化 → 作用域门 →
@@ -227,7 +232,7 @@ fail-closed 例外：confirm 模式下 `emitter` 为 None（stdio 独立会话�
 - [x] **A2-T7** confirm 门名单接入（2026-09-12：is_confirm_gated_tool = is_write_tool ∪ ssh_exec/ssh_multi_exec/ssh_terminal_input；`terminal_input_gate` ④ 号留位由同一 confirm 门覆盖；schema anyOf 断言已在 connection_tools_declare_connection_id + 清单测试）
   `smoke` 之外先补 `connection_tools_declare_connection_id` 式 schema 单测
   （anyOf 寻址、confirmDestructive 声明）。
-- [ ] **A2-T8** `cargo test` 全绿 + clippy。
+- [x] **A2-T8** `cargo test` 全绿 + clippy。（2026-09-12 multi_exec 批回归 357/357 + test.sh exit=0 核实）
 
 ### A3. 关键词高亮规则存储
 
@@ -239,13 +244,13 @@ save_entry/delete_entry` + `#[cfg(test)]` 全套）、`backend/src/ssh.rs`
 `backend/src/main.rs`（分发臂加在 :512-514 quickCommands 块旁：
 `ssh/highlightRules/list|save|delete`）。
 
-- [ ] **A3-T1 单测先行**（highlight_rules.rs tests，对照 quick_commands 七用例）：
+- [x] **A3-T1 单测先行**（highlight_rules.rs tests，对照 quick_commands 七用例）：
   save 建改与默认值（isRegex=false/color=#f59e0b/caseSensitive=false/enabled=true）、
   非法输入拒绝（空 pattern/超长/坏色值）、上限 30 只约束新建、delete 幂等、
   坏文件降级空库、roundtrip 保序、视图字段完整。
-- [ ] **A3-T2** 实现模块 + SshRuntime 三方法 + main.rs 三臂（save 返回完整清单、
+- [x] **A3-T2** 实现模块 + SshRuntime 三方法 + main.rs 三臂（save 返回完整清单、
   delete 未知 id `removed:false`）。
-- [ ] **A3-T3** `cargo test` 全绿。
+- [x] **A3-T3** `cargo test` 全绿。（2026-09-11 Netcatty 批落地，后续 09-12 全量回归持续绿）
 
 ### A4. 审计日志
 
@@ -284,14 +289,14 @@ save_entry/delete_entry` + `#[cfg(test)]` 全套）、`backend/src/ssh.rs`
 `parse_os_release`）、`backend/src/ssh.rs`（:2546 `metrics` payload 组装处透传）、
 `backend/src/model.rs` 无改动。
 
-- [ ] **A5-T1 单测先行**：`parse_os_release`——标准 `ID=ubuntu`+带引号
+- [x] **A5-T1 单测先行**：`parse_os_release`——标准 `ID=ubuntu`+带引号
   `PRETTY_NAME="Ubuntu 22.04…"`、`ID_LIKE` 忽略、文件缺失/空文本 → `(None, None)`、
   CRLF 容错。
-- [ ] **A5-T2** `collect_metrics` 采集命令尾部追加带哨兵的
+- [x] **A5-T2** `collect_metrics` 采集命令尾部追加带哨兵的
   `cat /etc/os-release 2>/dev/null || cat /usr/lib/os-release 2>/dev/null`
   （解析失败/缺文件不影响既有字段，两字段整体缺省）；payload 组装透传
   `osId`/`osPretty`（空则省略）；快照缓存自然携带。
-- [ ] **A5-T3** `cargo test` 全绿。
+- [x] **A5-T3** `cargo test` 全绿。（2026-09-11 Netcatty 批落地：`metrics.rs` `--os--` 哨兵段）
 
 ## 3. 工作包 B（前端，单 agent，独占 `frontend/`）
 
@@ -305,24 +310,24 @@ save_entry/delete_entry` + `#[cfg(test)]` 全套）、`backend/src/ssh.rs`
 （`highlightRules.*` 七语）、`frontend/src/mockDbxHost.ts`（镜像三方法，内存库）、
 `frontend/src/workbench.spec.ts`（七语 key 对齐自动覆盖）。
 
-- [ ] **B1-T1 单测先行**（keywordHighlight.spec.ts）：
+- [x] **B1-T1 单测先行**（keywordHighlight.spec.ts）：
   - `compileRules(rules)`：plain pattern 元字符转义、isRegex 直通、非法 regex 过滤掉
     不抛异常、按 pattern 长度降序（长词优先）。
   - `matchesInLine(line, compiled, maxPerLine=20)`：多规则命中、重叠先到先得、
     大小写敏感开关、单行上限、空规则零匹配。
   - `sanitizeHighlightRuleInput(draft)`：pattern trim/必填/长度、color hex 校验、
     regex compile 校验（返回 error 键名供 i18n）。
-- [ ] **B1-T2** 实现 lib 三函数（无 xterm 依赖的纯计算）。
-- [ ] **B1-T3** App.vue 数据面：挂载时 `hydrateHighlightRules()`（调
+- [x] **B1-T2** 实现 lib 三函数（无 xterm 依赖的纯计算）。
+- [x] **B1-T3** App.vue 数据面：挂载时 `hydrateHighlightRules()`（调
   `ssh/highlightRules/list`，失败静默降级空表，对齐 quickCommands hydrate 模式）；
   规则状态 + 弹层开态。
-- [ ] **B1-T4** App.vue 管理弹层：工具栏按钮（Palette 图标，紧邻快捷命令 Zap 按钮）、
+- [x] **B1-T4** App.vue 管理弹层：工具栏按钮（Palette 图标，紧邻快捷命令 Zap 按钮）、
   popover/弹窗列表（每条：色点 + pattern + regex/caseSensitive 徽标 + enabled 开关 +
   删除）、新增表单（pattern 输入 + regex/caseSensitive checkbox + 8 色板 +
   自定义 hex）、上限置灰 + `highlightRules.limit` 提示；焦点管理走既有
   `modalFocus.ts` 链（Esc/Tab 陷阱），对外点关闭复用 batch popover 的
   capture-mousedown 模式。
-- [ ] **B1-T5** App.vue decoration 引擎：
+- [x] **B1-T5** App.vue decoration 引擎：
   - `terminal.onRender(({start,end}) => …)` 触发 rAF 节流扫描（≤30fps）；
   - 仅扫活动 buffer 视口行 `start..end`（alternate buffer 同样处理），
     每行 `matchesInLine(line.translateString(true), compiled)`；
@@ -332,11 +337,12 @@ save_entry/delete_entry` + `#[cfg(test)]` 全套）、`backend/src/ssh.rs`
   - 规则变更/开关关闭/终端重建（重连、dispose）时全量清理；
   - 总开关 localStorage `ssh-keyword-highlight`（默认开，仅显式 "false" 关，
     对齐 `sanitizeSelectCopyEnabled` 模式）；关闭时零挂钩子。
-- [ ] **B1-T6** i18n 七语 `highlightRules.*` 全补；mockDbxHost 镜像三方法
+- [x] **B1-T6** i18n 七语 `highlightRules.*` 全补；mockDbxHost 镜像三方法
   （内存 CRUD，save 返回完整清单、delete 幂等）。
-- [ ] **B1-T7** `pnpm typecheck` 0 错、`pnpm test` 全绿（新增 ≥8 用例）、
+- [x] **B1-T7** `pnpm typecheck` 0 错、`pnpm test` 全绿（新增 ≥8 用例，keywordHighlight 17 spec）、
   `pnpm build` 过；visual.html 浏览器验证（mock 页造含 ERROR/自定义关键字的
-  终端输出：命中着色、规则增删即时生效、开关关闭清除、上限提示）。
+  终端输出：命中着色、规则增删即时生效、开关关闭清除、上限提示）——2026-09-11 晚
+  UI 打磨轮浏览器实测覆盖（高亮弹层/规则增删/Esc 链，vitest 364 全绿）。
 
 ### B2. metrics sparkline + 发行版徽标
 
@@ -345,22 +351,23 @@ save_entry/delete_entry` + `#[cfg(test)]` 全套）、`backend/src/ssh.rs`
 （:3869 `refreshMetrics` / :4906 `metrics-float` 区 / 连接信息面板）、
 `frontend/src/style.css`（sparkline + monogram 徽标微样式）。
 
-- [ ] **B2-T1 单测先行**：`pushSample(ring, sample)`（容量 60 环形）；
+- [x] **B2-T1 单测先行**：`pushSample(ring, sample)`（容量 60 环形）；
   `sparklinePath(values, width, height)`（空 → `""`、单点、全零、max 缩放、
   polyline points 字符串）；`distroBadge(osId)`：ubuntu/debian/centos/rhel/fedora/
   alpine/arch/rocky/almalinux/opensuse/oracle/amazon/kali/suse 映射
   `{label, color}`、未知/缺失 → 通用 Tux 灰 + osPretty 原文、`centos` 与
   `rhel` 色区分。
-- [ ] **B2-T2** 实现（纯 CSS monogram 徽标：圆角方块 + 首字母 + 主题色变量；
+- [x] **B2-T2** 实现（纯 CSS monogram 徽标：圆角方块 + 首字母 + 主题色变量；
   **不引入任何图片资产**）。
-- [ ] **B2-T3** App.vue 接线：metrics 轮询成功时把各接口 rx/tx 求和推进环形缓冲
+- [x] **B2-T3** App.vue 接线：metrics 轮询成功时把各接口 rx/tx 求和推进环形缓冲
   （会话关闭/面板关闭时保留缓冲即可，跨重连清空）；`metrics-float` 网络区头部
   渲染两枚 60×18 SVG（rx 用 `var(--primary)`、tx 用 `var(--success)`）；
   卡片头部主机名旁渲染 distro 徽标（tooltip=osPretty）；连接信息面板有 metrics
   数据时同款徽标。旧 sidecar（无 osId 字段）缺徽标不报错（optional 降级）。
-- [ ] **B2-T4** `pnpm typecheck` / `pnpm test` / `pnpm build` 全绿（新增 ≥6 用例）；
+- [x] **B2-T4** `pnpm typecheck` / `pnpm test` / `pnpm build` 全绿（新增 ≥6 用例）；
   visual.html 验证（mock metrics fixture 注入多帧速率 + osId，肉眼确认曲线滚动
-  与徽标渲染；deep/浅两主题截图不入库仅本地核对）。
+  与徽标渲染；deep/浅两主题截图不入库仅本地核对）——指标浮层在 2026-09-11 晚
+  UI 打磨轮实测范围内（vitest 364 全绿）。
 
 ### B3. 设置弹窗：MCP 权限档 + 作用域
 

@@ -33,7 +33,7 @@
 | 4 会话导入 | 全缺 | ❌ 仍缺（无任何导入器） |
 | 5 OTP 库 | 全缺 | ❌ 仍缺（现有为连接级 `totp_secret` 字段 + 登录 MFA/sudo 自动应答；无库、无二维码、无 HOTP、无集中面板） |
 | 7 X11 转发 | 全缺 | ❌ 仍缺（russh 0.62 x11 API 待 spike） |
-| 8 终端体验 | 全缺 | **8a 命令历史 🔶 缩水**：`frontend/src/lib/commandHistory.ts` 已有环形 100 条 + secret-like 过滤 + localStorage 持久化 + 命令弹窗上下键导航（对标 tiny-rdm）；**缺**终端内实时模糊建议浮层与按键级采集——且采集可直接挂已有 `terminalCommandMarkers.ts`（OSC 633），比 NyaTerm 的按键跟踪模型更可靠。**8b 动作链接 / 8c gutter / 8d 搜索翻译 / 8e 背景图 / 8f 大输出保护 ❌ 仍缺** |
+| 8 终端体验 | 全缺 | **8a 命令历史 🔶 缩水**：`frontend/src/lib/commandHistory.ts` 已有环形 100 条 + secret-like 过滤 + localStorage 持久化 + 命令弹窗上下键导航（对标 tiny-rdm）；**缺**终端内实时模糊建议浮层与按键级采集——且采集可直接挂已有 `terminalCommandMarkers.ts`（OSC 633），比 NyaTerm 的按键跟踪模型更可靠。**8b 动作链接 / 8c gutter（M1）/ 8e 背景图 / 8f 大输出保护（M2 feel 批）✅ 已落地**；**8d 搜索翻译 🔶 半边**——选中文本在线搜索已随 M2 feel 批上线（引擎可配，openExternal 缺失降级复制链接），**翻译半边依赖宿主 openExternal 能力确认——宿主确认前保持搜索-only** |
 | 9 监控深度 | GPU/NPU/Docker 全缺 | ❌ 仍缺（现有 CPU/内存/磁盘+inode/网络速率/top 进程 + 历史） |
 | 10 SFTP 尾部 | watcher/并发全缺 | **10b 🔶 缩水**：上传并发已有（`runWithConcurrency(files, 3)`，写死）；断点续传/暂停已有。**缺**并发可配置、重复目标策略。**10a watcher 回传 / 10c symlink 创建 ❌ 仍缺** |
 
@@ -63,7 +63,7 @@
 | P2 | 10a | 远程文件外部编辑 + notify watcher 自动回传 | `notify` | 中 |
 | P2 | 10c | SFTP 新建/编辑符号链接（`symlink@openssh.com`，spike russh-sftp API） | 无 | 小 |
 | P2 | 8e | 背景图（CSS 层 + 表面透明化 + 挂起 WebGL，复用 0.6.0 重建逻辑） | 无 | 小 |
-| P2 | 8d | 选中文本在线搜索（宿主 openExternal 缺失→剪贴板兜底）；翻译后置 | 无 | 中 |
+| P2 | 8d | 选中文本在线搜索（宿主 openExternal 缺失→剪贴板兜底）；翻译后置。跟踪点（2026-09-25）：翻译半边依赖宿主 openExternal 能力确认——宿主确认前保持搜索-only（搜索半边已落地） | 无 | 中 |
 | P2 | 8f | 大输出保护（背压分帧 + strained 模式 + 副组件挂起） | 无 | 中 |
 | P3 | 2c | 串口会话（`serialport`） | `serialport` | 中 |
 | P3 | 2d | VNC 会话（帧 patch 走现有二进制通道，需压测） | vnc-rs | 大 |

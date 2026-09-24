@@ -13,7 +13,7 @@ positioning and should be verified against the target platform and exact version
 | Graphical connection management | Built in | — | Built in | Built in | Built in | Built in | Built in/mobile |
 | Interactive PTY terminal | Built in | Built-in terminal | Built in | Built in | Built in | Built in | Built in |
 | Split panes / multiple shells in one window | Via DBX host workbench | External tool (tmux etc.) | Built in | Version dependent | Version dependent | Built in/version dependent | Built in/version dependent |
-| Custom themes / terminal appearance | Follows the DBX host theme | — | Built in (theme/plugin ecosystem) | Version dependent | Version dependent | Built in/version dependent | Version dependent |
+| Custom themes / terminal appearance | Host theme by default + 192 built-in color schemes as opt-in overrides | — | Built in (theme/plugin ecosystem) | Version dependent | Version dependent | Built in/version dependent | Version dependent |
 | SFTP file workspace | Built in | External `sftp`/client | Built in/version dependent | Built in/plan dependent | Built in | Built in | Built in/version dependent |
 | SSH Agent / key / password auth | Built in | Built in | Built in/config dependent | Built in/plan dependent | Built in | Built in | Built in |
 | Jump hosts / ProxyJump | Up to three hops | Built in | Config/plugin dependent | Supported/plan dependent | Supported/version dependent | Supported/config dependent | Supported/version dependent |
@@ -30,14 +30,15 @@ positioning and should be verified against the target platform and exact version
 | MCP automation tools | Built in | — | — | — | — | — | — |
 | DBX host secret binding | Native | — | — | — | — | — | — |
 | RDP | Improving | External tool | Plugin/version dependent | Supported/plan dependent | Supported/version dependent | Version dependent | Version dependent |
-| Telnet | Improving | External `telnet` | Plugin/version dependent | Supported/version dependent | Supported/version dependent | Built in/version dependent | Version dependent |
-| Serial | Planned or version dependent | External tool | Plugin/version dependent | Version dependent | Version dependent | Version dependent | Mobile/version dependent |
+| Telnet | Built in | External `telnet` | Plugin/version dependent | Supported/version dependent | Supported/version dependent | Built in/version dependent | Version dependent |
+| Serial | Built in | External tool | Plugin/version dependent | Version dependent | Version dependent | Version dependent | Mobile/version dependent |
+| VNC | Built in | — | — | — | — | — | Built in/version dependent |
 | Seven-language plugin UI | Built in | — | Partial/version dependent | Partial/plan dependent | Partial/version dependent | Version dependent | Version dependent |
 
 > **Protocol roadmap**: DBX SSH & SFTP currently focuses on SSH, SFTP, ProxyJump, PTY, and
-> governed server operations. RDP, Telnet, and additional remote protocols are still being
-> strengthened. “Improving” does not mean a complete production-ready replacement is already
-> guaranteed; verify the exact capability in the release notes for your target version.
+> governed server operations. Telnet is built in (M2), serial and X11 forwarding are built
+> in (M4), and VNC is built in (M5). RDP remains behind a manual review gate (vendored fork
+> + CredSSP) and is not a guaranteed production-ready replacement.
 
 ## Positioning versus Tabby
 
@@ -53,11 +54,13 @@ and cross-device config sync. DBX SSH & SFTP differs on the server operations ch
 - Session recording/replay with GIF export, batch commands across sessions, resumable
   transfers, and Zmodem/Trzsz are built in.
 - Up to three-hop ProxyJump with per-hop authentication, 2FA, and host-key verification.
-- Port mapping -L/-R is built in (0.6.0); dynamic SOCKS tunnels, agent forwarding, X11,
-  GSSAPI, and ControlMaster are intentionally not built — covered by the DBX host
-  transport layer or set aside by product decisions.
-- Terminal split panes and custom themes currently follow the DBX host workbench;
-  additional protocols (RDP/Telnet/serial) remain on the roadmap.
+- Port mapping -L/-R is built in (0.6.0); X11 forwarding is implemented (off by default,
+  2026-09-24, merge 75c5219). Dynamic SOCKS tunnels, agent forwarding, GSSAPI, and
+  ControlMaster are intentionally not built — covered by the DBX host transport layer
+  or set aside by product decisions.
+- Terminal split panes live in the DBX host workbench; terminal appearance follows the
+  host by default with 192 built-in color schemes as opt-in overrides. Telnet, serial,
+  and VNC are shipped full stack; RDP remains behind a review gate.
 
 ## Position in the DBX plugin family
 
@@ -83,6 +86,6 @@ secret, and workbench boundaries.
 - For a desktop tool combining SSH, SFTP, and server status, FinalShell is one direct option.
 - If you already use DBX host connections, MCP, and plugin workbenches, DBX SSH & SFTP keeps
   those workflows inside the same connection and permission boundary.
-- If you need RDP, Telnet, or additional protocols, follow the DBX roadmap; those capabilities
-  are actively being strengthened and should be checked against the release notes for the
-  version you plan to deploy.
+- If you need RDP or additional protocols, follow the DBX roadmap; Telnet, serial, and VNC
+  are built in, RDP is still moving through review, and capabilities should be checked
+  against the release notes for the version you plan to deploy.
