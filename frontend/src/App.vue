@@ -146,6 +146,7 @@ import {
 } from "./lib/sftpBookmarks";
 import { browseCommandHistory, commandInputAction, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "./lib/commandSuggestions";
+import { classifyGhostInput, createGhostState, evaluateGhost, nextGhostState, type TerminalGhostState } from "./lib/terminalGhostSuggest";
 import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "./lib/suggestionGuard";
 // 结构化补全（对标 Warp/fig，线 2）：spec 命中时优先于历史建议浮层展示
 // 带描述的命令/flag/值候选；开关读 pluginStore（SettingsDialog 自治写入）。
@@ -772,6 +773,24 @@ const suggestionQuery = ref("");
 let suggestionGuardState: SuggestionGuardState = createSuggestionGuardState();
 // 最近一次执行的命令行（onData 回车行 + OSC 633 E 帧），抑制门据此判定。
 const lastTerminalCommand = ref<string | null>(null);
+// —— 终端行内 ghost 自动建议（对标 Warp/fish autosuggest）——状态机纯逻辑在
+// lib/terminalGhostSuggest.ts；数据源即上方 commandHistory/quickCommands refs
+// （经 evaluateGhost 选项注入，不新建存储）。开关持久化在 SettingsDialog
+// （pluginStore 键 ssh-terminal-ghost-suggest，组件内自治），App 只持内存态、
+// 经 update:ghost-suggest 即时跟随；acceptPayload 直接写 PTY，等价用户键入。
+const GHOST_SUGGEST_KEY = "ssh-terminal-ghost-suggest";
+function loadGhostSuggestEnabled(): boolean {
+  try {
+    return pluginStore.getItem(GHOST_SUGGEST_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+const ghostEnabled = ref(loadGhostSuggestEnabled());
+const ghostMatch = ref<{ command: string; remainder: string } | null>(null);
+const ghostAnchor = ref<{ x: number; y: number } | null>(null);
+// 门状态非响应式：只有 evaluateGhost 的产物（ghostMatch）进渲染。
+let ghostGate: TerminalGhostState = createGhostState();
 
 // 结构化补全浮层（对标 Warp/fig，线 2）：spec 命中时取代历史建议浮层；
 // 行缓冲/锚点语义与 suggestion* 一致（pendingTerminalInput +
@@ -2098,6 +2117,7 @@ function createTerminal() {
     const lineBeforeInput = pendingTerminalInput;
     trackPendingInput(data);
     refreshSuggestionsAfterInput(data, lineBeforeInput);
+    refreshGhostAfterInput(data);
     terminalDiag.keys += 1;
     sendTerminalBytes(new TextEncoder().encode(data));
   };
@@ -2171,6 +2191,19 @@ function handleTerminalKey(event: KeyboardEvent) {
     event.stopPropagation();
     return false;
   };
+  // IME 组合中不出 ghost（组合文本尚未落行；提交后的 onData 会重算）。
+  if (event.isComposing || event.keyCode === 229) hideGhostSuggestion();
+  // ghost 接受（→）：仅在无菜单态（浮层建议未开）时消费一次，避免与
+  // handleSuggestionKey 的菜单按键语义冲突；无 ghost 的 → 原样放行给 shell。
+  if (
+    ghostMatch.value &&
+    !suggestionOpen.value &&
+    event.key === "ArrowRight" &&
+    !(event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
+  ) {
+    acceptGhostSuggestion();
+    return consume();
+  }
   // 命令建议浮层开启时优先消费导航/填充键（Tab 回车不落远端 shell）。
   // 结构化补全浮层（线 2）优先级更高，按键语义相同（↑↓/Tab/Enter/Esc）。
   if (completionOpen.value && handleCompletionKey(event)) return consume();
@@ -2635,6 +2668,115 @@ function executeSuggestion(item: CommandSuggestion) {
   terminal?.focus();
 }
 
+// ---------------------------------------------------------------------------
+// 终端行内 ghost 自动建议（对标 Warp/fish autosuggest）：门状态机与前缀扩展
+// 匹配在 lib/terminalGhostSuggest.ts，这里只做三件事——xterm buffer 行尾采样、
+// overlay 锚点计算、接受时向 PTY 注入剩余字节（等价用户键入，无协议改动）。
+// 渲染选 overlay DOM 而非 xterm decoration：ghost 逐键刷新，decoration 注册/
+// 销毁生命周期重；overlay 与既有 action-link-hint 同机制，零 buffer 侵入，
+// 不影响选区/搜索/屏幕阅读器。
+// ---------------------------------------------------------------------------
+
+/** 设置开关（SettingsDialog 自治持久化，经 update:ghost-suggest 即时上抛）。 */
+function setGhostEnabled(next: boolean) {
+  ghostEnabled.value = next;
+  if (!next) hideGhostSuggestion();
+}
+
+function hideGhostSuggestion() {
+  ghostMatch.value = null;
+}
+
+/** 会话切换/断开：门锁存与展示一并复位（与 closeSuggestions 同点调用）。 */
+function resetGhostSuggestion() {
+  ghostGate = createGhostState();
+  ghostMatch.value = null;
+}
+
+/**
+ * 光标行采样：光标右侧到行尾无字符、且逻辑行未向下折行时视为「光标在行尾」。
+ * 纯 buffer 读取，与字宽无关；读不到 buffer（渲染器未就绪/备用屏）时保守返回
+ * false——不出 ghost 优于错位注入。
+ */
+function terminalCursorAtLineEnd(): boolean {
+  if (!terminal) return false;
+  try {
+    const buffer = terminal.buffer.active;
+    if (buffer.type !== "normal") return false;
+    const rowY = buffer.cursorY + buffer.viewportY;
+    const row = buffer.getLine(rowY);
+    if (!row) return false;
+    for (let x = buffer.cursorX; x < terminal.cols; x += 1) {
+      if (row.getCell(x)?.getChars()) return false;
+    }
+    // 折行命令的后续视觉行仍属同一逻辑行：光标在视觉行尾 ≠ 逻辑行尾。
+    if (buffer.getLine(rowY + 1)?.isWrapped) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** ghost 专用锚点：光标像素坐标（灰字从光标格起绘，y 取光标行行顶）。 */
+function readGhostAnchor(): { x: number; y: number } | null {
+  if (!terminal || !terminalHost.value) return null;
+  try {
+    const core = (terminal as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } } })._core;
+    const cell = core?._renderService?.dimensions?.css?.cell;
+    const cellWidth = cell?.width ?? 0;
+    const cellHeight = cell?.height ?? 0;
+    if (!(cellWidth > 0) || !(cellHeight > 0)) return null;
+    const buffer = terminal.buffer.active;
+    const visibleRow = buffer.cursorY - buffer.viewportY;
+    return { x: Math.round(buffer.cursorX * cellWidth), y: Math.round(visibleRow * cellHeight) };
+  } catch {
+    return null;
+  }
+}
+
+/** onData 每次输入后调用：推进门状态并重算 ghost（与浮层建议同一采样点）。 */
+function refreshGhostAfterInput(data: string) {
+  ghostGate = nextGhostState(ghostGate, classifyGhostInput(data));
+  updateGhostSuggestion();
+}
+
+function updateGhostSuggestion() {
+  // 浮层建议菜单开着时不出 ghost：菜单占用 →/Enter/Esc，与「→ 仅在无菜单态
+  // 下接受」一致，同屏叠两层建议也无法阅读。
+  if (suggestionOpen.value) {
+    ghostMatch.value = null;
+    return;
+  }
+  const evaluation = evaluateGhost({
+    state: ghostGate,
+    line: pendingTerminalInput,
+    cursorAtLineEnd: terminalCursorAtLineEnd(),
+    enabled: ghostEnabled.value,
+    // 远端命令执行中 / zmodem、trzsz 传输占用流时不出建议（任务约束）。
+    commandRunning: commandRunning.value || terminalTransferBusy.value,
+    compositionActive: false,
+    sources: { history: commandHistory.value, quickCommands: quickCommands.value },
+    bounds: {
+      minLength: Math.max(1, suggestionMinCharsState.value),
+      maxLength: Math.max(suggestionMinCharsState.value, suggestionMaxCharsState.value),
+      limit: 12,
+    },
+  });
+  ghostMatch.value = evaluation.match;
+  if (evaluation.match) ghostAnchor.value = readGhostAnchor();
+}
+
+/** → 接受：向 PTY 注入剩余字节（等价用户逐键键入；按键轨迹缓冲同步补齐）。 */
+function acceptGhostSuggestion() {
+  const match = ghostMatch.value;
+  if (!match || !match.remainder) return;
+  ghostMatch.value = null;
+  pendingTerminalInput += match.remainder;
+  sendTerminalBytes(new TextEncoder().encode(match.remainder));
+  // 接受后按新行重算：更长同前缀历史可继续 → 扩展（fish 同款行为）。
+  updateGhostSuggestion();
+}
+
 function sendTerminalBytes(data: Uint8Array) {
   // 串口会话优先：MVP 走 serial/write JSON 通道（base64），不进二进制输入
   // 队列。取舍：串口无高速键盘场景，逐键 JSON 往返可接受；sidecar 暂无
@@ -2703,10 +2845,11 @@ function resetCommandMarker() {
   commandMarker.durationMs = null;
   commandMarker.cwd = "";
   commandMarker.startedAt = null;
-  // 会话切换/断开：建议浮层与抑制门锁存一并复位（P1-1）。
+  // 会话切换/断开：建议浮层与抑制门锁存一并复位（P1-1）；ghost 门同步复位。
   closeSuggestions();
   suggestionGuardState = createSuggestionGuardState();
   lastTerminalCommand.value = null;
+  resetGhostSuggestion();
 }
 
 function applyCommandMarker(updates: Osc633StreamUpdates) {
@@ -8042,6 +8185,8 @@ async function pasteTerminal() {
 function interceptTerminalPaste(event: ClipboardEvent) {
   event.preventDefault();
   event.stopPropagation();
+  // 粘贴路径不出 ghost：立即消除（onData 不经手粘贴正文，下一次可打印键入重算）。
+  hideGhostSuggestion();
   const text = event.clipboardData?.getData("text/plain") || "";
   if (!text) return;
   void sendConfirmedPaste(text);
@@ -10481,6 +10626,15 @@ onBeforeUnmount(() => {
           @activate="(index) => (completionActiveIndex = index)"
           @accept="acceptCompletionRow"
         />
+        <!-- 终端行内 ghost 自动建议（对标 Warp/fish）：灰色剩余文本盖在光标右侧，
+             → 一次接受（handleTerminalKey 消费）。overlay DOM 而非 xterm
+             decoration 的理由见 ghost 函数块注释。 -->
+        <div
+          v-if="ghostMatch && ghostAnchor"
+          class="terminal-ghost mono"
+          :style="{ left: `${ghostAnchor.x}px`, top: `${ghostAnchor.y}px` }"
+          aria-hidden="true"
+        >{{ ghostMatch.remainder }}</div>
         <div v-if="terminalDragActive || (dragActive && !sftpPaneOpen)" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
         <TerminalSearchPanel
           v-if="searchOpen"
@@ -11503,6 +11657,7 @@ onBeforeUnmount(() => {
       @update:action-links="updateActionLinksSettings"
       @update:gutter="updateGutterSettings"
       @update:ctx-search-engines="updateCtxSearchEngines"
+      @update:ghost-suggest="setGhostEnabled"
       @update:wallpaper-enabled="updateWallpaperEnabled"
       @update:wallpaper-opacity="updateWallpaperOpacity"
       @set-wallpaper-image="setWallpaperImage"
@@ -12110,6 +12265,20 @@ body.resizing-col { cursor: col-resize !important; user-select: none; }
   white-space: pre;
   text-overflow: ellipsis;
   box-shadow: var(--shadow-sm, 0 1px 3px rgb(0 0 0 / 0.25));
+  pointer-events: none;
+}
+/* 终端行内 ghost 自动建议（对标 Warp/fish）：灰字盖在光标格上，无交互
+   （pointer-events:none），不参与选区/搜索。终端主题色在 xterm 内部渲染，
+   CSS 拿不到，故用全局次级前景色 + 低透明度近似 fish 的 dim 灰。 */
+.terminal-ghost {
+  position: absolute;
+  z-index: 3;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  white-space: pre;
+  line-height: 1;
+  color: var(--muted-foreground);
+  opacity: 0.55;
   pointer-events: none;
 }
 </style>

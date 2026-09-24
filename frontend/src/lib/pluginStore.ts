@@ -41,6 +41,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 结构化补全开关（对标 Warp/fig 线 2）：SettingsDialog 开关行自治读写，
   // App 弹出浮层前直读（"false" = 关，默认开）。
   "ssh-completion-spec",
+  // 行内 ghost 自动建议（对标 Warp 线 1）：SettingsDialog 开关行自治读写，
+  // 默认开。
+  "ssh-terminal-ghost-suggest",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);

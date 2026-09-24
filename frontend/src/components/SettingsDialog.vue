@@ -175,6 +175,16 @@ const specCompletionEnabled = ref(true);
 function loadSpecCompletionEnabled(): boolean {
   try {
     return pluginStore.getItem(SPEC_COMPLETION_ENABLED_KEY) !== "false";
+// 终端行内 ghost 自动建议开关（np8，对标 Warp/fish）：沿用 x11 的「组件内自治
+// 读写」先例，但持久化走独立 pluginStore 键（UI 偏好单点，默认开）；与 x11 的
+// 差异只在生效语义——ghost 渲染在 App 当前会话即时生效，故写穿后经
+// update:ghostSuggest 把新值上抛（App 只握内存态，不负责持久化）。
+const GHOST_SUGGEST_KEY = "ssh-terminal-ghost-suggest";
+const ghostEnabled = ref(loadGhostEnabled());
+
+function loadGhostEnabled(): boolean {
+  try {
+    return pluginStore.getItem(GHOST_SUGGEST_KEY) !== "0";
   } catch {
     return true;
   }
@@ -190,6 +200,16 @@ function setSpecCompletionEnabled(next: boolean) {
 }
 
 specCompletionEnabled.value = loadSpecCompletionEnabled();
+
+function setGhostEnabled(next: boolean) {
+  ghostEnabled.value = next;
+  try {
+    pluginStore.setItem(GHOST_SUGGEST_KEY, next ? "1" : "0");
+  } catch {
+    // 存储不可用（沙箱降级链耗尽）：退化为会话内存态，开关仍然生效。
+  }
+  emit("update:ghostSuggest", next);
+}
 
 const props = defineProps<{
   open: boolean;
@@ -266,6 +286,8 @@ const emit = defineEmits<{
   (e: "error", cause: unknown): void;
   (e: "browse-download-dir"): void;
   (e: "update:webgl", value: boolean): void;
+  /** 行内 ghost 自动建议开关（组件自治持久化 pluginStore，App 只同步内存态）。 */
+  (e: "update:ghostSuggest", value: boolean): void;
   /** 行为设置局部增量：App 侧会归一化 + 持久化 + 即时落地到 xterm 选项。 */
   (e: "update-behavior", patch: Partial<TerminalBehaviorSettings>): void;
   /** 快捷键整表替换（编辑器内部管理增删改，只上抛最终结果）。 */
@@ -1761,6 +1783,15 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <span>{{ t("completionMenu.settingsEnabled") }}</span>
             </label>
             <p class="muted settings-note">{{ t("completionMenu.settingsEnabledHint") }}</p>
+
+            <!-- 行内 ghost 自动建议（np8，对标 Warp/fish）：追加于「终端行为」组末尾；
+                 组件内自治读写 pluginStore（ssh-terminal-ghost-suggest），即时上抛 App。 -->
+            <h3 class="settings-section-title">{{ t("terminalGhost.sectionTitle") }}</h3>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="ghostEnabled" size="sm" @update:model-value="setGhostEnabled(Boolean($event))" />
+              <span>{{ t("terminalGhost.label") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("terminalGhost.hint") }}</p>
             </div>
 
             <!-- 快捷键（对标 Tabby「Hotkeys」页）：注册表编辑器，逐动作增删改 + 冲突提示 + 单项/整体复位。 -->

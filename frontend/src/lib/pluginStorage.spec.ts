@@ -31,6 +31,7 @@ describe("ssh pluginStore wiring", () => {
         "ssh-terminal-appearance",
         // 结构化补全开关（对标 Warp/fig 线 2）：SettingsDialog 自治读写。
         "ssh-completion-spec",
+        "ssh-terminal-ghost-suggest",
       ].sort(),
     );
     for (const banned of [
