@@ -306,6 +306,14 @@ pub fn load_preferences(data_dir: &Path) -> Value {
         let opacity = sanitize_u64_clamped(&map["wallpaper_opacity"], 10, 90, 45);
         prefs.insert("wallpaper_opacity".to_string(), Value::from(opacity));
     }
+    // 连接级启动命令（P0-4，Tabby Login scripts 对标）：按 connectionId 分桶，
+    // 形状清洗在 startup_commands 模块（单测覆盖）。
+    if let Some(store) = map
+        .get("startup_commands")
+        .and_then(crate::startup_commands::sanitize_store)
+    {
+        prefs.insert("startup_commands".to_string(), store);
+    }
 
     Value::Object(prefs)
 }
@@ -468,6 +476,14 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
             )),
         );
     }
+    // 连接级启动命令（P0-4）：整表替换（对象按 connectionId 分桶，前端
+    // 读改写合并自己的桶），形状清洗在 startup_commands 模块（单测覆盖）。
+    if let Some(value) = params.get("startup_commands") {
+        let store = crate::startup_commands::sanitize_store(value).ok_or_else(|| {
+            "startup_commands must be an object keyed by connectionId".to_string()
+        })?;
+        map.insert("startup_commands".to_string(), store);
+    }
 
     let path = store_path(data_dir);
     if let Some(parent) = path.parent() {
@@ -619,6 +635,40 @@ mod tests {
         assert!(
             save_preferences(data_dir.path(), &json!({ "downloadUseDefaultDir": "yes" })).is_err()
         );
+    }
+
+    #[test]
+    fn startup_commands_pref_roundtrip_with_shape_cleaning() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // 空偏好：键不出现（前端按无配置处理）。
+        assert!(load_preferences(data_dir.path())
+            .get("startup_commands")
+            .is_none());
+        // 非对象整体报错且不落盘污染。
+        let error = save_preferences(data_dir.path(), &json!({ "startup_commands": [] }))
+            .expect_err("must reject non-object store");
+        assert!(error.contains("startup_commands"));
+        // 写入（部分行非法/禁用/超限）+ 读回：清洗语义在 startup_commands 模块
+        // 单测覆盖，这里验证偏好链路（键名、嵌套布局、部分合并）。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "startup_commands": {
+                "conn-1": { "enabled": true, "commands": [
+                    { "command": "echo one" },
+                    { "command": "echo two", "delayMs": 5, "enabled": false },
+                ] },
+            } }),
+        )
+        .expect("save");
+        let prefs = load_preferences(data_dir.path());
+        let store = prefs.get("startup_commands").expect("store kept");
+        assert_eq!(store["conn-1"]["enabled"], true);
+        assert_eq!(store["conn-1"]["commands"].as_array().unwrap().len(), 2);
+        // 部分更新：只带别的键时 startup_commands 原样保留。
+        save_preferences(data_dir.path(), &json!({ "downloadDir": "/tmp/x" })).expect("partial");
+        let prefs = load_preferences(data_dir.path());
+        assert!(prefs.get("startup_commands").is_some());
+        assert_eq!(prefs["downloadDir"], "/tmp/x");
     }
 
     #[test]

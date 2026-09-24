@@ -32,6 +32,7 @@ mod sftp_ext;
 mod sftp_tree;
 mod ssh;
 mod ssh_algorithms;
+mod startup_commands;
 mod sudo_allowlist;
 mod sudo_fs;
 mod sudo_profiles;
