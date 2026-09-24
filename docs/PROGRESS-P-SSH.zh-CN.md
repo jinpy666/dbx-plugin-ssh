@@ -3572,3 +3572,32 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
   拒绝、或运行在 Host API < 1.3 的旧宿主时，右键粘贴仍能粘贴终端内复制的
   文本，实现两层保护。
 - `ui/index.html` 重新生成，本地验证全绿。
+
+
+## M5.5 收口（2026-09-24，main 同步 + 三会话并行线）
+
+**三条并行线产出**（用户拆分的独立会话，不等轮次顺序）：
+
+- **RDP 立项材料 ✅**（parity-rdp-docs 66d6552/38d86ab，merge 73520a5）：
+  `docs/RDP_VENDOR_FORK_PLAN.zh-CN.md`（NyaTerm fork 链事实基线：ironrdp-client/connector/tls、picky、sspi 五 crate 补丁面 + `[patch.crates-io]` 整链同轮升级约束 + Route A/B/C 决策框架）与 `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`（【硬】/【条】两级清单：NTLMv2-only fail-closed、凭据委托最小化、TLS 证书策略、CVE 对齐）。**评审材料已备齐，评审执行仍是人工门**。
+- **串口遗留补齐 ✅**（parity-serial-enh a8f2e71，merge a7414c7）：ports 列表端口路径与描述规范化分离（USB 后缀不再手输剥离）+ start 行参数（baud/data bits/parity/stop/flow）严格校验，纯逻辑单测；协议级 resize/replay/二进制写通道升级仅出设计稿 `docs/SERIAL_ENHANCE_DESIGN.zh-CN.md`，不动 wire 协议（人工评审项）。
+- **X11 spike 示例收尾 ✅**（a862bdf，上轮已并入）：`backend/examples/x11_spike.rs` 纯编译验证示例入库。
+
+**main 同步 ✅**（ed4e910）：自 M2 时代的 merge-base 一口气补齐 main 侧 15 个 commit——0.7.0 版本 bump、交互式 MFA + 重复会话（cb0274f/e3442e6）、手动 OTP 提示（PR #107）、host.storage 偏好持久化（e9edf33）、右键粘贴插件视图副本降级链（PR #102）、kitty/XTVERSION/DECRQM 能力探测应答（PR #109）、randomUUID shim（PR #111）、manifest host.storage / host.clipboard:read 权限声明。
+
+**冲突解决摘要**（5 文件）：
+
+- **ssh.rs**：取 main 侧 `open_session` 新骨架（SessionOpenRequest / transport_lease / 认证传输复用路径），注入 integration 的 X11 arming 块；clippy 暴露 main 重写覆盖掉的 TOTP 绑定回落（`sudo_auth_for` 的 otp_store 回落 + `otp_bound_as_totp_secret` 映射 + 2 个 crate use）已恢复（c279407）。
+- **App.vue**：8 处冲突全解——偏好体系保留 integration 侧（terminalBehavior 结构化 + hotkeys + transfer/suggestion adapters），并入 main 的 `terminalCopyCache`/`resolveTerminalPasteText`（右键粘贴降级链）、`randomUUID` shim（issue #104）、工具栏"复制会话"按钮（与 telnet/VNC/serial 入口共存）；main 的 SELECT_COPY_KEY 独立键与 `toggleSelectCopy` 旧路径不取（已被结构化偏好取代），`pluginStore` 全量迁移留待下轮（遗留 3）。
+- **mockDbxHost**：main 的 pluginStore 种子写法 + integration 的 #33/#71 诊断注释融合。
+- **PROGRESS/TEST_MATRIX**：追加型冲突，双方时间线记录全保留。
+- **ui/index.html**：构建重生成（695d69d，对齐 main 侧 Node 22 产物）。
+
+**全量**：backend cargo **735**（M5 基线 719，只增不减）/ clippy `-D warnings` 0 / fmt 干净；frontend vitest **886**（基线 874，只增不减）/ vue-tsc 0 / build 过（ui/ 重生成）。
+
+### M5.5 遗留（人工门/后续轮）
+
+1. 真机验收（不变）：VNC server（None/VNC-Auth）、X server（XQuartz/VcXsrv）转发、串口硬件、GPU/NPU 主机、Windows ConPTY、DBX 桌面端到端。
+2. RDP：立项材料已备（`RDP_VENDOR_FORK_PLAN` / `RDP_CREDSSP_REVIEW_CHECKLIST`），评审执行仍为人工门；串口协议升级设计稿待评审。
+3. **App.vue 偏好存储 pluginStore 全量迁移**：main 侧已迁 12 个键；integration 结构化偏好新增的前端键（终端行为/快捷键/传输并发/命令建议等）仍走 localStorage 直写，在真机 opaque origin 下静默不持久化（行为可降但偏好不保）——建议下一轮统一切 `pluginStore` 并复验真机持久化。
+4. **操作规程**：同一 integration worktree 严禁两个会话并发写——本轮独立收口会话与看护会话曾在 merge 冲突解决上交叠（PROGRESS/mockDbxHost 被外部进程先行解决），靠互斥文件域与人工核验避免撞车；看护任务启动前必须确认既有会话已全部停止。

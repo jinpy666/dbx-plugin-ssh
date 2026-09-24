@@ -66,3 +66,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：`vnc/start|input|resize|reconnect|set-clipboard|close|list` 协议、44 字节 RGBA patch 帧编解码（3840×2160 / 64MiB / 步长上界）、VNC-Auth 密码长度拒绝、Tight/JPEG 矩形显式失败、generation 重连语义；前端 VNC 画布与连接对话框、Docker"在终端打开"fill 通道、x11_spike 编译示例（不参与运行）。
 
 仍保持未验收（依赖真机/CI）：VNC 真机 server（None/VNC-Auth）端到端、X server 转发真机联调、串口硬件、GPU/NPU 主机、Windows ConPTY、DBX 桌面宿主端到端；RDP 维持人工评审门（vendored fork 链 + CredSSP）。
+
+
+## M5.5（main 同步 + 三会话并行线，2026-09-24）
+
+单测：cargo **735/735**（M5 基线 719，只增不减；串口 ports 规范化/行参数校验 + main 侧 MFA、传输复用、pluginStorage、sessionTransportReuse、terminalModeQueries 等 spec 并入）、vitest **886/886**（基线 874，只增不减）、vue-tsc 0 错、`pnpm build` 过（ui/ 重生成）、clippy `-D warnings` 0、fmt 干净。
+
+新增可测面：serial ports 路径/描述规范化分离与 start 行参数严格校验（纯逻辑）；main 同步带入的交互式 MFA、重复会话认证传输复用、右键粘贴插件视图副本降级链（createTerminalCopyCache/resolveTerminalPasteText）、kitty/XTVERSION/DECRQM 能力探测应答、randomUUID shim 的既有 spec；RDP 立项材料两份与串口协议升级设计稿（评审门文档，无代码面）。
+
+仍保持未验收（依赖真机/CI）：VNC server、X server 转发、串口硬件、GPU/NPU 主机、Windows ConPTY、DBX 桌面端到端；RDP 评审执行（材料已备）。新增回归面：App.vue 结构化偏好新键（终端行为/快捷键/传输并发/命令建议）在真机 opaque origin 下的持久化——pluginStore 全量迁移待下轮（PROGRESS 遗留 3）。
