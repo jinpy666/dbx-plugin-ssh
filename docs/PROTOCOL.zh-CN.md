@@ -18,7 +18,7 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 
 | 方法 | 作用 |
 | --- | --- |
-| `ssh/session/open`、`ssh/session/close` | 创建、关闭 PTY 会话（`open` 可选 `reuseAuthenticatedTransport` + `reuseAuthenticatedSessionId`，复用指定同连接存活会话的认证 transport 并新开独立 channel；显式 ID 不可用时 fail closed，只有布尔参数时兼容选择同连接最早存活会话；复用会继承来源会话已解析的 sudo 编排快照；连接 `remote_command` 非空时 exec 该命令替代 shell，`set_env` 随会话注入；连接配置 `triggers` 时挂载自动交互触发器引擎，命中发 `ssh/trigger` 事件，见「自动交互触发器（Expect）与外部密码管理器」节） |
+| `ssh/session/open`、`ssh/session/close` | 创建、关闭 PTY 会话（`open` 可选 `reuseAuthenticatedTransport` + `reuseAuthenticatedSessionId`，复用指定同连接存活会话的认证 transport 并新开独立 channel；显式 ID 不可用时 fail closed，只有布尔参数时兼容选择同连接最早存活会话；复用会继承来源会话已解析的 sudo 编排快照；连接 `remote_command` 非空时 exec 该命令替代 shell，`set_env` 随会话注入；连接配置 `triggers` 时挂载自动交互触发器引擎，命中发 `ssh/trigger` 事件；`startup_commands` 偏好启用的连接在 shell 建立后按序自动键入预置命令并发 `ssh/startup` 事件，见「启动命令（Login scripts 对标）」节） |
 | `ssh/terminal/resize` | 调整 PTY 行列 |
 | `ssh/terminal/replay` | 从指定序号补发终端输出 |
 | `ssh/host-key/resolve` | 处理工作台内的主机密钥确认 |
@@ -69,7 +69,7 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `local/terminal/start`、`local/terminal/resize`、`local/terminal/replay` | 本地终端：sidecar 所在机器的交互式登录 shell（工作台显式入口触发，见「本地终端」节；`start` 支持显式 `shell` 与继承用的 `cwd`） |
 | `local/shells/list` | 本机可启动 shell 清单（用户登录 shell 置顶，含 `isDefault`/`isUserShell`/`injectable` 标记——最后一项表示该 shell 是否支持 integration 注入，不支持的在选择器中灰掉开关；Unix 读 `/etc/shells`+`dscl`，Windows 枚举 PATH 下的 pwsh/PowerShell/cmd/wsl），工作台 shell 选择器数据源 |
 | `local/session/list`、`local/session/close` | 本地终端会话清单（webview 重载后接回）与关闭 |
-| `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
+| `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
 
 ## 运行时设置
 
@@ -209,6 +209,14 @@ suggestions: [{command, purposeKey}]}`（字段钳制：title/message ≤2 KiB�
 
 - `set_env`（textarea，默认空串）：每行一条 `KEY=VALUE`（分号亦可作分隔符，空白条目忽略，键值两侧空白去除），在交互终端通道（`ssh/session/open`，PTY 申请后、shell/exec 请求前）与 exec / sudo 命令通道上以 CHANNEL_REQUEST `env` 注入。重复键以最后一条为准——本地合并去重后每个变量恰好请求一次；sudo 通道内部 `SUDO_ASKPASS` 清空默认值让位于用户同名条目（用户值优先，不靠服务器端覆盖顺序）。**默认值**：空串（不发任何 env 请求）。**校验失败行为**：任一条目非法（缺 `=`、键为空或含空白或 NUL、值含 NUL）时连接解析直接失败，并聚合报出全部非法条目——宁可连不上也不错配。语义为客户端显式指定的环境，**不透传本地进程环境变量**；env 请求的注入失败（通道/传输级错误）即报错并命名该变量，不静默吞掉。注意与 ssh(1) 一致的协议现实：env 请求为 fire-and-forget，服务器未 `AcceptEnv` 对应变量时静默丢弃（不发失败应答可观测），此时该变量不生效但连接不失败——需要在远端生效请在服务器 sshd_config 配置 `AcceptEnv`。插件内部管道命令（metrics 采集、磁盘用量、服务器内复制）不注入 setEnv，保证输出解析与连接的语言覆盖解耦。
 - `remote_command`（单行文本，默认空串）：非空时 `ssh/session/open` 在申请 PTY 并注入 setEnv 后 exec 该命令**替代 shell request**（PTY 照常申请，对标 `ssh RemoteCommand`）。空串 = 普通交互 shell（默认）。重连或工作台重开会话会**重放同一条命令**，属预期行为（与 ssh(1) 一致：每次新会话都重新执行）。MCP 隐藏 exec 通道、`ssh/exec`、sudo 执行与终端回放（replay）/重连语义不变——remoteCommand 只影响交互会话的启动方式。
+
+## 启动命令（Login scripts 对标）
+
+连接级启动命令（Tabby「Login scripts」对标，M7 P0-4）：连接建立、`request_shell` 成功进入交互 shell 后，sidecar 按配置顺序把预置命令逐条经终端输入通道（与终端 keepalive 相同的 PTY 键盘语义）写入并回车。这是 shell 起来之后的自动键入序列，**不是** `RemoteCommand` 的替代：`remote_command` 非空的 exec 会话没有可键入的 shell 提示符，语义冲突，**自动跳过启动命令**（见上节）。
+
+- 存储：复用 `local/preferences/*` 白名单键 `startup_commands`（`<plugin_data_dir>/preferences.json`），按 connectionId 分桶：`{ <connectionId>: { enabled: bool（默认 false）, commands: [{ command: string（≤4KiB，结尾 CR/LF 剥离）, delayMs: u64（0..=30000，缺省 300）, enabled: bool（默认 true） }] } }`；每连接最多 20 条、最多 512 个连接桶，桶/行级非法形状丢弃不报错（整体非对象由 set 报错）。前端「设置 → 终端 → 启动命令」列表编辑（增删/排序/启停/延迟毫秒，开关默认关），改动对之后新开的会话生效（`open_session` 时读取）。
+- 执行：shell 起来后 spawn 一次性顺序注入器；每条命令先等 `delayMs`（首条等待同时覆盖 shell 提示符就绪），再写入 `command + "\r"`；会话关闭（输入通道断开）注入即停。命令可能含敏感串——**永不进日志、审计或事件**。
+- 事件 `ssh/startup`：注入结束发一次 `{ sessionId, count, completed }`（`count` 为计划条数；`completed: false` 表示会话中途关闭、序列未走完），**不带任何命令内容**。
 
 ## Quick Sudo 远程执行
 

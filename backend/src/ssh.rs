@@ -49,6 +49,7 @@ use crate::quick_commands;
 use crate::session_recording;
 use crate::sftp_tree;
 use crate::ssh_algorithms;
+use crate::startup_commands;
 use crate::sudo_profiles;
 use crate::transfer_history;
 use crate::triggers;
@@ -1947,6 +1948,43 @@ impl SshRuntime {
                     }
                 }
             });
+        }
+
+        // Startup commands (Tabby "Login scripts" parity, M7 P0-4): after the
+        // shell is up, type the connection's pre-configured command sequence
+        // through the same input channel the keepalive uses. Only for real
+        // shell sessions — a RemoteCommand exec replaces the shell, so typing
+        // into it is a semantic conflict (documented in PROTOCOL.zh-CN.md).
+        // The event reports only the count and completion: command contents
+        // can carry secrets and never reach logs or events.
+        if startup_commands::executes_for(&connection.remote_command) {
+            let plan = startup_commands::load_plan(&self.data_dir, &connection.id);
+            if !plan.is_empty() {
+                let terminal_tx = entry.terminal_tx.clone();
+                let startup_emitter = emitter.clone();
+                let startup_session_id = session_id.clone();
+                let startup_count = plan.len();
+                tokio::spawn(async move {
+                    let completed = startup_commands::inject_sequence(&plan, |payload| {
+                        let terminal_tx = terminal_tx.clone();
+                        async move {
+                            terminal_tx
+                                .send(TerminalCommand::Input(payload))
+                                .await
+                                .is_ok()
+                        }
+                    })
+                    .await;
+                    let _ = startup_emitter.event(
+                        "ssh/startup",
+                        json!({
+                            "sessionId": startup_session_id,
+                            "count": startup_count,
+                            "completed": completed,
+                        }),
+                    );
+                });
+            }
         }
 
         let task_id = session_id.clone();

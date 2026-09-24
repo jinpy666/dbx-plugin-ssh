@@ -865,6 +865,13 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .remembered-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .remembered-line { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; }
 
+/* 设置弹窗「启动命令」编辑行（P0-4）：启用勾选 + 命令文本 + 延迟毫秒 + 排序/删除 */
+.startup-commands-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
+.startup-commands-list li { display: flex; align-items: center; gap: 6px; }
+.startup-commands-list li input[type="checkbox"] { accent-color: var(--primary); flex: 0 0 auto; }
+.startup-command-text { flex: 1 1 auto; min-width: 0; font-size: 11px; }
+.startup-command-delay { flex: 0 0 84px; width: 84px; font-size: 11px; }
+
 /* 告警排查弹窗 */
 .alert-triage-modal { width: min(560px, calc(100vw - 32px)); }
 .alert-triage-hint { margin: -6px 0 0; font-size: 11px; line-height: 1.5; }

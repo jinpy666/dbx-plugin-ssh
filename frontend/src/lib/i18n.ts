@@ -5219,6 +5219,113 @@ for (const locale of Object.keys(x11Messages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...x11Messages[locale] };
 }
 
+// 启动命令（P0-4，Tabby「Login scripts」对标）：连接建立进入 shell 后按序
+// 自动键入；仅 SSH 交互 shell 会话生效，RemoteCommand（exec）会话跳过。
+// 键全部 startupCommands.* 前缀，七语齐备。
+const startupCommandsMessages: Record<string, Record<string, string>> = {
+  en: {
+    "startupCommands.sectionTitle": "Startup commands",
+    "startupCommands.enabled": "Run startup commands after connecting",
+    "startupCommands.enabledHint": "Types each command into the shell (with Enter) after the session opens — Tabby \"Login scripts\" parity. Configured per connection; changes apply to sessions opened afterwards.",
+    "startupCommands.empty": "No commands yet. Add one to run it automatically after connecting.",
+    "startupCommands.add": "Add command",
+    "startupCommands.commandPlaceholder": "command, e.g. cd /var/log",
+    "startupCommands.delay": "Delay before this command (ms)",
+    "startupCommands.rowEnabled": "Enable this command",
+    "startupCommands.moveUp": "Move up",
+    "startupCommands.moveDown": "Move down",
+    "startupCommands.remove": "Remove",
+    "startupCommands.scopeNote": "SSH interactive shell sessions only: sessions with a RemoteCommand are skipped. Up to 20 commands, each capped at 4 KiB; the delay runs before each command (default 300 ms, max 30 s).",
+  },
+  "zh-CN": {
+    "startupCommands.sectionTitle": "启动命令",
+    "startupCommands.enabled": "连接后自动执行启动命令",
+    "startupCommands.enabledHint": "会话建立进入 shell 后按序自动键入命令并回车（Tabby「Login scripts」对标）。按连接分别配置，改动对之后新开的会话生效。",
+    "startupCommands.empty": "还没有命令。添加一条，连接后自动执行。",
+    "startupCommands.add": "添加命令",
+    "startupCommands.commandPlaceholder": "命令，如 cd /var/log",
+    "startupCommands.delay": "该命令执行前的延迟（毫秒）",
+    "startupCommands.rowEnabled": "启用该命令",
+    "startupCommands.moveUp": "上移",
+    "startupCommands.moveDown": "下移",
+    "startupCommands.remove": "移除",
+    "startupCommands.scopeNote": "仅 SSH 交互 shell 会话生效：RemoteCommand（exec）会话自动跳过。最多 20 条、单条上限 4 KiB；每条命令执行前先等待所设延迟（默认 300ms，上限 30s）。",
+  },
+  "zh-TW": {
+    "startupCommands.sectionTitle": "啟動命令",
+    "startupCommands.enabled": "連線後自動執行啟動命令",
+    "startupCommands.enabledHint": "工作階段建立進入 shell 後按序自動鍵入命令並送出 Enter（Tabby「Login scripts」對標）。按連線分別設定，變更對之後新開的工作階段生效。",
+    "startupCommands.empty": "還沒有命令。新增一條，連線後自動執行。",
+    "startupCommands.add": "新增命令",
+    "startupCommands.commandPlaceholder": "命令，如 cd /var/log",
+    "startupCommands.delay": "該命令執行前的延遲（毫秒）",
+    "startupCommands.rowEnabled": "啟用該命令",
+    "startupCommands.moveUp": "上移",
+    "startupCommands.moveDown": "下移",
+    "startupCommands.remove": "移除",
+    "startupCommands.scopeNote": "僅 SSH 互動 shell 工作階段生效：RemoteCommand（exec）工作階段自動略過。最多 20 條、單條上限 4 KiB；每條命令執行前先等待所設延遲（預設 300ms，上限 30s）。",
+  },
+  es: {
+    "startupCommands.sectionTitle": "Comandos de arranque",
+    "startupCommands.enabled": "Ejecutar comandos de arranque tras conectar",
+    "startupCommands.enabledHint": "Escribe cada comando en el shell (con Enter) tras abrirse la sesión — equivalente a \"Login scripts\" de Tabby. Se configura por conexión; los cambios se aplican a las sesiones abiertas después.",
+    "startupCommands.empty": "Aún no hay comandos. Añade uno para ejecutarlo automáticamente tras conectar.",
+    "startupCommands.add": "Añadir comando",
+    "startupCommands.commandPlaceholder": "comando, p. ej. cd /var/log",
+    "startupCommands.delay": "Retraso antes de este comando (ms)",
+    "startupCommands.rowEnabled": "Activar este comando",
+    "startupCommands.moveUp": "Subir",
+    "startupCommands.moveDown": "Bajar",
+    "startupCommands.remove": "Quitar",
+    "startupCommands.scopeNote": "Solo sesiones SSH de shell interactivo: las sesiones con RemoteCommand se omiten. Hasta 20 comandos, cada uno con un límite de 4 KiB; la espera transcurre antes de cada comando (300 ms por defecto, máx. 30 s).",
+  },
+  it: {
+    "startupCommands.sectionTitle": "Comandi di avvio",
+    "startupCommands.enabled": "Esegui i comandi di avvio dopo la connessione",
+    "startupCommands.enabledHint": "Digita ogni comando nella shell (con Invio) dopo l'apertura della sessione — equivalente ai \"Login scripts\" di Tabby. Configurazione per connessione; le modifiche valgono per le sessioni aperte successivamente.",
+    "startupCommands.empty": "Nessun comando. Aggiungine uno per eseguirlo automaticamente dopo la connessione.",
+    "startupCommands.add": "Aggiungi comando",
+    "startupCommands.commandPlaceholder": "comando, es. cd /var/log",
+    "startupCommands.delay": "Ritardo prima di questo comando (ms)",
+    "startupCommands.rowEnabled": "Abilita questo comando",
+    "startupCommands.moveUp": "Sposta su",
+    "startupCommands.moveDown": "Sposta giù",
+    "startupCommands.remove": "Rimuovi",
+    "startupCommands.scopeNote": "Solo sessioni SSH con shell interattiva: le sessioni con RemoteCommand vengono saltate. Fino a 20 comandi, ciascuno limitato a 4 KiB; l'attesa precede ogni comando (300 ms predefiniti, max 30 s).",
+  },
+  ja: {
+    "startupCommands.sectionTitle": "起動コマンド",
+    "startupCommands.enabled": "接続後に起動コマンドを自動実行",
+    "startupCommands.enabledHint": "セッション確立してシェルに入った後、各コマンドを（Enter 付きで）順にタイプ入力します — Tabby の「Login scripts」相当。接続ごとに設定し、変更は以後に開いたセッションに反映されます。",
+    "startupCommands.empty": "コマンドがありません。追加すると接続後に自動実行されます。",
+    "startupCommands.add": "コマンドを追加",
+    "startupCommands.commandPlaceholder": "コマンド（例: cd /var/log）",
+    "startupCommands.delay": "このコマンド実行前の待機時間（ミリ秒）",
+    "startupCommands.rowEnabled": "このコマンドを有効化",
+    "startupCommands.moveUp": "上へ移動",
+    "startupCommands.moveDown": "下へ移動",
+    "startupCommands.remove": "削除",
+    "startupCommands.scopeNote": "SSH の対話シェルセッションのみ有効：RemoteCommand（exec）セッションはスキップされます。最大 20 件、各 4 KiB まで。各コマンドの前に設定した遅延を待ちます（既定 300ms、上限 30 秒）。",
+  },
+  "pt-BR": {
+    "startupCommands.sectionTitle": "Comandos de inicialização",
+    "startupCommands.enabled": "Executar comandos de inicialização após conectar",
+    "startupCommands.enabledHint": "Digita cada comando no shell (com Enter) após abrir a sessão — equivalente aos \"Login scripts\" do Tabby. Configurado por conexão; mudanças valem para sessões abertas depois.",
+    "startupCommands.empty": "Nenhum comando ainda. Adicione um para executá-lo automaticamente após conectar.",
+    "startupCommands.add": "Adicionar comando",
+    "startupCommands.commandPlaceholder": "comando, ex.: cd /var/log",
+    "startupCommands.delay": "Atraso antes deste comando (ms)",
+    "startupCommands.rowEnabled": "Ativar este comando",
+    "startupCommands.moveUp": "Mover para cima",
+    "startupCommands.moveDown": "Mover para baixo",
+    "startupCommands.remove": "Remover",
+    "startupCommands.scopeNote": "Somente sessões SSH de shell interativo: sessões com RemoteCommand são ignoradas. Até 20 comandos, cada um limitado a 4 KiB; a espera acontece antes de cada comando (300 ms por padrão, máx. 30 s).",
+  },
+};
+for (const locale of Object.keys(startupCommandsMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...startupCommandsMessages[locale] };
+}
+
 /** Dev/test helper: flattens a nested message table into dotted `a.b` keys. */
 function flattenMessageTable(table: unknown, prefix = "", out: Record<string, string> = {}): Record<string, string> {
   if (!table || typeof table !== "object") return out;

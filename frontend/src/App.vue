@@ -11337,6 +11337,7 @@ onBeforeUnmount(() => {
       v-model:open="settingsOpen"
       v-model:profilesOpen="profilesOpen"
       :session-id="session?.sessionId"
+      :connection-id="session?.connectionId"
       :terminal-font-size="terminalFontSize"
       :host-font-size="appearance.terminal.fontSize"
       :host-font-family="hostTerminalFontFamily(appearance)"

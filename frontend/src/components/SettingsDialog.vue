@@ -7,7 +7,7 @@
 // （WebGL/选中复制/终端字体）的权威态在宿主 App——下载偏好经 downloadPrefs
 // 适配器读写，终端偏好经 props 下发 + emits 上抛。
 import { computed, reactive, ref, watch } from "vue";
-import { Check, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, ShieldCheck, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Check, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, ShieldCheck, Trash2, Upload, X } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
@@ -49,6 +49,96 @@ import {
 import type { TerminalHotkeyBindings } from "../lib/terminalHotkeys";
 import { type ActionLinkMatcherToggles, type ActionLinksSettings } from "../lib/actionLinksMatcher";
 import { GUTTER_TIMESTAMP_DEFAULT_FORMAT, type GutterSettings } from "../lib/terminalGutter";
+import {
+  createStartupEntry,
+  mergeStartupStore,
+  normalizeStartupConfig,
+  STARTUP_COMMAND_MAX,
+  STARTUP_DELAY_MAX_MS,
+  STARTUP_DELAY_DEFAULT_MS,
+  type StartupCommandEntry,
+} from "../lib/startupCommands";
+
+/** 连接级启动命令（P0-4，Tabby「Login scripts」对标）：同 X11 走组件内自治
+ * RPC 读写 sidecar 偏好（`startup_commands` 键按 connectionId 分桶，读改写
+ * 合并只动本连接的桶）；shell 起来后按序注入，改动对新开会话生效。 */
+const startupEnabled = ref(false);
+const startupCommands = ref<StartupCommandEntry[]>([]);
+
+async function loadStartupCommands() {
+  const connectionId = props.connectionId;
+  if (!connectionId) return;
+  try {
+    const prefs = await window.dbxPlugin?.invoke<{ startup_commands?: unknown }>("local/preferences/get", {});
+    const store = prefs?.startup_commands as Record<string, unknown> | undefined;
+    const config = normalizeStartupConfig(store?.[connectionId]);
+    startupEnabled.value = config.enabled;
+    startupCommands.value = config.commands;
+  } catch {
+    startupEnabled.value = false;
+    startupCommands.value = [];
+  }
+}
+
+/// 读改写合并：`local/preferences/set` 对 startup_commands 是整键替换，
+/// 其他连接的桶从最新偏好读回后原样保留。
+async function persistStartupCommands() {
+  const connectionId = props.connectionId;
+  if (!connectionId) return;
+  try {
+    const prefs = await window.dbxPlugin?.invoke<{ startup_commands?: unknown }>("local/preferences/get", {});
+    await window.dbxPlugin?.invoke("local/preferences/set", {
+      startup_commands: mergeStartupStore(
+        prefs?.startup_commands,
+        connectionId,
+        { enabled: startupEnabled.value, commands: startupCommands.value },
+      ),
+    });
+  } catch (cause) {
+    emit("error", cause);
+  }
+}
+
+async function setStartupEnabled(next: boolean) {
+  startupEnabled.value = next;
+  // 开启且无命令时给一行空行，省一次点击；清空命令立即持久化。
+  if (next && startupCommands.value.length === 0) startupCommands.value.push(createStartupEntry());
+  await persistStartupCommands();
+}
+
+function addStartupEntry() {
+  if (startupCommands.value.length >= STARTUP_COMMAND_MAX) return;
+  startupCommands.value.push(createStartupEntry());
+  void persistStartupCommands();
+}
+
+function removeStartupEntry(index: number) {
+  startupCommands.value.splice(index, 1);
+  void persistStartupCommands();
+}
+
+function moveStartupEntry(index: number, delta: number) {
+  const target = index + delta;
+  if (target < 0 || target >= startupCommands.value.length) return;
+  const [row] = startupCommands.value.splice(index, 1);
+  startupCommands.value.splice(target, 0, row);
+  void persistStartupCommands();
+}
+
+/** 行内增量（命令文本 / 延迟 / 启用）：改完即持久化（@change 语义，非逐键）。 */
+function updateStartupEntry(index: number, patch: Partial<StartupCommandEntry>) {
+  const row = startupCommands.value[index];
+  if (!row) return;
+  Object.assign(row, patch);
+  void persistStartupCommands();
+}
+
+/** 延迟输入收敛：空/非法回缺省 300ms，越界截断到 30s。 */
+function clampStartupDelayInput(raw: string): number {
+  const value = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(value) || value < 0) return STARTUP_DELAY_DEFAULT_MS;
+  return Math.min(value, STARTUP_DELAY_MAX_MS);
+}
 
 /** X11 转发偏好（P3-3）：组件内自治读写 sidecar 偏好——即时生效语义
  * （新会话才启用），不走 props/emit（App 无需感知）。 */
@@ -79,6 +169,8 @@ const props = defineProps<{
   open: boolean;
   profilesOpen: boolean;
   sessionId?: string;
+  /** 当前 SSH 会话的连接 id：启动命令偏好按 connectionId 分桶（无会话时整区隐藏）。 */
+  connectionId?: string;
   /** 终端当前生效字号（缩放链路在 App，设置页字号草稿以它为初始回显）。 */
   terminalFontSize: number;
   /** 宿主主题终端基准字号（「恢复默认」回到该值）。 */
@@ -615,6 +707,7 @@ async function reloadSettings() {
   void loadLocalKeys();
   void loadMcpSettings();
   void loadSudoProfiles();
+  void loadStartupCommands();
   try {
     // revealSecrets: 预填已存原值（原始凭据串），避免只能看到"已配置"占位。
     const meta = await window.dbxPlugin.invoke<SshSettings>("ssh/settings/get", { sessionId: props.sessionId, revealSecrets: true });
@@ -639,6 +732,11 @@ async function reloadSettings() {
 
 watch(() => props.open, (open) => {
   if (open) void reloadSettings();
+});
+
+// 弹窗开着时活跃会话切到另一连接：启动命令区按新 connectionId 重新回显。
+watch(() => props.connectionId, () => {
+  if (props.open) void loadStartupCommands();
 });
 
 watch(() => props.profilesOpen, (open) => {
@@ -1564,6 +1662,57 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("x11.enabledHint") }}</p>
             <p v-if="x11ReadOnlyNote" class="muted settings-note">{{ t("x11.readOnlyNote") }}</p>
+
+            <!-- 启动命令（对标 Tabby「Login scripts」）：连接建立进入 shell 后按序
+                 自动键入；仅 SSH 交互 shell 会话生效（RemoteCommand exec 会话跳过）。 -->
+            <template v-if="connectionId">
+            <h3 class="settings-section-title">{{ t("startupCommands.sectionTitle") }}</h3>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="startupEnabled" size="sm" @update:model-value="setStartupEnabled(Boolean($event))" />
+              <span>{{ t("startupCommands.enabled") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("startupCommands.enabledHint") }}</p>
+            <template v-if="startupEnabled">
+              <p v-if="!startupCommands.length" class="muted settings-note">{{ t("startupCommands.empty") }}</p>
+              <ul v-else class="settings-list startup-commands-list">
+                <li v-for="(entry, index) in startupCommands" :key="index">
+                  <input
+                    type="checkbox"
+                    :checked="entry.enabled"
+                    :aria-label="t('startupCommands.rowEnabled')"
+                    :title="t('startupCommands.rowEnabled')"
+                    @change="updateStartupEntry(index, { enabled: ($event.target as HTMLInputElement).checked })"
+                  />
+                  <input
+                    class="mono startup-command-text"
+                    spellcheck="false"
+                    :value="entry.command"
+                    :placeholder="t('startupCommands.commandPlaceholder')"
+                    :aria-label="t('startupCommands.commandPlaceholder')"
+                    @change="updateStartupEntry(index, { command: textFieldValue($event) })"
+                  />
+                  <input
+                    class="mono startup-command-delay"
+                    type="number"
+                    min="0"
+                    :max="STARTUP_DELAY_MAX_MS"
+                    step="50"
+                    :value="entry.delayMs"
+                    :aria-label="t('startupCommands.delay')"
+                    :title="t('startupCommands.delay')"
+                    @change="updateStartupEntry(index, { delayMs: clampStartupDelayInput(($event.target as HTMLInputElement).value) })"
+                  />
+                  <span class="settings-list-actions">
+                    <button class="icon-button" :disabled="index === 0" :title="t('startupCommands.moveUp')" @click="moveStartupEntry(index, -1)"><ArrowUp /></button>
+                    <button class="icon-button" :disabled="index === startupCommands.length - 1" :title="t('startupCommands.moveDown')" @click="moveStartupEntry(index, 1)"><ArrowDown /></button>
+                    <button class="icon-button" :title="t('startupCommands.remove')" @click="removeStartupEntry(index)"><Trash2 /></button>
+                  </span>
+                </li>
+              </ul>
+              <button v-if="startupCommands.length < STARTUP_COMMAND_MAX" class="link-button" type="button" @click="addStartupEntry"><Plus />{{ t("startupCommands.add") }}</button>
+              <p class="muted settings-note">{{ t("startupCommands.scopeNote") }}</p>
+            </template>
+            </template>
 
             <h3 class="settings-section-title">{{ t("suggestions.settingsTitle") }}</h3>
             <label class="settings-field settings-switch-row">
