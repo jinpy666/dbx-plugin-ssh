@@ -3608,3 +3608,17 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **遗留 3 关单 ✅**（parity-plugin-store 93bc1ea/af4f73d，merge 9a1527a）：integration 结构化偏好三键迁入 pluginStore——`ssh-terminal-behavior` / `ssh-terminal-hotkeys` / `ssh-terminal-appearance`（PLUGIN_STORE_KEYS 现 15 键），实现模式对齐 terminalFont/terminalWebgl 先例（defaultStorage 返回 store 单例、显式注入保留为测试口），App.vue 调用点零改动；LEGACY_SELECT_COPY_KEY 降级镜像随主键写穿。**不迁键固化**：transfer/suggestions 五键与下载偏好同构（sidecar preferences 权威 + localStorage 同步缓存，迁走即双权威）、quick-commands（sidecar 迁移种子）、dbx-term-diag（诊断开关非偏好）——排除理由写入 pluginStore.ts 头注释与 spec 排除断言。
 - **全量**：frontend vitest **891**（基线 886，+5 默认存储回环/不抛用例）/ vue-tsc 0 / build 过（ui/ 重生成）；backend 零改动。
 - **遗留**：真机持久化复验（三键首装靠 pluginStore 惰性搬家带入 localStorage 旧值）仍属人工门；老宿主（Host API < 1.2）降级 guarded localStorage，行为等同迁移前。
+
+
+## M7 轮排期（2026-09-25，对标缺漏对齐——NyaTerm/Tabby 基准复审结论）
+
+全量源码对标复审（NyaTerm v1.2.11 /Users/Jinpy/btroot/nyaterm + Tabby/NetCatty/tiny-rdm/iShell 文档线索交叉）结论：已完成面见 FEATURE_PARITY（Tabby 配色 192 套/行为页/快捷键编辑器、tiny-rdm 后端全家族、NetCatty 五项、iShell 四件、NyaTerm 七差距项 2a-2d/4/5/7/8a-8f/9a-9c/10a/10c），剩余缺漏按优先级排出 M7 并发实施（全部从 670d124 切独立 worktree）：
+
+- **P0-1 Telnet auto_login**（np9-telnet-autologin）：声明式正则自动登录（用户名/密码/成功/失败正则+重试），对标 NyaTerm `TelnetAutoLoginConfig`；落点 backend/telnet_session.rs + TelnetConnectDialog。
+- **P0-2 会话导入补四格式**（np9-import-formats）：SecureCRT(.xml)/FinalShell/Electerm/Termius，对标 NyaTerm `core/importer/`；落点 backend/connection_import.rs + ImportWizard。
+- **P0-3 串口 XMODEM/YMODEM/ZMODEM 上传**（np9-serial-xymodem）：对标 NyaTerm `serial/xymodem.rs`；走现有 serial JSON 写通道内嵌协议，不动 wire 协议（SERIAL_ENHANCE_DESIGN 评审项不受影响）。
+- **P0-4 连接级启动命令 startup_commands**（np9-startup-commands）：Tabby Login scripts 对标（REVIEW_FORM_VS_TABBY P2-5 曾提出后掉跟踪）；落点 sidecar 偏好（x11_forwarding 先例，不改 manifest）+ open_session shell 建立后按序注入。
+- **P1 docs-sync**（np9-docs-sync）：文档同步修编——NetCatty 对标行补入 FEATURE_PARITY、COMPARISON 过时结论更新、tssh/iShell 节"X11/VNC/Telnet/串口不做"矛盾回写、NETCATTY checkbox 补勾、8d 翻译重启条件补跟踪点；并登记 P1/P2 候选缺口（认证 Auto 模式、每连接编码、录制 transcript/自动录制/搜索、SFTP pipeline/兼容模式/文件名编码、Quick Commands 导入、iShell 句柄/监听端口维度、NetCatty 三遗留）。
+- **在途**：np8-e2e（smoke_ui_settings 超时修复，已见 terminalModeQueries/smoke_ui_fresh_review 改动）；cron 每 10 分钟看护（交付标准五条）。
+- 维持人工门：RDP 评审执行、串口协议升级评审、真机验收矩阵、PR #98 合入。
+- M7 完成判据：五分支合入 integration、全量绿（cargo ≥735 / vitest ≥891 只增不减）、e2e walkthrough 绿、push 后 CI 十一门 success。
