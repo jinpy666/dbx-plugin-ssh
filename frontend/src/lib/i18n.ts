@@ -6394,3 +6394,75 @@ const vncMessages: Record<string, Record<string, string>> = {
 for (const locale of Object.keys(vncMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...vncMessages[locale] };
 }
+
+// 结构化补全下拉（对标 Warp/fig，线 2，completionMenu.*）：CompletionMenu
+// 浮层与 SettingsDialog 开关行。只增不改 —— 走 supplemental 平铺 dotted key
+// 合并，七语键集与占位符完全一致。
+const completionMenuMessages: Record<string, Record<string, string>> = {
+  en: {
+    "completionMenu.title": "Command completion",
+    "completionMenu.levelSub": "Subcommands",
+    "completionMenu.levelFlag": "Options",
+    "completionMenu.levelValue": "Values",
+    "completionMenu.acceptHint": "Tab/Enter fills · Esc closes",
+    "completionMenu.settingsEnabled": "Suggest command structure while typing",
+    "completionMenu.settingsEnabledHint": "Shows structured subcommand/option/value candidates with descriptions for known commands (git, docker, kubectl, …) below the cursor. Falls back to the command-history suggestions otherwise.",
+  },
+  es: {
+    "completionMenu.title": "Autocompletado de comandos",
+    "completionMenu.levelSub": "Subcomandos",
+    "completionMenu.levelFlag": "Opciones",
+    "completionMenu.levelValue": "Valores",
+    "completionMenu.acceptHint": "Tab/Entrar completa · Esc cierra",
+    "completionMenu.settingsEnabled": "Sugerir la estructura del comando al escribir",
+    "completionMenu.settingsEnabledHint": "Muestra candidatos estructurados de subcomandos, opciones y valores con descripciones para comandos conocidos (git, docker, kubectl, …) bajo el cursor. En otros casos vuelve a las sugerencias del historial de comandos.",
+  },
+  it: {
+    "completionMenu.title": "Completamento comandi",
+    "completionMenu.levelSub": "Sottocomandi",
+    "completionMenu.levelFlag": "Opzioni",
+    "completionMenu.levelValue": "Valori",
+    "completionMenu.acceptHint": "Tab/Invio completa · Esc chiude",
+    "completionMenu.settingsEnabled": "Suggerisci la struttura del comando durante la digitazione",
+    "completionMenu.settingsEnabledHint": "Mostra sotto il cursore candidati strutturati di sottocomandi, opzioni e valori con descrizioni per i comandi noti (git, docker, kubectl, …). Negli altri casi torna ai suggerimenti dalla cronologia dei comandi.",
+  },
+  ja: {
+    "completionMenu.title": "コマンド補完",
+    "completionMenu.levelSub": "サブコマンド",
+    "completionMenu.levelFlag": "オプション",
+    "completionMenu.levelValue": "値",
+    "completionMenu.acceptHint": "Tab/Enter で確定 · Esc で閉じる",
+    "completionMenu.settingsEnabled": "入力中にコマンド構造を補完表示",
+    "completionMenu.settingsEnabledHint": "既知のコマンド（git、docker、kubectl など）に対し、説明付きのサブコマンド・オプション・値の候補をカーソル下に表示します。該当なしの場合はコマンド履歴の候補に戻ります。",
+  },
+  "pt-BR": {
+    "completionMenu.title": "Autocompletar comandos",
+    "completionMenu.levelSub": "Subcomandos",
+    "completionMenu.levelFlag": "Opções",
+    "completionMenu.levelValue": "Valores",
+    "completionMenu.acceptHint": "Tab/Enter preenche · Esc fecha",
+    "completionMenu.settingsEnabled": "Sugerir a estrutura do comando ao digitar",
+    "completionMenu.settingsEnabledHint": "Mostra sob o cursor candidatos estruturados de subcomandos, opções e valores com descrições para comandos conhecidos (git, docker, kubectl, …). Caso contrário, volta às sugestões do histórico de comandos.",
+  },
+  "zh-CN": {
+    "completionMenu.title": "命令结构补全",
+    "completionMenu.levelSub": "子命令",
+    "completionMenu.levelFlag": "选项",
+    "completionMenu.levelValue": "取值",
+    "completionMenu.acceptHint": "Tab/Enter 填充 · Esc 关闭",
+    "completionMenu.settingsEnabled": "输入时按命令结构补全",
+    "completionMenu.settingsEnabledHint": "对已知命令（git、docker、kubectl 等）在光标下方展示带说明的子命令/选项/取值候选；未命中时回落命令历史建议。",
+  },
+  "zh-TW": {
+    "completionMenu.title": "命令結構補全",
+    "completionMenu.levelSub": "子命令",
+    "completionMenu.levelFlag": "選項",
+    "completionMenu.levelValue": "取值",
+    "completionMenu.acceptHint": "Tab/Enter 填入 · Esc 關閉",
+    "completionMenu.settingsEnabled": "輸入時按命令結構補全",
+    "completionMenu.settingsEnabledHint": "對已知命令（git、docker、kubectl 等）在游標下方顯示帶說明的子命令/選項/取值候選；未命中時回落命令歷史建議。",
+  },
+};
+for (const locale of Object.keys(completionMenuMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...completionMenuMessages[locale] };
+}

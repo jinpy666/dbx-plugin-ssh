@@ -147,6 +147,10 @@ import {
 import { browseCommandHistory, commandInputAction, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "./lib/commandSuggestions";
 import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "./lib/suggestionGuard";
+// 结构化补全（对标 Warp/fig，线 2）：spec 命中时优先于历史建议浮层展示
+// 带描述的命令/flag/值候选；开关读 pluginStore（SettingsDialog 自治写入）。
+import { matchSpecLine, type CompletionLevel, type CompletionRow } from "./lib/completions/spec";
+import { COMPLETION_SPECS } from "./lib/completions/specs";
 import { clampTransferConcurrency, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
 import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, normalizeLocalBatchTargets, quickPickCommandById, selectBatchTargets, summarizeBatchResults, toggleBatchTarget, type BatchSendSummary, type BatchSendTarget } from "./lib/batchSend";
@@ -273,6 +277,7 @@ import TextPreview from "./components/TextPreview.vue";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
 import TerminalGutter from "./components/TerminalGutter.vue";
 import CommandSuggestions from "./components/CommandSuggestions.vue";
+import CompletionMenu from "./components/CompletionMenu.vue";
 import ConnectingCard from "./components/ConnectingCard.vue";
 import GpuNpuMonitor from "./components/GpuNpuMonitor.vue";
 import FolderPickerDialog from "./components/FolderPickerDialog.vue";
@@ -767,6 +772,90 @@ const suggestionQuery = ref("");
 let suggestionGuardState: SuggestionGuardState = createSuggestionGuardState();
 // 最近一次执行的命令行（onData 回车行 + OSC 633 E 帧），抑制门据此判定。
 const lastTerminalCommand = ref<string | null>(null);
+
+// 结构化补全浮层（对标 Warp/fig，线 2）：spec 命中时取代历史建议浮层；
+// 行缓冲/锚点语义与 suggestion* 一致（pendingTerminalInput +
+// readTerminalSuggestionAnchor）。开关存 pluginStore（"false" = 关，默认开），
+// SettingsDialog 开关行内联自治读写，本处每次弹出前直读（无缓存即时生效）。
+const COMPLETION_SPEC_ENABLED_KEY = "ssh-completion-spec";
+const completionOpen = ref(false);
+const completionRows = ref<CompletionRow[]>([]);
+const completionLevel = ref<CompletionLevel>("sub");
+const completionCommandPath = ref<string[]>([]);
+const completionActiveIndex = ref(0);
+const completionAnchor = ref<{ x: number; y: number } | null>(null);
+
+function completionSpecEnabled(): boolean {
+  try {
+    return pluginStore.getItem(COMPLETION_SPEC_ENABLED_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function closeCompletionMenu() {
+  completionOpen.value = false;
+  completionRows.value = [];
+  completionActiveIndex.value = 0;
+}
+
+function openCompletionMenu(commandPath: string[], level: CompletionLevel, rows: CompletionRow[]) {
+  completionCommandPath.value = commandPath;
+  completionLevel.value = level;
+  completionRows.value = rows;
+  completionActiveIndex.value = 0;
+  completionAnchor.value = readTerminalSuggestionAnchor();
+  completionOpen.value = true;
+}
+
+/** 结构化补全浮层的按键消费：↑↓ 选择、Tab/Enter 填充、Esc 关闭。 */
+function handleCompletionKey(event: KeyboardEvent): boolean {
+  if (event.type !== "keydown" || !completionOpen.value || !completionRows.value.length) return false;
+  const rows = completionRows.value;
+  if (event.key === "ArrowDown") {
+    completionActiveIndex.value = (completionActiveIndex.value + 1) % rows.length;
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    completionActiveIndex.value = (completionActiveIndex.value - 1 + rows.length) % rows.length;
+    return true;
+  }
+  if (event.key === "Tab" || event.key === "Enter") {
+    acceptCompletionRow(rows[completionActiveIndex.value]);
+    return true;
+  }
+  if (event.key === "Escape") {
+    closeCompletionMenu();
+    return true;
+  }
+  return false;
+}
+
+/** 接受候选项：替换当前 token 并按新行内容刷新（无后续候选则关闭）。 */
+function acceptCompletionRow(row: CompletionRow) {
+  if (!row.token) {
+    closeCompletionMenu();
+    terminal?.focus();
+    return;
+  }
+  replaceTerminalLineWith(row.token + (row.space ? " " : ""), false);
+  refreshCompletionMenu();
+  if (!completionOpen.value) terminal?.focus();
+}
+
+/** 按当前行缓冲重算结构化补全候选：无命中或无候选时关闭（回落历史建议）。 */
+function refreshCompletionMenu() {
+  if (!completionSpecEnabled()) {
+    closeCompletionMenu();
+    return;
+  }
+  const match = matchSpecLine(pendingTerminalInput, COMPLETION_SPECS);
+  if (match && match.rows.length) {
+    openCompletionMenu(match.commandPath, match.level, match.rows);
+  } else {
+    closeCompletionMenu();
+  }
+}
 
 function openQuickEditor(item?: QuickCommand) {
   quickDraft.id = item?.id;
@@ -2083,6 +2172,8 @@ function handleTerminalKey(event: KeyboardEvent) {
     return false;
   };
   // 命令建议浮层开启时优先消费导航/填充键（Tab 回车不落远端 shell）。
+  // 结构化补全浮层（线 2）优先级更高，按键语义相同（↑↓/Tab/Enter/Esc）。
+  if (completionOpen.value && handleCompletionKey(event)) return consume();
   if (suggestionOpen.value && handleSuggestionKey(event)) return consume();
   // 搜索框已打开时 Esc 先关面板，不参与快捷键匹配（关闭键不可改写）。
   {
@@ -2371,6 +2462,8 @@ function closeSuggestions() {
   suggestionOpen.value = false;
   suggestionItems.value = [];
   suggestionActiveIndex.value = 0;
+  // 结构化补全浮层与历史建议浮层同一生命周期（Ctrl+C/回车/Esc 同步关闭）。
+  closeCompletionMenu();
 }
 
 function suggestionSearchBounds() {
@@ -2430,6 +2523,18 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
     closeSuggestions();
     return;
   }
+  // 结构化补全（线 2）优先：行缓冲命中 spec 且有候选时展示结构化菜单并
+  // 跳过历史模糊建议；未命中回落下方历史建议浮层（两者并存、不替换）。
+  if (completionSpecEnabled()) {
+    const specMatch = matchSpecLine(pendingTerminalInput, COMPLETION_SPECS);
+    if (specMatch && specMatch.rows.length) {
+      suggestionOpen.value = false;
+      suggestionItems.value = [];
+      openCompletionMenu(specMatch.commandPath, specMatch.level, specMatch.rows);
+      return;
+    }
+  }
+  closeCompletionMenu();
   const query = pendingTerminalInput;
   const bounds = suggestionSearchBounds();
   if (!commandSuggestionQueryAcceptable(query, bounds.minLength, bounds.maxLength)) {
@@ -10348,6 +10453,19 @@ onBeforeUnmount(() => {
           :t="t"
           @activate="(index) => (suggestionActiveIndex = index)"
           @fill="fillSuggestion"
+        />
+        <!-- 结构化补全浮层（对标 Warp/fig，线 2）：spec 命中时优先展示，
+             键盘（↑↓/Tab/Enter/Esc）由 handleCompletionKey 消费，点击即填充。 -->
+        <CompletionMenu
+          v-if="completionOpen && completionRows.length"
+          :rows="completionRows"
+          :level="completionLevel"
+          :command-path="completionCommandPath"
+          :active-index="completionActiveIndex"
+          :anchor="completionAnchor"
+          :t="t"
+          @activate="(index) => (completionActiveIndex = index)"
+          @accept="acceptCompletionRow"
         />
         <div v-if="terminalDragActive || (dragActive && !sftpPaneOpen)" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
         <TerminalSearchPanel

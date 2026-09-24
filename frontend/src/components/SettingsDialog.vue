@@ -49,6 +49,7 @@ import {
 import type { TerminalHotkeyBindings } from "../lib/terminalHotkeys";
 import { type ActionLinkMatcherToggles, type ActionLinksSettings } from "../lib/actionLinksMatcher";
 import { GUTTER_TIMESTAMP_DEFAULT_FORMAT, type GutterSettings } from "../lib/terminalGutter";
+import { pluginStore } from "../lib/pluginStore";
 
 /** X11 转发偏好（P3-3）：组件内自治读写 sidecar 偏好——即时生效语义
  * （新会话才启用），不走 props/emit（App 无需感知）。 */
@@ -74,6 +75,31 @@ async function setX11Enabled(next: boolean) {
 }
 
 void loadX11Preference();
+
+// 结构化补全开关（对标 Warp/fig，线 2）：组件内自治读写 pluginStore
+// （键 ssh-completion-spec，"false" = 关，默认开）——不走 props/emit，
+// App 在浮层弹出前直读同一键，无需事件同步。
+const SPEC_COMPLETION_ENABLED_KEY = "ssh-completion-spec";
+const specCompletionEnabled = ref(true);
+
+function loadSpecCompletionEnabled(): boolean {
+  try {
+    return pluginStore.getItem(SPEC_COMPLETION_ENABLED_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function setSpecCompletionEnabled(next: boolean) {
+  specCompletionEnabled.value = next;
+  try {
+    pluginStore.setItem(SPEC_COMPLETION_ENABLED_KEY, next ? "true" : "false");
+  } catch {
+    // 存储不可用（无宿主桥且 localStorage 受限）：仅当前会话生效。
+  }
+}
+
+specCompletionEnabled.value = loadSpecCompletionEnabled();
 
 const props = defineProps<{
   open: boolean;
@@ -1581,6 +1607,11 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <input v-model="suggestionMaxCharsDraft" type="number" min="8" max="512" step="1" @change="suggestionMaxCharsDraft = String(Math.min(512, Math.max(8, Number.parseInt(suggestionMaxCharsDraft, 10) || 64)))" />
             </label>
             <p class="muted settings-note">{{ t("suggestions.settingsMaxCharsHint") }}</p>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="specCompletionEnabled" size="sm" @update:model-value="setSpecCompletionEnabled(Boolean($event))" />
+              <span>{{ t("completionMenu.settingsEnabled") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("completionMenu.settingsEnabledHint") }}</p>
             </div>
 
             <!-- 快捷键（对标 Tabby「Hotkeys」页）：注册表编辑器，逐动作增删改 + 冲突提示 + 单项/整体复位。 -->
