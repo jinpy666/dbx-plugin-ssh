@@ -131,7 +131,8 @@ deferred（本批不做）：多会话分屏、端口转发、SecretRef/审计�
 | RemoteCommand | ✅ 已有 | 连接表单 `remote_command`（非空生效；0.4.35 前表单 key 为 `remoteCommand`，sidecar 兼容读取）：交互会话 PTY 照常、exec 替代 shell request；命令退出即会话终止（与 `ssh host command` 同语义）；reattach 重放属预期 |
 | 端口转发（-L/-R） | ✅ 已有（2026-09-22 **用户决策翻转**原 2026-09-07「不做」）：插件侧实现用户级会话转发——sidecar `ssh/forward/list|start|stop`（local=direct-tcpip+客户端监听，remote=tcpip-forward/forwarded-tcpip 双向），工作台 `PortForwardDialog.vue` 面板（列表/添加/停止/状态事件，七语），会话关闭整组清理。**-D 动态仍不做**：宿主 dbx-core `ssh_tunnel.rs` 已为数据库代拨内置动态隧道，用户级 SOCKS 面板待真实需求再立项 |
 | Agent 转发（ForwardAgent/-A） | ❌ 不做 | **2026-09-07 用户决策**：转发类特性不做（认证侧 ssh-agent 已支持：SSH_AUTH_SOCK/自定义 socket/Pageant/agent 内证书身份，见 `ssh.rs authenticate_agent`） |
-| mosh/UDP 漫游、X11、GSSAPI、ControlMaster、SSH console | ❌ 不做 | 需自研服务端组件/大额自研、或宿主已承担（连接管理/凭据）、或 GUI 客户端不适用；理由见 review 结论 |
+| X11 转发 | ✅ 已有（2026-09-24 M4 **翻转本节原「不做」结论**） | `backend/src/x11.rs` 全栈：DISPLAY 解析/假 MIT-MAGIC-COOKIE/.Xauthority/准入门 + PTY 后 `request_x11` + 服务端 x11 channel 显式 fail-closed gate；偏好 `x11_forwarding` 默认关、只读禁用（merge 75c5219，Windows 侧 unix-socket 形态报可读错误指路 VcXsrv TCP）；真机 X server 联调记遗留 |
+| mosh/UDP 漫游、GSSAPI、ControlMaster、SSH console | ❌ 不做 | 需自研服务端组件/大额自研、或宿主已承担（连接管理/凭据）、或 GUI 客户端不适用；理由见 review 结论 |
 | 批量登录、登录选择器/分组、记住密码、自动重连 | ✅ 已有（等价） | 分别对应批量发送（跨连接活跃会话）、DBX 连接管理、宿主 secret binding、断线自动重连 |
 | 自动交互（Expect 系列：ExpectPattern/SendText/SendPass/CaseSendText/CaseSendPass/Timeout/SleepMS/PassSleep） | ✅ 已有 | 连接表单 `triggers_enabled`（独立 boolean，默认关闭）+ `triggers`（单一 textarea，仅开关打开后显示；已有文本不会自动启用；官方参考：<https://github.com/trzsz/trzsz-ssh>；可用 `triggers/validate` 复用 parser 检测）：多阶段正则按序匹配 PTY 输出（ANSI 剥离归一化、≤8 KiB 滚动缓冲跨 chunk 匹配），每阶段三选一应答——明文 `sendText`（`\r\n\t` 转义、`\|` 分段停顿 `sleepMs`）、密文 `sendSecretKey`、本地命令 `sendCommand`；case 预匹配（`casePattern` + `caseSend*`）命中不推进游标；阶段超时或 shell 提示复位重新武装；`passSleep`（none/each/enter）控制密文/命令应答节奏。引擎在 sidecar 终端读循环、先于终端 auto-sudo（互斥防双答），`ssh/trigger` 事件只报 `{sessionId, stage, kind}` 永不带应答内容。**0.4.77 输入兼容升级**：`triggers` 文本形态直接接受 tssh 规则原文（`#!!` 前缀可选；`ExpectCount`/`ExpectTimeout`/`ExpectSleepMS`/`ExpectPassSleep`/`ExpectPatternN`/`ExpectSendTextN`/`ExpectSendOtpN`/`ExpectCaseSendTextN`，`ExpectCount 0` 显式关闭；非合法正则按字面量匹配兜底），JSON 形态新增顶层 `"enabled": false` 保留规则并关闭引擎。**0.4.77 完全兼容升级**：tssh 密文/TOTP 应答指令全部支持——`ExpectSendPassN` / `ExpectCaseSendPassN` / `ExpectSendEncTotpN` / `ExpectSendEncOtpN` 的 `--enc-secret` 密文按 tssh 源码同款算法在 sidecar 解密（hex(nonce12‖AES-256-GCM)，固定内嵌密钥逐字节一致），`ExpectSendTotpN` / `ExpectSendEncTotpN` 按 RFC 6238（HMAC-SHA1/6 位/30 秒，与 pquerna/otp 默认一致）在命中时刻生成验证码；JSON 形态相应新增 `sendSecret` / `sendTotp` / `caseSendSecret` 应答字段。**差异**：`ExpectSendPass` 亦可继续走宿主 secret binding（`trigger_answer_1/2` 连接表单槽位）；exec/命令通道不接入（仅 PTY 终端会话） |
 | 外部密码管理器（PasswordCommand/PassphraseCommand） | ✅ 已有 | 连接表单 `password_command` / `passphrase_command`（0.4.74）：登录密码/私钥口令缺失时本地执行命令取回（gopass、1Password CLI、`oathtool` 等），占位符 `%h`/`%u`/`%p`/`%n`/`%%`，`sh -c`/`cmd /C` 执行、10s 超时、stdout 去单个结尾换行；优先级 显式凭据 > 命令（对齐 tssh「加密 > 命令 > 明文」的插件侧映射——加密层由宿主 secret binding 承担）；`password_command` 在拨号认证的 orchestration 构建前一次性解析，登录链与 sudo 编排共用；命令日志只记已执行/失败退出码，输出用后 zeroize |
@@ -172,9 +173,12 @@ React 19 独立桌面 SSH 工作台）为参照的能力借鉴（实施计划
 ## iShell Pro 对标补充（2026-09-12）
 
 以 [iShell Pro](https://ishell.cc/)（六协议独立终端平台 v3.0，免费+订阅）为参照的能力差距收敛。
-产品形态不同（宿主内插件 vs 独立终端），仅取终端/SFTP/监控域内可对齐项；协议广度
-（RDP/VNC/Telnet/串口）、多标签分屏、端口转发、X11 转发、云同步/导入、隐私遮蔽等
-仍按既有决策不做（宿主承担或超出插件契约）。
+产品形态不同（宿主内插件 vs 独立终端），仅取终端/SFTP/监控域内可对齐项。本节登记时
+「协议广度（RDP/VNC/Telnet/串口）、端口转发、X11 转发」仍列为不做——其后已分批翻转：
+Telnet/串口/VNC 已全栈落地（M2/M4/M5，见 PROGRESS 2026-09-24 收口记录）、X11 转发已实现
+（M4，merge 75c5219）、端口转发 -L/-R 已内置（2026-09-22 用户决策翻转，见 tssh 节）；
+仍不做的收敛为 RDP（vendored fork+CredSSP 人工评审门）、多标签分屏（宿主工作台承担）、
+云同步/导入、隐私遮蔽等（宿主承担或超出插件契约）。
 
 | iShell Pro 能力 | 插件状态 | 说明 |
 | --- | --- | --- |
@@ -185,6 +189,26 @@ React 19 独立桌面 SSH 工作台）为参照的能力借鉴（实施计划
 | 会话录制回放 + GIF 导出 | ✅ 已有（同批新增） | `ssh/recording/*` 五方法：asciicast v2 `.cast` 落盘（会话关闭自动收尾）、`ssh/recording/get` 分页回放（xterm 重放、0.5–4× 倍速、进度条 seek）、GIF 导出（离屏 xterm 逐事件重放 + 500ms 抽帧 + 零依赖 GIF89a 编码器，封顶 120 帧）。iShell 的暂停/快进/水印/帧率质量参数未做 |
 | GPU 监控、大文件扫描、主机巡检报告 | ⏸ 未做（候选） | GPU 依赖远端 nvidia-smi 等工具可用性；大文件扫描与巡检报告维持"另有对标项"候选结论 |
 | 终端 WebGL GPU 加速渲染 | ✅ 已有（2026-09-13 落地） | `@xterm/addon-webgl`（0.18.0，配 xterm 5.5）：主终端默认挂 GPU renderer（localStorage 偏好 `ssh-terminal-webgl`，设置弹窗「终端渲染」开关即时切换）；WebGL 不可用（headless/无 context/驱动限制）构造即回退 DOM 渲染器，context loss（GPU 重置）自动 dispose 回退；回放弹窗与 GIF 导出的离屏终端刻意保持 2d canvas（导出依赖 drawImage 稳定路径、且浏览器 WebGL context 总数有限）。纯逻辑（偏好/挂载/回退/切换）独立模块 `terminalWebgl.ts` + 单测 7 |
+
+## NetCatty 对标补充（2026-09-11 立项，2026-09-13 收口）
+
+以 binaricat/Netcatty（Electron SSH 客户端，内置 MCP server 面向 AI agent）为参照的
+五项能力落地（实施计划 `docs/IMPL_PLAN_NETCATTY_PARITY.zh-CN.md`；期间 mcp.rs 事故
+导致 A1/A2 首次实现回退，2026-09-12 重放落地，全程记录见 `PROGRESS-P-SSH` 同日章节）：
+
+| NetCatty 能力 | 插件状态 | 说明 |
+| --- | --- | --- |
+| MCP 权限档（permission mode）+ 作用域会话 | ✅ 已有 | `mcp/settings` 新增 `execPermissionMode`（autonomous 默认 / confirm——写类与 exec 族工具在全部既有门通过后、执行前经 `ssh/agent/prompt` 人工审批，stdio 无工作台 fail-closed 立即拒绝）+ `connectionScope` 作用域白名单（条目匹配连接 id / 连接名 / 主机名 ASCII 大小写不敏感；越界整体拒绝、`ssh_list_connections` 只回作用域内条目、作用域非空时内联凭据拨打整体拒绝）；进程级 env 覆盖 `DBX_SSH_MCP_PERMISSION_MODE` / `DBX_SSH_MCP_CONNECTION_SCOPE` |
+| multi_host_execute / terminal_send_input | ✅ 已有 | `ssh_multi_exec`（1–10 连接聚合执行，parallel/sequential + stopOnError 首败短路；sudo 整体拒绝、灾难门与只读白名单逐目标生效）+ `ssh_terminal_input`（向存活终端会话注入原始输入，交互应答/Ctrl+C 语义；只读连接仅放行纯控制序列；输出不收集），工具数 29→31 |
+| 终端关键词高亮（README Features） | ✅ 已有 | `highlight_rules.rs` 存储（上限 30、文件 0600、首启播种后永不重播）+ `ssh/highlightRules/list\|save\|delete`；22 条按严重度分色的默认规则（红=ERROR/FATAL/Permission denied…、琥珀=FAIL/denied/timed out、黄=WARN/deprecated、绿=SUCCESS/PASSED 区分大小写、蓝=IPv4 正则；长短语优先）；前端 `keywordHighlight.ts` 纯函数 + xterm onRender 视口自绘着色（rAF 节流、单行/全局上限、总开关 `ssh-keyword-highlight`）+ 工具栏管理弹层（regex 合法性由前端保存前校验） |
+| 连接日志审计（ConnectionLogsManager） | ✅ 已有（等价收敛） | MCP/AI 执行面 JSONL 审计（`audit-log.jsonl`，5 MiB 单代轮转 `.1`）：gated 工具每调用一条（gate/outcome/exitCode/耗时/命令 ≤512 字符 + 输出尾部 ≤1024）+ 审批生命周期 + exec/终端 auto-sudo 事件；`ssh/audit/list` 工作台只读查看（kind 过滤/truncated 提示）+ `ssh/audit/clear` 清空；与 openocta 对标批同源（见上节），agent 面无审计工具，人工工作台操作不记 |
+| 流量图 / 发行版徽标（TrafficDiagram/DistroAvatar） | ✅ 已有（去资产化） | `lib/metricsSparkline.ts` 60 点环形 SVG（rx/tx 双曲线）+ `lib/distroBadge.ts` 14 发行版纯 CSS monogram（圆角方块 + 首字母 + 主题色变量，**不引入任何图片资产**——Netcatty SVG 资产为 GPL-3.0，刻意隔离）；`ssh/metrics` 追加可选 `osId`/`osPretty`（os-release 解析，缺失整体省略，旧 sidecar 不渲染徽标不报错） |
+| 云同步（CloudSyncManager） | ❌ 不做（导出待议） | 口令加密的 quick-sudo-profiles/quick-commands 导出导入降维为本批遗留候选，见文末「候选缺口（未排期）」 |
+
+本批同步登记明确不做（IMPL_PLAN §7）：sftp/sudo 文件写操作的审计埋点（审计面现只覆盖
+exec 族 + 审批生命周期 + auto-sudo）、审计日志分页/导出（v1 只读最近条目）、作用域
+条目的 host+username 粒度（v1 只到 host）、`ssh_audit` 只读 MCP 工具（与「agent 不可读
+审计」原则冲突，除非未来加独立开关）。
 
 ## Tabby 主题对标补充（2026-09-22，`codex/ssh/terminal-themes` 分支）
 
@@ -507,3 +531,20 @@ PATH 导出，否则 `spawn pnpm ENOENT`。
 运行时报 `ok` 47 条、0 失败（本轮 3 条 + 既有 44 条）。
 `metricsSwap` 与拖拽上传对话框的 5 个键需要真实会话/拖拽事件才能触达，
 故只在单测层（运行时语言表解析）覆盖，不在 e2e 覆盖。
+
+## 候选缺口（未排期）
+
+对标复审（Tabby / NetCatty / iShell 文档线索 + 本仓批次遗留）沉淀的候选登记。
+均未排期、无承诺；立项前需过依赖/范围评审，登记处随评审结果更新：
+
+| 候选项 | 来源线索 | 说明 |
+| --- | --- | --- |
+| 认证 Auto 模式 | Tabby（REVIEW_FORM_VS_TABBY P2-6） | Tabby 支持 Auto（按序尝试各认证方式）；插件现为显式五选一，可增 Auto 依序回退 |
+| 每连接编码选择 | 对标复审线索 | 现无连接级编码覆盖（沿用默认/推断），缺 per-connection encoding |
+| 录制 transcript / 自动录制 / 录制搜索 | iShell 线索 | 现录制为手动 asciicast v2 + 回放/GIF 导出（`ssh/recording/*`）；transcript 文本导出、按会话自动录制、录制内容搜索未做 |
+| SFTP pipeline 深度 / 兼容模式 / 文件名编码 | 对标复审线索 | 传输管线并发深度可配、老旧服务器兼容模式、非 UTF-8 文件名编码处理 |
+| Quick Commands 导入 | Tabby/NetCatty 线索 | 快速命令现为插件内 CRUD（全局 ≤20 条），缺外部格式批量导入 |
+| 进程管理句柄数 / 监听端口维度 | iShell 线索 | `ssh/processes/list` 现为 CPU 序 500 行 + kill；缺句柄数与监听端口维度（iShell 节同款注记） |
+| 多文件并行 watcher 编辑 | M3 遗留（PROGRESS M3 遗留 1） | watcher 外部编辑现为单文件 MVP，多文件并行编辑需排队扩展 |
+| 终端 BiDi | sshbool 对标候选（见上节） | xterm.js 原生无 BiDi/shaping；shaping 管线建议放 `shared/frontend/` 公共层单点实现 |
+| 云同步/口令加密导出导入 | NetCatty CloudSync 降维（见 NetCatty 节） | 待议——涉及凭据导出的安全边界，未立项 |
