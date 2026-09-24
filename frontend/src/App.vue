@@ -8169,9 +8169,16 @@ onBeforeUnmount(() => {
           <span class="record-countdown-number" :key="recordCountdown">{{ recordCountdown }}</span>
           <span class="record-countdown-hint">{{ t("recordingCountdownHint") }}</span>
         </div>
-        <!-- Dock panel surface: no loading overlay at all — the panel shows the
-             terminal area as-is while connecting. -->
-        <div v-if="!panelSurface && !isLocalMode && !localShellRestored && terminalState !== 'connected' && !reconnectPending" class="terminal-overlay">
+        <!-- Dock panel surface: no loading overlay while connecting (the host
+             pre-dials and the panel shows the terminal area as-is), but a
+             FAILED terminal must not read as an empty panel: terminal-error /
+             terminal-disconnected are dead ends the user has to see, so the
+             connect card — with its error text and reconnect exit — renders
+             in panels too, only the transient connecting state stays hidden. -->
+        <div
+          v-if="(!panelSurface || terminalState === 'error' || terminalState === 'disconnected') && !isLocalMode && !localShellRestored && terminalState !== 'connected' && !reconnectPending"
+          class="terminal-overlay"
+        >
           <ConnectingCard
             :locale="locale"
             :name="connection.name || connectionIdentity"
