@@ -38,6 +38,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-terminal-behavior",
   "ssh-terminal-hotkeys",
   "ssh-terminal-appearance",
+  // 结构化补全开关（对标 Warp/fig 线 2）：SettingsDialog 开关行自治读写，
+  // App 弹出浮层前直读（"false" = 关，默认开）。
+  "ssh-completion-spec",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);
