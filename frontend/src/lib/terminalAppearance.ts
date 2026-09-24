@@ -1,6 +1,6 @@
 // 终端外观偏好（对标 Tabby 的 Settings → Appearance）：配色方案两槽（暗/亮
 // 自适应切换）、底色来源策略、字体与间距、光标形态，以及「多套主题」快照
-// （预设 + 我的主题）。纯逻辑 + localStorage 持久化，不依赖 Vue/DOM。
+// （预设 + 我的主题）。纯逻辑 + pluginStore 持久化，不依赖 Vue/DOM。
 //
 // 与既有模块的分工：
 // - `terminalFont.ts` 仍是字体族/字号的持有者（键 `ssh-terminal-font-family`
@@ -10,9 +10,11 @@
 //   方案时叠加覆盖，`schemeSource: "host"`（默认）下插件行为与既有版本完全
 //   一致——「全局外观由 DBX 宿主承担」的既有结论不被推翻。
 //
-// 存储访问一律写在函数体 try 内：宿主工作台 iframe 是 sandbox="allow-scripts"
-// （opaque origin），访问 window.localStorage 属性本身就抛 SecurityError。
+// 存储默认走 pluginStore（宿主 host.storage → guarded localStorage → 内存，
+// 见 pluginStore.ts）；读写在函数体 try 内完成——历史上直读 window.localStorage
+// 在 opaque origin 下「访问属性」本身就抛 SecurityError（同 terminalFont.ts 的约定）。
 
+import { pluginStore } from "./pluginStore";
 import {
   builtinSchemeById,
   normalizeHexColor,
@@ -26,7 +28,7 @@ import { TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "./terminalZoom";
 
 export const TERMINAL_APPEARANCE_KEY = "ssh-terminal-appearance";
 
-/** 自定义方案数量上限：localStorage 单键约 5MB，60 个方案 ≈ 100KB，留足余量。 */
+/** 自定义方案数量上限：单键约 5MB，60 个方案 ≈ 100KB，留足余量。 */
 export const CUSTOM_SCHEME_LIMIT = 60;
 /** 用户保存的主题数量上限。 */
 export const CUSTOM_THEME_LIMIT = 30;
@@ -316,7 +318,9 @@ export function defaultTerminalAppearanceState(): TerminalAppearanceState {
 }
 
 function defaultStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
-  return window.localStorage;
+  // 默认走 pluginStore（宿主 host.storage → guarded localStorage → 内存），
+  // opaque origin 下不再抛 SecurityError；显式注入 storage 仅测试用。
+  return pluginStore;
 }
 
 /** 读取偏好：键缺失/JSON 损坏/存储不可用一律回默认（首次运行即默认态）。 */
@@ -340,7 +344,7 @@ export function persistTerminalAppearance(
     const target = storage ?? defaultStorage();
     target.setItem(TERMINAL_APPEARANCE_KEY, JSON.stringify(state));
   } catch {
-    // localStorage 不可用（沙箱/隐私模式）时设置仅对当前会话生效。
+    // 存储不可用（沙箱/隐私模式）时设置仅对当前会话生效。
   }
 }
 
