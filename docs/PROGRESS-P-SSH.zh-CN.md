@@ -3691,3 +3691,12 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **全量**：backend cargo **801**（M5.5 基线 735 → M7 766 → 801，只增不减）/ clippy `-D warnings` 0 / fmt 干净；frontend vitest **975**（97 文件，基线 891 → 934 → 975）/ vue-tsc 0 / build 过（ui/ 重生成）。
 - **交付核验 ✅**（reverify.md）：UI 场景矩阵 13/13（原 3 FAIL 随 XTVERSION 修复 9fcb326 全部转绿）、walkthrough 家族 3/3（settings/mock/fresh_review 全绿）、smoke 双件套 PASS。
 - 至此 M7 五任务 + Warp 两线全部合入，CI 覆盖最新 HEAD。
+
+
+## M9 轮：连接表单协议化（2026-09-25，用户指令"对标 Tabby 做进连接设置"）
+
+- **manifest 连接表单 protocol 字段 ✅**（parity-protocol-connect 53d29f6）：`protocol` select（ssh 默认/telnet/vnc）+ 29 个 SSH 特有字段挂 `visible_when`（原单条件升级 all_of 叠加 protocol=ssh，passphrase_command/password_prompt_hint 展平为三条件）+ username 覆盖 ssh+telnet + 七语 label/options/description；RDP 刻意不提供（实现不存在，评审门材料在 docs/RDP_*）。connection-forms/verify.mjs 断言同步（502 组合全过）。
+- **工作台协议路由 ✅**（e68f808）：openSession 读连接 protocol——telnet/vnc 连接直启各自会话（参数=连接 host/port + 上次使用偏好），失败回落预填弹窗；SSH 保持默认路径。backend 零改动（telnet/vnc start 参数直传，不依赖 SSH StoredConnection）。
+- **对话框参数记忆 ✅**（6bc0496）：Telnet/Serial/VNC 三弹窗经共享 `lib/connectLastParams.ts` 回填/写穿上次参数（pluginStore 三新键）；凭据字段一律不落盘。
+- **全量**：frontend vitest **980**（98 文件，基线 975 只增不减：connectLastParams 5）/ vue-tsc 0 / build 过（ui/ 重生成）；backend 零改动；connection-forms verify 502 组合全过。
+- **遗留**：telnet/vnc 连接驱动的直启路径需扩展 mockDbxHost fixture（telnet/start mock）后才能 e2e 验证——下一轮；serial 协议化 deferred（参数组不同构）；RDP 表单暴露待实现落地。
