@@ -10,6 +10,11 @@
 //!
 //! `BackspaceMode` reuses the telnet mapping: `ctrl_h` rewrites DEL (0x7F)
 //! into BS (0x08) for devices that expect a vt100-style erase.
+//!
+//! Line parameters are validated strictly (unknown values fail the start
+//! with a readable error instead of silently degrading to 8N1), and port
+//! enumeration labels are normalized so `path (description)` glue from some
+//! backends never leaks into the device path the UI dials.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -53,28 +58,82 @@ impl BackspaceMode {
     }
 }
 
-/// Parses the `serialport` enums from the wire strings; invalid values fall
-/// back to the 8N1 defaults rather than failing a start that a legacy device
-/// might still accept with the defaults.
-fn parse_data_bits(value: Option<&String>) -> serialport::DataBits {
+/// Line parameters resolved from a start request. Validation is strict:
+/// unknown strings are rejected before any open attempt, because silently
+/// falling back to 8N1 masks misconfiguration (a device wired for 7E1 opened
+/// as 8N1 just garbles output with no hint of the wrong parameter).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LineParams {
+    pub(crate) data_bits: serialport::DataBits,
+    pub(crate) parity: serialport::Parity,
+    pub(crate) stop_bits: serialport::StopBits,
+    pub(crate) flow_control: serialport::FlowControl,
+}
+
+fn parse_data_bits(value: Option<&String>) -> Result<serialport::DataBits, String> {
     match value.map(String::as_str) {
-        Some("7") => serialport::DataBits::Seven,
-        _ => serialport::DataBits::Eight,
+        None => Ok(serialport::DataBits::Eight),
+        Some("5") => Ok(serialport::DataBits::Five),
+        Some("6") => Ok(serialport::DataBits::Six),
+        Some("7") => Ok(serialport::DataBits::Seven),
+        Some("8") => Ok(serialport::DataBits::Eight),
+        Some(other) => Err(format!(
+            "serial/start: invalid dataBits \"{other}\" (expected 5, 6, 7 or 8)"
+        )),
     }
 }
 
-fn parse_parity(value: Option<&String>) -> serialport::Parity {
+fn parse_parity(value: Option<&String>) -> Result<serialport::Parity, String> {
     match value.map(String::as_str) {
-        Some("even") => serialport::Parity::Even,
-        Some("odd") => serialport::Parity::Odd,
-        _ => serialport::Parity::None,
+        None | Some("none") => Ok(serialport::Parity::None),
+        Some("even") => Ok(serialport::Parity::Even),
+        Some("odd") => Ok(serialport::Parity::Odd),
+        Some(other) => Err(format!(
+            "serial/start: invalid parity \"{other}\" (expected none, even or odd)"
+        )),
     }
 }
 
-fn parse_stop_bits(value: Option<&String>) -> serialport::StopBits {
+fn parse_stop_bits(value: Option<&String>) -> Result<serialport::StopBits, String> {
     match value.map(String::as_str) {
-        Some("2") => serialport::StopBits::Two,
-        _ => serialport::StopBits::One,
+        None | Some("1") => Ok(serialport::StopBits::One),
+        Some("2") => Ok(serialport::StopBits::Two),
+        Some(other) => Err(format!(
+            "serial/start: invalid stopBits \"{other}\" (expected 1 or 2)"
+        )),
+    }
+}
+
+fn parse_flow_control(value: Option<&String>) -> Result<serialport::FlowControl, String> {
+    match value.map(String::as_str) {
+        None | Some("none") => Ok(serialport::FlowControl::None),
+        Some("rts_cts") => Ok(serialport::FlowControl::Hardware),
+        Some("xon_xoff") => Ok(serialport::FlowControl::Software),
+        Some(other) => Err(format!(
+            "serial/start: invalid flowControl \"{other}\" (expected none, rts_cts or xon_xoff)"
+        )),
+    }
+}
+
+pub(crate) fn resolve_line_params(request: &SerialStartRequest) -> Result<LineParams, String> {
+    Ok(LineParams {
+        data_bits: parse_data_bits(request.data_bits.as_ref())?,
+        parity: parse_parity(request.parity.as_ref())?,
+        stop_bits: parse_stop_bits(request.stop_bits.as_ref())?,
+        flow_control: parse_flow_control(request.flow_control.as_ref())?,
+    })
+}
+
+/// Baud is driver-defined, so any in-range rate passes (including custom
+/// ones); only nonsense outside the same bounds the MVP clamped to is
+/// rejected — now with an error instead of a silent clamp.
+pub(crate) fn checked_baud_rate(baud_rate: u32) -> Result<u32, String> {
+    if (50..=4_000_000).contains(&baud_rate) {
+        Ok(baud_rate)
+    } else {
+        Err(format!(
+            "serial/start: baudRate {baud_rate} out of range (50..=4000000)"
+        ))
     }
 }
 
@@ -86,6 +145,9 @@ pub struct SerialStartRequest {
     pub data_bits: Option<String>,
     pub parity: Option<String>,
     pub stop_bits: Option<String>,
+    /// New in the line-parameter validation pass; absent on legacy clients,
+    /// which keeps the driver default (`none`).
+    pub flow_control: Option<String>,
     pub backspace_mode: Option<String>,
     pub workbench_id: String,
 }
@@ -98,6 +160,7 @@ impl Default for SerialStartRequest {
             data_bits: None,
             parity: None,
             stop_bits: None,
+            flow_control: None,
             backspace_mode: None,
             workbench_id: String::new(),
         }
@@ -137,6 +200,66 @@ fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// A candidate port after label normalization: the device path to open plus
+/// an optional human-readable description for pickers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NormalizedPortLabel {
+    pub(crate) path: String,
+    pub(crate) description: Option<String>,
+}
+
+/// Splits a glued `path (description)` label. Some serialport backends fold
+/// the OS description into the port name, which breaks both connect (the
+/// glue is not a device path) and display. The split is conservative: only
+/// labels ending in ")" with a " (" separator are split, and nested
+/// parentheses stay with the description (`COM3 (USB Serial Port (COM3))`).
+/// Anything else passes through untouched.
+pub(crate) fn split_glued_description(raw: &str) -> (String, Option<String>) {
+    let raw = raw.trim();
+    if raw.ends_with(')') {
+        if let Some(sep) = raw.find(" (") {
+            let path = raw[..sep].trim();
+            let description = raw[sep + 2..raw.len() - 1].trim();
+            if !path.is_empty() {
+                let description = (!description.is_empty()).then(|| description.to_string());
+                return (path.to_string(), description);
+            }
+        }
+    }
+    (raw.to_string(), None)
+}
+
+/// Normalizes one enumeration entry; the structured description from the
+/// typed port info wins over anything glued into the raw label.
+pub(crate) fn normalize_port_label(raw: &str, known: Option<&str>) -> NormalizedPortLabel {
+    let (path, glued) = split_glued_description(raw);
+    let description = known
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+        .or(glued);
+    NormalizedPortLabel { path, description }
+}
+
+/// Human label for a USB port: product name, then manufacturer, then a
+/// VID:PID tag so pickers never show a bare path for known adapters.
+pub(crate) fn usb_port_description(info: &serialport::UsbPortInfo) -> String {
+    let named = info
+        .product
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .or_else(|| {
+            info.manufacturer
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+        });
+    named
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("USB {:04x}:{:04x}", info.vid, info.pid))
+}
+
 fn encode_frame(sequence: u64, stream: TerminalStream, data: &[u8]) -> Vec<u8> {
     TerminalFrame {
         sequence,
@@ -153,20 +276,32 @@ impl SerialSessionRuntime {
         }
     }
 
-    /// Lists candidate port names, sorted. Empty on hosts without serial
+    /// Lists candidate ports, sorted by device path. `ports` stays a flat
+    /// string array of device paths only (descriptions glued into the name
+    /// are split off); `portDetails` carries the path/description pairs for
+    /// pickers that want to show them. Empty on hosts without serial
     /// support — the UI renders its own "no ports" hint from this.
     pub fn list_ports(&self) -> Value {
-        let ports = serialport::available_ports()
+        let mut labels: Vec<NormalizedPortLabel> = serialport::available_ports()
             .unwrap_or_default()
             .into_iter()
-            .map(|entry| match entry.port_type {
-                serialport::SerialPortType::UsbPort(info) => {
-                    format!("{} (USB)", info.serial_number.clone().unwrap_or_default())
-                }
-                _ => entry.port_name,
+            .map(|entry| {
+                let known = match &entry.port_type {
+                    serialport::SerialPortType::UsbPort(info) => Some(usb_port_description(info)),
+                    serialport::SerialPortType::PciPort => Some("PCI".to_string()),
+                    serialport::SerialPortType::BluetoothPort => Some("Bluetooth".to_string()),
+                    serialport::SerialPortType::Unknown => None,
+                };
+                normalize_port_label(&entry.port_name, known.as_deref())
             })
+            .collect();
+        labels.sort_by(|a, b| a.path.cmp(&b.path));
+        let ports = labels.iter().map(|l| l.path.clone()).collect::<Vec<_>>();
+        let port_details = labels
+            .iter()
+            .map(|l| json!({ "path": l.path, "description": l.description }))
             .collect::<Vec<_>>();
-        json!({ "ports": ports })
+        json!({ "ports": ports, "portDetails": port_details })
     }
 
     /// Opens the port (blocking call moved off the async workers) and spawns
@@ -180,11 +315,9 @@ impl SerialSessionRuntime {
         if port_name.is_empty() {
             return Err("serial/start: portName is required".to_string());
         }
-        let baud_rate = request.baud_rate.clamp(50, 4_000_000);
+        let baud_rate = checked_baud_rate(request.baud_rate)?;
         let backspace = BackspaceMode::parse(request.backspace_mode.as_ref());
-        let data_bits = parse_data_bits(request.data_bits.as_ref());
-        let parity = parse_parity(request.parity.as_ref());
-        let stop_bits = parse_stop_bits(request.stop_bits.as_ref());
+        let line = resolve_line_params(&request)?;
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -193,9 +326,10 @@ impl SerialSessionRuntime {
         let open_name = port_name.clone();
         let port = tokio::task::spawn_blocking(move || {
             serialport::new(&open_name, baud_rate)
-                .data_bits(data_bits)
-                .parity(parity)
-                .stop_bits(stop_bits)
+                .data_bits(line.data_bits)
+                .parity(line.parity)
+                .stop_bits(line.stop_bits)
+                .flow_control(line.flow_control)
                 .timeout(READ_TIMEOUT)
                 .open()
                 .map_err(|error| format!("serial/start: {error}"))
@@ -327,4 +461,222 @@ fn spawn_reader(
 /// Base64 解码复用 telnet 的实现（同一负载形状）。
 pub fn decode_write_payload(data_base64: &str) -> Result<Vec<u8>, String> {
     crate::telnet_session::decode_write_payload(data_base64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // —— 端口标签规范化 ——————————————————————————————————————
+
+    #[test]
+    fn port_label_split_covers_platform_shapes() {
+        // (原始标签, 期望路径, 期望描述)：Linux ttyUSB/ttyACM、macOS cu.、Windows COM。
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "/dev/ttyUSB0 (FTDI FT232R USB UART)",
+                "/dev/ttyUSB0",
+                Some("FTDI FT232R USB UART"),
+            ),
+            (
+                "/dev/ttyACM0 (Arduino (www.arduino.cc))",
+                "/dev/ttyACM0",
+                Some("Arduino (www.arduino.cc)"),
+            ),
+            (
+                "/dev/cu.usbserial-1420 (Silicon Labs CP210x USB to UART Bridge)",
+                "/dev/cu.usbserial-1420",
+                Some("Silicon Labs CP210x USB to UART Bridge"),
+            ),
+            ("/dev/cu.usbmodem14101", "/dev/cu.usbmodem14101", None),
+            (
+                "COM3 (USB Serial Port (COM3))",
+                "COM3",
+                Some("USB Serial Port (COM3)"),
+            ),
+            ("COM3", "COM3", None),
+            ("/dev/ttyS0", "/dev/ttyS0", None),
+            ("/dev/ttyUSB0 ()", "/dev/ttyUSB0", None),
+            // 未闭合括号与空路径不拆分，原样保留。
+            ("/dev/ttyUSB0 (FTDI", "/dev/ttyUSB0 (FTDI", None),
+            ("(junk)", "(junk)", None),
+        ];
+        for (raw, path, description) in cases {
+            let (got_path, got_description) = split_glued_description(raw);
+            assert_eq!(&got_path, path, "path for {raw:?}");
+            assert_eq!(
+                got_description.as_deref(),
+                *description,
+                "description for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn port_label_prefers_structured_description_over_glue() {
+        let structured = normalize_port_label("/dev/cu.usbserial-1420 (glued)", Some("CP210x"));
+        assert_eq!(structured.path, "/dev/cu.usbserial-1420");
+        assert_eq!(structured.description.as_deref(), Some("CP210x"));
+        // 结构化描述为空时退回粘合后缀。
+        let fallback = normalize_port_label("/dev/ttyUSB0 (FTDI FT232R)", Some("  "));
+        assert_eq!(fallback.path, "/dev/ttyUSB0");
+        assert_eq!(fallback.description.as_deref(), Some("FTDI FT232R"));
+        let plain = normalize_port_label("/dev/ttyS0", None);
+        assert_eq!(plain.path, "/dev/ttyS0");
+        assert!(plain.description.is_none());
+    }
+
+    #[test]
+    fn usb_description_prefers_product_then_manufacturer_then_vid_pid() {
+        let base = serialport::UsbPortInfo {
+            vid: 0x0403,
+            pid: 0x6001,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        };
+        assert_eq!(usb_port_description(&base), "USB 0403:6001");
+        let with_manufacturer = serialport::UsbPortInfo {
+            manufacturer: Some("FTDI".to_string()),
+            ..base.clone()
+        };
+        assert_eq!(usb_port_description(&with_manufacturer), "FTDI");
+        let with_product = serialport::UsbPortInfo {
+            product: Some("FT232R USB UART".to_string()),
+            ..with_manufacturer
+        };
+        assert_eq!(usb_port_description(&with_product), "FT232R USB UART");
+        // 空白字符串视为缺失。
+        let blank_product = serialport::UsbPortInfo {
+            product: Some("   ".to_string()),
+            manufacturer: None,
+            ..base
+        };
+        assert_eq!(usb_port_description(&blank_product), "USB 0403:6001");
+    }
+
+    // —— 串口参数校验 ——————————————————————————————————————
+
+    #[test]
+    fn data_bits_accepts_the_full_range_and_rejects_junk() {
+        let cases = [
+            ("5", serialport::DataBits::Five),
+            ("6", serialport::DataBits::Six),
+            ("7", serialport::DataBits::Seven),
+            ("8", serialport::DataBits::Eight),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(parse_data_bits(Some(&raw.to_string())).unwrap(), expected);
+        }
+        assert_eq!(parse_data_bits(None).unwrap(), serialport::DataBits::Eight);
+        for junk in ["9", "eight", "", "8 "] {
+            assert!(
+                parse_data_bits(Some(&junk.to_string())).is_err(),
+                "{junk:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parity_accepts_the_wire_vocabulary_and_rejects_junk() {
+        let cases = [
+            ("none", serialport::Parity::None),
+            ("even", serialport::Parity::Even),
+            ("odd", serialport::Parity::Odd),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(parse_parity(Some(&raw.to_string())).unwrap(), expected);
+        }
+        assert_eq!(parse_parity(None).unwrap(), serialport::Parity::None);
+        for junk in ["mark", "space", "EVEN", ""] {
+            assert!(
+                parse_parity(Some(&junk.to_string())).is_err(),
+                "{junk:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn stop_bits_accepts_one_or_two_and_rejects_junk() {
+        assert_eq!(
+            parse_stop_bits(Some(&"1".to_string())).unwrap(),
+            serialport::StopBits::One
+        );
+        assert_eq!(
+            parse_stop_bits(Some(&"2".to_string())).unwrap(),
+            serialport::StopBits::Two
+        );
+        assert_eq!(parse_stop_bits(None).unwrap(), serialport::StopBits::One);
+        for junk in ["1.5", "0", ""] {
+            assert!(
+                parse_stop_bits(Some(&junk.to_string())).is_err(),
+                "{junk:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn flow_control_accepts_the_wire_vocabulary_and_rejects_junk() {
+        let cases = [
+            ("none", serialport::FlowControl::None),
+            ("rts_cts", serialport::FlowControl::Hardware),
+            ("xon_xoff", serialport::FlowControl::Software),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                parse_flow_control(Some(&raw.to_string())).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            parse_flow_control(None).unwrap(),
+            serialport::FlowControl::None
+        );
+        for junk in ["hardware", "rtscts", "software", ""] {
+            assert!(
+                parse_flow_control(Some(&junk.to_string())).is_err(),
+                "{junk:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_reports_the_offending_parameter() {
+        let request = SerialStartRequest {
+            data_bits: Some("8".to_string()),
+            parity: Some("mark".to_string()),
+            stop_bits: Some("1".to_string()),
+            ..SerialStartRequest::default()
+        };
+        let error = resolve_line_params(&request).unwrap_err();
+        assert!(error.starts_with("serial/start:"), "got {error}");
+        assert!(error.contains("invalid parity"), "got {error}");
+        assert!(
+            !error.contains("dataBits"),
+            "only the offender is named: {error}"
+        );
+    }
+
+    #[test]
+    fn default_request_resolves_to_8n1_without_flow_control() {
+        let line = resolve_line_params(&SerialStartRequest::default()).unwrap();
+        assert_eq!(line.data_bits, serialport::DataBits::Eight);
+        assert_eq!(line.parity, serialport::Parity::None);
+        assert_eq!(line.stop_bits, serialport::StopBits::One);
+        assert_eq!(line.flow_control, serialport::FlowControl::None);
+    }
+
+    #[test]
+    fn baud_rate_bounds_match_the_documented_range() {
+        for good in [50u32, 9_600, 115_200, 230_400, 3_000_000, 4_000_000] {
+            assert_eq!(checked_baud_rate(good).unwrap(), good);
+        }
+        for bad in [0, 49, 4_000_001, u32::MAX] {
+            let error = checked_baud_rate(bad).unwrap_err();
+            assert!(
+                error.starts_with("serial/start:") && error.contains("baudRate"),
+                "{bad} error names the field: {error}"
+            );
+        }
+    }
 }
