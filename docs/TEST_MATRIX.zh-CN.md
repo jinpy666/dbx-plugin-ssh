@@ -111,3 +111,5 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：行内 ghost 建议（字节分类/门闩/前缀扩展/接受注入，Warp/fish 对标）；结构化补全三级下拉（spec 优先/历史回落）；telnet 声明式自动登录；四格式会话导入；连接级启动命令（<=20 行/<=4KiB/<=30s 延迟上限、按 connectionId 分桶、完成事件不含命令内容）。
 
 仍保持未验收（依赖真机/人工）：serial-xymodem 线在途（模块已落盘，验证中）；ghost/spec 真机输入法与宿主渲染联调；DBX 桌面端到端；RDP 评审执行。
+
+- 补录：serial-xymodem 合入（backend 801 / 前端 975 终值），XMODEM/YMODEM/ZMODEM 上传协议状态机与 serialUpload 前端为新增可测面；smoke_serial_upload.py 入实例测试家族。np9 排期清零。

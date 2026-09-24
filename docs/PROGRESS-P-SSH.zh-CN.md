@@ -3680,3 +3680,6 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **并入确认**：warp 线 1（np8-warp-ghost 行内 ghost 建议）已由并行会话先行合入（terminalGhost 文案块在案），本次 merge 基于其上。
 - **全量（六线合并后）**：backend cargo **801**（基线 735）/ clippy 0 / fmt 干净；frontend vitest **975**（97 文件，基线 891）/ vue-tsc 0 / build 过（ui/ 重生成）。
 - **在途**：np8-e2e（walkthrough 修复）。M7 剩余：全量数字随最后一线上升后做终收口。
+
+- **serial-xymodem ✅ 合入**（parity-serial-xymodem 8356403，merge 42264bb）：XMODEM/YMODEM/ZMODEM 文件上传（NyaTerm parity P0-3，serial JSON 写通道内嵌协议，不动 wire 协议）+ 前端 serialUpload 状态机 + 七语文案 + smoke_serial_upload.py 上传冒烟。**np9 五线全部合入，M7 排期清零。**
+- **M8 全量终值**：backend cargo **801**（745 + xymodem 56）/ clippy 0 / fmt 干净；frontend vitest **975**（97 文件，960 + xymodem 15）/ vue-tsc 0 / build 过。
