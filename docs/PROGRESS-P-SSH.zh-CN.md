@@ -3683,3 +3683,11 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 
 - **serial-xymodem ✅ 合入**（parity-serial-xymodem 8356403，merge 42264bb）：XMODEM/YMODEM/ZMODEM 文件上传（NyaTerm parity P0-3，serial JSON 写通道内嵌协议，不动 wire 协议）+ 前端 serialUpload 状态机 + 七语文案 + smoke_serial_upload.py 上传冒烟。**np9 五线全部合入，M7 排期清零。**
 - **M8 全量终值**：backend cargo **801**（745 + xymodem 56）/ clippy 0 / fmt 干净；frontend vitest **975**（97 文件，960 + xymodem 15）/ vue-tsc 0 / build 过。
+
+
+## M8 收口补遗：serial-xymodem 全量数字（2026-09-25）
+
+- **P0-3 串口 XMODEM/YMODEM/ZMODEM 上传 ✅ 合入**（8356403 + merge 42264bb）：backend `serial_xmodem.rs`（2069 行，走现有 serial JSON 写通道内嵌协议，不动 wire 协议）+ 前端 SerialUploadDialog/serialUpload + `smoke_serial_upload.py`（406 行）+ PROTOCOL 文档同步。
+- **全量**：backend cargo **801**（M5.5 基线 735 → M7 766 → 801，只增不减）/ clippy `-D warnings` 0 / fmt 干净；frontend vitest **975**（97 文件，基线 891 → 934 → 975）/ vue-tsc 0 / build 过（ui/ 重生成）。
+- **交付核验 ✅**（reverify.md）：UI 场景矩阵 13/13（原 3 FAIL 随 XTVERSION 修复 9fcb326 全部转绿）、walkthrough 家族 3/3（settings/mock/fresh_review 全绿）、smoke 双件套 PASS。
+- 至此 M7 五任务 + Warp 两线全部合入，CI 覆盖最新 HEAD。
