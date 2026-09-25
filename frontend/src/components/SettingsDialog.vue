@@ -59,6 +59,12 @@ import {
   STARTUP_DELAY_DEFAULT_MS,
   type StartupCommandEntry,
 } from "../lib/startupCommands";
+import {
+  choiceFromOverride,
+  mergeNameEncodingStore,
+  overrideFromChoice,
+  type ConnectionNameEncodingChoice,
+} from "../lib/connectionNameEncoding";
 
 /** 连接级启动命令（P0-4，Tabby「Login scripts」对标）：同 X11 走组件内自治
  * RPC 读写 sidecar 偏好（`startup_commands` 键按 connectionId 分桶，读改写
@@ -141,6 +147,46 @@ function clampStartupDelayInput(raw: string): number {
   return Math.min(value, STARTUP_DELAY_MAX_MS);
 }
 import { pluginStore } from "../lib/pluginStore";
+
+/** 连接级 SFTP 文件名编码覆盖（M16）：同启动命令的自治 RPC 读写
+ * （`sftp_name_encoding_overrides` 键按 connectionId 分桶）。控件缺省
+ * 「跟随全局」且不落盘（删除本连接桶）；连接未覆盖时全局
+ * `sftp_name_encoding` 生效，判定优先级在 sidecar（覆盖 > 全局 > auto）。 */
+const connNameEncodingChoice = ref<ConnectionNameEncodingChoice>("follow");
+
+async function loadConnNameEncoding() {
+  const connectionId = props.connectionId;
+  if (!connectionId) return;
+  try {
+    const prefs = await window.dbxPlugin?.invoke<{ sftp_name_encoding_overrides?: unknown }>("local/preferences/get", {});
+    const store = prefs?.sftp_name_encoding_overrides as Record<string, unknown> | undefined;
+    connNameEncodingChoice.value = choiceFromOverride(store?.[connectionId]);
+  } catch {
+    connNameEncodingChoice.value = "follow";
+  }
+}
+
+async function persistConnNameEncoding() {
+  const connectionId = props.connectionId;
+  if (!connectionId) return;
+  try {
+    const prefs = await window.dbxPlugin?.invoke<{ sftp_name_encoding_overrides?: unknown }>("local/preferences/get", {});
+    await window.dbxPlugin?.invoke("local/preferences/set", {
+      sftp_name_encoding_overrides: mergeNameEncodingStore(
+        prefs?.sftp_name_encoding_overrides,
+        connectionId,
+        overrideFromChoice(connNameEncodingChoice.value),
+      ),
+    });
+  } catch (cause) {
+    emit("error", cause);
+  }
+}
+
+function setConnNameEncoding(choice: ConnectionNameEncodingChoice) {
+  connNameEncodingChoice.value = choice;
+  void persistConnNameEncoding();
+}
 
 /** X11 转发偏好（P3-3）：组件内自治读写 sidecar 偏好——即时生效语义
  * （新会话才启用），不走 props/emit（App 无需感知）。 */
@@ -800,6 +846,7 @@ async function reloadSettings() {
   void loadMcpSettings();
   void loadSudoProfiles();
   void loadStartupCommands();
+  void loadConnNameEncoding();
   try {
     // revealSecrets: 预填已存原值（原始凭据串），避免只能看到"已配置"占位。
     const meta = await window.dbxPlugin.invoke<SshSettings>("ssh/settings/get", { sessionId: props.sessionId, revealSecrets: true });
@@ -828,7 +875,10 @@ watch(() => props.open, (open) => {
 
 // 弹窗开着时活跃会话切到另一连接：启动命令区按新 connectionId 重新回显。
 watch(() => props.connectionId, () => {
-  if (props.open) void loadStartupCommands();
+  if (props.open) {
+    void loadStartupCommands();
+    void loadConnNameEncoding();
+  }
 });
 
 watch(() => props.profilesOpen, (open) => {
@@ -1836,6 +1886,22 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <button v-if="startupCommands.length < STARTUP_COMMAND_MAX" class="link-button" type="button" @click="addStartupEntry"><Plus />{{ t("startupCommands.add") }}</button>
               <p class="muted settings-note">{{ t("startupCommands.scopeNote") }}</p>
             </template>
+
+            <!-- 连接级 SFTP 文件名编码（M16）：覆盖全局 `sftp_name_encoding`；
+                 缺省「跟随全局」（不落盘），白名单 auto/latin-1 与全局一致。 -->
+            <h3 class="settings-section-title">{{ t("connNameEncoding.sectionTitle") }}</h3>
+            <label class="settings-field">
+              <span>{{ t("connNameEncoding.label") }}</span>
+              <Select :model-value="connNameEncodingChoice" @update:model-value="setConnNameEncoding(String($event) as ConnectionNameEncodingChoice)">
+                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="follow">{{ t("connNameEncoding.follow") }}</SelectItem>
+                  <SelectItem value="auto">{{ t("transferCfg.encoding.auto") }}</SelectItem>
+                  <SelectItem value="latin-1">{{ t("transferCfg.encoding.latin-1") }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <p class="muted settings-note">{{ t("connNameEncoding.hint") }}</p>
             </template>
 
             <h3 class="settings-section-title">{{ t("suggestions.settingsTitle") }}</h3>

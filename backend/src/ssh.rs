@@ -3488,6 +3488,17 @@ impl SshRuntime {
         Ok(home)
     }
 
+    /// sessionId → connectionId（M16 连接级 SFTP 文件名编码判定用）：只查
+    /// 会话注册表，未知/已摘除的会话返回 None，由调用方按「未覆盖（跟随
+    /// 全局）」兜底——编码判定绝不因会话状态未知而失败。
+    pub async fn connection_id_for_session(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|entry| entry.connection_id.clone())
+    }
+
     pub async fn session_id_for_connection(&self, connection_id: &str) -> Result<String, String> {
         // The caller holds only the connection id, so with several workbenches
         // on one connection this must pick deterministically: the oldest live
