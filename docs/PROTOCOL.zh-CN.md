@@ -510,6 +510,7 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 - `sftp/upload/{taskId}`：大端 `u64` 文件偏移加最多 256 KiB 数据；偏移必须等于服务端期待值。
 - `sftp/download/{taskId}`：大端 `u64` 文件偏移加最多 256 KiB 数据（树任务该偏移为整树聚合字节位置；队列耗尽后的 eof 应答携带 0 字节数据）。
 - `vnc/frame/{sessionId}`：VNC 帧补丁，44 字节头 + RGBA 像素负载，全部**小端**（字段表见下文「VNC 帧补丁」小节）。
+- `rdp/frame/{sessionId}`：RDP 帧补丁，与 `vnc/frame` **同一** 44 字节 patch 头 + RGBA 像素负载（全小端；字段表、校验不变式与跨端 golden 向量同「VNC 帧补丁」小节，前端解码器直接复用）。
 
 终端输出保留 2 MiB 环形缓存。前端检测到序号缺口后停止乱序输出并调用 `ssh/terminal/replay`。文件传输采用逐块 RPC 确认，不依赖广播队列可靠送达。
 
@@ -572,6 +573,33 @@ VNC 远程桌面的帧缓冲更新以 patch 帧推送：`44 字节头 | RGBA 像
 - 事件 `serial/upload/progress`（notify）：`{sessionId, protocol, fileName, fileIndex, sent, total, state, reason?}`，`state ∈ "running" | "file_complete" | "complete" | "failed"`；`sent` 为对端已确认（ZMODEM）或已确认收到（X/Y ACK）的字节数，不含文件内容；事件按 ≥4KiB 增量或 200ms 窗口限流，状态变化强制上报。
 
 协议语义（对齐 NyaTerm 及其 vendor zmodem2 发送端行为，代码手写）：XMODEM 128B 块 + CRC16（`C` 握手）或 8-bit checksum（`NAK` 握手）、CPM-EOF 尾填充、EOT 先 NAK 后 ACK；YMODEM 批形态（块 0 头 `name\0size` 零填充、固定 CRC、EOT 后收尾全零头块）；ZMODEM ZRQINIT(hex)→ZRINIT→ZFILE(bin32+CRCW 子包)→ZRPOS→ZDATA（每帧单 ZCRCW 子包等待落盘确认，子包按对端 ZRINIT 声明的接收缓冲截断，上限 8KiB）→ZEOF→ZRINIT→ZFIN(hex)→`OO`，支持 ZRPOS 断点续传与 ZSKIP 拒收；对端连续取消字节（X/Y CAN×2、Z ZDLE×5）判远端取消，静默 10s 重发最后一帧、10 次后失败。
+
+## RDP 远程桌面会话
+
+RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRDP 链（ironrdp 0.17 lockstep，`backend/vendor/`），连接序列（X.224 协商 → TLS → CredSSP/NLA → 虚通道）与 NyaTerm `src/core/rdp.rs` 同构。**范围（评审定案，见 `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）**：密码/NLA（CredSSP）+ TLS + 文本剪贴板 + 断线重连；不做音频、驱动器重定向、键盘捕获、网关/RDCleanPath、UDP 传输、Kerberos。仅 TCP 直连形态。
+
+- `rdp/start {workbenchId, host, port?=3389, username, password?, domain?, width?=1280, height?=800, useNla?, certificatePolicy?, clipboard?=true, reconnectAttempts?=5}` → `{sessionId, host, port, useNla, certificatePolicy, clipboard, reconnectAttempts}`。`width/height` 须在 640x480..3840x2160（下界沿 NyaTerm，上界沿插件远程桌面上界，保证补丁负载 < 64 MiB）。`useNla`/`certificatePolicy` 缺省依次回落偏好（`rdp_use_nla`/`rdp_certificate_policy`，见下）与评审锁定缺省（`true`/`prompt`）。密码仅本地 IPC 传输，sidecar 以 `Zeroizing` 持有，不落日志/审计/错误信息。
+- `rdp/input`（别名 `rdp/write`）`{sessionId, kind, ...}`：`kind ∈ key-down | key-up | mouse-move | mouse-button | mouse-wheel | unicode | release-all`。键盘字段 `scan_code`（camelCase `scanCode` 别名）+ `extended`；鼠标 `button ∈ left|middle|right|back|forward`、`pressed`、`x/y`；滚轮 `deltaX/deltaY`（浏览器增量，取反映射为 RDP 旋转单位，NyaTerm 语义）；`unicode` 按字符 press+release。右 Shift（非扩展 0x36）走直发 fast-path（NyaTerm 修复），其余经输入数据库派生 fast-path 事件。返回 `{success}`。
+- `rdp/resize {sessionId, width, height}`：服务端动态分辨率，尺寸门限同 start。返回 `{success}`。
+- `rdp/set-clipboard {sessionId, text}`：本地文本 → 远端（暂存 + 以 CF_UNICODETEXT 广告）。**仅文本**；上限 16 MiB，超限整包拒绝（不截断）。返回 `{success}`。
+- `rdp/reconnect {sessionId}`：手动重连（generation 计数防串话）。返回 `{sessionId, success}`。
+- `rdp/close {sessionId}`：关闭会话（凭据随会话丢弃、待定证书确认全部拒绝、剪贴板暂存清空）。返回 `{success}`。
+- `rdp/list` → `{sessions: [{sessionId, workbenchId, host, port, username, hasPassword, useNla, certificatePolicy, clipboard, createdAt}]}`（按创建时间排序；不含密码与实时状态）。
+- `rdp/certificate/resolve {challengeId, accept?, remember?}`：证书确认应答。`accept` 缺省 false——超时/取消/未知 id 一律拒绝（fail-closed）。`remember=true` 时把指纹记入 `<plugin-data>/rdp-known-certs.json`（`{"host:port": "SHA256:hex"}`，上限 1024 条，与 SSH known_hosts 先例同作用域语义）。共享入口 `connection/challenge/resolve` 亦按 challengeId 路由到 RDP 注册表。
+
+事件：
+
+- `rdp/session/state {sessionId, workbenchId, state, errorKind?, error?, attempt?, maxAttempts?}`：`state ∈ connecting | connected | reconnecting | closed | error`；`connected` 在首个桌面帧到达时发布。`errorKind ∈ transport | tls | certificate | authentication | negotiation | session | clipboard`。**认证失败文案统一为 "RDP authentication failed"**（不区分用户名/密码错误、不回显凭据）。
+- `rdp/frame/{sessionId}`（二进制）：44 字节 patch 头 + RGBA 负载，与 `vnc/frame` 同格式（见上文），`sequence` 跨重连单调。
+- `rdp/clipboard {sessionId, text}`：远端 → 本地文本（≤16 MiB，仅 CF_UNICODETEXT；由后端格式过滤保证，非 UI 约束）。
+- `rdp/pointer {sessionId, type, ...}`：`type ∈ default | hidden | position(x,y) | bitmap(width,height,hotspotX,hotspotY,rgbaBase64)`（服务端光标形状，NyaTerm 同族事件）。
+- `connection/challenge {challengeId, kind: "rdp-certificate", sessionId, host, port, fingerprint, knownHostStatus}`：证书确认请求（`knownHostStatus ∈ match | changed | unknown`）。确认窗 **120s**，超时即拒绝；generation 变更后到达的应答一律拒绝（防串话）。
+
+重连门控（NyaTerm 同款分类器）：证书/认证/协商类失败**永不**自动重试；TLS/传输类失败有限重试，退避 1/2/4/8/15s 封顶 30s，默认 5 次（上限 10；`reconnectAttempts` 可调）。会话曾进入 active（收到过帧）后失败则重置重试预算；服务端主动断开（graceful disconnect）不自动重连，由用户 `rdp/reconnect` 决定。`rdp/close` 与 `rdp/reconnect` 递增 generation，旧代 worker 静默退出，帧/事件/证书应答均按 generation 过滤。
+
+安全红线（实现与评审对照见 `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）：NTLMv2-only（vendored sspi 明示不支持 NTLMv1/LM，源码断言钉在 `vendored_sspi_marks_ntlmv1_and_lm_as_unsupported`）；CredSSP 仅在 TLS 之上（`with_tls(true)` 恒开）；证书策略 fail-closed（`prompt` 默认 / `strict` / `accept-temporarily`，无「静默接受」路径）；剪贴板 text-only + 16 MiB + 不落审计；凭据 `Zeroizing` 持有、不进日志/事件/错误。用户文档保留「连接期间远端可读写会话剪贴板、凭据实质交付目标主机，仅连接可信主机」警示。
+
+偏好（`local/preferences/*` 白名单新增，RDP-2）：`rdp_use_nla`（布尔，缺省 true）、`rdp_certificate_policy`（`prompt`（缺省）| `strict` | `accept-temporarily`，白名单外拒绝写入）。不新增 manifest 字段。
 
 ## 主机密钥确认通道(requestUserInput)
 

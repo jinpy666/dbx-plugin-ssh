@@ -128,6 +128,18 @@ fn sanitize_conflict_policy(value: &Value) -> Option<&'static str> {
     }
 }
 
+/// RDP 证书策略白名单（评审定案，RDP_CREDSSP_REVIEW_CHECKLIST §3-C）：
+/// prompt（默认，120s 确认窗）/ strict / accept-temporarily。不存在
+/// 「静默接受任意证书」的选项——白名单之外一律拒绝写入。
+fn sanitize_rdp_certificate_policy(value: &Value) -> Option<&'static str> {
+    match value.as_str()? {
+        "prompt" => Some("prompt"),
+        "strict" => Some("strict"),
+        "accept-temporarily" => Some("accept-temporarily"),
+        _ => None,
+    }
+}
+
 /// 数值偏好钳制：非负整数夹进 [min, max]，超界取边界、非法取 fallback。
 fn sanitize_u64_clamped(value: &Value, min: u64, max: u64, fallback: u64) -> u64 {
     let raw = match value {
@@ -314,6 +326,20 @@ pub fn load_preferences(data_dir: &Path) -> Value {
     {
         prefs.insert("startup_commands".to_string(), store);
     }
+    // RDP 安全设置（RDP-2）：use_nla 缺省 true、证书策略缺省 prompt；
+    // 键不存在时不出现（前端按缺省处理）。
+    if let Some(use_nla) = map.get("rdp_use_nla").and_then(Value::as_bool) {
+        prefs.insert("rdp_use_nla".to_string(), Value::Bool(use_nla));
+    }
+    if let Some(policy) = map
+        .get("rdp_certificate_policy")
+        .and_then(sanitize_rdp_certificate_policy)
+    {
+        prefs.insert(
+            "rdp_certificate_policy".to_string(),
+            Value::String(policy.to_string()),
+        );
+    }
 
     Value::Object(prefs)
 }
@@ -483,6 +509,24 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
             "startup_commands must be an object keyed by connectionId".to_string()
         })?;
         map.insert("startup_commands".to_string(), store);
+    }
+    // RDP 安全设置（RDP-2）：布尔直存；证书策略走白名单（白名单外报错，
+    // 不落盘污染），缺省语义由 rdp_session::resolve_security 兜底
+    // （use_nla=true、certificate_policy=prompt）。
+    if let Some(value) = params.get("rdp_use_nla") {
+        let use_nla = value
+            .as_bool()
+            .ok_or_else(|| "rdp_use_nla must be a boolean".to_string())?;
+        map.insert("rdp_use_nla".to_string(), Value::Bool(use_nla));
+    }
+    if let Some(value) = params.get("rdp_certificate_policy") {
+        let policy = sanitize_rdp_certificate_policy(value).ok_or_else(|| {
+            "rdp_certificate_policy must be prompt, strict or accept-temporarily".to_string()
+        })?;
+        map.insert(
+            "rdp_certificate_policy".to_string(),
+            Value::String(policy.to_string()),
+        );
     }
 
     let path = store_path(data_dir);
@@ -669,6 +713,41 @@ mod tests {
         let prefs = load_preferences(data_dir.path());
         assert!(prefs.get("startup_commands").is_some());
         assert_eq!(prefs["downloadDir"], "/tmp/x");
+    }
+
+    #[test]
+    fn rdp_security_prefs_whitelist_and_roundtrip() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // 空偏好：两键都不出现（前端按缺省 use_nla=true/prompt 处理）。
+        let prefs = load_preferences(data_dir.path());
+        assert!(prefs.get("rdp_use_nla").is_none());
+        assert!(prefs.get("rdp_certificate_policy").is_none());
+        // 写入 + 读回。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_use_nla": false, "rdp_certificate_policy": "strict" }),
+        )
+        .expect("save");
+        let prefs = load_preferences(data_dir.path());
+        assert_eq!(prefs["rdp_use_nla"], false);
+        assert_eq!(prefs["rdp_certificate_policy"], "strict");
+        // 白名单外证书策略报错且不落盘污染（fail-closed：无「静默接受」项）。
+        let error = save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_certificate_policy": "accept-always" }),
+        )
+        .expect_err("must reject unknown policy");
+        assert!(
+            error.contains("prompt, strict or accept-temporarily"),
+            "{error}"
+        );
+        // 非 bool 拒绝。
+        assert!(save_preferences(data_dir.path(), &json!({ "rdp_use_nla": "yes" })).is_err());
+        // 部分更新只改出现的键。
+        save_preferences(data_dir.path(), &json!({ "rdp_use_nla": true })).expect("partial");
+        let prefs = load_preferences(data_dir.path());
+        assert_eq!(prefs["rdp_use_nla"], true);
+        assert_eq!(prefs["rdp_certificate_policy"], "strict");
     }
 
     #[test]

@@ -913,6 +913,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2",
  "sha3 0.11.0",
+ "smallvec",
  "tempfile",
  "tokio",
  "uuid",

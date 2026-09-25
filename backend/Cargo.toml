@@ -80,6 +80,10 @@ vnc-rs = "0.6"
 # redirection or keyboard capture. TLS backend follows NyaTerm's platform
 # split (rustls elsewhere, native-tls/Schannel on Windows).
 ironrdp = { version = "0.17", default-features = false, features = ["client", "client-clipboard", "cliprdr", "connector", "core", "input", "pdu"] }
+# RDP 键盘输入路径（src/rdp_session.rs）：ironrdp-input 的 Database::apply
+# 返回 SmallVec<[FastPathInputEvent; 2]>，右 Shift 直发 fast-path 事件也用
+# smallvec! 构造。已是 ironrdp 传递依赖（锁内 1.16.x），此处只声明直用。
+smallvec = "1"
 
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2"
