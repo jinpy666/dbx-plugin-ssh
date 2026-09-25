@@ -13,13 +13,15 @@
 //! No DISPLAY is probed anywhere in this module, so the tests never depend
 //! on an X server being present (CI runners have none).
 
-// The bridge consumer lands in the next commit; everything below is
-// exercised from unit tests meanwhile.
+// The bridge is driven by `server_channel_open_x11` in `ssh.rs`; the pure
+// pieces additionally carry their own unit tests below.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+
+use tokio::io::AsyncWriteExt;
 
 /// The only authorization protocol this implementation produces and accepts.
 pub(crate) const X11_AUTH_PROTOCOL: &str = "MIT-MAGIC-COOKIE-1";
@@ -227,6 +229,39 @@ fn pad4(len: usize) -> usize {
     (len + 3) & !3
 }
 
+/// Bounds the bytes buffered while an x11 channel's setup block is still
+/// pending. A well-formed setup is a few hundred bytes; a peer that keeps
+/// writing past this bound is malformed or hostile and must be cut off.
+pub(crate) const MAX_SETUP_BYTES: usize = 16 * 1024;
+
+/// Accumulates the first bytes of an accepted x11 channel until the X
+/// connection setup block is complete. Pure and unit-tested; the
+/// `server_channel_open_x11` handler in `ssh.rs` feeds it every incoming
+/// `ChannelMsg::Data` and relays nothing until it yields a final verdict,
+/// so a wrong cookie never reaches the local display.
+#[derive(Default)]
+pub(crate) struct SetupBuffer {
+    bytes: Vec<u8>,
+}
+
+impl SetupBuffer {
+    /// Appends a data chunk and re-evaluates the setup block. Memory stays
+    /// bounded: once the pending bytes exceed [`MAX_SETUP_BYTES`] without a
+    /// verdict, the channel is rejected outright.
+    pub(crate) fn push(&mut self, data: &[u8], expected: &FakeCookie) -> SetupInspection {
+        if self.bytes.len() + data.len() > MAX_SETUP_BYTES {
+            return SetupInspection::Reject("X setup block exceeds the size bound");
+        }
+        self.bytes.extend_from_slice(data);
+        inspect_setup(&self.bytes, expected)
+    }
+
+    /// The accumulated bytes, relayed verbatim on `Accept`.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 /// Family codes from Xau(3).
 const FAMILY_LOCAL: u16 = 256;
 const FAMILY_WILD: u16 = 65535;
@@ -336,6 +371,28 @@ pub(crate) fn load_real_cookie(display: &DisplayTarget) -> Option<Vec<u8>> {
     find_real_cookie(&parse_xauthority(&bytes), display.number)
 }
 
+/// OpenSSH's fake->real substitution: rewrites the validated fake cookie
+/// inside a setup block with the display's real cookie. `None`, an
+/// odd-length cookie, or an offset out of range relay the fake unchanged —
+/// the same fallback OpenSSH takes when it has no xauth data (only works
+/// against a local X server with access control disabled). Pure and
+/// unit-tested; the caller feeds `load_real_cookie` as `real`.
+pub(crate) fn substitute_cookie(setup: &mut [u8], cookie_offset: usize, real: Option<&[u8]>) {
+    let Some(real) = real else {
+        return;
+    };
+    if real.len() != COOKIE_LEN {
+        return;
+    }
+    let end = match cookie_offset.checked_add(COOKIE_LEN) {
+        Some(end) => end,
+        None => return,
+    };
+    if setup.len() >= end {
+        setup[cookie_offset..end].copy_from_slice(real);
+    }
+}
+
 /// Concurrent x11 channels bridged per armed session. Eight is generous for
 /// interactive use and bounds the local X connection fan-out of one remote
 /// host (spike §3.6).
@@ -420,22 +477,52 @@ impl X11Gate {
 // —— 会话接线（ssh.rs 消费）———————————————————————————————
 
 /// The gate of the most recent X11-enabled session (`armed()` output).
-/// `None` until a session turns X11 on; replaced on each re-arm.
-static ACTIVE_GATE: std::sync::OnceLock<Arc<X11Gate>> = std::sync::OnceLock::new();
+/// `None` until a session turns X11 on. Each re-arm replaces the slot and
+/// disarms the previous gate, so only the newest armed session's fake
+/// cookie is honored and admit counts stay per-gate. Concurrent X11
+/// sessions therefore share the newest gate by design — a strictly
+/// per-connection gate cannot be disarmed per session because reused
+/// transports serve several sessions through one `SshClient`. When the
+/// sidecar's last session closes, `ssh.rs` (`close_session`) calls
+/// [`disarm_active`]; afterwards every channel fails closed until a new
+/// session arms again.
+static ACTIVE_GATE: Mutex<Option<Arc<X11Gate>>> = Mutex::new(None);
 
 /// Arms a fresh gate for a session that turned X11 on; returns the fake
-/// cookie hex to send in `x11-req`.
+/// cookie hex to send in `x11-req`. Any previously armed gate is disarmed
+/// first, so channels racing the re-arm fail closed on the stale cookie.
 pub(crate) fn arm_session() -> Result<String, String> {
     let (gate, hex) = X11Gate::armed()?;
-    let _ = ACTIVE_GATE.set(gate);
+    if let Ok(mut slot) = ACTIVE_GATE.lock() {
+        replace_gate(&mut slot, gate);
+    }
     set_enabled(true);
     Ok(hex)
 }
 
+/// Slot replacement: disarm the previous gate, then store the new one.
+fn replace_gate(slot: &mut Option<Arc<X11Gate>>, gate: Arc<X11Gate>) {
+    if let Some(previous) = slot.take() {
+        previous.disarm();
+    }
+    *slot = Some(gate);
+}
+
+/// Releases the active gate (last session closed): the cookie is cleared
+/// and every subsequent admission fails closed.
+pub(crate) fn disarm_active() {
+    if let Ok(mut slot) = ACTIVE_GATE.lock() {
+        if let Some(gate) = slot.take() {
+            gate.disarm();
+        }
+    }
+}
+
 /// Admission for `server_channel_open_x11`: only succeeds while a session
-/// has X11 armed and the per-connection bridge cap is not exhausted.
+/// has X11 armed and the armed gate's bridge cap is not exhausted.
 pub(crate) fn try_admit_active() -> Option<(FakeCookie, BridgePermit)> {
-    ACTIVE_GATE.get().and_then(|gate| gate.try_admit())
+    let gate = ACTIVE_GATE.lock().ok().and_then(|slot| slot.clone());
+    gate.and_then(|gate| gate.try_admit())
 }
 
 /// Fast-path preference flag (mirrors `x11_forwarding` in preferences.json).
@@ -473,11 +560,13 @@ pub(crate) fn enabled_from(data_dir: &Path) -> bool {
 }
 
 /// Bridges an accepted x11 channel into the local X server endpoint
-/// (unix socket first, TCP loopback fallback). Byte-for-byte relay: the X
-/// client's real-cookie setup packet travels untouched to the local server.
+/// (unix socket first, TCP loopback fallback). The validated setup block
+/// (real cookie already substituted) is written first; the relay then
+/// continues byte-for-byte in both directions.
 pub(crate) async fn bridge_channel(
     channel: russh::Channel<russh::client::Msg>,
     target: &DisplayTarget,
+    setup: Vec<u8>,
 ) -> Result<(), String> {
     let connect_error = |error| format!("X11: cannot reach local display {target:?}: {error}");
     // Unix sockets do not exist on Windows: X servers there listen on TCP
@@ -488,6 +577,10 @@ pub(crate) async fn bridge_channel(
             .await
             .map_err(&connect_error)?;
         let mut stream = channel.into_stream();
+        stream
+            .write_all(&setup)
+            .await
+            .map_err(|error| format!("X11: cannot write the X setup block: {error}"))?;
         let (up, down) = tokio::io::copy_bidirectional(&mut stream, &mut { local })
             .await
             .map_err(|error| format!("X11: bridge error: {error}"))?;
@@ -511,6 +604,10 @@ pub(crate) async fn bridge_channel(
         .await
         .map_err(&connect_error)?;
     let mut stream = channel.into_stream();
+    stream
+        .write_all(&setup)
+        .await
+        .map_err(|error| format!("X11: cannot write the X setup block: {error}"))?;
     let (up, down) = tokio::io::copy_bidirectional(&mut stream, &mut local)
         .await
         .map_err(|error| format!("X11: bridge error: {error}"))?;
@@ -812,6 +909,109 @@ mod tests {
         // Releasing one slot admits the next waiting channel.
         drop(permits.pop());
         assert!(gate.try_admit().is_some());
+    }
+
+    #[test]
+    fn gate_replacement_disarms_the_previous_gate() {
+        let (old, old_hex) = X11Gate::armed().expect("arm");
+        let (new, new_hex) = X11Gate::armed().expect("arm");
+        assert_ne!(old_hex, new_hex, "each arm draws a fresh cookie");
+        let mut slot = Some(old.clone());
+        replace_gate(&mut slot, new.clone());
+        // The replaced gate was disarmed on the way out: a channel racing
+        // the re-arm must fail closed instead of honoring the stale cookie.
+        assert!(old.try_admit().is_none());
+        let (cookie, _permit) = new.try_admit().expect("the newest gate admits");
+        assert_eq!(cookie.hex(), new_hex);
+    }
+
+    #[test]
+    fn replacement_keeps_admit_counts_per_gate() {
+        let (old, _hex) = X11Gate::armed().expect("arm");
+        let _held_on_old = old.try_admit().expect("old gate admits");
+        let (new, _hex) = X11Gate::armed().expect("arm");
+        let mut slot = Some(old);
+        replace_gate(&mut slot, new.clone());
+        // The new gate starts from an empty cap: permits still held on the
+        // replaced gate must not consume the new gate's slots.
+        assert_eq!(new.bridges.load(Ordering::Acquire), 0);
+        let mut permits = Vec::new();
+        for _ in 0..MAX_BRIDGES_PER_SESSION {
+            permits.push(new.try_admit().expect("full cap available on the new gate"));
+        }
+        assert!(new.try_admit().is_none(), "cap must hold on the new gate");
+    }
+
+    /// Serializes against every other global-slot test: `ACTIVE_GATE` is
+    /// process-wide, so exactly one test touches the arm/admit/disarm path.
+    #[test]
+    fn active_slot_arms_admits_and_disarms() {
+        let hex = arm_session().expect("arm");
+        let (cookie, _permit) = try_admit_active().expect("admit while armed");
+        assert_eq!(cookie.hex(), hex);
+        disarm_active();
+        assert!(try_admit_active().is_none(), "disarm must fail closed");
+    }
+
+    #[test]
+    fn setup_buffer_rejects_a_foreign_cookie_across_chunks() {
+        let (gate, hex) = X11Gate::armed().expect("arm");
+        let (cookie, _permit) = gate.try_admit().expect("admit");
+        assert_eq!(cookie.hex(), hex);
+        // A setup block carrying a different cookie than the one issued for
+        // the session is rejected even when it arrives chunked.
+        let foreign = FakeCookie::generate().expect("CSPRNG");
+        let packet = setup_packet(0x6c, true, X11_AUTH_PROTOCOL.as_bytes(), foreign.bytes());
+        let mut buffer = SetupBuffer::default();
+        let (head, tail) = packet.split_at(5);
+        assert_eq!(buffer.push(head, &cookie), SetupInspection::Incomplete);
+        assert_eq!(
+            buffer.push(tail, &cookie),
+            SetupInspection::Reject("X setup cookie does not match the issued fake cookie")
+        );
+    }
+
+    #[test]
+    fn setup_buffer_bounds_a_peer_that_never_finishes() {
+        let (gate, _hex) = X11Gate::armed().expect("arm");
+        let (cookie, _permit) = gate.try_admit().expect("admit");
+        // A header declaring a huge protocol length keeps the block
+        // "incomplete" forever; the buffer must cut the channel off instead
+        // of growing without bound.
+        let mut header = vec![0x6c, 0, 11, 0, 0, 0];
+        header.extend_from_slice(&u16::MAX.to_le_bytes());
+        header.extend_from_slice(&0u16.to_le_bytes());
+        header.extend_from_slice(&[0, 0]);
+        let mut buffer = SetupBuffer::default();
+        assert_eq!(buffer.push(&header, &cookie), SetupInspection::Incomplete);
+        for _ in 0..1_000 {
+            match buffer.push(&[0u8; 512], &cookie) {
+                SetupInspection::Incomplete => continue,
+                SetupInspection::Reject(_) => return,
+                SetupInspection::Accept { .. } => panic!("an unfinished block cannot accept"),
+            }
+        }
+        panic!("the setup size bound never tripped");
+    }
+
+    #[test]
+    fn substitute_cookie_swaps_the_fake_for_the_real_one() {
+        let cookie = FakeCookie::generate().expect("CSPRNG");
+        let offset = 12 + pad4(X11_AUTH_PROTOCOL.len());
+        let build = || setup_packet(0x6c, true, X11_AUTH_PROTOCOL.as_bytes(), cookie.bytes());
+        // A matching-length real cookie replaces the fake in place.
+        let real = vec![0xa5u8; COOKIE_LEN];
+        let mut setup = build();
+        substitute_cookie(&mut setup, offset, Some(&real));
+        assert_eq!(&setup[offset..offset + COOKIE_LEN], real.as_slice());
+        // No real cookie: the fake is relayed unchanged.
+        let mut setup = build();
+        substitute_cookie(&mut setup, offset, None);
+        assert_eq!(&setup[offset..offset + COOKIE_LEN], cookie.bytes());
+        // An odd-length real cookie must never corrupt the block.
+        let mut setup = build();
+        substitute_cookie(&mut setup, offset, Some(&[1u8; 3]));
+        assert_eq!(&setup[offset..offset + COOKIE_LEN], cookie.bytes());
     }
 
     #[test]

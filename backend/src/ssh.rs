@@ -907,6 +907,82 @@ impl client::Handler for SshClient {
         }
         Ok(())
     }
+
+    /// Incoming `x11` channel: the server accepted the `x11-req` sent when
+    /// the shell opened and a remote X client connected. russh's default
+    /// handler accepts unconditionally, so this override is the fail-closed
+    /// boundary (docs/SPIKE_X11_FORWARDING.zh-CN.md §3.4): the armed-session
+    /// gate must admit the channel and the X setup block must carry the
+    /// issued fake cookie before a single byte is relayed to the local
+    /// display. SSH delivers channel data only after the open is confirmed,
+    /// so the channel is accepted first and then held (nothing relayed)
+    /// until the setup block validates; a mismatch closes it immediately.
+    async fn server_channel_open_x11(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        originator_address: &str,
+        originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let _ = (originator_address, originator_port, session);
+        // Admission first: no armed gate (X11 off or the last session
+        // closed) or the armed gate's bridge cap exhausted -> reject, never
+        // accept.
+        let Some((cookie, permit)) = crate::x11::try_admit_active() else {
+            eprintln!("[x11] channel refused: no armed gate or the bridge cap is exhausted");
+            reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+            return Ok(());
+        };
+        reply.accept().await;
+        // The relay runs detached so the SSH reader is never blocked by X
+        // traffic; the admission permit travels with the task and frees its
+        // cap slot whenever the task ends.
+        tokio::spawn(async move {
+            // Keeping the admission permit alive for the bridge's lifetime
+            // holds the cap slot; its Drop frees the slot whenever this
+            // task ends (bridge finished, setup rejected, or channel gone).
+            let _bridge_permit = permit;
+            let mut channel = channel;
+            let mut buffer = crate::x11::SetupBuffer::default();
+            let verdict = loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Data { data }) => match buffer.push(&data, &cookie) {
+                        crate::x11::SetupInspection::Incomplete => continue,
+                        verdict => break verdict,
+                    },
+                    Some(ChannelMsg::Eof | ChannelMsg::Close) | None => {
+                        break crate::x11::SetupInspection::Reject(
+                            "x11 channel closed before the X setup block arrived",
+                        );
+                    }
+                    Some(_) => continue,
+                }
+            };
+            match verdict {
+                crate::x11::SetupInspection::Accept { cookie_offset } => {
+                    let mut setup = buffer.into_bytes();
+                    let target = crate::x11::current_display_target();
+                    crate::x11::substitute_cookie(
+                        &mut setup,
+                        cookie_offset,
+                        crate::x11::load_real_cookie(&target).as_deref(),
+                    );
+                    if let Err(error) = crate::x11::bridge_channel(channel, &target, setup).await {
+                        eprintln!("[x11] {error}");
+                    }
+                }
+                crate::x11::SetupInspection::Reject(reason) => {
+                    eprintln!("[x11] x11 channel rejected: {reason}");
+                    let _ = channel.close().await;
+                }
+                crate::x11::SetupInspection::Incomplete => {
+                    unreachable!("the setup loop only breaks on a final verdict")
+                }
+            }
+        });
+        Ok(())
+    }
 }
 
 /// Verdict of a key-exchange-only host-key probe against the known_hosts
@@ -2857,6 +2933,13 @@ impl SshRuntime {
         self.cleanup_session_transfers(session_id)?;
         if let Ok(mut cache) = self.metrics_cache.lock() {
             cache.remove(session_id);
+        }
+        // X11 gate lifecycle: the armed gate is the sidecar-wide slot (see
+        // x11::ACTIVE_GATE) serving the most recently armed session. With
+        // the last session gone no admission can be legitimate, so release
+        // the cookie and fail closed until a session arms again.
+        if self.sessions.read().await.is_empty() {
+            crate::x11::disarm_active();
         }
         let connection_id = session.connection_id.clone();
         let connection_has_sessions = self
