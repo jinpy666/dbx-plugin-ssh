@@ -93,6 +93,11 @@ jobs:
         with:
           workspaces: backend
           cache-on-failure: true
+      # docs/RDP_VENDOR_FORK_PLAN.zh-CN.md §6：vendored RDP 链锁步断言，
+      # 漂移（vendor/ 与 [patch.crates-io] / Cargo.lock 不一致）即红。先于
+      # fmt/clippy/test 执行，坏锁秒失败。
+      - name: Assert vendored RDP chain lockstep
+        run: python3 scripts/check_vendor_lockstep.py
       - run: cargo fmt --manifest-path backend/Cargo.toml --check
       # -D warnings keeps new lints out; a stable-toolchain update that
       # introduces a new lint fails here and is fixed like any other red CI.
