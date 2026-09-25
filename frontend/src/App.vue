@@ -159,6 +159,7 @@ import { hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./li
 import { clampTransferConcurrency, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
 import { mergeQuickCommandImport, parseQuickCommandImport } from "./lib/quickCommandImport";
+import { enqueueWatchModified, popWatchModified, registerWatch, watchName, type ModifiedPrompt, type WatchRegistry } from "./lib/watchEdits";
 import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, normalizeLocalBatchTargets, quickPickCommandById, selectBatchTargets, summarizeBatchResults, toggleBatchTarget, type BatchSendSummary, type BatchSendTarget } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
 import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./lib/pluginContext";
@@ -752,15 +753,21 @@ const archiveBusy = ref(false);
 const operationDialog = ref<"mkdir" | null>(null);
 const operationDraft = ref("");
 
-// —— 外部编辑器回传（P2-5，桌面端）：文件先经 sftp/download 落到
-// <下载目录>/remote-edit/<ts>/，watch/start 注册监听；编辑器保存经
-// watch/file-modified 事件回来弹确认，上传走 watch/upload（sidecar 从本机
-// 路径读字节、原子写回远端，写门禁与其他 SFTP 写一致）。
+// —— 外部编辑器回传（P2-5，桌面端；M15 起多文件并行）：文件先经 sftp/download
+// 落到 <下载目录>/remote-edit/<ts>/，watch/start 注册监听（同一会话可同时挂
+// 多个远端文件，注册表按 watchId 记、同远端路径按粒度顶替）；编辑器保存经
+// watch/file-modified 事件回来逐文件排队弹确认，上传走 watch/upload（sidecar
+// 从本机路径读字节、原子写回远端，写门禁与其他 SFTP 写一致）。
 const externalEditBusy = ref(false);
-const activeExternalWatch = ref<{ watchId: string; name: string; remotePath: string }>();
-const watchModifiedPrompt = ref<{ watchId: string; name: string } | null>(null);
+const activeExternalWatches = ref<WatchRegistry>({});
+const watchModifiedQueue = ref<ModifiedPrompt[]>([]);
+/** 当前待确认 = 队列头：决议（上传/总是/取消）才出队，后到文件不顶替。 */
+const watchModifiedPrompt = computed<ModifiedPrompt | null>(() => watchModifiedQueue.value[0] ?? null);
 // 「总是上传」记住的 watchId：同一监听上的后续保存直接推回，不再逐次确认。
 const alwaysUploadWatches = new Set<string>();
+// watch/upload 串行链：sidecar 的 .dbx-part 暂存本就按调用隔离，前端再把
+// 回传排成一队，避免并发回传的 notice/目录刷新互相覆盖（上传不丢，逐个执行）。
+let watchUploadChain: Promise<void> = Promise.resolve();
 // —— 符号链接（P2-6）：新建/改指向小对话框 + 列表 tooltip 的 → target 缓存。
 // create 用 draft(链接名)+targetDraft(指向)；edit 复用 draft 承载指向。
 const symlinkDialog = ref<{ mode: "create" | "edit"; linkPath: string; name: string } | null>(null);
@@ -3980,9 +3987,7 @@ function handleEvent(event: DbxPluginEvent) {
   if (event.method === "watch/file-modified") {
     const payload = event.params as { watchId?: string };
     const watchId = String(payload.watchId || "");
-    if (watchId && watchId === activeExternalWatch.value?.watchId) {
-      handleWatchModified(watchId);
-    }
+    if (watchId) handleWatchModified(watchId);
     return;
   }
   if (event.method === "sftp/upload/ack") {
@@ -4334,10 +4339,11 @@ async function closeSession(updateStatus = true) {
   reconnectPending.value = false;
   resetCommandMarker();
   // 外部编辑器监听挂在会话上：断开前先停掉（后端 ssh/session/close 兜底）。
+  // M15 多文件：清空整个 watch 注册表与逐文件确认队列。
   if (sessionId) {
     void window.dbxPlugin.invoke("watch/stop-all", { sessionId }).catch(() => undefined);
-    if (activeExternalWatch.value) activeExternalWatch.value = undefined;
-    watchModifiedPrompt.value = null;
+    activeExternalWatches.value = {};
+    watchModifiedQueue.value = [];
   }
   if (sessionId) await window.dbxPlugin.invoke("ssh/session/close", { sessionId }).catch(() => undefined);
   if (updateStatus) {
@@ -8067,28 +8073,40 @@ function waitForUploadAck(taskId: string, nextOffset: number) {
   });
 }
 
-// —— 外部编辑器回传（P2-5）——
-// watch/file-modified 的确认策略：「总是上传」的记忆命中直接推回，否则弹
-// 确认框让用户逐次决定（上传一次 / 总是上传 / 取消）。
+// —— 外部编辑器回传（P2-5；M15 起逐文件化）——
+// watch/file-modified 的确认策略：「总是上传」的记忆命中直接进上传串行链；
+// 否则事件入队、逐个弹确认框（后到文件的 modified 事件排队等待，不顶替
+// 未决确认、不丢事件），用户对队头决议（上传一次 / 总是上传 / 取消）后才
+// 轮到下一个文件。watch/upload 由 sidecar 从 remote-edit 下载路径读字节、
+// 经 sftp/write 同款原子提交写回远端（写门禁 ensure_writable 在后端强制）。
+// 完成后刷新当前目录，让大小/修改时间立即反映编辑后的内容。
 function handleWatchModified(watchId: string) {
-  const name = activeExternalWatch.value?.name || "";
+  // 不认识的 watchId（监听已被顶替/会话已关）静默丢弃，不弹窗也不上传。
+  if (!activeExternalWatches.value[watchId]) return;
   if (alwaysUploadWatches.has(watchId)) {
     void uploadWatchedFile(watchId);
     return;
   }
-  watchModifiedPrompt.value = { watchId, name };
+  watchModifiedQueue.value = enqueueWatchModified(watchModifiedQueue.value, activeExternalWatches.value, watchId);
 }
 
-// watch/upload 由 sidecar 从 remote-edit 下载路径读字节、经 sftp/write 同款
-// 原子提交写回远端（写门禁 ensure_writable 在后端强制）。完成后刷新当前
-// 目录，让大小/修改时间立即反映编辑后的内容。
-async function uploadWatchedFile(watchId: string) {
-  if (externalEditBusy.value) return;
+/** 队头决议完成（上传/取消）：弹出队头，露出下一条待确认。过期决议
+ * （watchId 已不是队头）由 popWatchModified 拒绝，不动后面的文件。 */
+function resolveWatchHead(watchId: string) {
+  const next = popWatchModified(watchModifiedQueue.value, watchId);
+  if (next) watchModifiedQueue.value = next;
+}
+
+/** watch/upload 串行链入口：排入队尾逐个执行，返回前不入队。 */
+function uploadWatchedFile(watchId: string) {
+  watchUploadChain = watchUploadChain.then(() => invokeWatchUpload(watchId));
+}
+
+async function invokeWatchUpload(watchId: string) {
   externalEditBusy.value = true;
-  watchModifiedPrompt.value = null;
   try {
     await window.dbxPlugin.invoke<{ remotePath: string; size: number }>("watch/upload", { watchId });
-    showNotice(t("sftpEdit.uploaded", { name: activeExternalWatch.value?.name || "" }));
+    showNotice(t("sftpEdit.uploaded", { name: watchName(activeExternalWatches.value, watchId) }));
     // 刷新当前目录，让大小/修改时间立即反映编辑后的内容。
     await loadDirectory();
   } catch (cause) {
@@ -8098,15 +8116,26 @@ async function uploadWatchedFile(watchId: string) {
   }
 }
 
+/** 取消当前队头的确认（该文件本次保存不回传）。 */
 function dismissWatchModified() {
-  watchModifiedPrompt.value = null;
+  const prompt = watchModifiedPrompt.value;
+  if (prompt) resolveWatchHead(prompt.watchId);
 }
 
-// 「总是上传」：记住本次监听的 watchId 后直接推回当前内容。
+/** 「上传一次」：决议当前队头后排入上传链。 */
+function uploadWatchedFileOnce() {
+  const prompt = watchModifiedPrompt.value;
+  if (!prompt) return;
+  resolveWatchHead(prompt.watchId);
+  void uploadWatchedFile(prompt.watchId);
+}
+
+/** 「总是上传」：记住当前队头的 watchId 后决议并入上传链。 */
 function uploadWatchedFileAlways() {
   const prompt = watchModifiedPrompt.value;
   if (!prompt) return;
   alwaysUploadWatches.add(prompt.watchId);
+  resolveWatchHead(prompt.watchId);
   void uploadWatchedFile(prompt.watchId);
 }
 
@@ -8167,16 +8196,17 @@ async function downloadForExternalEdit(entry: SftpEntry, downloadDir: string): P
 }
 
 /** 「在外部编辑器中打开」：下载 → watch/start → 系统默认程序打开 → 通知。
- * 仅桌面端可用（web/docker 的 sidecar 不在本机，无法监听也无法回传）。 */
+ * 仅桌面端可用（web/docker 的 sidecar 不在本机，无法监听也无法回传）。
+ * M15 起可并发打开多个文件：每次打开独立下载、独立注册 watch，互不顶替
+ * （同远端路径的重复打开由注册表与 sidecar 的 per-path dedup 收敛为最新）。 */
 async function openInExternalEditor(entry: SftpEntry) {
   fileMenu.value = undefined;
-  if (!session.value || externalEditBusy.value) return;
+  if (!session.value) return;
   const local = await probeLocalCapabilities();
   if (!local?.canSaveLocal) {
     showNotice(t("sftpEdit.desktopOnly"));
     return;
   }
-  externalEditBusy.value = true;
   try {
     const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
     const dir = joinLocalPath(loadDownloadDir() || local.downloadsDir, `remote-edit/${stamp}`);
@@ -8189,7 +8219,11 @@ async function openInExternalEditor(entry: SftpEntry) {
       localPath,
     });
     alwaysUploadWatches.delete(watch.watchId);
-    activeExternalWatch.value = { watchId: watch.watchId, name: entry.name, remotePath };
+    activeExternalWatches.value = registerWatch(activeExternalWatches.value, {
+      watchId: watch.watchId,
+      name: entry.name,
+      remotePath,
+    });
     // 宿主 local/open 校验该路径确为本插件完成的下载（防任意路径打开）。
     try {
       await window.dbxPlugin.invoke("local/open", { path: localPath });
@@ -8200,8 +8234,6 @@ async function openInExternalEditor(entry: SftpEntry) {
     showNotice(t("sftpEdit.watching", { name: entry.name }));
   } catch (cause) {
     showError(cause, "sftp");
-  } finally {
-    externalEditBusy.value = false;
   }
 }
 
@@ -10572,7 +10604,7 @@ const modalOpenStates = computed(() => [
   newFileDialog.value,
   operationDialog.value,
   symlinkDialog.value !== null,
-  watchModifiedPrompt.value !== null,
+  watchModifiedQueue.value.length > 0,
   commandOpen.value,
   profilesOpen.value,
   auditOpen.value,
@@ -12189,7 +12221,7 @@ onBeforeUnmount(() => {
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite" @select="downloadEntry(fileMenu.entry, true)"><Download />{{ t("sudoDownload.action") }}</ContextMenuItem>
                   <!-- 外部编辑器回传（P2-5，桌面端）：web/docker 的 sidecar 不在本机，
                        监听与回传都不可用，localCanSave 未探测到前也保持禁用。 -->
-                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite || !localCanSave || externalEditBusy" @select="openInExternalEditor(fileMenu.entry)"><ExternalLink />{{ t("sftpEdit.openExternal") }}</ContextMenuItem>
+                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite || !localCanSave" @select="openInExternalEditor(fileMenu.entry)"><ExternalLink />{{ t("sftpEdit.openExternal") }}</ContextMenuItem>
                   <!-- 符号链接改指向（P2-6）：读取现有 target 预填后 update。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'symlink'" :disabled="!canWrite" @select="beginSymlinkEdit(fileMenu.entry)"><Link2 />{{ t("symlink.editAction") }}</ContextMenuItem>
                   <ContextMenuItem :disabled="!canWrite" @select="beginRename(fileMenu.entry)"><Pencil />{{ t("rename") }}</ContextMenuItem>
@@ -12288,15 +12320,16 @@ onBeforeUnmount(() => {
       </DialogContent>
     </Dialog>
 
-    <!-- 外部编辑器保存回传确认（P2-5）：上传一次 / 总是上传（记住 watchId）/ 取消。 -->
-    <Dialog :open="watchModifiedPrompt !== null" @update:open="(open) => { if (!open) dismissWatchModified(); }">
+    <!-- 外部编辑器保存回传确认（P2-5；M15 起逐文件排队）：队列头逐个弹，
+    决议（上传一次 / 总是上传（记住 watchId）/ 取消）才出队，多文件互不顶替。 -->
+    <Dialog :open="watchModifiedQueue.length > 0" @update:open="(open) => { if (!open) dismissWatchModified(); }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("sftpEdit.modifiedTitle") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="dismissWatchModified"><X /></button></header>
+        <header><DialogTitle>{{ t("sftpEdit.modifiedTitle") }}</DialogTitle><Loader2 v-if="externalEditBusy" class="spinning" /><button :title="t('close')" class="icon-button" @click="dismissWatchModified"><X /></button></header>
         <p class="sftp-dialog-hint">{{ t("sftpEdit.modifiedMessage", { name: watchModifiedPrompt?.name || "" }) }}</p>
         <footer>
           <button @click="dismissWatchModified">{{ t("cancel") }}</button>
-          <button :disabled="externalEditBusy" @click="uploadWatchedFileAlways">{{ t("sftpEdit.alwaysUpload") }}</button>
-          <button class="primary-button" :disabled="externalEditBusy" @click="uploadWatchedFile(watchModifiedPrompt?.watchId || '')"><Loader2 v-if="externalEditBusy" class="spinning" />{{ t("sftpEdit.uploadOnce") }}</button>
+          <button @click="uploadWatchedFileAlways">{{ t("sftpEdit.alwaysUpload") }}</button>
+          <button class="primary-button" @click="uploadWatchedFileOnce">{{ t("sftpEdit.uploadOnce") }}</button>
         </footer>
       </DialogContent>
     </Dialog>
