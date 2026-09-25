@@ -801,6 +801,11 @@ pub enum TerminalStream {
     Stdout = 0,
     Stderr = 1,
     State = 2,
+    /// Serial B1 inbound write frames (`serial/terminal/in/{id}`) only; the
+    /// value skips `State = 2`, which the local terminal already uses for
+    /// in-band state frames. Decoders that meet an unknown tag must drop the
+    /// frame silently and count it (docs/SERIAL_ENHANCE_DESIGN.zh-CN.md §2).
+    Stdin = 3,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -914,6 +919,21 @@ mod tests {
         assert_eq!(encoded[0], 1);
         assert_eq!(u64::from_be_bytes(encoded[1..9].try_into().unwrap()), 42);
         assert_eq!(&encoded[9..], b"x");
+    }
+
+    #[test]
+    fn stdin_stream_tag_is_three_and_avoids_state() {
+        // B1 契约：Stdin = 3，避开 local 终端已占用带内状态帧的 State = 2。
+        assert_eq!(TerminalStream::Stdin as u8, 3);
+        let encoded = TerminalFrame {
+            sequence: 7,
+            stream: TerminalStream::Stdin,
+            data: b"hi".to_vec(),
+        }
+        .encode();
+        assert_eq!(encoded[0], 3);
+        assert_eq!(u64::from_be_bytes(encoded[1..9].try_into().unwrap()), 7);
+        assert_eq!(&encoded[9..], b"hi");
     }
 
     #[test]

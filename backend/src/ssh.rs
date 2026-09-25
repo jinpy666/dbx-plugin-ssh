@@ -1233,15 +1233,32 @@ impl DirectoryHandshakeFilter {
 
 /// Monotonic terminal output journal shared by the SSH and local-terminal
 /// session loops: assigns each chunk a sequence, keeps a bounded tail for
-/// `replay`, and survives transport gaps.
-#[derive(Default)]
+/// `replay`, and survives transport gaps. The byte budget defaults to the
+/// shared 2 MiB terminal limit; serial sessions build a smaller buffer via
+/// [`ReplayBuffer::with_byte_limit`] (128 KiB, design doc §3).
 pub(crate) struct ReplayBuffer {
     frames: VecDeque<TerminalFrame>,
     bytes: usize,
     sequence: u64,
+    byte_limit: usize,
+}
+
+impl Default for ReplayBuffer {
+    fn default() -> Self {
+        Self::with_byte_limit(TERMINAL_REPLAY_LIMIT)
+    }
 }
 
 impl ReplayBuffer {
+    pub(crate) fn with_byte_limit(byte_limit: usize) -> Self {
+        Self {
+            frames: VecDeque::new(),
+            bytes: 0,
+            sequence: 0,
+            byte_limit,
+        }
+    }
+
     pub(crate) fn push(&mut self, stream: TerminalStream, data: Vec<u8>) -> TerminalFrame {
         self.sequence += 1;
         let frame = TerminalFrame {
@@ -1251,7 +1268,7 @@ impl ReplayBuffer {
         };
         self.bytes += frame.data.len();
         self.frames.push_back(frame.clone());
-        while self.bytes > TERMINAL_REPLAY_LIMIT {
+        while self.bytes > self.byte_limit {
             let Some(removed) = self.frames.pop_front() else {
                 break;
             };
@@ -8204,6 +8221,27 @@ lrwxrwxrwx  1 root root   11 1720000004 link -> notes.txt
         let frames = replay.after(1);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].sequence, 2);
+    }
+
+    #[test]
+    fn replay_buffer_honours_a_custom_byte_budget() {
+        // 串口会话的 128 KiB 预算（设计稿 §3）：绕回后 first_sequence 前移，
+        // after() 只回可得的尾部，complete 语义随 first_available 变化。
+        let mut replay = ReplayBuffer::with_byte_limit(8);
+        replay.push(TerminalStream::Stdout, b"12345".to_vec());
+        replay.push(TerminalStream::Stdout, b"67890".to_vec());
+        assert_eq!(replay.first_sequence(), 2, "frame 1 was evicted");
+        assert_eq!(replay.tail_sequence(), 2);
+        assert!(replay.after(0).iter().all(|frame| frame.sequence >= 2));
+        // afterSequence+1 >= first_available → complete。
+        assert!(
+            replay.after(1).len() == 1,
+            "replaying from 1 yields the surviving frame"
+        );
+        // 默认预算仍是共享的 2 MiB 上限。
+        let replay = ReplayBuffer::default();
+        let serialized = format!("{:?}", replay.byte_limit);
+        assert_eq!(serialized, format!("{TERMINAL_REPLAY_LIMIT}"));
     }
 
     #[test]

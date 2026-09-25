@@ -111,6 +111,7 @@ import { planHostFileDrop } from "./lib/hostFileDrop";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
 import { createOutputGate } from "./lib/terminalBackpressure";
 import { createTerminalInputQueue } from "./lib/terminalInputQueue";
+import { SERIAL_STREAM_STDIN, isKnownStreamTag, supportsBinaryInput } from "./lib/serialTerminalFrames";
 import { describeReconnectCountdown, describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS, type ReconnectCountdown } from "./lib/terminalReconnect";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
 import { decideConnectRetry, isDuplicatedTransportUnavailableError } from "./lib/connectRetry";
@@ -1293,9 +1294,10 @@ let telnetReplayInFlight = false;
 let telnetReplayNoProgress = 0;
 const isTelnetMode = computed(() => telnetSession.value !== null);
 const telnetTarget = computed(() => (telnetSession.value ? `${telnetSession.value.host}:${telnetSession.value.port}` : ""));
-// 串口会话（P3）：与 SSH/本地/Telnet 同款互斥展示，并入 localUiMode。
-// sidecar 契约最小集：无 replay、无 resize 方法（出帧由读线程单线程递增
-// sequence，掉帧仅按 pending 上限清空兜底）；输入走 serial/write JSON 通道。
+// 串口会话（P3 + B1 增强）：与 SSH/本地/Telnet 同款互斥展示，并入
+// localUiMode。出帧由读线程单线程递增 sequence；键盘输入主路径走
+// `serial/terminal/in/{id}` 二进制写通道（B1，Stdin=3 标签），JSON
+// `serial/write` 保留为兼容/降级路径；resize 无协议概念（设计稿 §4）。
 const serialSession = ref<{ sessionId: string; port: string; baudRate: number } | null>(null);
 const serialDialogOpen = ref(false);
 const serialConfirmOpen = ref(false);
@@ -1303,6 +1305,16 @@ const serialState = ref<"idle" | "running" | "closed">("idle");
 const serialError = ref("");
 const serialLastSequence = ref(0);
 const serialPendingFrames = new Map<number, { stream: number; data: Uint8Array }>();
+// 序号缺口回放（设计稿 §3）：与 telnet/local 的 drain/replay 体系同构，
+// 复用既有 gap 检测 + 无进度重试上限，不新写恢复逻辑。
+let serialReplayInFlight = false;
+let serialReplayNoProgress = 0;
+// B1 解码契约：输出帧遇到未知流标签（> Stdin=3）一律静默丢弃并计数。
+let serialUnknownStreamFrames = 0;
+// B1 能力开关：true = 键盘走二进制写通道。初始值取 serial/start 的
+// binaryInput 能力字段（未声明 = 旧 sidecar → JSON 兼容路径）；通道报错
+// （未知方法/会话消失）时 send 回调一次性降级 JSON。
+const serialBinaryInput = ref(true);
 const isSerialMode = computed(() => serialSession.value !== null);
 const serialTarget = computed(() => (serialSession.value ? `${serialSession.value.port}@${serialSession.value.baudRate}` : ""));
 // 串口文件上传 overlay 状态：进度由 sidecar 的 serial/upload/progress 事件
@@ -1429,6 +1441,23 @@ const terminalInputQueue = createTerminalInputQueue({
     // 同款有界梯子自动重连。错误串契约见 backend ssh.rs session()。
     if (terminalState.value === "connected" && !reconnectPending.value && isSessionGoneError(cause)) scheduleSessionReconnect();
   },
+});
+
+// 串口专用输入队列：与 SSH/Telnet 共用同一有序实现，但负载带 Stdin 流
+// 标签（B1 TerminalFrame 形状），序列号独立计数；宿主对未知通道/方法报错
+// 时一次性降级 JSON 兼容路径（serialBinaryInput）。
+const serialInputQueue = createTerminalInputQueue({
+  frameTag: SERIAL_STREAM_STDIN,
+  send: (sessionId, payload) => {
+    if (!sessionId.startsWith("serial:")) return;
+    return window.dbxPlugin
+      .sendBinary(`serial/terminal/in/${sessionId.slice("serial:".length)}`, payload)
+      .catch((cause: unknown) => {
+        serialBinaryInput.value = false;
+        throw cause;
+      });
+  },
+  onError: (cause) => showError(cause, "terminal"),
 });
 
 const locale = ref("zh-CN");
@@ -2826,13 +2855,19 @@ function acceptGhostSuggestion() {
 }
 
 function sendTerminalBytes(data: Uint8Array) {
-  // 串口会话优先：MVP 走 serial/write JSON 通道（base64），不进二进制输入
-  // 队列。取舍：串口无高速键盘场景，逐键 JSON 往返可接受；sidecar 暂无
-  // serial/terminal/in 二进制通道，后续需要吞吐时再加并切回同款队列。
+  // 串口会话优先：B1 主路径走 `serial/terminal/in/{id}` 二进制写通道（专用
+  // 有序队列 + Stdin 流标签帧）；宿主报错（未知通道/旧 sidecar）一次性降级
+  // serial/write JSON 兼容路径。
   if (serialSession.value) {
     // 上传进行中吞掉键入：X/Y/ZMODEM 的 ACK/NAK/CAN 控制字符窗口内，
     // 用户字节会污染协议流（进度状态在终端 overlay 上提示"传输中"）。
+    // B1 互斥：二进制写帧与 JSON 键入共用这道前端闸门；sidecar 侧另有
+    // 二进制帧拒收后盾。
     if (serialUploadBusy.value) return;
+    if (serialBinaryInput.value) {
+      serialInputQueue.enqueue(`serial:${serialSession.value.sessionId}`, normalizeTerminalInputBytes(data));
+      return;
+    }
     const dataBase64 = window.dbxPlugin.encodeBase64(normalizeTerminalInputBytes(data));
     void window.dbxPlugin.invoke("serial/write", { sessionId: serialSession.value.sessionId, dataBase64 }).catch((cause) => showError(cause, "terminal"));
     return;
@@ -3349,6 +3384,11 @@ function handleBinary(event: DbxPluginBinaryEvent) {
     if (!serialSession.value || serialId !== serialSession.value.sessionId) return;
     const payload = bridgeBinaryBytes(event, window.dbxPlugin.decodeBase64);
     if (payload.length < 9) return;
+    // B1 解码契约：未知流标签（> Stdin=3）一律静默丢帧并计数，不断连。
+    if (!isKnownStreamTag(payload[0])) {
+      serialUnknownStreamFrames += 1;
+      return;
+    }
     const sequence = readU64(payload, 1);
     if (sequence <= serialLastSequence.value) return;
     serialPendingFrames.set(sequence, { stream: payload[0], data: payload.slice(9) });
@@ -4364,6 +4404,40 @@ function drainSerialFrames() {
   if (serialPendingFrames.size > TERMINAL_PENDING_FRAME_LIMIT) {
     serialPendingFrames.clear();
   }
+  // 序号缺口 → serial/replay（序号制回放）：重发帧从既有二进制通道到货后
+  // 由同一 drain 消费；缺口永不可填（缓冲绕回/会话重建）时按无进度上限
+  // resync 游标，避免 replay 循环空转冻结工作台。
+  const firstPending = Math.min(...serialPendingFrames.keys());
+  if (Number.isFinite(firstPending) && firstPending > serialLastSequence.value + 1 && !serialReplayInFlight && serialSession.value) {
+    serialReplayInFlight = true;
+    const holeAt = serialLastSequence.value;
+    void window.dbxPlugin
+      .invoke<ReplayResult>("serial/replay", { sessionId: serialSession.value.sessionId, afterSequence: serialLastSequence.value })
+      .then((result) => {
+        // complete: false = 缓冲已绕回、回放不完整（设计稿 §3）——提示截断。
+        if (!result.complete) showNotice(t("serial.replayTruncated"));
+        if (serialLastSequence.value === holeAt) {
+          serialReplayNoProgress += 1;
+          if (serialReplayNoProgress >= 3) {
+            serialLastSequence.value = firstPending - 1;
+            serialReplayNoProgress = 0;
+          }
+        } else {
+          serialReplayNoProgress = 0;
+        }
+      })
+      .catch(() => {
+        // 会话不存在（已关闭/未重建）：resync 过缺口放出后续帧。
+        if (firstPending > serialLastSequence.value) {
+          serialLastSequence.value = firstPending - 1;
+          serialReplayNoProgress = 0;
+        }
+      })
+      .finally(() => {
+        serialReplayInFlight = false;
+        drainSerialFrames();
+      });
+  }
 }
 
 async function startSerialSession(options: SerialConnectOptions) {
@@ -4371,8 +4445,9 @@ async function startSerialSession(options: SerialConnectOptions) {
   if (serialSession.value && serialState.value !== "closed") await closeSerialSession();
   try {
     // 线上字段为 snake_case：SerialStartRequest 未启用 camelCase rename；
-    // 响应则由 sidecar 手拼 json!，sessionId/port/baudRate 为 camelCase。
-    const info = await window.dbxPlugin.invoke<{ sessionId: string; port: string; baudRate: number }>("serial/start", {
+    // 响应则由 sidecar 手拼 json!，sessionId/port/baudRate 为 camelCase，
+    // binaryInput 为 B1 能力字段（旧 sidecar 缺失 → JSON 兼容路径）。
+    const info = await window.dbxPlugin.invoke<{ sessionId: string; port: string; baudRate: number; binaryInput?: boolean }>("serial/start", {
       workbenchId: workbenchId.value,
       port_name: options.portName,
       baud_rate: options.baudRate,
@@ -4390,6 +4465,11 @@ async function startSerialSession(options: SerialConnectOptions) {
     serialError.value = "";
     serialLastSequence.value = 0;
     serialPendingFrames.clear();
+    serialUnknownStreamFrames = 0;
+    // 能力探测降级（设计稿 §2）：未声明 binaryInput 的 sidecar 走 JSON
+    // serial/write；通道报错时再一次性降级（send 回调）。
+    serialBinaryInput.value = supportsBinaryInput(info);
+    serialInputQueue.reset();
     // 从 A4 恢复外壳 tab 直接起串口时清掉外壳态，退出覆盖层随即让位。
     localShellRestored.value = false;
     await nextTick();
@@ -4406,6 +4486,9 @@ async function closeSerialSession() {
   serialState.value = "idle";
   serialError.value = "";
   serialPendingFrames.clear();
+  serialUnknownStreamFrames = 0;
+  serialBinaryInput.value = true;
+  serialInputQueue.reset();
   serialConfirmOpen.value = false;
   // 上传挂在会话上：随会话关闭一并终止（sidecar cancel 幂等）。
   if (serialUpload.value.phase !== "idle") {

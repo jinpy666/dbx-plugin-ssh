@@ -532,7 +532,8 @@ impl Plugin {
                 let data_base64 = required_string(&params, "dataBase64")?;
                 let data = serial_session::decode_write_payload(data_base64)?;
                 let session = self.runtime.block_on(self.serial.session(session_id))?;
-                self.serial.write_input(&session, &data)?;
+                self.serial
+                    .write_input(&session, session_id, &data, emitter)?;
                 Ok(json!({ "success": true }))
             }
             "serial/close" => {
@@ -541,6 +542,21 @@ impl Plugin {
                 Ok(json!({ "success": true }))
             }
             "serial/list" => Ok(self.runtime.block_on(self.serial.list())),
+            // 序号制输出回放（设计稿 §3）：webview 重载/断线重连后恢复滚动区
+            // 上下文；帧走既有 serial/terminal/out 二进制通道，摘要走 JSON。
+            "serial/replay" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let after_sequence = params
+                    .get("afterSequence")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let replay = self.runtime.block_on(self.serial.replay(
+                    session_id,
+                    after_sequence,
+                    emitter,
+                ))?;
+                Ok(replay)
+            }
             // 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：引擎是纯
             // 状态机，由串口读线程喂数据/取输出；文件字节由前端 File API
             // 分块（≤64KiB）送入，sidecar 不落盘（web/docker 浏览器兜底）。
@@ -1812,6 +1828,51 @@ impl PluginHandler for Plugin {
             }
             emitter.event(
                 "telnet/terminal/inputAck",
+                json!({ "sessionId": session_id, "sequence": sequence }),
+            )?;
+            return Ok(());
+        }
+        if let Some(session_id) = channel.strip_prefix("serial/terminal/in/") {
+            // 串口 B1 二进制写通道：帧与输出同构（流标签 + u64 序号 + 数据），
+            // 非 Stdin 标签/截断帧 → 参数错误。上传活动期间一律拒绝（互斥
+            // 后盾，第一道闸门在前端）；死会话/互斥拒绝镜像 `serial/terminal/
+            // error` 事件，工作台不至于看着在线却打不进字。
+            TERMINAL_INPUT_FRAMES_RECEIVED.fetch_add(1, Ordering::Relaxed);
+            let (sequence, payload) = match serial_session::decode_input_frame(&data) {
+                Ok(split) => split,
+                Err(error) => return Err(to_plugin_error(error)),
+            };
+            let session = match self.runtime.block_on(self.serial.session(session_id)) {
+                Ok(session) => session,
+                Err(error) => {
+                    let _ = emitter.event(
+                        "serial/terminal/error",
+                        json!({ "sessionId": session_id, "error": error }),
+                    );
+                    return Err(to_plugin_error(error));
+                }
+            };
+            if session.upload_active() {
+                let error =
+                    "Serial input is rejected while a file upload is in progress".to_string();
+                let _ = emitter.event(
+                    "serial/terminal/error",
+                    json!({ "sessionId": session_id, "error": error }),
+                );
+                return Err(to_plugin_error(error));
+            }
+            if let Err(error) = self
+                .serial
+                .write_input(&session, session_id, &payload, emitter)
+            {
+                let _ = emitter.event(
+                    "serial/terminal/error",
+                    json!({ "sessionId": session_id, "error": error }),
+                );
+                return Err(to_plugin_error(error));
+            }
+            emitter.event(
+                "serial/terminal/inputAck",
                 json!({ "sessionId": session_id, "sequence": sequence }),
             )?;
             return Ok(());

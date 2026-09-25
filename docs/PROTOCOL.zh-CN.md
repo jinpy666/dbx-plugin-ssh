@@ -507,6 +507,8 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 - `ssh/terminal/out/{sessionId}`：首字节为流类型，随后为大端 `u64` 单调序号，再后为终端数据。
 - `local/terminal/in/{sessionId}`：本地终端输入，与 `ssh/terminal/in` 同形（8 字节大端序号 + 数据）；确认事件为 `local/terminal/inputAck`，死会话镜像 `local/terminal/error`。
 - `local/terminal/out/{sessionId}`：本地终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + u64 序号）；stdout/stderr 在 PTY 内合流，数据帧恒为流 0。
+- `serial/terminal/out/{sessionId}`：串口终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + u64 序号），数据帧恒为 Stdout 流（读线程逐读递增序号）。
+- `serial/terminal/in/{sessionId}`：串口终端输入（B1 二进制写通道），帧与输出同构（`TerminalFrame`：1 字节流标签 + 大端 `u64` 序号 + 原始键序字节），标签**恒为 `Stdin = 3`**（避开 local 终端带内状态帧占用的 `State = 2`）；非 Stdin 标签/截断帧由 sidecar 按参数错误拒绝；文件上传活动期间一律拒绝（互斥后盾，第一道闸门在前端）；拒绝与死会话镜像 `serial/terminal/error`，成功确认 `serial/terminal/inputAck {sessionId, sequence}`（sequence 仅审计用，无重传语义）。解码端遇到未知流标签（> 3）一律静默丢帧并计数，不得断连或 panic。设计依据 `docs/SERIAL_ENHANCE_DESIGN.zh-CN.md` §2。
 - `sftp/upload/{taskId}`：大端 `u64` 文件偏移加最多 256 KiB 数据；偏移必须等于服务端期待值。
 - `sftp/download/{taskId}`：大端 `u64` 文件偏移加最多 256 KiB 数据（树任务该偏移为整树聚合字节位置；队列耗尽后的 eof 应答携带 0 字节数据）。
 - `vnc/frame/{sessionId}`：VNC 帧补丁，44 字节头 + RGBA 像素负载，全部**小端**（字段表见下文「VNC 帧补丁」小节）。
@@ -562,6 +564,24 @@ VNC 远程桌面的帧缓冲更新以 patch 帧推送：`44 字节头 | RGBA 像
 - `local/session/list` 供 webview 重载后接回仍活着的 shell；`workbench/close` 会回收该工作台的本地会话；sidecar 退出即全部终止（本地 PTY 生命周期 = sidecar 生命周期）。
 - 安全语义：入口为工作台显式按钮（未连接也可用；SSH 会话在连时经确认先关闭），无自动开启路径；manifest 权限集不变（复用 `host.binary`），本机命令执行能力与用户自身终端同级，无提权。
 - 偏好（`local/preferences/*` 白名单新增）：`localShell`（字符串 ≤200，空=自动探测）、`localShellIntegration`（布尔，缺省 true）。shell 选择器在工作台本地终端按钮旁的设置菜单（`local/shells/list` 发现 + 注入开关），徽标显示 `Local · <shell>`，重开按钮在本地会话存活时保持可用（restart 语义：关当前 → 按新偏好重开）。
+
+## 串口终端回放（`serial/replay`）
+
+与 telnet/local 终端完全同构的序号制输出回放（设计稿 `docs/SERIAL_ENHANCE_DESIGN.zh-CN.md` §3）：读线程在会话生命周期内把输出帧存入按字节预算截断的有界环形缓冲（串口会话 128 KiB，远小于终端的 2 MiB——串口输出是控制台流量而非全屏重绘），`serial/terminal/out` 的在线帧与回放帧共用同一单调序号。
+
+- `serial/replay {sessionId, afterSequence}` → 在 `serial/terminal/out/{id}` 上重发其后帧，并返回摘要 `{frameCount, firstAvailableSequence, tailSequence, complete}`。`complete: false` 表示缓冲已绕回、回放不完整，前端提示截断；会话已关闭时返回 "Serial session was not found"。
+- 前端复用既有 gap 检测/drain 机制（`drainSerialFrames`）：缺口经 `serial/replay` 回填；缺口永不可填时按无进度上限 resync 游标。
+- 能力探测降级（设计稿 §2 兼容策略）：`serial/start` 响应新增 `binaryInput: true` 能力字段；未声明该字段的旧 sidecar 由前端走 JSON `serial/write` 兼容路径，前端对 `serial/terminal/in` 通道报错一律一次性降级 JSON，老前端不受影响。`BackspaceMode` 的 DEL→BS 改写在两个通道上语义一致（sidecar 内统一执行）。
+- RS-232 无窗口尺寸概念，串口会话无 `resize` 方法（设计稿 §4 明确不实现）。
+
+### 写序列化与回压
+
+串口写方向收敛到每会话一条**专用写线程**（独占端口写方向；读线程与写线程共用端口互斥锁但各持短临界区）：键入（B1 二进制帧与 `serial/write` JSON 同源）与上传引擎输出只**入队**不碰锁。设计稿「写序列化与回压」节定稿参数：
+
+- 分帧：键入大包按 **4 KiB** 小块分帧入队，单块持锁写时间有上界（@9600 波特约 4 秒）；上传引擎输出保持块级原样，不受切分影响。
+- 有界队列：按 **256 KiB** 字节预算有界；准入全有或全无（半个包入队会让线上字节流停在任意中断点）。满时键入**整包丢弃**并发事件 `serial/input/dropped {sessionId, bytes, reason: "oversize" | "queue_full"}` 回报前端；引擎输出满时报错终止上传（可读错误，绝不阻塞调用线程）。键入单包上限 **16 KiB**，超限按 `oversize` 丢弃并回报。
+- 可取消：上传取消先清空队列再入队取消序列；会话关闭清空队列并唤醒写线程退出（在途系统调用写入无法中断，其后队列内容保证不再写出）。
+- 写失败镜像事件 `serial/write/error {sessionId, error}`（写线程异步写失败时；会话保持存活，端口消失由读线程 error 状态收场）。
 
 ## 串口文件上传（X/Y/ZMODEM）
 
