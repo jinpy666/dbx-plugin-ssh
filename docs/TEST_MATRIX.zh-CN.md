@@ -196,3 +196,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 修复面：`FXP_READDIR` 常量错值（16=REALPATH → 12）引发的 raw 列表通道 EOF；`sftp/read` latin-1 wire 车道补齐（raw_read_chunk，多读 1 字节 truncated 语义）；树下载 latin-1 逐文件裸包读取（`TreeDownloadState.latin1`）。三者均为「离线桩自洽通过、真容器才爆」的字节级缺口——字面值对表测试专门封堵常量自洽盲区。
 
 仍保持未验收（依赖真机/人工）：latin-1 真机全链联调在 CI 容器口径已过（本轮 79/79），工作台 GUI 手测与既有真机门不变。
+
+
+## M20（watcher 真容器批次，2026-09-26，Mac linuxserver/openssh-server 容器实测）
+
+smoke_fs_test.py +3 用例（watcher external-edit 组，PASS 82 / SKIP 0 / FAIL 0）：`watch/start` 双文件并发注册（watchId 互异、localPath 落 `<下载目录>/remote-edit/<stamp>/` 域）；外部编辑按 watchId 精确路由事件（payload 的 sessionId/remotePath 逐项断言）+ `watch/upload` 回写后 `sftp/read` 字节级一致 + 同内容重复保存 sha256 去重不再触发；`watch/stop` 精确移除单个 watch（被停者静默、其余照常）+ `watch/stop-all` 全清。backend 代码零改动（本轮纯 smoke 收口"多文件 watcher 外部编辑真机门"的可自动化部分）。
+
+用例自洽设计：进组显式 `sftp_name_encoding=auto`（不依赖持久档历史值——此前多轮 FAIL 轮的偏好残留会让 auto 语义的用例误走 latin-1 裸包分支）；外部编辑前越过 pump 启动抑制窗（SUPPRESS_WINDOW=2s）；事件经 sidecar_client 事件池以无害请求泵出。
+
+仍保持未验收（依赖真机/人工）：watcher 工作台 GUI 手测（编辑器打开/确认弹窗/always-upload 流）、latin-1 连接下的 watcher 回写（write_bytes latin-1 分支已有单测与 MCP 往返覆盖）、既有真机门不变。

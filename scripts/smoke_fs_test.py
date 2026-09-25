@@ -1578,6 +1578,12 @@ def main() -> None:
         enc_name_wire = "caf%E9.txt"
         enc_name_renamed_wire = "caf%E9-renamed.txt"
         enc_payload = b"latin-1 smoke payload\n"
+        # M20：watcher 外部编辑链路（watch/start -> 外部保存 -> file-modified
+        # 事件 -> watch/upload 回写远端）。localPath 必须落在 sidecar 的下载
+        # 根内（validate_remote_edit_path），所以每个文件的本地副本来自
+        # saveToLocal 单文件下载（finish.localPath）。
+        watch_dir = f"{home}/.dbx-watch-smoke"
+        watch_state = {}
         enc_tree_local = Path(tempfile.mkdtemp(prefix="dbx-ssh-smoke-enc-tree-"))
         prefs_snapshot = req("local/preferences/get", {})
         mcp_stamp = int(time.time())
@@ -1780,6 +1786,126 @@ def main() -> None:
             req("local/preferences/set", {"sftp_name_encoding": "auto",
                                           "sftp_name_encoding_overrides": {}})
 
+        def watch_download_local(remote_path):
+            # saveToLocal 单文件下载。工作台 openInExternalEditor 把落点指定为
+            # <下载目录>/remote-edit/<stamp>/ —— watch/start 对 localPath 的
+            # 白名单域就是该 remote-edit 子目录，smoke 沿同一分工。
+            stamp = time.strftime("%Y%m%d%H%M%S")
+            edit_dir = str(Path(download_dir) / "remote-edit" / f"smoke-{stamp}-{len(watch_state)}")
+            info = req("sftp/download/start", {"sessionId": session_id,
+                                               "remotePath": remote_path,
+                                               "saveToLocal": True,
+                                               "downloadDir": edit_dir,
+                                               "conflict": "overwrite"})
+            task_id, size = str(info["taskId"]), int(info["size"])
+            offset = 0
+            while True:
+                chunk = req("sftp/download/next", {"taskId": task_id, "offset": offset})
+                offset += int(chunk.get("length") or 0)
+                if chunk.get("eof"):
+                    break
+            finish = req("sftp/download/finish", {"taskId": task_id})
+            local_path = finish.get("localPath")
+            if not local_path:
+                raise AssertionError(f"watch fixture download has no localPath: {json.dumps(finish)[:120]}")
+            return local_path, size
+
+        def wait_watch_event(watch_id, marker, timeout_s=8.0):
+            # 事件帧在 socket 里堆到下一次请求才被 sidecar_client 读出，所以
+            # 用无害请求泵事件循环，直到目标 watchId 的 file-modified 出现。
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                req("local/capabilities")
+                for event in client.events[marker:]:
+                    if (event.get("method") == "watch/file-modified"
+                            and (event.get("params") or {}).get("watchId") == watch_id):
+                        return event
+                time.sleep(0.3)
+            raise AssertionError(f"watch/file-modified for {watch_id} not seen in {timeout_s}s")
+
+        def watch_modified_events(marker):
+            return [event for event in client.events[marker:]
+                    if event.get("method") == "watch/file-modified"]
+
+        def case_watch_register_two():
+            # 两个文件并发注册：watchId 互不相同、各带自己的本地副本。
+            # 组自洽：显式归位 auto（wa/wb 是 clean 名，走高层写/读即可），
+            # 不依赖持久档里 sftp_name_encoding 的历史残留值。
+            req("local/preferences/set", {"sftp_name_encoding": "auto"})
+            req("sftp/createDirectory", {"sessionId": session_id, "path": watch_dir})
+            req("sftp/write", {"sessionId": session_id, "remotePath": f"{watch_dir}/wa.txt",
+                               "dataBase64": base64.b64encode(b"watch-a v1\n").decode()})
+            req("sftp/write", {"sessionId": session_id, "remotePath": f"{watch_dir}/wb.txt",
+                               "dataBase64": base64.b64encode(b"watch-b v1\n").decode()})
+            local_a, size_a = watch_download_local(f"{watch_dir}/wa.txt")
+            local_b, size_b = watch_download_local(f"{watch_dir}/wb.txt")
+            if (size_a, size_b) != (len(b"watch-a v1\n"), len(b"watch-b v1\n")):
+                raise AssertionError(f"watch fixture sizes: {size_a}/{size_b}")
+            watch_state["id_a"] = str(req("watch/start", {
+                "sessionId": session_id, "remotePath": f"{watch_dir}/wa.txt",
+                "localPath": local_a}).get("watchId") or "")
+            watch_state["id_b"] = str(req("watch/start", {
+                "sessionId": session_id, "remotePath": f"{watch_dir}/wb.txt",
+                "localPath": local_b}).get("watchId") or "")
+            if not watch_state["id_a"] or not watch_state["id_b"] \
+                    or watch_state["id_a"] == watch_state["id_b"]:
+                raise AssertionError(f"watch ids: {watch_state}")
+            watch_state["local_a"], watch_state["local_b"] = local_a, local_b
+            watch_state["marker"] = len(client.events)
+            print(f"    watchId a={watch_state['id_a'][:8]}… b={watch_state['id_b'][:8]}…")
+
+        def case_watch_edit_upload():
+            # 外部编辑 a：直接改本地副本（编辑器保存语义），事件须按 watchId
+            # 精确路由，upload-back 后远端字节与本地一致。先越过 pump 的启动
+            # 抑制窗（SUPPRESS_WINDOW=2s，编辑器预热噪音被直接丢弃）。
+            time.sleep(2.5)
+            Path(watch_state["local_a"]).write_text(f"external edit A {time.time()}\n")
+            event = wait_watch_event(watch_state["id_a"], watch_state["marker"])
+            params = event.get("params") or {}
+            if params.get("remotePath") != f"{watch_dir}/wa.txt" or params.get("sessionId") != session_id:
+                raise AssertionError(f"event a routing: {params}")
+            watch_state["marker"] = len(client.events)
+            back = req("watch/upload", {"watchId": watch_state["id_a"]})
+            local_bytes = Path(watch_state["local_a"]).read_bytes()
+            if int(back.get("size") or -1) != len(local_bytes):
+                raise AssertionError(f"upload-back size: {back}")
+            read_back = req("sftp/read", {"sessionId": session_id,
+                                          "path": f"{watch_dir}/wa.txt", "maxBytes": 4096})
+            if base64.b64decode(read_back.get("dataBase64", "")) != local_bytes:
+                raise AssertionError("upload-back content mismatch on wa.txt")
+            # 多文件互不串扰：编辑 b，事件路由到 b 自己的 watchId 并可独立回写。
+            Path(watch_state["local_b"]).write_text(f"external edit B {time.time()}\n")
+            event_b = wait_watch_event(watch_state["id_b"], watch_state["marker"])
+            if (event_b.get("params") or {}).get("remotePath") != f"{watch_dir}/wb.txt":
+                raise AssertionError(f"event b routing: {event_b.get('params')}")
+            watch_state["marker"] = len(client.events)
+            req("watch/upload", {"watchId": watch_state["id_b"]})
+            # 同内容重复保存（mtime 变、sha256 不变）不得再触发事件。
+            marker = len(client.events)
+            Path(watch_state["local_a"]).write_text(Path(watch_state["local_a"]).read_text())
+            time.sleep(2.0)
+            watch_drain = watch_modified_events(marker)
+            if watch_drain:
+                raise AssertionError(f"identical re-save re-fired: {watch_drain}")
+            print("    per-watch routing + upload-back round-trip + identical-save dedup ok")
+
+        def case_watch_stop_semantics():
+            req("watch/stop", {"watchId": watch_state["id_a"]})
+            marker = len(client.events)
+            Path(watch_state["local_a"]).write_text(f"post-stop edit A {time.time()}\n")
+            time.sleep(2.0)
+            stopped_fired = [event for event in watch_modified_events(marker)
+                             if (event.get("params") or {}).get("watchId") == watch_state["id_a"]]
+            if stopped_fired:
+                raise AssertionError(f"stopped watch still fired: {stopped_fired}")
+            # b 未受影响：仍能触发。
+            Path(watch_state["local_b"]).write_text(f"post-stop edit B {time.time()}\n")
+            wait_watch_event(watch_state["id_b"], marker)
+            result = req("watch/stop-all", {"sessionId": session_id})
+            if int(result.get("stopped") or 0) < 1:
+                raise AssertionError(f"stop-all stopped={result}")
+            print("    stop removes exactly its watch; b survives; stop-all sweeps")
+
         def case_mcp_sftp_toolface():
             # M17-B MCP 工具面：sftp_mkdir/sftp_list_dir/sftp_rename/sftp_remove
             # （+ sftp_exists 收口）在 autonomous 模式经 mcp/call 基本往返。
@@ -1818,6 +1944,7 @@ def main() -> None:
                    case_audit_clear,
                    needs="ssh/audit/list returns approval trail")
 
+
         print("\n--- encoding / pipeline preferences group (M14-M17) ---")
         report.run("local/preferences pipeline clamps read back", "local/preferences/set",
                    case_prefs_pipeline_preferences)
@@ -1844,6 +1971,17 @@ def main() -> None:
         report.run("MCP tool-face sftp round-trip (autonomous)", "mcp/call",
                    case_mcp_sftp_toolface)
 
+        print("\n--- watcher external-edit group (M20) ---")
+        report.run("watch/start registers two files with distinct ids", "watch/start",
+                   case_watch_register_two)
+        report.run("watcher external edit routes events per watch + upload-back",
+                   "watch/upload",
+                   case_watch_edit_upload,
+                   needs="watch/start registers two files with distinct ids")
+        report.run("watch/stop drops exactly its watch; stop-all sweeps", "watch/stop-all",
+                   case_watch_stop_semantics,
+                   needs="watcher external edit routes events per watch + upload-back")
+
         step("cleanup leftovers")
         # Best-effort mode/secret restore even when a late case failed: the
         # sidecar keeps these in memory only, but a clean teardown keeps the
@@ -1862,6 +2000,12 @@ def main() -> None:
             print(f"    deleted {enc_dir}")
         except SidecarError:
             pass  # already cleaned by its case / never created
+        try:
+            client.request("sftp/delete", {"sessionId": session_id, "path": watch_dir,
+                                           "recursive": True})
+            print(f"    deleted {watch_dir}")
+        except SidecarError:
+            pass  # watcher group never reached registration
         try:
             client.request("local/preferences/set", {
                 "sftp_name_encoding": prefs_snapshot.get("sftp_name_encoding") or "auto",
