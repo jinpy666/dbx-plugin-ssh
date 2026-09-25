@@ -118,7 +118,10 @@ impl WriteQueue {
         if source == WriteSource::Keystroke && data.len() > SERIAL_KEYSTROKE_MAX_BYTES {
             return Err(WriteReject::Oversize);
         }
-        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if inner.closed {
             return Err(WriteReject::Closed);
         }
@@ -147,7 +150,10 @@ impl WriteQueue {
 
     /// 写线程取块：阻塞直到有块或队列关闭排空（None = 退出）。
     fn pop(&self) -> Option<Vec<u8>> {
-        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
             if let Some(chunk) = inner.chunks.pop_front() {
                 inner.bytes = inner.bytes.saturating_sub(chunk.len());
@@ -165,7 +171,10 @@ impl WriteQueue {
 
     /// 取消路径：清空尚未写出的块，返回丢弃字节数（诊断用）。
     fn clear(&self) -> usize {
-        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dropped = inner.bytes;
         inner.chunks.clear();
         inner.bytes = 0;
@@ -174,7 +183,10 @@ impl WriteQueue {
 
     /// 会话关闭：清空 + 置关闭 + 唤醒，写线程排空检查后随即退出。
     fn shutdown(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.chunks.clear();
         inner.bytes = 0;
         inner.closed = true;
@@ -182,8 +194,12 @@ impl WriteQueue {
         self.available.notify_all();
     }
 
+    #[cfg(test)]
     fn queued_bytes(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).bytes
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .bytes
     }
 }
 
@@ -1028,7 +1044,9 @@ pub fn decode_write_payload(data_base64: &str) -> Result<Vec<u8>, String> {
 /// 数据同样报参数错误，绝不 panic。
 pub(crate) fn decode_input_frame(data: &[u8]) -> Result<(u64, Vec<u8>), String> {
     if data.len() < 9 {
-        return Err("serial/terminal/in: frame is shorter than the 9-byte TerminalFrame header".to_string());
+        return Err(
+            "serial/terminal/in: frame is shorter than the 9-byte TerminalFrame header".to_string(),
+        );
     }
     let tag = data[0];
     if tag != TerminalStream::Stdin as u8 {
@@ -1352,7 +1370,9 @@ mod tests {
         let empty = crate::ssh::ReplayBuffer::with_byte_limit(SERIAL_REPLAY_BYTE_LIMIT);
         assert_eq!(empty.first_sequence(), 1);
         assert_eq!(empty.tail_sequence(), 0);
-        assert!(0 + 1 >= empty.first_sequence());
+        // afterSequence=0 → 0+1 >= first(1) = complete。
+        let after_sequence = 0u64;
+        assert!(after_sequence + 1 >= empty.first_sequence());
     }
 
     #[test]
@@ -1364,15 +1384,20 @@ mod tests {
         replay.push(TerminalStream::Stdout, vec![b'y'; 3]);
         replay.push(TerminalStream::Stdout, vec![b'z'; 3]);
         // 预算 4 字节只容得下最后一帧（前两帧先后被逐出）。
-        assert_eq!(replay.first_sequence(), 3, "frames 1-2 evicted by the budget");
+        assert_eq!(
+            replay.first_sequence(),
+            3,
+            "frames 1-2 evicted by the budget"
+        );
         // 请求 afterSequence=0（第 1 帧之后）：第 1、2 帧已不在缓冲 → 不完整。
+        let after_sequence = 0u64;
         assert!(
-            !(0 + 1 >= replay.first_sequence()),
+            !(after_sequence + 1 >= replay.first_sequence()),
             "afterSequence 0 below first_available must be incomplete"
         );
         assert_eq!(replay.after(0).len(), 1);
-        // 从可得帧之后回放 → 完整。
-        assert!(2 + 1 >= replay.first_sequence());
+        // 从可得帧之后回放（afterSequence=2）→ 完整。
+        assert!(2u64 + 1 >= replay.first_sequence());
         // 串口实际预算常量为 128 KiB。
         assert_eq!(SERIAL_REPLAY_BYTE_LIMIT, 128 * 1024);
     }
@@ -1384,7 +1409,9 @@ mod tests {
         // 键入大包按 4 KiB 小块分帧入队；FIFO 出队拼回字节流逐字节一致。
         // （pop 在未关闭的队列上会阻塞，按预期块数出队。）
         let queue = WriteQueue::new();
-        let payload: Vec<u8> = (0..(SERIAL_WRITE_CHUNK_BYTES * 2 + 3)).map(|i| i as u8).collect();
+        let payload: Vec<u8> = (0..(SERIAL_WRITE_CHUNK_BYTES * 2 + 3))
+            .map(|i| i as u8)
+            .collect();
         queue.push(&payload, WriteSource::Keystroke).unwrap();
         assert_eq!(queue.queued_bytes(), payload.len());
         let expected_chunks = payload.len().div_ceil(SERIAL_WRITE_CHUNK_BYTES);
@@ -1447,7 +1474,9 @@ mod tests {
         // （取消序列本身在清空后入队）。关闭：shutdown 后 push 报 Closed，
         // pop 排空即 None（写线程退出条件）。
         let queue = WriteQueue::new();
-        queue.push(b"stale upload block", WriteSource::Bulk).unwrap();
+        queue
+            .push(b"stale upload block", WriteSource::Bulk)
+            .unwrap();
         assert_eq!(queue.clear(), "stale upload block".len());
         assert_eq!(queue.queued_bytes(), 0);
         queue.push(b"cancel sequence", WriteSource::Bulk).unwrap();
@@ -1455,7 +1484,10 @@ mod tests {
         let closed = WriteQueue::new();
         closed.push(b"pending", WriteSource::Keystroke).unwrap();
         closed.shutdown();
-        assert_eq!(closed.push(b"late", WriteSource::Keystroke), Err(WriteReject::Closed));
+        assert_eq!(
+            closed.push(b"late", WriteSource::Keystroke),
+            Err(WriteReject::Closed)
+        );
         assert_eq!(closed.pop(), None);
     }
 

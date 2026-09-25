@@ -1779,7 +1779,10 @@ impl PluginHandler for Plugin {
                 );
                 return Err(to_plugin_error(error));
             }
-            if let Err(error) = self.serial.write_input(&session, session_id, &payload, emitter) {
+            if let Err(error) = self
+                .serial
+                .write_input(&session, session_id, &payload, emitter)
+            {
                 let _ = emitter.event(
                     "serial/terminal/error",
                     json!({ "sessionId": session_id, "error": error }),
