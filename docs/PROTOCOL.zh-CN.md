@@ -413,7 +413,11 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 - **查漏补缺**：`sftp/stat`（属性对话框）与 `sftp/chmod`（权限编辑）在 latin-1 下整条 wire 还原后走裸包 LSTAT/SETSTAT（此前字面量发送，转义名探不到）；裸包 v3 attrs 不携带 uid/gid，`sftp/stat` 的属主/属组仍经 `stat -c` shell 查询尽力而为（转义名下该查询受上述 shell 字节边界限制，失败显示 `-`），元数据主体（kind/size/mtime/mode）不受影响。
 - **仍按字面量发送的残留点（登记，shell 字节参数不可控）**：`sftp/diskUsage`（`df -kP` 按目录路径拼命令）、`sftp/archive`/`sftp/extract`（远端 `tar` 拼命令）、sudo 模式全族（`sudo/*` 走 shell 文本管道 `ls -la`/`stat`，本就没有 wire 形式的名字来源）。这些入口在 latin-1 下对含转义的名字维持字面量发送、由远端报错，语义与迁移前一致。
 
-**遗留（登记）**：① ~~粘贴预检与 `sftp/copy`/`sftp/move` 未迁移 raw~~（M17 已收尾，见上——shell 执行层的字节边界仍登记在案）。② ~~终端拖入上传的自定义目标目录按 wire 前缀处理~~（M17 已收尾，见上；shell cwd 回读的非 UTF-8 字节丢失场景为不可恢复边界）。③ MCP 工具面 `sftp_mkdir`/`sftp_remove`/`sftp_rename` 保持字面量发送：MCP 的 `sftp_list_dir` 走高层客户端（非法字节已 lossy），工具面没有 wire 形式的名字来源，且工具面无编码偏好——字节保真需要 MCP 面自身的编码模式与列表层迁移设计，成本/风险超出本批次，登记后续处理。
+
+**M17 起 MCP 工具面复用同一编码判定并迁移列表/写工具（字节保真闭环）**：MCP 连接类工具在连接上下文内执行，编码判定直接复用连接级优先链——工具 `arguments` 的 `connectionId`（dispatch 层已把 `connectionName`/端点选择器归一化为该字段，stdio 与 `mcp/call` 同构）命中 `sftp_name_encoding_overrides` 时优先，否则跟随全局 `sftp_name_encoding`，缺省 auto；内联拨号（无 registry 身份）按未覆盖处理。latin-1 生效时：`sftp_list_dir` 改走裸包 READDIR（与工作台列表同源），**名字口径为显示形式**——`name`/`path` 均为 latin-1 解码文本（与工作台看到的显示名一致，不向 AI 消费者暴露 `%XX` wire 噪声），`.`/`..` 跳过，kind 按 v3 类型位归类（缺 permissions 退回 `file`）；`sftp_mkdir`/`sftp_remove`/`sftp_rename` 把路径参数整条按 latin-1 显示编码还原为服务器字节后走裸包 MKDIR/LSTAT+REMOVE/RMDIR/树删/RENAME（remove 判型分派与 auto 分支一致：symlink/文件 REMOVE、目录递归树删、非递归目录报错；rename 源 = 列表回传显示路径、目标 = AI 新输入显示文本，>U+00FF 字符 UTF-8 兜底）。**往返闭环**：latin-1 解码输出恒在 U+0000..=U+00FF 域内，显示 → 字节的 `latin1_encode_display` 是其精确逆变换——AI 把列表返回的 `path` 原样回传给写工具即落回原始字节（单测覆盖）。回退策略与工作台一致：列表 raw 路径任何失败回退高层（读操作安全），写操作仅裸包客户端**建立**失败回退；`auto` 模式下四个工具行为完全不变。
+
+**遗留（登记）**：① ~~粘贴预检与 `sftp/copy`/`sftp/move` 未迁移 raw~~（M17 已收尾，见上——shell 执行层的字节边界仍登记在案）。② ~~终端拖入上传的自定义目标目录按 wire 前缀处理~~（M17 已收尾，见上；shell cwd 回读的非 UTF-8 字节丢失为不可恢复边界）。③ MCP 工具面编码模式已落地（见上）：`sftp_list_dir`/`sftp_mkdir`/`sftp_remove`/`sftp_rename` 完成字节保真迁移；MCP 面其余工具（`sftp_read_file`/`sftp_write_file`/`sftp_stat`/`sftp_exists`/`sftp_chmod`/`sftp_copy`/`sftp_move`）在 latin-1 下仍按字面量发送——列表显示路径回传给这批工具时非 ASCII 名可能探不到目标（报错而非误操作），后续可沿同一模式（raw OPEN/READ/写族 + 显示路径还原）补齐。
+
 
 `includeOwner: true` 时，每个条目可携带可选 `owner`、`group` 字符串字段（属主用户、属组）：优先服务器直接提供的名字（SFTPv4+ 属主属性），数字 uid/gid 次之，SFTPv3 服务器（如 OpenSSH）再经一次只读 `ls -l` 往返升级为名字——该次往返失败（无 shell、无 `ls`、超时）时静默保留数字或省略字段，不影响列表本身。字段缺失即"未知"，由 UI 显示 `-`。省略 `includeOwner`（或为 `false`）时不输出这两个字段，与历史响应完全一致。`sudo/listDir` 恒定返回 `owner`/`group`（`ls -la` 解析附带，无额外往返）。
 
