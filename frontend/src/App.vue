@@ -3474,7 +3474,9 @@ async function saveTrzszDownloadedFiles(files: readonly TrzszDownloadFile[]) {
   if (!fileTransfer) {
     const local = await probeLocalCapabilities();
     if (!local?.canSaveLocal) {
-      for (const file of saving) saveBrowserDownload(file.chunks, file.fileName);
+      // issue #93：沙箱 iframe 内 <a download> 被浏览器静默丢弃，改为宿主
+      // host.saveFile 单次落盘（取消/无桥/超限抛错走 showError）。
+      for (const file of saving) await saveHostFile(file.chunks, file.fileName);
       return;
     }
     // 「使用默认地址」关闭时按批次只问一次，整批落同一目录；取消则整批不保存。
@@ -3517,7 +3519,9 @@ async function saveTrzszDownloadedFiles(files: readonly TrzszDownloadFile[]) {
     return;
   }
   for (const file of saving) {
+    // 契约：用户取消原生保存框返回 null——取消整批（与 SFTP 下载取消语义一致）。
     const target = await fileTransfer.beginSave({ name: file.fileName, size: file.byteLength });
+    if (!target) throw new Error(t("transferStatus.cancelled"));
     try {
       let offset = 0;
       for (const chunk of file.chunks) {
@@ -8412,7 +8416,14 @@ async function downloadEntry(entry: SftpEntry, forceSudo = false) {
       ? await window.dbxPlugin.invoke<DownloadInfo>("sudo/download/start", { ...startParams, path: pathFromUri(entry.uri) })
       : await window.dbxPlugin.invoke<DownloadInfo>("sftp/download/start", { ...startParams, remotePath: pathFromUri(entry.uri) });
     transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now() };
-    target = fileTransfer ? await fileTransfer.beginSave({ name: info.fileName, size: info.size }) : undefined;
+    // beginSave 在用户取消原生保存框时按契约返回 null：必须立刻终止整个下载，
+    // 否则 target=null 会让循环滑进「只推进度不写盘」分支，最终提示成功却无文件。
+    target = fileTransfer ? (await fileTransfer.beginSave({ name: info.fileName, size: info.size })) ?? undefined : undefined;
+    if (fileTransfer && !target) {
+      await window.dbxPlugin.invoke("sftp/transfer/cancel", { taskId: info.taskId, reason: "user" }).catch(() => undefined);
+      cancelledTransferTasks.add(info.taskId);
+      throw new Error(t("transferStatus.cancelled"));
+    }
     let offset = 0;
     while (offset < info.size) {
       await waitWhilePaused(info.taskId);
@@ -8452,7 +8463,7 @@ async function downloadEntry(entry: SftpEntry, forceSudo = false) {
       await fileTransfer!.finish(target.handleId);
       target = undefined;
     } else if (chunks) {
-      saveBrowserDownload(chunks, info.fileName);
+      await saveHostFile(chunks, info.fileName);
     }
     const finishResult = await window.dbxPlugin.invoke<{ localPath?: string }>("sftp/download/finish", { taskId: info.taskId });
     localPath = finishResult?.localPath;
@@ -8621,19 +8632,30 @@ async function batchDownload() {
   }
 }
 
-function saveBrowserDownload(chunks: Uint8Array[], fileName: string) {
-  // Runtime chunks always come from decodeBase64 (ArrayBuffer-backed); the
-  // ArrayBufferLike generic just doesn't fit BlobPart's stricter view typing.
-  const blob = new Blob(chunks as unknown as BlobPart[]);
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  // Give the browser time to start the download before releasing the blob.
-  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+// 宿主单次落盘上限（pluginHostBridge MAX_BRIDGE_SAVE_BYTES）：超出时明确报错，
+// 绝不回退 iframe 内 <a download>——sandbox="allow-scripts" 下该动作被浏览器
+// 静默丢弃，正是 issue #93「提示成功但本机没有文件」的根因。
+const HOST_SAVE_MAX_BYTES = 512 * MIB;
+
+/**
+ * 无 fileTransfer 宿主（DBX 0.6.14–0.6.17 及全部 web/docker 旧宿主）的落盘路径：
+ * 把整包字节交给宿主顶层页面（host.saveFile）保存。宿主顶层文档不受插件 iframe
+ * 的 sandbox 约束；桌面端宿主同时弹出原生保存对话框。用户取消返回 null。
+ */
+async function saveHostFile(chunks: Uint8Array[], fileName: string): Promise<void> {
+  if (!window.dbxPlugin.saveFile) throw new Error(t("errors.localSaveUnavailable"));
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  if (total > HOST_SAVE_MAX_BYTES) throw new Error(t("errors.localSaveTooLarge", { size: formatBytes(total), limit: formatBytes(HOST_SAVE_MAX_BYTES) }));
+  // Runtime chunks always come from decodeBase64 (ArrayBuffer-backed); merge
+  // into one buffer because host.saveFile is a single-shot, no-append bridge.
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const saved = await window.dbxPlugin.saveFile({ fileName, contentType: "application/octet-stream" }, merged);
+  if (!saved) throw new Error(t("transferStatus.cancelled"));
 }
 
 function waitForDownloadChunk(taskId: string, offset: number) {
@@ -10257,6 +10279,7 @@ async function exportRecordingGif(summary: RecordingSummary, events: readonly Re
       // destination instead of silently losing the file in an unknown folder.
       const fileTransfer = window.dbxPlugin.fileTransfer;
       const target = await fileTransfer.beginSave({ name: fileName, contentType: "image/gif", size: gif.byteLength });
+      if (!target) return; // 用户在原生保存框取消：安静结束，不提示导出成功
       try {
         await fileTransfer.write(target.handleId, 0, gif);
         await fileTransfer.finish(target.handleId);
@@ -10268,10 +10291,11 @@ async function exportRecordingGif(summary: RecordingSummary, events: readonly Re
     } else {
       // 沙箱 iframe（宿主 fileTransfer 缺失）下的可靠路径：sidecar 落盘到
       // 下载目录（或「每次询问」选择的目录），完成后提示完整路径。
-      // web/docker（sidecar 不在本机）仍回退浏览器 <a download>。
+      // web/docker（sidecar 不在本机）走宿主 host.saveFile——iframe 内
+      // <a download> 被浏览器静默丢弃（issue #93）。
       const local = await probeLocalCapabilities();
       if (!local?.canSaveLocal) {
-        saveBrowserDownload([gif], fileName);
+        await saveHostFile([gif], fileName);
         showNotice(t("replayExported"));
         return;
       }
