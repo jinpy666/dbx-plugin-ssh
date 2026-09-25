@@ -509,8 +509,31 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 - `local/terminal/out/{sessionId}`：本地终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + u64 序号）；stdout/stderr 在 PTY 内合流，数据帧恒为流 0。
 - `sftp/upload/{taskId}`：大端 `u64` 文件偏移加最多 256 KiB 数据；偏移必须等于服务端期待值。
 - `sftp/download/{taskId}`：大端 `u64` 文件偏移加最多 256 KiB 数据（树任务该偏移为整树聚合字节位置；队列耗尽后的 eof 应答携带 0 字节数据）。
+- `vnc/frame/{sessionId}`：VNC 帧补丁，44 字节头 + RGBA 像素负载，全部**小端**（字段表见下文「VNC 帧补丁」小节）。
 
 终端输出保留 2 MiB 环形缓存。前端检测到序号缺口后停止乱序输出并调用 `ssh/terminal/replay`。文件传输采用逐块 RPC 确认，不依赖广播队列可靠送达。
+
+### VNC 帧补丁（`vnc/frame/{sessionId}`）
+
+VNC 远程桌面的帧缓冲更新以 patch 帧推送：`44 字节头 | RGBA 像素负载`，所有字段一律**小端（LE）**——与 `ssh/terminal/out` 的大端序号刻意不同（逐字段对齐 NyaTerm 的 patch 协议）。字段序与偏移：
+
+| 偏移 | 长度 | 类型 | 字段 | 说明 |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | u64 LE | `sequence` | 单调递增（跨重连持续），前端据此丢弃乱序补丁 |
+| 8 | 4 | u32 LE | `desktopWidth` | 桌面宽（像素，≤3840） |
+| 12 | 4 | u32 LE | `desktopHeight` | 桌面高（像素，≤2160） |
+| 16 | 4 | u32 LE | `x` | 补丁左上角 x |
+| 20 | 4 | u32 LE | `y` | 补丁左上角 y |
+| 24 | 4 | u32 LE | `width` | 补丁宽（像素） |
+| 28 | 4 | u32 LE | `height` | 补丁高（像素） |
+| 32 | 4 | u32 LE | `stride` | 字节/行；恒为 `width*4`（RGBA 紧排），作为对齐 NyaTerm 的保留字段 |
+| 36 | 4 | u32 LE | `pixelFormat` | 恒为 `2`（RGBA8888，R/G/B/A 字节序） |
+| 40 | 4 | u32 LE | `payloadLength` | 负载字节数 |
+| 44 | N | bytes | payload | RGBA 像素数据，按行存放，行尾可有 stride 填充 |
+
+编解码两侧（sidecar `encode_frame_patch` / 前端 `decodeVncFramePatch`）校验同一组不变式，任一不满足整帧丢弃（前端抛错丢帧；sidecar 判会话失败）：桌面与矩形尺寸非零；`x+width ≤ desktopWidth`、`y+height ≤ desktopHeight`（带回绕保护）；`stride ≥ width*4`；`payloadLength ≥ stride*height`；帧总长恰为 `44 + payloadLength`；`pixelFormat == 2`。桌面有界（≤3840×2160）使补丁负载天然 < 64 MiB。`sequence` 无需请求重放——丢帧只影响画面，下一帧补丁或全帧刷新（重连重画）自愈。
+
+参考实现：`backend/src/vnc_session.rs`（编码端）、`frontend/src/lib/vncFrame.ts`（解码端）；跨端 golden 向量以同一 hex 字符串硬编码在两侧测试中（`patch_frame_golden_vector_matches_frontend` / `vncFrame.spec.ts` 的 golden 断言，互指本文档）。`vnc/start`、`vnc/input`、`vnc/session/state` 等 JSON 契约见 sidecar 模块文档与 `docs/SPIKE_VNC_SESSION.zh-CN.md`。
 
 ### 死会话输入事件（`ssh/terminal/error`）
 

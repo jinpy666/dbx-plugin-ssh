@@ -16,6 +16,10 @@
  * (/tmp/dbx-ui-mock, same pattern as the A-LDAP walkthrough) — the project
  * package.json stays dependency-frozen. If playwright-core or Chrome is
  * unavailable the script SKIPs (exit 0), matching the smoke SKIP semantics.
+ * CI (and anyone who wants a hard gate) sets DBX_SMOKE_STRICT=1: a SKIP that
+ * stems from missing tooling then exits non-zero, so a broken environment can
+ * no longer share the silent-green path with a genuine pass. Assertion and
+ * timeout failures always exit non-zero, strict or not.
  *
  * Usage: node scripts/smoke_ui_mock.mjs [--port 5199]
  */
@@ -32,6 +36,12 @@ const SHOT_DIR = `${ROOT}docs/screenshots-ui-mock`;
 
 function skip(reason) {
   console.log(`SKIP: ${reason}`);
+  // DBX_SMOKE_STRICT=1（CI 门禁）：工具链缺失的 SKIP 按失败退出，环境损坏
+  // 不再与测试通过共享静默绿路径；默认（本地无依赖）保持 exit 0。
+  if (process.env.DBX_SMOKE_STRICT === "1") {
+    console.error("DBX_SMOKE_STRICT=1: dependency-missing SKIP is treated as a failure");
+    process.exit(1);
+  }
   process.exit(0);
 }
 
@@ -53,13 +63,17 @@ for (const dir of playwrightCandidates) {
   } catch { /* try next candidate */ }
 }
 if (!chromium) skip("playwright-core not available at /tmp/dbx-ui-mock (npm install --prefix /tmp/dbx-ui-mock playwright-core)");
+// Linux：launch 用 channel:"chrome"，探测装在标准路径的稳定版/发行版 Chrome
+//（ubuntu runner 自带 google-chrome-stable —— CI 门禁依赖这一点）。
 const chromeCandidates = process.platform === "win32"
   ? [
       "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
       "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
       join(process.env.LOCALAPPDATA ?? "", "Google\\Chrome\\Application\\chrome.exe"),
     ]
-  : ["/Applications/Google Chrome.app", "/Applications/Chromium.app"];
+  : process.platform === "darwin"
+    ? ["/Applications/Google Chrome.app", "/Applications/Chromium.app"]
+    : ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"];
 const hasChrome = chromeCandidates.some((p) => p && existsSync(p));
 if (!hasChrome) skip("no system Chrome/Chromium");
 

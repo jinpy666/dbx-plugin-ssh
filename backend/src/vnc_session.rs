@@ -7,7 +7,10 @@
 //! by the frontend, and framebuffer updates answer as 44-byte-header RGBA
 //! patch frames on the binary channel `vnc/frame/{sessionId}` — the same
 //! patch protocol NyaTerm uses (`sequence u64 LE`, desktop W/H, x/y/w/h,
-//! stride, pixel format, payload length, all `u32 LE`). Lifecycle changes
+//! stride, pixel format, payload length, all `u32 LE`). The wire contract
+//! (field order, little-endian byte order, stride semantics, validation
+//! invariants) is documented in `docs/PROTOCOL.zh-CN.md` § VNC 帧补丁.
+//! Lifecycle changes
 //! surface as `vnc/session/state` events (`connecting`/`connected`/
 //! `closed`/`error`).
 //!
@@ -84,8 +87,13 @@ const COMMAND_CHANNEL_CAPACITY: usize = 256;
 const DEFAULT_RECONNECT_ATTEMPTS: u32 = 3;
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
-// —— 44-byte patch frame protocol (aligned with NyaTerm encode_frame_patch) ——
+// —— 44-byte patch frame protocol (aligned with NyaTerm encode_frame_patch;
+// documented in docs/PROTOCOL.zh-CN.md § VNC 帧补丁) ——
 
+/// Wire format: `44-byte header | payload`, every field little-endian.
+/// Documented in docs/PROTOCOL.zh-CN.md § VNC 帧补丁; the cross-side golden
+/// vector is pinned in `tests::patch_frame_golden_vector_matches_frontend`
+/// and mirrored in frontend/src/lib/vncFrame.spec.ts (same hex).
 pub(crate) const FRAME_HEADER_BYTES: usize = 44;
 /// Wire values shared with the frontend decoder and NyaTerm's renderer.
 pub(crate) const PIXEL_FORMAT_RGBA8888: u32 = 2;
@@ -1104,6 +1112,53 @@ mod tests {
         assert_eq!(format, PIXEL_FORMAT_RGBA8888);
         assert_eq!(PIXEL_FORMAT_RGBA8888, 2);
         assert_eq!(payload_len, 8);
+        assert_eq!(&frame[FRAME_HEADER_BYTES..], &payload);
+    }
+
+    // —— 跨端 golden 向量 ————————————————————————————————————————
+    // 与 frontend/src/lib/vncFrame.spec.ts 的 "cross-side golden vector"
+    // 断言硬编码同一 hex 字符串（互指）；字段序/字节序/stride 语义的权威
+    // 契约见 docs/PROTOCOL.zh-CN.md「VNC 帧补丁」小节。
+    //
+    // 向量定义：desktop 8x8，patch 位于 (2,1) 尺寸 4x4，sequence=42，
+    // stride=16（紧排 width*4），payload = 0x00..=0x3F（64 字节 RGBA）。
+    // 改协议字段序/字节序时两侧同步更新，任何一侧单独变化即测试失败。
+
+    const GOLDEN_FRAME_HEX: &str = "2a00000000000000080000000800000002000000010000000400000004000000100000000200000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+
+    fn hex_decode(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0, "golden hex must be byte aligned");
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("golden hex digit"))
+            .collect()
+    }
+
+    #[test]
+    fn patch_frame_golden_vector_matches_frontend() {
+        let payload: Vec<u8> = (0u8..=0x3f).collect();
+        let frame = encode_frame_patch(&FramePatch {
+            sequence: 42,
+            desktop_width: 8,
+            desktop_height: 8,
+            x: 2,
+            y: 1,
+            width: 4,
+            height: 4,
+            stride: 16,
+            payload: &payload,
+        })
+        .expect("golden frame should encode");
+        assert_eq!(frame.len(), FRAME_HEADER_BYTES + 64);
+        // 逐字节等于跨端 hex：字段序或字节序任一侧漂移立即失败。
+        assert_eq!(frame, hex_decode(GOLDEN_FRAME_HEX));
+        // 字段级复读，把契约钉在断言上（sequence u64 LE + 9 个 u32 LE）。
+        let (sequence, dw, dh, x, y, w, h, stride, format, payload_len) =
+            decode_patch_header(&frame);
+        assert_eq!(sequence, 42);
+        assert_eq!((dw, dh, x, y, w, h, stride), (8, 8, 2, 1, 4, 4, 16));
+        assert_eq!(format, PIXEL_FORMAT_RGBA8888);
+        assert_eq!(payload_len, 64);
         assert_eq!(&frame[FRAME_HEADER_BYTES..], &payload);
     }
 
