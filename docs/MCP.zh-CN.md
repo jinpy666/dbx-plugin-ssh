@@ -149,7 +149,7 @@ MCP 调用方是 LLM，`sftp_upload`（本地读）与 `sftp_download`（本地�
 | `ssh_close` | 关闭缓存的连接（方式二按连接键；方式一由 sidecar 生命周期管理） |
 | `sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_pwd` | 浏览、检查远端路径与登录家目录；**懒建立连接**：无需先 `ssh_exec` 预热，首次调用即按寻址解析并拨号。文件名编码跟随连接级偏好（连接覆盖 > 全局 `sftp_name_encoding` > auto，见 PROTOCOL「扩展文件操作」M17/M18 节）：latin-1 连接上 `sftp_list_dir` 返回的 `name`/`path` 为显示形式（与工作台一致），把返回的 `path` 原样回传给其余 SFTP 工具即落回同一组服务器字节；latin-1 下 `sftp_stat`/`sftp_exists` 走裸包 LSTAT（stat 的 uid/gid 经 shell 查询尽力而为，非 ASCII 名可能为 `null`；exists 只认「无此文件」为不存在，其余错误如实上抛） |
 | `sftp_read_file` / `sftp_write_file` | 读写远端文件（文本或 base64，支持 offset 分页）。latin-1 连接上按显示路径还原服务器字节走裸包 OPEN/READ/WRITE（32 KiB 分块；读侧 `maxBytes` 截断语义不变） |
-| `sftp_upload` / `sftp_download` | 本地 ↔ 远端单文件传输（受 `maxUploadBytes` / `maxDownloadBytes` 限制；本地路径校验先于拨号，校验拒绝不清连接池）。本地路径受传输根约束：必须落在 `localTransferRoot`（未配置时为系统临时目录 + 插件数据目录）之内，且任何模式下都拒绝敏感路径（凭据库、shell 启动文件等，见下文「本地传输路径约束」） |
+| `sftp_upload` / `sftp_download` | 本地 ↔ 远端单文件传输（受 `maxUploadBytes` / `maxDownloadBytes` 限制；本地路径校验先于拨号，校验拒绝不清连接池）。latin-1 连接上远端路径按显示形式还原服务器字节走裸包 OPEN/READ/WRITE（M19，upload 响应的 `remotePath` 原样回传给 download 即命中同一组字节；回退策略同其他 SFTP 工具，见 PROTOCOL「扩展文件操作」M19 节）。本地路径受传输根约束：必须落在 `localTransferRoot`（未配置时为系统临时目录 + 插件数据目录）之内，且任何模式下都拒绝敏感路径（凭据库、shell 启动文件等，见下文「本地传输路径约束」） |
 | `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` | 目录与文件管理。latin-1 连接上均按显示路径还原服务器字节走裸包操作（非 UTF-8 文件名保真，回退策略同工作台）；`sftp_chmod` 的 `mode` 兼容多种写法：字符串 `"0644"`/`"0o644"` 按八进制数字读；数字全部由 0-7 组成时也按八进制读（`644` → `0644`），其余数字按原始权限位读（`384` = `0600`） |
 | `sftp_disk_usage` | 路径所在挂载的磁盘用量 |
 | `sftp_copy` / `sftp_move` | 服务器内复制 / 剪切（`from` 单值或数组 → `toDir`，逐项返回成败）。latin-1 连接上覆盖预检与同目录 move 的 RENAME 快路径走裸包字节保真；远端 `cp`/`mv` 执行层按字面量发送（非 ASCII 名由服务器侧报错，边界见 PROTOCOL） |
