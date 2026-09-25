@@ -3852,3 +3852,10 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 2. smoke latin-1 组未覆盖 sftp/symlink-* 的 latin-1 路径（同族可按需补）；smoke_mcp.py stdio 面未新增（embedded 路径已覆盖同一工具实现）。
 3. sftp_upload/sftp_download MCP 工具与 sudo 族维持既有策略（不在本批次范围）。
 4. 工程面 backlog 持续为零；真机人工门沿既有登记。
+
+
+## M19 收口（2026-09-25，编码保真家族收尾批次：MCP 传输工具 latin-1 / smoke symlink 补齐）
+
+- **MCP sftp_upload/sftp_download latin-1 迁移 ✅**（parity-np19-mcp-io，M18 遗留 3 消化）：沿 M17-B/M18 同一模式（显示路径整条 `latin1_encode_display` 还原字节 + 连接级裸包客户端）——`sftp_upload` 走裸包 LSTAT 覆盖预检 + OPEN(CREAT|WRITE|TRUNC) 截断直写 + WRITE 32 KiB 分块（**选型**：沿既有 MCP 传输直写语义，无工作台上传族 `.dbx-part` 暂存需求；复用 M18 `sftp_write_file` 直写核心抽出的 `raw_sftp_write_bytes`，按工具各自响应形状组装）；`sftp_download` 走裸包 OPEN(READ)+READ 分块（`maxDownloadBytes+1` 探测封顶，超限沿 post-read 口径报错；目录 OPEN 被拒后落回高层给 auto 同款「is a directory」错误）。回退沿先例：download 读侧裸包任何失败回退高层重读、upload 写侧仅裸包建立失败回退；auto 模式行为不变（本地校验/传输根/敏感路径/大小上限均先于拨号不受影响）。单测 3 条（duplex 桩字节级）：upload 帧序+路径字节+载荷落帧、upload↔download 同显示路径 OPEN 帧字节一致 + 载荷逐字节回收（往返闭环）。PROTOCOL M19 节 + MCP.zh-CN.md 工具表同步。
+- **smoke latin-1 组补符号链接三命令 ✅**（同线，M18 遗留 2 消化）：smoke_fs_test.py latin-1 组新增 `latin-1 symlink create/read/update round-trip` 用例（needs 链插在 raw rename 与每连接覆盖之间）——`sftp/symlink-create` 0xE9 字节链接名落盘 + 列表 kind=symlink、`sftp/symlink-read` 整条 wire 路径读指向、`sftp/symlink-update` 显示形式新指向再编码回字节后 read 回环验证（latin-1 域内读↔写精确闭环）；链接/锚点 finally 自清理，交还空目录给每连接覆盖组（沿用快照/自清理/needs 门控结构）。
+- **遗留销项**：M18 遗留 2、3 销项；遗留 1（exec 命令串字节参数）维持设计边界登记。sudo 族维持既有策略（非编码家族范围）。

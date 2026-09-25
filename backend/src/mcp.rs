@@ -2772,6 +2772,30 @@ impl McpState {
         let entry = guard
             .get_mut(&connection_pool_key(arguments))
             .ok_or("Connection is not established")?;
+        // latin-1（M19）：显示路径整条按 latin1_encode_display 还原字节后走
+        // 裸包直写（选型：沿既有 sftp_upload 直写语义，无工作台上传族的
+        // `.dbx-part` 暂存需求；覆盖预检与写入同一字节口径，复用 M18 的
+        // raw_sftp_write_bytes）。仅裸包客户端建立失败回退高层（M18 写工具
+        // 同策略）；操作错误原样上抛，不回退（不会重复执行）。
+        if mcp_sftp_encoding(&self.runtime.data_dir(), arguments) == sftp_name::NameEncoding::Latin1
+        {
+            match entry.raw_sftp().await {
+                Ok(mut client) => {
+                    let bytes =
+                        raw_sftp_write_bytes(&mut client, remote_path, data, overwrite).await?;
+                    return Ok(json!({
+                        "localPath": local_path,
+                        "remotePath": remote_path,
+                        "bytes": bytes,
+                    }));
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[ssh] MCP sftp_upload: raw byte client unavailable, falling back: {error}"
+                    );
+                }
+            }
+        }
         let sftp = entry.sftp().await?;
         if !overwrite && sftp.lock().await.metadata(remote_path).await.is_ok() {
             return Err(format!(
@@ -2873,6 +2897,51 @@ impl McpState {
         let entry = guard
             .get_mut(&connection_pool_key(arguments))
             .ok_or("Connection is not established")?;
+        // latin-1（M19）：读侧沿 M18 sftp_read_file 同策略——显示路径整条
+        // latin1_encode_display 还原字节后 OPEN(READ)+READ，裸包路径任何
+        // 失败回退高层重读（读操作安全）。目录探测不单独走裸包 STAT：目录
+        // 的 OPEN 会被服务器拒绝、落入回退，由高层给出与 auto 分支一致的
+        // 「is a directory」错误；超限沿既有 post-read 口径报错（读取量以
+        // download_limit+1 探测封顶，不做无界传输）。
+        if mcp_sftp_encoding(&self.runtime.data_dir(), arguments) == sftp_name::NameEncoding::Latin1
+        {
+            match entry.raw_sftp().await {
+                Ok(mut client) => {
+                    match raw_sftp_read_file(&mut client, remote_path, 0, download_limit).await {
+                        Ok((data, truncated)) => {
+                            if truncated {
+                                return Err(format!(
+                                    "Remote file {remote_path} exceeds the MCP download limit \
+                                     of {download_limit} bytes (adjust maxDownloadBytes via \
+                                     mcp/settings/set)"
+                                ));
+                            }
+                            std::fs::write(local_target, &data).map_err(|error| {
+                                format!(
+                                    "Cannot write local file {}: {error}",
+                                    local_target.display()
+                                )
+                            })?;
+                            return Ok(json!({
+                                "remotePath": remote_path,
+                                "localPath": local_path,
+                                "bytes": data.len(),
+                            }));
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_download: raw byte read unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[ssh] MCP sftp_download: raw byte client unavailable, falling back: {error}"
+                    );
+                }
+            }
+        }
         let sftp = entry.sftp().await?;
         let metadata = sftp
             .lock()
@@ -3257,16 +3326,33 @@ fn read_file_response(path: &str, data: &[u8], truncated: bool, as_base64: bool)
 }
 
 /// latin-1（M18）`sftp_write_file` 裸包分支：显示路径还原字节后
-/// OPEN(CREAT|WRITE|TRUNC) 截断直写 + WRITE 32 KiB 分块（选型：MCP 面沿
-/// 既有 sftp_write_file 直写语义，无工作台上传族的 `.dbx-part` 暂存需求）。
-/// `overwrite=false` 的覆盖预检走裸包 LSTAT，与写入同一字节口径；操作错误
-/// 原样上抛不回退（与 M17-B 写工具同策略，避免重复执行）。
+/// OPEN(CREAT|WRITE|TRUNC) 截断直写 + WRITE 32 KiB 分块（选型：MCP 面
+/// 沿既有 sftp_write_file 直写语义，无工作台上传族的 `.dbx-part` 暂存
+/// 需求）。`overwrite=false` 的覆盖预检走裸包 LSTAT，与写入同一字节口径；
+/// 操作错误原样上抛不回退（与 M17-B 写工具同策略，避免重复执行）。
 async fn raw_sftp_write_file<S>(
     client: &mut sftp_raw::RawSftp<S>,
     path: &str,
     content: &[u8],
     overwrite: bool,
 ) -> Result<Value, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin,
+{
+    let bytes = raw_sftp_write_bytes(client, path, content, overwrite).await?;
+    Ok(json!({ "path": path, "bytes": bytes }))
+}
+
+/// latin-1（M19）`sftp_upload` 裸包车道共用核心：与 [`raw_sftp_write_file`]
+/// 同一直写语义，返回写入字节数供调用方按工具各自的响应形状组装
+/// （sftp_write_file → `{path, bytes}`；sftp_upload → `{localPath,
+/// remotePath, bytes}`）。
+async fn raw_sftp_write_bytes<S>(
+    client: &mut sftp_raw::RawSftp<S>,
+    path: &str,
+    content: &[u8],
+    overwrite: bool,
+) -> Result<usize, String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin,
 {
@@ -3290,7 +3376,7 @@ where
     let closed = client.close(&handle).await;
     result?;
     closed?;
-    Ok(json!({ "path": path, "bytes": content.len() }))
+    Ok(content.len())
 }
 
 /// latin-1（M18）`sftp_chmod` 裸包分支：显示路径还原字节后 SETSTAT 只带
@@ -9159,6 +9245,112 @@ mod dbx_bridge_tests {
             .await
             .unwrap_err();
         assert!(error.contains("already exists"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn raw_sftp_upload_round_trips_latin1_path_and_payload() {
+        // M19 sftp_upload 裸包车道：覆盖预检 LSTAT（NO_SUCH_FILE）→ OPEN →
+        // WRITE → CLOSE；OPEN 帧路径字节 = 显示路径 latin1_encode_display
+        // 逆变换，载荷逐字节落 WRITE 帧（与 sftp_download 的往返闭环见
+        // raw_sftp_upload_download_round_trip_closes_latin1_loop）。
+        let payload = b"mcp upload \xE9 \xA9 payload".to_vec();
+        let (mut client, log) = stub_raw_sftp(vec![
+            sftp_raw::test_support::status_body(2), // LSTAT 预检：目标不存在
+            sftp_raw::test_support::handle_body(b"h1"),
+            sftp_raw::test_support::status_body(0), // WRITE
+            sftp_raw::test_support::status_body(0), // CLOSE
+        ])
+        .await;
+        let bytes = raw_sftp_write_bytes(&mut client, "/up/caf\u{e9}.bin", &payload, false)
+            .await
+            .unwrap();
+        assert_eq!(bytes, payload.len());
+        let requests = sftp_raw::test_support::recorded_requests(&log);
+        // 覆盖预检与 OPEN 同一字节口径（显示路径 → 服务器原始字节）。
+        let lstat = &requests[1];
+        assert_eq!(lstat[0], 7); // FXP_LSTAT
+        assert_eq!(&lstat[9..], b"/up/caf\xe9.bin");
+        let open = &requests[2];
+        assert_eq!(open[0], 3); // FXP_OPEN
+        assert_eq!(&open[9..21], b"/up/caf\xe9.bin");
+        // WRITE 帧尾部载荷逐字节一致（payload = type+id+handle_len+handle
+        // +offset+data_len 之后是 data）。
+        let write = &requests[3];
+        assert_eq!(write[0], 6); // FXP_WRITE
+        assert_eq!(&write[write.len() - payload.len()..], &payload[..]);
+    }
+
+    #[tokio::test]
+    async fn raw_sftp_download_round_trips_latin1_path_and_payload() {
+        // M19 sftp_download 裸包车道：OPEN(READ) → READ → EOF → CLOSE；
+        // OPEN 帧路径字节 = 显示路径 latin1_encode_display 逆变换，载荷
+        // 逐字节回收（与 upload 的同路径闭环见下一条）。
+        let payload = b"mcp download \xE9 \xA9 payload".to_vec();
+        let (mut client, log) = stub_raw_sftp(vec![
+            sftp_raw::test_support::handle_body(b"h1"),
+            sftp_raw::test_support::data_body(&payload),
+            sftp_raw::test_support::status_body(1), // SSH_FX_EOF：读完
+            sftp_raw::test_support::status_body(0), // CLOSE
+        ])
+        .await;
+        let (data, truncated) = raw_sftp_read_file(&mut client, "/up/caf\u{e9}.bin", 0, 4096)
+            .await
+            .unwrap();
+        assert!(!truncated);
+        assert_eq!(data, payload);
+        let open = &sftp_raw::test_support::recorded_requests(&log)[1];
+        assert_eq!(open[0], 3); // FXP_OPEN
+        assert_eq!(&open[9..21], b"/up/caf\xe9.bin");
+    }
+
+    #[tokio::test]
+    async fn raw_sftp_upload_download_round_trip_closes_latin1_loop() {
+        // M19 往返闭环：同一显示路径下，upload 的 OPEN 帧路径字节与
+        // download 的 OPEN 帧路径字节完全一致（同一 latin1_encode_display
+        // 逆变换），且上传载荷经下载侧逐字节回收——latin-1 域内显示 → 字节
+        // → 显示精确闭环（duplex 桩先例，M18 同款）。
+        let payload = b"mcp round trip \xE9 \xA9 payload".to_vec();
+        let display_path = "/up/caf\u{e9}.bin";
+        let raw_path = b"/up/caf\xe9.bin";
+
+        // 前半程：upload（LSTAT 不存在 → OPEN → WRITE → CLOSE）。
+        let (mut client, upload_log) = stub_raw_sftp(vec![
+            sftp_raw::test_support::status_body(2),
+            sftp_raw::test_support::handle_body(b"h1"),
+            sftp_raw::test_support::status_body(0),
+            sftp_raw::test_support::status_body(0),
+        ])
+        .await;
+        let bytes = raw_sftp_write_bytes(&mut client, display_path, &payload, false)
+            .await
+            .unwrap();
+        assert_eq!(bytes, payload.len());
+        let upload_open = &sftp_raw::test_support::recorded_requests(&upload_log)[2];
+        assert_eq!(upload_open[0], 3); // FXP_OPEN
+        assert_eq!(&upload_open[9..9 + raw_path.len()], &raw_path[..]);
+
+        // 后半程：download（OPEN → READ → EOF → CLOSE），同一显示路径。
+        let (mut client, download_log) = stub_raw_sftp(vec![
+            sftp_raw::test_support::handle_body(b"h1"),
+            sftp_raw::test_support::data_body(&payload),
+            sftp_raw::test_support::status_body(1), // SSH_FX_EOF：读完
+            sftp_raw::test_support::status_body(0),
+        ])
+        .await;
+        let (data, truncated) = raw_sftp_read_file(&mut client, display_path, 0, 4096)
+            .await
+            .unwrap();
+        assert!(!truncated);
+        assert_eq!(data, payload);
+        let download_open = &sftp_raw::test_support::recorded_requests(&download_log)[1];
+        assert_eq!(download_open[0], 3); // FXP_OPEN
+                                         // 两侧 OPEN 帧路径字节一致：AI 把 upload 响应里的 remotePath 原样
+                                         // 回传给 sftp_download 即命中同一组服务器字节。
+
+        assert_eq!(
+            &download_open[9..9 + raw_path.len()],
+            &upload_open[9..9 + raw_path.len()]
+        );
     }
 
     #[tokio::test]

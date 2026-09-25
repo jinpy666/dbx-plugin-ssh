@@ -178,3 +178,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：MCP stat/exists/read/write/chmod latin-1 裸包分支往返；exists 仅 NO_SUCH_FILE 判不存在的契约；write_file 直写语义；copy/move 预检 LSTAT 与同目录 RENAME 快路径；smoke latin-1 全链（含 exists wire 双形态交叉反例、覆盖回退后 auto 高层删 0xE9 名的清理路径）；mock auth=auto 逐方式事件序列与全败聚合。
 
 仍保持未验收（依赖真机/人工）：latin-1 真机全链联调（工作台+MCP 面）、多文件 watcher 全链路、既有真机门不变。
+
+
+## M19（编码保真收尾批次，2026-09-25）
+
+单测：cargo 基线 950 → **953**（+3：MCP upload/download latin-1 裸包分支往返闭环）、vitest 基线 1067 无前端改动。clippy 0、fmt 0。smoke_fs_test.py latin-1 组 +1 用例（sftp/symlink-create/read/update 往返）。
+
+新增可测面：MCP sftp_upload 直写帧序（LSTAT 预检 + OPEN + WRITE 载荷逐字节）与 sftp_download OPEN(READ) 帧路径字节；同显示路径 upload/download OPEN 帧字节一致 + 载荷回收的往返闭环；smoke 符号链接三命令 latin-1 路径（0xE9 字节链接名 + 显示指向读写回环）。
+
+仍保持未验收（依赖真机/人工）：latin-1 真机全链联调（工作台+MCP 面，含传输工具）、既有真机门不变。
