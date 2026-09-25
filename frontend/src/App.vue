@@ -181,7 +181,7 @@ import { formatBytes, formatRate } from "./lib/format";
 import { mergeTransferProgress, transferCancelReason, type TransferPhase } from "./lib/transferProgress";
 import { DBX_POPOVER, resolveAppearance, TERMINAL_ANSI, type DbxPluginAppearanceInput } from "./lib/appearance";
 import { isDbxPluginTheme, onHostThemeChange, themeToAppearance } from "./lib/hostTheme";
-import { AGENT_MODES, agentPromptCommandReadOnly, approvalRemainingSecs, buildAgentResolveBody, dropAgentPrompt, enqueueAcceptedAgentPrompt, enqueueAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload, type AgentTerminalMode } from "./lib/agentTerminal";
+import { AGENT_MODES, agentPromptCommandReadOnly, approvalRemainingSecs, buildAgentResolveBody, clearSessionBoundAgentPrompts, dropAgentPrompt, enqueueAcceptedAgentPrompt, enqueueAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload, type AgentTerminalMode } from "./lib/agentTerminal";
 import { purposeKeyLabel, sanitizeTriagePayload, severityClass, type TriageResult } from "./lib/alertTriage";
 import {
   compileRules,
@@ -5603,12 +5603,15 @@ function dismissAgentPrompt() {
   agentPromptQueue.value = dropAgentPrompt(agentPromptQueue.value, head.challengeId);
 }
 
-// 清空整个审批队列（会话切换 / 关闭时不继承旧会话的排队挑战）。
+// 会话切换 / 关闭只清理 SSH 会话绑定挑战；无 sessionId 的 MCP 审批是进程级
+// 交互，必须继续显示，才能被显式允许或拒绝。
 function clearAgentPrompts() {
-  stopAgentPromptTimer();
-  agentPromptQueue.value = [];
-  agentPromptCommand.value = "";
-  agentPromptRemaining.value = 0;
+  agentPromptQueue.value = clearSessionBoundAgentPrompts(agentPromptQueue.value);
+  if (agentPromptQueue.value.length === 0) {
+    stopAgentPromptTimer();
+    agentPromptCommand.value = "";
+    agentPromptRemaining.value = 0;
+  }
 }
 
 // 审批语义对齐 host-key 挑战：先出队再 resolve（挑战一次性，重复 resolve 报错）；

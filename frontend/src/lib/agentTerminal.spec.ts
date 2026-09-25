@@ -5,6 +5,7 @@ import {
   acceptsAgentPrompt,
   agentPromptCommandReadOnly,
   buildAgentResolveBody,
+  clearSessionBoundAgentPrompts,
   dropAgentPrompt,
   enqueueAgentPrompt,
   enqueueAcceptedAgentPrompt,
@@ -46,6 +47,17 @@ describe("agent terminal mode contract", () => {
 
 describe("agent prompt routing", () => {
   const activeSessionId = "ssh-session";
+
+  it("keeps process-level MCP confirmations when lifecycle cleanup removes session-bound SSH prompts", () => {
+    const queue = [
+      { challengeId: "docker-1", source: "mcp" as const, tool: "docker_action" },
+      { challengeId: "ssh-1", sessionId: activeSessionId, tool: "ssh_exec" },
+      { challengeId: "ssh-2", sessionId: "other-session", tool: "ssh_exec" },
+    ];
+    expect(clearSessionBoundAgentPrompts(queue)).toEqual([
+      { challengeId: "docker-1", source: "mcp", tool: "docker_action" },
+    ]);
+  });
 
   it("queues an MCP Docker confirmation without sessionId while preserving SSH session isolation", () => {
     const mcpDocker = {

@@ -95,6 +95,12 @@ export function enqueueAcceptedAgentPrompt<Q extends { challengeId: string; sour
   return acceptsAgentPrompt(payload, activeSessionId) ? enqueueAgentPrompt(queue, payload) : [...queue];
 }
 
+/** Session lifecycle cleanup only owns terminal-bound prompts. Process-level
+ * MCP prompts intentionally omit sessionId and must survive SSH tab changes. */
+export function clearSessionBoundAgentPrompts<Q extends { sessionId?: string }>(queue: readonly Q[]): Q[] {
+  return queue.filter((prompt) => !prompt.sessionId);
+}
+
 /** 移除指定 challengeId 的挑战；未命中返回等价浅拷贝。 */
 export function dropAgentPrompt<Q extends { challengeId: string }>(
   queue: readonly Q[],
