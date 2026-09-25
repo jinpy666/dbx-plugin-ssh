@@ -124,3 +124,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 仍保持未验收（依赖真机/CI）：X server 真机联调、CI walkthrough job 首跑观测；其余人工门不变（真机矩阵、RDP 评审、PR 合入）。
 
 - RDP 实施链（2026-09-25）：rdpFrame 21 用例（golden/坏帧/扫描码/状态机/证书）+ RDP-2 rdp_session 30 用例（分类器/上界/策略状态机/NTLMv2 断言）= 新增 51；cargo 854 / vitest 1019 终值。未验收：真机 RDP server 端到端、WKWebView 位图光标、CBT 端到端核对。
+
+
+## M13（对标差距批次，2026-09-25）
+
+单测：cargo **894/894**（887+7：auto_auth 编排顺序/全失败汇总/挑战流中立）、vitest **1031/1031**（1029+10：quickCommandImport 9 + 进程排序 1 + auth 展示 2 [102 文件]）、vue-tsc 0、build 过、clippy 0、fmt 0、connection-forms verify 598 组合 PASS（含 Auto 场景）。
+
+新增可测面：Auto 编排顺序不变式与逐方式汇总；quickCommandImport 双格式解析/去重/上限；/proc fd 计数与监听端口解析（容错）；进程表 fd/ports 排序。
+
+仍保持未验收（依赖真机/人工）：Auto 真机多方式回退联调（含 agent 转发环境）、导入文件对话框真机、句柄数/端口在真实服务器的覆盖度、既有真机门（RDP/X server/串口/GPU-NPU/ConPTY/DBX 桌面）不变。

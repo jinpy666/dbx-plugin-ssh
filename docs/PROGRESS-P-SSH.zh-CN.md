@@ -3756,3 +3756,20 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **修复 ✅ 全部合入**（parity-rdp-fix 978f151a/a215a65a，+29 测试）：C2 剪贴板分片发送（JSON 转义后 7MiB 预算切分、chunkIndex/Total、App 会话隔离缓冲拼接）保 16MiB 契约可用；C1 入口长度门（原始载荷先于 String 物化拒绝）——**缓解+登记**（crates.io cliprdr 0.7.0 PDU 整包物化不可避免，完全修复走 vendored fork plan 另一工作流）；D3 ReconnectBudget 状态机（总预算 50 次永不重置，active 只重置退避步长，防恶意服务器无限循环）；E5 unicode 4096 上限 + scan_code u16→u8 显式拒绝；B4 known-certs 写盘 uuid tmp + rename、磁盘格式 V1→V2 信封向后兼容、真"最旧"淘汰；B6 Debug 手写脱敏 + host/username/domain 上限；cert_key 大小写归一；mock 桩对齐（challengeId 一次性 + 120s fail-closed + 序号全局单调防 walkthrough 假死），余偏差头注释登记。
 - **全量终值**：backend cargo **883** / clippy 0 / fmt 0；frontend vitest **1019** / vue-tsc 0 / build 过（ui/ 重生成）。
 - **RDP 链状态：正式收官**。遗留人工门：真机 RDP server 联调、WKWebView 位图光标走查、CBT 端到端核对、C1 完全修复（属 vendored fork plan 升级工作流）。
+
+
+## M13 收口（2026-09-25，对标差距批次三线并发）
+
+- **认证 Auto 模式 ✅**（parity-np13-auth-auto-np13 三 commits，merge 5eda9804）：`AuthenticationMethod::Auto` + `authenticate_auto` 纯编排器（密码→私钥→KI 含 TOTP→agent 固定顺序，AUTO_AUTH_ORDER 契约常量 + debug_assert 不变式）；逐阶段复用既有 helper（Quick Sudo OTP/挑战流零改动），私钥/agent partial-success 走既有 MFA KI 续答不重复提问；逐跳过/失败发 `ssh/auth/auto` 事件入连接日志，全失败按序汇总原因。frontend：表单 Auto 选项 + 七语 + 卡片日志渲染；存量连接零迁移。
+- **Quick Commands 导入 ✅**（parity-np13-quickcmds-proc-np13 99a27e48，merge 4f8f0091）：JSON 数组 + Tabby snippets 格式映射；同名跳过去重 + 上限 20 导入前 N 条策略；解析纯函数 9 单测 + 导入子视图（文件/粘贴 → 预览 → 确认逐条 save）。
+- **进程管理维度 ✅**（同 commit）：`ssh/processes/list` 加 fdCount（/proc/<pid>/fd 纯内建计数，零 spawn）与 listenPorts（/proc/net/tcp{,6} 监听态 inode 关联，去重升序 ≤16）；`ss -tlnp` 降级有意省略（无 root 同样拿不到 pid 归属，注释写明）；前端两列可排序 + 七语；mock 补 processes/kill。
+- **对标文档同步 ✅**（parity-np13-docs-sync-np13 383967c0，merge fa0abe59）：COMPARISON 矩阵 RDP 行改"内置（vendored 链，真机联调人工门）"+ 新增 5 行能力 + Telnet/串口行补注；FEATURE_PARITY 候选缺口表核实（会话导入实为 7 格式，纠正任务卡 8 的笔误）；PROTOCOL 补 RDP 三处契约（E5 4096/C2 分片/D3 预算）。
+- **⚠️ manifest 解释偏差（待 integrator 复核）**：A 线按 agent-flow ownership（frontend 拥有 manifest.json）增量修改 manifest——① 认证 select 加 Auto 选项+七语 description；② 6 个凭据字段 visible_when.one_of 追加 "auto"（否则选中 Auto 后凭据字段级联隐藏）；③ password 七语 hint 弱化"必填"表述。**逐行复核通过**：无版本号/permissions/贡献点/其他字段改动。已知限制：required_when 单字段表达力下 Auto+password_source=direct 仍强制填密码（密钥-only 用户暂用显式方式），登记遗留。
+- **全量终值**：backend cargo **894**（887+7）/ clippy 0 / fmt 0；frontend vitest **1031**（102 文件，1029+2）/ vue-tsc 0 / build 过（ui/ 重生成）；connection-forms verify 598 组合 PASS。
+
+### M13 遗留
+
+1. Auto+direct 密码必填（manifest required_when 表达力限制）——未来可评估条件化 required_when 或 options_action 动态选项。
+2. `ssh/auth/auto` 事件无 sessionId 过滤（连接期无 session，与 host-key/notice 同策略）；connection/test 也触发该事件。
+3. mockDbxHost 未模拟 Auto 场景（纯展示层 spec 已覆盖）；COMPARISON.en.md 未同步（需双语一致可另开小轮）。
+4. 候选缺口表消化后剩余：录制增强（transcript/自动录制/搜索）、SFTP 管线（深度/兼容模式/文件名编码）、DownloadSudo、多文件 watcher、BiDi（观察）、云同步降维（待安全评审）。
