@@ -11,6 +11,12 @@ pub enum AuthenticationMethod {
     PrivateKey,
     PrivateKeyPassword,
     Agent,
+    /// Tabby-style ordered fallback: try password → private key →
+    /// keyboard-interactive (incl. TOTP) → ssh-agent, in that fixed order,
+    /// until one succeeds or every attempt has failed. Stage prerequisites
+    /// (no password, no key material, unreachable agent) are recorded as
+    /// skipped attempts instead of aborting the chain.
+    Auto,
     None,
 }
 
@@ -23,7 +29,7 @@ impl AuthenticationMethod {
             .and_then(Value::as_str)
             .unwrap_or("password");
         match value {
-            "password" | "private-key" | "private-key-password" | "agent" | "none" => {
+            "password" | "private-key" | "private-key-password" | "agent" | "none" | "auto" => {
                 Ok(Self::from_method_name(value))
             }
             _ => Err(format!("Unsupported SSH authentication method '{value}'")),
@@ -36,6 +42,7 @@ impl AuthenticationMethod {
             "private-key-password" => Self::PrivateKeyPassword,
             "agent" => Self::Agent,
             "none" => Self::None,
+            "auto" => Self::Auto,
             _ => Self::Password,
         }
     }
@@ -49,6 +56,7 @@ impl AuthenticationMethod {
             Self::PrivateKeyPassword => "private-key-password",
             Self::Agent => "agent",
             Self::None => "none",
+            Self::Auto => "auto",
             Self::Password => "password",
         }
     }
@@ -1237,7 +1245,8 @@ mod tests {
             "password_prompt_hint must follow the sudo source and fold with the 2FA trio when OTP auto-answer is off"
         );
         // passphrase_command 只服务密钥解密：密码 / agent 认证下是死 UI，
-        // 需要同时满足高级区与密钥类认证。
+        // 需要同时满足高级区与密钥类认证（Auto 按序回退同样解密密钥，纳入
+        // 密钥类门控）。
         assert_eq!(
             fields
                 .iter()
@@ -1247,7 +1256,7 @@ mod tests {
                 "all_of": [
                     protocol_gate,
                     { "field": "advanced_options", "one_of": ["true"] },
-                    { "field": "authentication", "one_of": ["private-key", "private-key-password"] },
+                    { "field": "authentication", "one_of": ["private-key", "private-key-password", "auto"] },
                 ]
             }),
             "passphrase_command must combine the advanced switch with key-based auth"
@@ -1301,6 +1310,7 @@ mod tests {
             "private-key",
             "private-key-password",
             "agent",
+            "auto",
             "none",
         ] {
             // Name round-trip is a pure enum mapping; credential validation is
@@ -2409,6 +2419,15 @@ mod manifest_contract_tests {
                 serde_json::json!({}),
                 serde_json::json!({}),
                 AuthenticationMethod::Agent,
+            ),
+            // Auto 按序回退不要求任何前置凭据：密码/私钥缺失只是对应阶段
+            // 被跳过（回退链里的既有记录），解析层必须接受零凭据组合。
+            (
+                "auto",
+                None,
+                serde_json::json!({}),
+                serde_json::json!({}),
+                AuthenticationMethod::Auto,
             ),
             (
                 "none",

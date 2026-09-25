@@ -2548,6 +2548,10 @@ impl SshRuntime {
         // remote forwards registered later on this connection insert into the
         // same Arc, and the table dies with the connection's last session.
         let remote_forwards = self.remote_table_for(&connection.id);
+        // Auto 回退编排也要逐方式发日志事件：emitter 主体随 handler 移走，
+        // 这里先留一份克隆给认证分派用（Option<PluginEmitter>，headless 为
+        // None 时事件自然省略）。
+        let auth_emitter = emitter.clone();
         let handler = SshClient {
             verifier,
             prompts: self.prompts.clone(),
@@ -2705,6 +2709,18 @@ impl SshRuntime {
                         return Err("No SSH Agent identity was accepted".to_string());
                     }
                 }
+            }
+            AuthenticationMethod::Auto => {
+                authenticate_auto(
+                    &mut session,
+                    connection,
+                    &orchestration,
+                    &none,
+                    &self.prompts,
+                    auth_emitter.as_ref(),
+                    operation_id,
+                )
+                .await?;
             }
             AuthenticationMethod::None => unreachable!(),
         }
@@ -6634,6 +6650,253 @@ fn auth_partial_success(result: &AuthResult) -> bool {
     }
 }
 
+/// Fixed Auto try order — the public contract of the fallback chain. Method
+/// names use the `external_config.authentication` spellings so log lines stay
+/// greppable against connection configs.
+const AUTO_AUTH_ORDER: [&str; 4] = ["password", "private-key", "keyboard-interactive", "agent"];
+
+/// Pure stage gate for the Auto chain: `None` means "attempt the stage",
+/// `Some(reason)` means "record a skipped attempt". Credential presence is
+/// configuration (known before dialing); whether the server advertises the
+/// password method is the runtime fact captured by the auth-none probe.
+/// keyboard-interactive and agent have no local prerequisites — the user can
+/// still answer prompts interactively and the agent socket comes from the
+/// environment — so they are never skipped.
+fn auto_stage_skip(
+    method: &str,
+    has_password: bool,
+    password_offered: bool,
+    has_key: bool,
+) -> Option<String> {
+    match method {
+        "password" if !has_password => {
+            Some("no password configured for this connection".to_string())
+        }
+        "password" if !password_offered => {
+            Some("server does not advertise password authentication".to_string())
+        }
+        "private-key" if !has_key => {
+            Some("no private key configured for this connection".to_string())
+        }
+        _ => None,
+    }
+}
+
+/// One recorded Auto-fallback attempt: the method plus why it was skipped or
+/// why it failed. The name must stay aligned with `AUTO_AUTH_ORDER`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoAuthAttempt {
+    method: &'static str,
+    skipped: bool,
+    detail: String,
+}
+
+fn auto_auth_attempt(method: &'static str, detail: String) -> AutoAuthAttempt {
+    AutoAuthAttempt {
+        method,
+        skipped: false,
+        detail,
+    }
+}
+
+fn auto_auth_skip(method: &'static str, detail: String) -> AutoAuthAttempt {
+    AutoAuthAttempt {
+        method,
+        skipped: true,
+        detail,
+    }
+}
+
+/// Aggregated failure message for the Auto chain: every attempted (or
+/// skipped) method with its reason, in the fixed try order, so a total
+/// failure explains itself instead of surfacing only the last error.
+fn auto_auth_failure_message(attempts: &[AutoAuthAttempt]) -> String {
+    if attempts.is_empty() {
+        return "SSH authentication failed in Auto mode: no method could be attempted".to_string();
+    }
+    let summary = attempts
+        .iter()
+        .map(|attempt| {
+            if attempt.skipped {
+                format!("{} (skipped: {})", attempt.method, attempt.detail)
+            } else {
+                format!("{} ({})", attempt.method, attempt.detail)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("SSH authentication failed in Auto mode, tried in order — {summary}")
+}
+
+/// Auto authentication, Tabby-style ordered fallback: password → private key
+/// → interactive keyboard-interactive (incl. TOTP) → ssh-agent, in that fixed
+/// order (`AUTO_AUTH_ORDER`), until one succeeds or every attempt failed.
+///
+/// Deliberately a thin orchestrator: every credential flow reuses the exact
+/// helper of the explicit method it mirrors (`try_password`,
+/// `authenticate_private_key_result`, `authenticate_keyboard_interactive`,
+/// `authenticate_agent`), including the Quick Sudo OTP orchestration and the
+/// host-key challenge path, which stay untouched under Auto. A private-key or
+/// agent partial success continues into the same MFA keyboard-interactive
+/// continuation as the explicit paths; that continuation counts as the KI
+/// stage so a later failure does not ask the user the same questions twice.
+///
+/// Each non-successful stage is reported as a sidecar log event
+/// (`ssh/auth/auto`, best-effort — skipped in MCP headless mode without an
+/// emitter) and recorded for the aggregated failure message.
+async fn authenticate_auto(
+    session: &mut Handle<SshClient>,
+    connection: &StoredConnection,
+    orchestration: &SudoAuth,
+    offered: &AuthResult,
+    prompts: &PromptBroker,
+    emitter: Option<&PluginEmitter>,
+    operation_id: &str,
+) -> Result<(), String> {
+    let has_password = !connection.password.is_empty();
+    let password_offered = method_offered(offered, MethodKind::Password);
+    let has_key = !connection.private_key.is_empty() || !connection.private_key_path.is_empty();
+    let mut attempts: Vec<AutoAuthAttempt> = Vec::new();
+    // 私钥/agent 的 partial-success 续答就是 KI 阶段本身：再跑一轮全新 KI
+    // 会把同样的提问（验证码）重复问一遍。
+    let mut ki_attempted = false;
+    let report = |attempt: &AutoAuthAttempt| {
+        if let Some(emitter) = emitter {
+            let _ = emitter.event(
+                "ssh/auth/auto",
+                json!({
+                    "operationId": operation_id,
+                    "connectionId": connection.id,
+                    "method": attempt.method,
+                    "status": if attempt.skipped { "skipped" } else { "failed" },
+                    "detail": attempt.detail,
+                }),
+            );
+        }
+    };
+    let mut record = |attempt: AutoAuthAttempt| {
+        eprintln!(
+            "[ssh-trace] auth auto: {} {} ({})",
+            attempt.method,
+            if attempt.skipped { "skipped" } else { "failed" },
+            attempt.detail
+        );
+        report(&attempt);
+        attempts.push(attempt);
+    };
+
+    // Stage 1: password.
+    if let Some(reason) = auto_stage_skip("password", has_password, password_offered, has_key) {
+        record(auto_auth_skip("password", reason));
+    } else {
+        match try_password(session, connection).await {
+            Ok(result) if result.success() => return Ok(()),
+            Ok(result) => record(auto_auth_attempt(
+                "password",
+                format!(
+                    "rejected by the server (partial_success={})",
+                    auth_partial_success(&result)
+                ),
+            )),
+            Err(error) => record(auto_auth_attempt("password", error)),
+        }
+    }
+
+    // Stage 2: private key.
+    if let Some(reason) = auto_stage_skip("private-key", has_password, password_offered, has_key) {
+        record(auto_auth_skip("private-key", reason));
+    } else {
+        match authenticate_private_key_result(session, connection).await {
+            Ok(result) if result.success() => return Ok(()),
+            Ok(result)
+                if auth_partial_success(&result)
+                    && method_offered(&result, MethodKind::KeyboardInteractive) =>
+            {
+                eprintln!(
+                    "[ssh-trace] auth auto: publickey partial success, continuing with keyboard-interactive"
+                );
+                ki_attempted = true;
+                match authenticate_keyboard_interactive(
+                    session,
+                    connection,
+                    orchestration,
+                    true,
+                    prompts,
+                )
+                .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(error) => record(auto_auth_attempt("keyboard-interactive", error)),
+                }
+            }
+            Ok(_) => record(auto_auth_attempt(
+                "private-key",
+                "rejected by the server".to_string(),
+            )),
+            Err(error) => record(auto_auth_attempt("private-key", error)),
+        }
+    }
+
+    // Stage 3: interactive keyboard-interactive (incl. TOTP).
+    if ki_attempted {
+        record(auto_auth_skip(
+            "keyboard-interactive",
+            "already answered as the MFA follow-up of an earlier stage".to_string(),
+        ));
+    } else {
+        match authenticate_keyboard_interactive(session, connection, orchestration, false, prompts)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => record(auto_auth_attempt("keyboard-interactive", error)),
+        }
+    }
+
+    // Stage 4: ssh-agent.
+    match authenticate_agent(session, connection).await {
+        Ok(AgentAuthOutcome::Accepted) => return Ok(()),
+        Ok(AgentAuthOutcome::NeedsKeyboardInteractive) => {
+            eprintln!(
+                "[ssh-trace] auth auto: agent partial success, continuing with keyboard-interactive"
+            );
+            match authenticate_keyboard_interactive(
+                session,
+                connection,
+                orchestration,
+                true,
+                prompts,
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => record(auto_auth_attempt("keyboard-interactive", error)),
+            }
+        }
+        Ok(AgentAuthOutcome::Rejected) => record(auto_auth_attempt(
+            "agent",
+            "no SSH Agent identity was accepted".to_string(),
+        )),
+        Err(error) => record(auto_auth_attempt("agent", error)),
+    }
+
+    // Order invariant: attempts (skips included) must appear in the fixed try
+    // order of `AUTO_AUTH_ORDER` — filtering the contract list by the methods
+    // actually attempted must reproduce the record exactly.
+    debug_assert_eq!(
+        attempts
+            .iter()
+            .map(|attempt| attempt.method)
+            .collect::<Vec<_>>(),
+        AUTO_AUTH_ORDER
+            .iter()
+            .filter(|method| attempts.iter().any(|attempt| attempt.method == **method))
+            .copied()
+            .collect::<Vec<_>>(),
+        "Auto authentication attempts must follow the fixed try order"
+    );
+    Err(auto_auth_failure_message(&attempts))
+}
+
 /// Tries password authentication first, then keyboard-interactive. The
 /// `offered` result of the preceding auth attempt tells which methods the
 /// server still accepts. Keyboard-interactive rounds are auto-answered from
@@ -9688,6 +9951,104 @@ matrix-ed25519";
             .map(|task| task["taskId"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(ids, vec!["t-alpha", "t-mike", "t-zulu"]);
+    }
+
+    /// Auto 按序回退的纯逻辑契约：固定顺序、阶段门控、全失败汇总。真实
+    /// 凭据流（密码/私钥/KI/agent）复用既有 helper，端到端由既有认证测试
+    /// 覆盖；这里只锁定编排器自身的决策面。
+    mod auto_auth {
+        use super::*;
+
+        #[test]
+        fn auto_order_contract_lists_methods_in_fallback_order() {
+            // 对标 Tabby 的认证依序回退：密码 → 私钥 → 交互式 KI → agent。
+            assert_eq!(
+                AUTO_AUTH_ORDER,
+                ["password", "private-key", "keyboard-interactive", "agent"]
+            );
+        }
+
+        #[test]
+        fn auto_stage_skip_gates_password_on_config_and_advertised_methods() {
+            // 无密码配置：跳过，无论服务器是否广告 password 方法。
+            assert_eq!(
+                auto_stage_skip("password", false, true, true).as_deref(),
+                Some("no password configured for this connection")
+            );
+            // 有密码但服务器未广告 password 方法：不发送密码，跳过。
+            assert_eq!(
+                auto_stage_skip("password", true, false, true).as_deref(),
+                Some("server does not advertise password authentication")
+            );
+            // 有密码且已广告：尝试。
+            assert_eq!(auto_stage_skip("password", true, true, true), None);
+        }
+
+        #[test]
+        fn auto_stage_skip_gates_private_key_on_configured_material() {
+            assert_eq!(
+                auto_stage_skip("private-key", true, true, false).as_deref(),
+                Some("no private key configured for this connection")
+            );
+            // 路径或粘贴内容任一存在即算已配置。
+            assert_eq!(auto_stage_skip("private-key", false, false, true), None);
+        }
+
+        #[test]
+        fn auto_stage_skip_never_gates_interactive_or_agent_stages() {
+            // KI 与 agent 没有本地前置凭据：提问可交互作答，agent 套接字
+            // 来自环境（挑战流中立——Auto 不改变 host key / 2FA 交互行为）。
+            for method in ["keyboard-interactive", "agent"] {
+                assert_eq!(
+                    auto_stage_skip(method, false, false, false),
+                    None,
+                    "{method} must never be skipped by local prerequisites"
+                );
+            }
+        }
+
+        #[test]
+        fn auto_auth_failure_message_aggregates_attempts_in_order() {
+            let attempts = vec![
+                auto_auth_skip(
+                    "password",
+                    "no password configured for this connection".to_string(),
+                ),
+                auto_auth_attempt("private-key", "rejected by the server".to_string()),
+                auto_auth_attempt(
+                    "keyboard-interactive",
+                    "SSH keyboard-interactive authentication was rejected".to_string(),
+                ),
+                auto_auth_attempt("agent", "no SSH Agent identity was accepted".to_string()),
+            ];
+            // 汇总保持固定顺序，逐方式带原因；skipped 有显式标记。
+            assert_eq!(
+                auto_auth_failure_message(&attempts),
+                "SSH authentication failed in Auto mode, tried in order — \
+                 password (skipped: no password configured for this connection); \
+                 private-key (rejected by the server); \
+                 keyboard-interactive (SSH keyboard-interactive authentication was rejected); \
+                 agent (no SSH Agent identity was accepted)"
+            );
+        }
+
+        #[test]
+        fn auto_auth_failure_message_without_attempts_names_the_chain() {
+            assert_eq!(
+                auto_auth_failure_message(&[]),
+                "SSH authentication failed in Auto mode: no method could be attempted"
+            );
+        }
+
+        #[test]
+        fn auto_auth_attempt_helpers_mark_skip_state() {
+            let skipped = auto_auth_skip("password", "reason".to_string());
+            assert!(skipped.skipped);
+            assert_eq!(skipped.method, "password");
+            let attempted = auto_auth_attempt("agent", "detail".to_string());
+            assert!(!attempted.skipped);
+            assert_eq!(attempted.method, "agent");
+        }
     }
 
     /// 登录期 2FA 的端到端回归（issue #17 / #30）：密码/公钥先被接受后服务器

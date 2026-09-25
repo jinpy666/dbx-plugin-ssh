@@ -1726,6 +1726,7 @@ const connectionAuthMethodLabel = computed(() => formatAuthMethodLabel(connectio
     "private-key": t("authMethodPrivateKey"),
     "private-key-password": t("authMethodPrivateKeyPassword"),
     agent: t("authMethodAgent"),
+    auto: t("authMethodAuto"),
     none: t("authMethodNone"),
   };
   return labels[method];
@@ -3761,6 +3762,16 @@ function handleEvent(event: DbxPluginEvent) {
   }
   if (event.method === "ssh/host-key/notice") {
     showError(String(event.params.message || "SSH host-key warning"), "terminal");
+    return;
+  }
+  // Auto 认证（M13-A）逐方式进度：sidecar 在按序回退中每跳过一个/失败一个
+  // 方式就发一条；对齐 host-key 通知渲染进连接卡片的 Show logs 面板。事件
+  // 不带 sessionId（连接尚未建立），按当前连接/操作上下文过滤。
+  if (event.method === "ssh/auth/auto") {
+    const params = event.params as { method?: string; status?: string; detail?: string; operationId?: string };
+    const method = params.method || "unknown";
+    const detail = params.detail || "";
+    connectLog.push(params.status === "skipped" ? "info" : "warn", t("connectCard.log.authAuto", { method, detail }));
     return;
   }
   if (event.method === "ssh/session/state" && event.params.sessionId === session.value?.sessionId) {
