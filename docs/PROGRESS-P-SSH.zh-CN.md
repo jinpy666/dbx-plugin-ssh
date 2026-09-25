@@ -3748,3 +3748,11 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **RDP-3 前端 ✅**（本 merge，+21 测试）：RdpSurface（rAF 合帧/缩放三态/pointer 四型含位图光标）+ RdpConnectDialog（分辨率门限/证书策略三选/凭据不落盘）+ App.vue localUiMode 互斥接线 + rdp-certificate 专属确认弹窗（SHA256+倒计时+remember，fail-closed）+ rdp.* 七语 56 键 + mockDbxHost rdp/* 全协议桩（?rdpCert/rdpErr 走查参数）。
 - **全量终值**：backend cargo **854** / clippy 0 / fmt 0 / lockstep PASS；frontend vitest **1019**（101 文件）/ vue-tsc 0 / build 过（ui/ 重生成）。
 - **遗留（人工门）**：RDP 真机 server 联调（握手/帧/剪贴板/重连端到端）、canvas 位图光标 WKWebView 走查、`?rdpCert/rdpErr` mock 走查路径浏览器复验、rdp/resize 前端触发入口（按需）、CredSSP CBT 端到端核对（评审动作）。
+
+
+## RDP 收官对抗审查与修复轮（2026-09-25）
+
+- **审查结论**：8 攻击面 8 安全 / 7 问题（中 2 低 5）/ 4 需确认。凭据流（Zeroizing 闭环）与证书状态机（120s fail-closed/generation 竞态闭环）两大核心通过。
+- **修复 ✅ 全部合入**（parity-rdp-fix 978f151a/a215a65a，+29 测试）：C2 剪贴板分片发送（JSON 转义后 7MiB 预算切分、chunkIndex/Total、App 会话隔离缓冲拼接）保 16MiB 契约可用；C1 入口长度门（原始载荷先于 String 物化拒绝）——**缓解+登记**（crates.io cliprdr 0.7.0 PDU 整包物化不可避免，完全修复走 vendored fork plan 另一工作流）；D3 ReconnectBudget 状态机（总预算 50 次永不重置，active 只重置退避步长，防恶意服务器无限循环）；E5 unicode 4096 上限 + scan_code u16→u8 显式拒绝；B4 known-certs 写盘 uuid tmp + rename、磁盘格式 V1→V2 信封向后兼容、真"最旧"淘汰；B6 Debug 手写脱敏 + host/username/domain 上限；cert_key 大小写归一；mock 桩对齐（challengeId 一次性 + 120s fail-closed + 序号全局单调防 walkthrough 假死），余偏差头注释登记。
+- **全量终值**：backend cargo **883** / clippy 0 / fmt 0；frontend vitest **1019** / vue-tsc 0 / build 过（ui/ 重生成）。
+- **RDP 链状态：正式收官**。遗留人工门：真机 RDP server 联调、WKWebView 位图光标走查、CBT 端到端核对、C1 完全修复（属 vendored fork plan 升级工作流）。
