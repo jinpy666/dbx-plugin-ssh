@@ -12,7 +12,9 @@
     "host.events",
     "host.binary",
     "host.filesystem",
-    "host.workbench"
+    "host.workbench",
+    "host.storage",
+    "host.clipboard:read"
   ],
   "source": "https://github.com/jinpy666/dbx-plugin-ssh",
   "homepage": "https://github.com/jinpy666/dbx-plugin-ssh",
