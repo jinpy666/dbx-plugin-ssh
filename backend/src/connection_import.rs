@@ -38,7 +38,7 @@
 //! archives, and malformed entries degrade to "skipped" instead of failing
 //! the whole import.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -85,7 +85,10 @@ const WINDTERM_DERIVED_BYTES: usize = 48;
 
 /// Authentication material carried by one imported session. Plaintext in
 /// memory only — the store seals every secret field through the vault.
-#[derive(Debug, Clone, PartialEq)]
+/// `Debug` is manual and redacts the secret fields: sessions legitimately end
+/// up in derived `Debug` output (e.g. `ImportedSession`), and a future log or
+/// panic message must never be able to carry a credential.
+#[derive(Clone, PartialEq)]
 pub enum ImportedAuth {
     Password {
         value: Option<String>,
@@ -96,6 +99,38 @@ pub enum ImportedAuth {
         passphrase: Option<String>,
     },
     None,
+}
+
+impl std::fmt::Debug for ImportedAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportedAuth::Password { value } => formatter
+                .debug_struct("Password")
+                .field("value", &redacted_secret_flag(value))
+                .finish(),
+            ImportedAuth::PrivateKey {
+                path,
+                content,
+                passphrase,
+            } => formatter
+                .debug_struct("PrivateKey")
+                .field("path", &path)
+                .field("content", &redacted_secret_flag(content))
+                .field("passphrase", &redacted_secret_flag(passphrase))
+                .finish(),
+            ImportedAuth::None => formatter.write_str("None"),
+        }
+    }
+}
+
+/// `<set>`/`None` instead of the secret itself, mirroring the redaction style
+/// of the telnet auto-login `Debug` impls.
+fn redacted_secret_flag(value: &Option<String>) -> &'static str {
+    if value.is_some() {
+        "<set>"
+    } else {
+        "None"
+    }
 }
 
 /// One imported session in the common shape shared by all parsers.
@@ -780,6 +815,11 @@ pub fn parse_securecrt(text: &str) -> Result<Vec<ImportedSession>, String> {
 
 fn scan_securecrt_xml(text: &str) -> Result<Vec<SecureCrtFrame>, String> {
     const ERR_PREFIX: &str = "Invalid SecureCRT XML";
+    /// Nesting ceiling for `<key>` frames. Real exports nest
+    /// VanDyke > Sessions > folders > session (a handful of levels); a hostile
+    /// input nesting thousands deep would clone the whole ancestor stack per
+    /// closing tag (O(N²) CPU amplification), so deeper frames fail closed.
+    const MAX_KEY_DEPTH: usize = 32;
     let raw = text.as_bytes();
     let mut frames: Vec<SecureCrtFrame> = Vec::new();
     // Stack of open `<key>` frames: (name, collected fields).
@@ -869,6 +909,11 @@ fn scan_securecrt_xml(text: &str) -> Result<Vec<SecureCrtFrame>, String> {
         }
         match (tag_name, self_closing) {
             ("key", false) => {
+                if stack.len() >= MAX_KEY_DEPTH {
+                    return Err(format!(
+                        "{ERR_PREFIX}: <key> nesting exceeds the {MAX_KEY_DEPTH} level limit"
+                    ));
+                }
                 let name = xml_attr(&attrs, "name").unwrap_or_default().to_string();
                 stack.push((name, Vec::new()));
             }
@@ -2050,6 +2095,9 @@ pub fn commit_sessions(
     let vault = Vault::new(provider.as_ref());
     let mut imported = 0usize;
     let mut skipped = 0usize;
+    // (host, port) -> taken names, built once so a large batch of same-key
+    // entries probes in O(1) instead of scanning the whole store per suffix.
+    let mut taken = taken_index(&store);
     for index in selected {
         let Some(session) = sessions.get(*index) else {
             skipped += 1;
@@ -2059,7 +2107,11 @@ pub fn commit_sessions(
             skipped += 1;
             continue;
         }
-        let name = unique_name(&store, &session.name, &session.host, session.port);
+        let name = unique_name(&taken, &session.name, &session.host, session.port);
+        taken
+            .entry((session.host.clone(), session.port))
+            .or_default()
+            .insert(name.clone());
         let id = uuid::Uuid::new_v4().to_string();
         store
             .connections
@@ -2119,25 +2171,45 @@ fn build_entry(vault: &Vault, id: &str, name: String, session: &ImportedSession)
 }
 
 /// Same name + host + port is treated as a duplicate; the new entry gets a
-/// " (2)" suffix (incrementing on repeated collisions).
-fn unique_name(store: &ImportedStore, name: &str, host: &str, port: u16) -> String {
-    let taken = |candidate: &str| {
-        store
-            .connections
-            .iter()
-            .any(|entry| entry.name == candidate && entry.host == host && entry.port == port)
+/// " (2)" suffix (incrementing on repeated collisions). `taken` is the
+/// [`taken_index`] of the store plus the names already handed out in this
+/// batch; output semantics match the previous whole-store scan.
+fn unique_name(
+    taken: &HashMap<(String, u16), HashSet<String>>,
+    name: &str,
+    host: &str,
+    port: u16,
+) -> String {
+    let is_taken = |candidate: &str| {
+        taken
+            .get(&(host.to_string(), port))
+            .is_some_and(|names| names.contains(candidate))
     };
-    if !taken(name) {
+    if !is_taken(name) {
         return name.to_string();
     }
     let mut suffix = 2usize;
     loop {
         let candidate = format!("{name} ({suffix})");
-        if !taken(&candidate) {
+        if !is_taken(&candidate) {
             return candidate;
         }
         suffix += 1;
     }
+}
+
+/// Index of every stored entry by (host, port) -> set of names, so
+/// [`unique_name`] checks are O(1) instead of a full store scan per candidate
+/// (a 5000-entry same-key batch degraded to minutes of string comparisons).
+fn taken_index(store: &ImportedStore) -> HashMap<(String, u16), HashSet<String>> {
+    let mut taken: HashMap<(String, u16), HashSet<String>> = HashMap::new();
+    for entry in &store.connections {
+        taken
+            .entry((entry.host.clone(), entry.port))
+            .or_default()
+            .insert(entry.name.clone());
+    }
+    taken
 }
 
 // ---------------------------------------------------------------------------
@@ -2652,6 +2724,93 @@ mod tests {
         assert_eq!(parse_securecrt_dword("junk"), None);
         assert_eq!(parse_securecrt_dword("00000000"), None);
         assert_eq!(parse_securecrt_dword(""), None);
+    }
+
+    #[test]
+    fn securecrt_deeply_nested_keys_fail_closed() {
+        // A1 回归：恶意深嵌套（500 层）必须快速拒绝，而不是逐闭合标签克隆
+        // 整个祖先栈（O(N²) CPU 放大）。
+        let mut text = String::from("<VanDyke version=\"9.0\"><key name=\"Sessions\">");
+        for depth in 0..500 {
+            text.push_str(&format!("<key name=\"folder{depth}\">"));
+        }
+        for _ in 0..500 {
+            text.push_str("</key>");
+        }
+        text.push_str("</key></VanDyke>");
+        let error = parse_securecrt(&text).expect_err("deep nesting must be rejected");
+        assert!(error.contains("nesting"), "{error}");
+        // 真实导出的嵌套深度（Sessions > 文件夹 > 会话）不受影响。
+        let sessions = parse_securecrt(SECURECRT_EXPORT).unwrap();
+        assert_eq!(sessions.len(), 3);
+    }
+
+    #[test]
+    fn imported_auth_debug_redacts_secret_material() {
+        // Z3 回归：派生 Debug 曾把明文密码/密钥内容带进任何 {:?} 输出；
+        // 现在手动脱敏，宿主名等非敏感字段保持可读。
+        let password = ImportedAuth::Password {
+            value: Some("s3cret-password".to_string()),
+        };
+        let rendered = format!("{password:?}");
+        assert!(!rendered.contains("s3cret-password"), "{rendered}");
+        assert!(rendered.contains("<set>"), "{rendered}");
+        let key = ImportedAuth::PrivateKey {
+            path: Some("/home/u/id_ed25519".to_string()),
+            content: Some("-----BEGIN OPENSSH PRIVATE KEY-----".to_string()),
+            passphrase: Some("p@55phrase".to_string()),
+        };
+        let rendered = format!("{key:?}");
+        assert!(!rendered.contains("BEGIN OPENSSH"), "{rendered}");
+        assert!(!rendered.contains("p@55phrase"), "{rendered}");
+        assert!(rendered.contains("/home/u/id_ed25519"), "{rendered}");
+        // ImportedSession 派生 Debug 时只经由脱敏后的 auth 字段。
+        let session = ImportedSession {
+            name: "web".to_string(),
+            host: "10.0.0.1".to_string(),
+            port: 22,
+            username: "root".to_string(),
+            group_path: Vec::new(),
+            description: String::new(),
+            auth: password,
+            secret_note: String::new(),
+        };
+        let rendered = format!("{session:?}");
+        assert!(!rendered.contains("s3cret-password"), "{rendered}");
+    }
+
+    #[test]
+    fn commit_large_same_key_batch_produces_sequential_suffixes() {
+        // A2 回归：一批同名 + 同主机 + 同端口条目曾以 O(n³) 线性探测退化
+        // （5000 条卡顿分钟级）；索引化后输出语义不变、复杂度线性。
+        let dir = temp_dir();
+        let sessions: Vec<ImportedSession> = (0..1500)
+            .map(|_| ImportedSession {
+                name: "dev".to_string(),
+                host: "10.9.9.9".to_string(),
+                port: 22,
+                username: "root".to_string(),
+                group_path: Vec::new(),
+                description: String::new(),
+                auth: ImportedAuth::None,
+                secret_note: String::new(),
+            })
+            .collect();
+        let selected: Vec<usize> = (0..sessions.len()).collect();
+        let result = commit_sessions(&dir, &sessions, &selected).unwrap();
+        assert_eq!(result["imported"], 1500);
+        let store = load_store(&dir);
+        assert_eq!(store.connections.len(), 1500);
+        // 去重语义不变：首条保名，其余按序 "dev (2)"、"dev (3)"……
+        assert_eq!(store.connections[0].name, "dev");
+        assert_eq!(store.connections[1].name, "dev (2)");
+        assert_eq!(store.connections[2].name, "dev (3)");
+        assert_eq!(store.connections[1499].name, "dev (1500)");
+        let mut names: Vec<&str> = store.connections.iter().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 1500, "all names must be unique");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
