@@ -146,7 +146,8 @@ import {
 } from "./lib/sftpBookmarks";
 import { browseCommandHistory, commandInputAction, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "./lib/commandSuggestions";
-import { classifyGhostInput, createGhostState, evaluateGhost, nextGhostState, type TerminalGhostState } from "./lib/terminalGhostSuggest";
+import { classifyGhostInput, createGhostState, evaluateGhost, nextGhostState, ghostMenuSuppressed, type TerminalGhostState } from "./lib/terminalGhostSuggest";
+import { cursorAbsoluteRow, cursorViewportRow } from "./lib/terminalAnchor";
 import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "./lib/suggestionGuard";
 // 结构化补全（对标 Warp/fig，线 2）：spec 命中时优先于历史建议浮层展示
 // 带描述的命令/flag/值候选；开关读 pluginStore（SettingsDialog 自治写入）。
@@ -2229,13 +2230,17 @@ function handleTerminalKey(event: KeyboardEvent) {
   };
   // IME 组合中不出 ghost（组合文本尚未落行；提交后的 onData 会重算）。
   if (event.isComposing || event.keyCode === 229) hideGhostSuggestion();
-  // ghost 接受（→）：仅在无菜单态（浮层建议未开）时消费一次，避免与
-  // handleSuggestionKey 的菜单按键语义冲突；无 ghost 的 → 原样放行给 shell。
+  // ghost 接受（→）：仅在无菜单态（浮层建议/结构化补全都未开）时消费一次，
+  // 避免与 handleSuggestionKey/handleCompletionKey 的菜单按键语义冲突；
+  // 补全菜单打开时 → 必须归 handleCompletionKey（其分支在本分支之后），
+  // 故此处显式排除 completionOpen（旧 ghostMatch 可能在 onData 重算前残留）。
+  // 无 ghost 的 → 原样放行给 shell。
   // 复查 commandRunning/传输占用（与 evaluateGhost 同门）：update 与 accept
   // 之间远端可能已开跑（回车竞态），不能把剩余字节打进运行中的命令。
   if (
     ghostMatch.value &&
     !suggestionOpen.value &&
+    !completionOpen.value &&
     event.key === "ArrowRight" &&
     !(event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) &&
     !(commandRunning.value || terminalTransferBusy.value)
@@ -2638,7 +2643,8 @@ function readTerminalSuggestionAnchor(): { x: number; y: number } | null {
     const cellHeight = cell?.height ?? 0;
     if (!(cellWidth > 0) || !(cellHeight > 0)) return null;
     const buffer = terminal.buffer.active;
-    const visibleRow = buffer.cursorY - buffer.viewportY;
+    // cursorY 已是视口内相对行；旧式 `cursorY - viewportY` 在回滚区出现后为负，浮层画出画布。
+    const visibleRow = cursorViewportRow(buffer);
     return { x: Math.round(buffer.cursorX * cellWidth), y: Math.round((visibleRow + 1) * cellHeight) };
   } catch {
     return null;
@@ -2742,7 +2748,9 @@ function terminalCursorAtLineEnd(): boolean {
   try {
     const buffer = terminal.buffer.active;
     if (buffer.type !== "normal") return false;
-    const rowY = buffer.cursorY + buffer.viewportY;
+    // 光标行按缓冲绝对行号采样：baseY + cursorY（cursorY 是视口内相对行，
+    // viewportY 随用户滚动偏移，`cursorY + viewportY` 上滚时会采到滚回区旧行）。
+    const rowY = cursorAbsoluteRow(buffer);
     const row = buffer.getLine(rowY);
     if (!row) return false;
     for (let x = buffer.cursorX; x < terminal.cols; x += 1) {
@@ -2766,7 +2774,8 @@ function readGhostAnchor(): { x: number; y: number } | null {
     const cellHeight = cell?.height ?? 0;
     if (!(cellWidth > 0) || !(cellHeight > 0)) return null;
     const buffer = terminal.buffer.active;
-    const visibleRow = buffer.cursorY - buffer.viewportY;
+    // cursorY 已是视口内相对行；旧式 `cursorY - viewportY` 在回滚区出现后为负，ghost 画出画布。
+    const visibleRow = cursorViewportRow(buffer);
     return { x: Math.round(buffer.cursorX * cellWidth), y: Math.round(visibleRow * cellHeight) };
   } catch {
     return null;
@@ -2780,9 +2789,9 @@ function refreshGhostAfterInput(data: string) {
 }
 
 function updateGhostSuggestion() {
-  // 浮层建议菜单开着时不出 ghost：菜单占用 →/Enter/Esc，与「→ 仅在无菜单态
-  // 下接受」一致，同屏叠两层建议也无法阅读。
-  if (suggestionOpen.value) {
+  // 浮层建议/结构化补全菜单开着时不出 ghost：菜单占用 →/Enter/Esc，与
+  // 「→ 仅在无菜单态下接受」一致，同屏叠两层建议也无法阅读。
+  if (ghostMenuSuppressed(suggestionOpen.value, completionOpen.value)) {
     ghostMatch.value = null;
     return;
   }

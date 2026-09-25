@@ -194,3 +194,12 @@ export function evaluateGhost(input: GhostEvaluationInput): GhostEvaluation {
   const match = pickGhostMatch(input.line, candidates);
   return { match, acceptPayload: match?.remainder ?? null };
 }
+
+/**
+ * 菜单互斥：任一建议浮层（历史建议 / 结构化补全）打开时抑制 ghost。菜单占用
+ * →/Enter/Esc，「→ 仅在无菜单态下接受」；同屏叠两层建议也无法阅读。补全浮层
+ * 与 ghost 走同一批键位（→），不互斥会导致打开补全后 → 键仍被 ghost 抢消费。
+ */
+export function ghostMenuSuppressed(suggestionOpen: boolean, completionOpen: boolean): boolean {
+  return suggestionOpen || completionOpen;
+}

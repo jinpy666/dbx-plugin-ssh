@@ -5,6 +5,7 @@ import {
   classifyGhostInput,
   createGhostState,
   evaluateGhost,
+  ghostMenuSuppressed,
   isGhostPrefixMatch,
   nextGhostState,
   pickGhostMatch,
@@ -215,5 +216,20 @@ describe("evaluateGhost (gates + search + accept bytes)", () => {
 
   it("documents the default bounds on top of the shared engine defaults", () => {
     expect(TERMINAL_GHOST_DEFAULTS).toEqual({ minLength: 2, maxLength: 64, limit: 12 });
+  });
+});
+
+// 菜单互斥（浮层建议 / 结构化补全打开时不出 ghost）：→ 键在补全菜单打开时
+// 必须归 handleCompletionKey 消费，不互斥会导致 ghost 抢走 →（历史缺陷只排除了
+// suggestionOpen，completionOpen 打开时旧 ghostMatch 仍被消费）。
+describe("ghostMenuSuppressed (menu mutual exclusion)", () => {
+  it("suppresses ghost when either suggestion or completion menu is open", () => {
+    expect(ghostMenuSuppressed(true, false)).toBe(true);
+    expect(ghostMenuSuppressed(false, true)).toBe(true);
+    expect(ghostMenuSuppressed(true, true)).toBe(true);
+  });
+
+  it("allows ghost only when both menus are closed", () => {
+    expect(ghostMenuSuppressed(false, false)).toBe(false);
   });
 });
