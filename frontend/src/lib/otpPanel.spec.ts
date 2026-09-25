@@ -10,13 +10,12 @@ import {
   entryLabel,
   entryToDraft,
   formatCountdown,
-  importBaseParams,
-  importCommitParams,
+  importPreviewStartParams,
+  importPreviewChunk,
   importErrorCode,
   otpDraftError,
   otpSaveParams,
   parseGenerateResponse,
-  parseImportResult,
   parseImportSessions,
   parseOtpBindings,
   parseOtpEntries,
@@ -157,20 +156,11 @@ describe("import wizard helpers", () => {
     expect(parseImportSessions({ sessions: "x" })).toEqual([]);
   });
 
-  it("parses commit results", () => {
-    expect(parseImportResult({ imported: 3, skipped: 1 })).toEqual({ imported: 3, skipped: 1 });
-    expect(parseImportResult({})).toEqual({ imported: 0, skipped: 0 });
-  });
-
-  it("builds base params carrying optional WindTerm fields only when set", () => {
-    expect(importBaseParams("moba", "QUJD", "", "")).toEqual({ kind: "moba", fileBase64: "QUJD" });
-    expect(importBaseParams("windterm", "QUJD", "VVNFUg==", "pw")).toEqual({ kind: "windterm", fileBase64: "QUJD", userConfigBase64: "VVNFUg==", masterPassword: "pw" });
-    const commit = importCommitParams("xshell", "QUJD", "", "", [0, 2]);
-    expect(commit).toEqual({ kind: "xshell", fileBase64: "QUJD", selectedIndexes: [0, 2] });
-    // M7 四来源 kind 与普通文件参数一致（无附加字段）。
-    for (const kind of ["securecrt", "finalshell", "electerm", "termius"] as const) {
-      expect(importBaseParams(kind, "QQ==", "eHg=", "pw")).toEqual({ kind, fileBase64: "QQ==" });
-    }
+  it("builds bounded streaming start params and offset-prefixed binary chunks", () => {
+    expect(importPreviewStartParams("moba", 42, 0, "")).toEqual({ kind: "moba", mainSize: 42 });
+    expect(importPreviewStartParams("windterm", 42, 7, "pw")).toEqual({ kind: "windterm", mainSize: 42, userConfigSize: 7, masterPassword: "pw" });
+    const chunk = importPreviewChunk(9, new Uint8Array([1, 2, 3]));
+    expect([...chunk]).toEqual([0, 0, 0, 0, 0, 0, 0, 9, 1, 2, 3]);
   });
 
   it("maps the WindTerm master-password contract error", () => {

@@ -28,54 +28,47 @@
 //!   that arrive as encrypted sync blobs (`BA…` base64) are dropped, never
 //!   decrypted; plaintext passwords and PEM private keys are carried over.
 //!
-//! Parsed secrets stay plaintext in memory only. `import/parse` returns a
-//! sanitized preview (`hasSecret`, never the secret itself); `import/commit`
-//! seals every secret field through the [`crate::vault`] before it reaches
-//! the 0600 `imported-connections.json` store.
+//! Parsed secrets exist only for the duration of one preview request. The
+//! streaming transport retains source bytes only until `import/preview/finish`
+//! returns a sanitized preview; no imported connection or credential is ever
+//! persisted by this plugin.
 //!
 //! All parsers are written for hostile input: no panicking indexing (only
 //! `get`/`strip_*`/checked parsing), per-file and aggregate size caps on
 //! archives, and malformed entries degrade to "skipped" instead of failing
 //! the whole import.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::vault::{self, Vault};
-
 /// Hard caps for Xshell ZIP archives (zip-bomb protection).
 pub const MAX_ZIP_ENTRIES: usize = 10_000;
 pub const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
-/// Cap on a single decoded import file (the base64 transport is additionally
-/// capped in `handle_parse`/`handle_commit` before decoding).
+/// Total byte budget across the main export and optional WindTerm user.config.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
-/// Upper bound for the committed store so a bad import cannot grow the file
-/// without limit (each entry is a few hundred bytes; 5000 is plenty).
-pub const MAX_STORED_CONNECTIONS: usize = 5000;
+/// Binary chunks stay well below the host's JSON message limit and match SFTP's
+/// bounded, acknowledged upload pattern.
+pub const IMPORT_CHUNK_LIMIT: usize = 256 * 1024;
+/// Bound the JSON preview/export response to remain below the SDK 8 MiB limit.
+pub const MAX_PREVIEW_SESSIONS: usize = 1000;
+const MAX_PREVIEW_TEXT_BYTES: usize = 4096;
 /// Error returned when WindTerm encryption is detected (master-password
 /// switch on in `user.config`) but the caller did not supply the password.
 pub const WINDTERM_MASTER_PASSWORD_REQUIRED: &str = "WindTerm master password is required";
 
 /// Preview secret-note codes: why an imported session has no credential
 /// material despite password semantics. The frontend maps them to localized
-/// copy (see `importWizard.note.*` in `lib/i18n.ts`); the store does not
-/// persist them.
+/// copy (see `importWizard.note.*` in `lib/i18n.ts`); no import output is
+/// persisted.
 pub const SECRET_NOTE_ENCRYPTED: &str = "encrypted";
 pub const SECRET_NOTE_NOT_CARRIED: &str = "not-carried";
-
-const FILE_NAME: &str = "imported-connections.json";
-const STORAGE_VERSION: u64 = 1;
-/// Vault AAD field names for sealed import secrets (profile id = entry id).
-const FIELD_IMPORTED_PASSWORD: &str = "importedPassword";
-const FIELD_IMPORTED_KEY_CONTENT: &str = "importedKeyContent";
-const FIELD_IMPORTED_KEY_PASSPHRASE: &str = "importedKeyPassphrase";
 
 /// WindTerm KDF parameters: PBKDF2-HMAC-SHA3-512 over the master password,
 /// salted with the raw `application.fingerprint` bytes, producing 48 bytes
@@ -1849,367 +1842,315 @@ fn is_termius_encrypted_blob(value: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Store: <plugin_data_dir>/imported-connections.json (0600)
+// Streaming preview protocol
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ImportedEntry {
-    pub id: String,
-    pub name: String,
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub group_path: Vec<String>,
-    pub description: String,
-    /// "none" | "password" | "private-key" (see [`auth_kind`]).
-    pub auth_kind: String,
-    /// Key file path — a path is metadata, not a secret, so it stays plain.
-    pub key_path: String,
-    /// Vault envelopes (`base64(nonce‖ct)`); empty means "no secret".
-    pub password_enc: String,
-    pub key_content_enc: String,
-    pub key_passphrase_enc: String,
+/// In-memory upload state. This deliberately owns the raw source bytes only
+/// between start and finish/cancel; completion and every failure remove it.
+struct ImportUpload {
+    kind: String,
+    main: ImportFile,
+    user_config: Option<ImportFile>,
+    master_password: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ImportedStore {
-    pub connections: Vec<ImportedEntry>,
+struct ImportFile {
+    expected: u64,
+    bytes: Vec<u8>,
 }
 
-pub fn store_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(FILE_NAME)
-}
-
-/// Loads the store; a missing or corrupted file yields an empty store so a
-/// bad file can never break the workbench (quick-commands policy).
-pub fn load_store(data_dir: &Path) -> ImportedStore {
-    let text = std::fs::read_to_string(store_path(data_dir)).unwrap_or_default();
-    let Some(value) = serde_json::from_str::<Value>(&text).ok() else {
-        return ImportedStore::default();
-    };
-    let connections = value
-        .get("connections")
-        .and_then(Value::as_array)
-        .map(|list| list.iter().filter_map(entry_from_json).collect())
-        .unwrap_or_default();
-    ImportedStore { connections }
-}
-
-/// Persists atomically (tmp + rename) with 0600 permissions on Unix.
-pub fn save_store(data_dir: &Path, store: &ImportedStore) -> Result<(), String> {
-    let path = store_path(data_dir);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+impl ImportFile {
+    fn new(expected: u64) -> ImportFile {
+        ImportFile {
+            expected,
+            bytes: Vec::with_capacity(usize::try_from(expected).unwrap_or(0)),
+        }
     }
-    let value = json!({
-        "version": STORAGE_VERSION,
-        "connections": store.connections.iter().map(entry_json).collect::<Vec<_>>(),
-    });
-    let text = serde_json::to_string_pretty(&value)
-        .map_err(|error| format!("Failed to encode imported connections: {error}"))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text)
-        .map_err(|error| format!("Failed to write {}: {error}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, &path)
-        .map_err(|error| format!("Failed to write {}: {error}", path.display()))
 }
 
-fn entry_from_json(value: &Value) -> Option<ImportedEntry> {
-    let object = value.as_object()?;
-    let string = |key: &str| {
-        object
-            .get(key)
+/// Owns stream state for the sidecar lifetime. No state is written to the
+/// plugin data directory: source files and master passwords vanish at finish,
+/// cancel, malformed chunks, and process exit.
+#[derive(Default)]
+pub struct ImportStream {
+    uploads: Mutex<HashMap<String, ImportUpload>>,
+}
+
+impl ImportStream {
+    /// Starts a source upload. `mainSize` plus optional `userConfigSize` share
+    /// one 64 MiB budget, which avoids the SDK's 8 MiB JSON payload limit.
+    pub fn start(&self, params: &Value) -> Result<Value, String> {
+        let kind = params
+            .get("kind")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    Some(ImportedEntry {
-        id: string("id"),
-        name: string("name"),
-        host: string("host"),
-        port: object
-            .get("port")
-            .and_then(Value::as_u64)
-            .and_then(|port| u16::try_from(port).ok())
-            .unwrap_or(22),
-        username: string("username"),
-        group_path: object
-            .get("groupPath")
-            .and_then(Value::as_array)
-            .map(|parts| {
-                parts
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        description: string("description"),
-        auth_kind: string("authKind"),
-        key_path: string("keyPath"),
-        password_enc: string("passwordEnc"),
-        key_content_enc: string("keyContentEnc"),
-        key_passphrase_enc: string("keyPassphraseEnc"),
-    })
-}
-
-fn entry_json(entry: &ImportedEntry) -> Value {
-    json!({
-        "id": entry.id,
-        "name": entry.name,
-        "host": entry.host,
-        "port": entry.port,
-        "username": entry.username,
-        "groupPath": entry.group_path,
-        "description": entry.description,
-        "authKind": entry.auth_kind,
-        "keyPath": entry.key_path,
-        "passwordEnc": entry.password_enc,
-        "keyContentEnc": entry.key_content_enc,
-        "keyPassphraseEnc": entry.key_passphrase_enc,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Protocol handlers (`import/parse`, `import/commit`)
-// ---------------------------------------------------------------------------
-
-/// `import/parse`: parses the uploaded file and returns a sanitized preview
-/// (secrets represented as `hasSecret: true`). Nothing is persisted.
-pub fn handle_parse(params: &Value) -> Result<Value, String> {
-    let sessions = parse_from_params(params)?;
-    let views = sessions
-        .iter()
-        .enumerate()
-        .map(|(index, session)| preview_view(index, session))
-        .collect::<Vec<_>>();
-    Ok(json!({ "sessions": views }))
-}
-
-/// `import/commit`: re-parses the uploaded file and persists the selected
-/// indexes, sealing every secret through the vault first. Returns
-/// `{ imported, skipped }` (skipped = invalid index or store cap reached).
-pub fn handle_commit(data_dir: &Path, params: &Value) -> Result<Value, String> {
-    let sessions = parse_from_params(params)?;
-    let selected: Vec<usize> = params
-        .get("selectedIndexes")
-        .and_then(Value::as_array)
-        .map(|list| {
-            list.iter()
-                .filter_map(|index| index.as_u64().and_then(|index| usize::try_from(index).ok()))
-                .collect()
-        })
-        .unwrap_or_default();
-    commit_sessions(data_dir, &sessions, &selected)
-}
-
-/// Dispatches on `kind`, decoding `fileBase64` (and the WindTerm extras).
-fn parse_from_params(params: &Value) -> Result<Vec<ImportedSession>, String> {
-    let kind = params
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or("Missing kind")?;
-    let file_base64 = params
-        .get("fileBase64")
-        .and_then(Value::as_str)
-        .ok_or("Missing fileBase64")?;
-    // Cap the base64 string before decoding to bound the allocation.
-    let max_base64_len = (MAX_INPUT_BYTES / 3 + 1) * 4;
-    if file_base64.len() > max_base64_len {
-        return Err(format!(
-            "Import file exceeds the {} MB limit",
-            MAX_INPUT_BYTES / (1024 * 1024)
-        ));
+            .filter(|value| !value.is_empty())
+            .ok_or("import/preview/start: kind is required")?;
+        validate_kind(kind)?;
+        let main_size = required_size(params, "mainSize")?;
+        let user_config_size = params.get("userConfigSize").and_then(Value::as_u64);
+        if kind != "windterm" && user_config_size.is_some() {
+            return Err(
+                "import/preview/start: userConfigSize is only valid for WindTerm".to_string(),
+            );
+        }
+        let total = main_size
+            .checked_add(user_config_size.unwrap_or(0))
+            .ok_or("import/preview/start: size overflow")?;
+        if total > MAX_INPUT_BYTES as u64 {
+            return Err(format!(
+                "Import files exceed the {} MiB total limit",
+                MAX_INPUT_BYTES / (1024 * 1024)
+            ));
+        }
+        let master_password = params
+            .get("masterPassword")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if master_password
+            .as_ref()
+            .is_some_and(|value| value.len() > 4096)
+        {
+            return Err(
+                "import/preview/start: masterPassword exceeds the 4096 byte limit".to_string(),
+            );
+        }
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let upload = ImportUpload {
+            kind: kind.to_string(),
+            main: ImportFile::new(main_size),
+            user_config: user_config_size.map(ImportFile::new),
+            master_password,
+        };
+        self.uploads
+            .lock()
+            .map_err(|_| "import preview state is unavailable")?
+            .insert(task_id.clone(), upload);
+        Ok(json!({ "taskId": task_id, "chunkSize": IMPORT_CHUNK_LIMIT }))
     }
-    let file = BASE64
-        .decode(file_base64)
-        .map_err(|error| format!("fileBase64 is not valid base64: {error}"))?;
-    if file.len() > MAX_INPUT_BYTES {
-        return Err(format!(
-            "Import file exceeds the {} MB limit",
-            MAX_INPUT_BYTES / (1024 * 1024)
-        ));
+
+    /// Appends one `[u64 BE offset][payload]` binary frame. The caller emits
+    /// the resulting `nextOffset` as the ACK event after this returns.
+    pub fn append(&self, task_id: &str, part: &str, frame: &[u8]) -> Result<u64, String> {
+        let result = (|| {
+            if frame.len() < 8 {
+                return Err("import preview chunk is missing its 8-byte offset".to_string());
+            }
+            let offset = u64::from_be_bytes(frame[..8].try_into().expect("slice length checked"));
+            let payload = &frame[8..];
+            if payload.len() > IMPORT_CHUNK_LIMIT {
+                return Err(format!(
+                    "import preview chunk of {} bytes exceeds the {} byte limit",
+                    payload.len(),
+                    IMPORT_CHUNK_LIMIT
+                ));
+            }
+            let mut uploads = self
+                .uploads
+                .lock()
+                .map_err(|_| "import preview state is unavailable")?;
+            let upload = uploads
+                .get_mut(task_id)
+                .ok_or("import preview task was not found")?;
+            let file = match part {
+                "main" => &mut upload.main,
+                "user-config" => upload
+                    .user_config
+                    .as_mut()
+                    .ok_or("import preview task has no user.config stream")?,
+                _ => return Err("unknown import preview binary stream".to_string()),
+            };
+            let expected_offset = file.bytes.len() as u64;
+            if offset != expected_offset {
+                return Err(format!(
+                    "import preview chunk offset {offset} does not match expected {expected_offset}"
+                ));
+            }
+            let next_offset = offset
+                .checked_add(payload.len() as u64)
+                .ok_or("import preview chunk offset overflow")?;
+            if next_offset > file.expected {
+                return Err("import preview chunk exceeds declared file size".to_string());
+            }
+            file.bytes.extend_from_slice(payload);
+            Ok(next_offset)
+        })();
+        if result.is_err() {
+            self.clear(task_id);
+        }
+        result
     }
+
+    /// Parses a fully uploaded source and atomically clears its bytes and
+    /// password before returning the sanitized preview.
+    pub fn finish(&self, task_id: &str) -> Result<Value, String> {
+        let upload = self
+            .uploads
+            .lock()
+            .map_err(|_| "import preview state is unavailable")?
+            .remove(task_id)
+            .ok_or("import preview task was not found")?;
+        if upload.main.bytes.len() as u64 != upload.main.expected {
+            return Err("import preview main file is incomplete".to_string());
+        }
+        if let Some(config) = &upload.user_config {
+            if config.bytes.len() as u64 != config.expected {
+                return Err("import preview user.config file is incomplete".to_string());
+            }
+        }
+        let sessions = parse_uploaded(
+            &upload.kind,
+            &upload.main.bytes,
+            upload
+                .user_config
+                .as_ref()
+                .map(|config| config.bytes.as_slice()),
+            upload.master_password.as_deref(),
+        )?;
+        let visible = sessions.len().min(MAX_PREVIEW_SESSIONS);
+        let selected = (0..visible).collect::<Vec<_>>();
+        let normalized = normalized_export(&upload.kind, &sessions, &selected)?;
+        let preview = normalized["sessions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, session)| preview_view(index, session))
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "sourceKind": upload.kind,
+            "sessions": preview,
+            "totalSessions": sessions.len(),
+            "truncated": sessions.len() > visible,
+            "export": normalized,
+        }))
+    }
+
+    /// Drops an unfinished upload. Cancellation is idempotent so component
+    /// teardown can always issue it without needing a status probe.
+    pub fn cancel(&self, task_id: &str) -> bool {
+        self.clear(task_id)
+    }
+
+    fn clear(&self, task_id: &str) -> bool {
+        self.uploads
+            .lock()
+            .map(|mut uploads| uploads.remove(task_id).is_some())
+            .unwrap_or(false)
+    }
+}
+
+fn required_size(params: &Value, field: &str) -> Result<u64, String> {
+    params
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("import/preview/start: {field} is required"))
+}
+
+fn validate_kind(kind: &str) -> Result<(), String> {
+    match kind {
+        "moba" | "xshell" | "windterm" | "securecrt" | "finalshell" | "electerm" | "termius" => {
+            Ok(())
+        }
+        _ => Err(format!("Unknown import kind: {kind}")),
+    }
+}
+
+fn parse_uploaded(
+    kind: &str,
+    file: &[u8],
+    user_config: Option<&[u8]>,
+    master_password: Option<&str>,
+) -> Result<Vec<ImportedSession>, String> {
     match kind {
         "moba" => parse_moba_ini(
-            std::str::from_utf8(&file).map_err(|_| "MobaXterm file is not valid UTF-8")?,
+            std::str::from_utf8(file).map_err(|_| "MobaXterm file is not valid UTF-8")?,
         ),
-        "xshell" => parse_xshell(&file),
-        "windterm" => {
-            let user_config =
-                match params
-                    .get("userConfigBase64")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                {
-                    Some(encoded) => Some(BASE64.decode(encoded).map_err(|error| {
-                        format!("userConfigBase64 is not valid base64: {error}")
-                    })?),
-                    None => None,
-                };
-            let master_password = params
-                .get("masterPassword")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty());
-            parse_windterm(&file, user_config.as_deref(), master_password)
-        }
+        "xshell" => parse_xshell(file),
+        "windterm" => parse_windterm(file, user_config, master_password),
         "securecrt" => parse_securecrt(
-            std::str::from_utf8(&file).map_err(|_| "SecureCRT file is not valid UTF-8")?,
+            std::str::from_utf8(file).map_err(|_| "SecureCRT file is not valid UTF-8")?,
         ),
-        "finalshell" => parse_finalshell(&file),
-        "electerm" => parse_electerm(&file),
-        "termius" => parse_termius(&file),
-        other => Err(format!("Unknown import kind: {other}")),
+        "finalshell" => parse_finalshell(file),
+        "electerm" => parse_electerm(file),
+        "termius" => parse_termius(file),
+        _ => Err(format!("Unknown import kind: {kind}")),
     }
 }
 
-fn preview_view(index: usize, session: &ImportedSession) -> Value {
-    json!({
-        "index": index,
-        "name": session.name,
-        "host": session.host,
-        "port": session.port,
-        "username": session.username,
-        "groupPath": session.group_path,
-        "description": session.description,
-        "authKind": auth_kind(&session.auth),
-        "hasSecret": has_secret(&session.auth),
-        "secretNote": session.secret_note,
-    })
-}
-
-/// Commits the selected sessions into the store. A name colliding with an
-/// existing entry on the same host/port gets " (2)" appended (then (3), ...).
-pub fn commit_sessions(
-    data_dir: &Path,
+/// Builds a portable, normalized export with metadata only. Passwords, private
+/// key contents and passphrases are structurally absent even when source files
+/// held them in plaintext.
+pub fn normalized_export(
+    source_kind: &str,
     sessions: &[ImportedSession],
     selected: &[usize],
 ) -> Result<Value, String> {
-    let mut store = load_store(data_dir);
-    let provider = vault::resolve_provider(None, data_dir);
-    let vault = Vault::new(provider.as_ref());
-    let mut imported = 0usize;
-    let mut skipped = 0usize;
-    // (host, port) -> taken names, built once so a large batch of same-key
-    // entries probes in O(1) instead of scanning the whole store per suffix.
-    let mut taken = taken_index(&store);
+    validate_kind(source_kind)?;
+    if selected.len() > MAX_PREVIEW_SESSIONS {
+        return Err(format!(
+            "An export may contain at most {MAX_PREVIEW_SESSIONS} sessions"
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::with_capacity(selected.len());
     for index in selected {
-        let Some(session) = sessions.get(*index) else {
-            skipped += 1;
-            continue;
-        };
-        if store.connections.len() >= MAX_STORED_CONNECTIONS {
-            skipped += 1;
+        if !seen.insert(*index) {
             continue;
         }
-        let name = unique_name(&taken, &session.name, &session.host, session.port);
-        taken
-            .entry((session.host.clone(), session.port))
-            .or_default()
-            .insert(name.clone());
-        let id = uuid::Uuid::new_v4().to_string();
-        store
-            .connections
-            .push(build_entry(&vault, &id, name, session));
-        imported += 1;
+        let session = sessions
+            .get(*index)
+            .ok_or_else(|| format!("Selected preview index {index} is invalid"))?;
+        rows.push(normalized_session(session));
     }
-    if imported > 0 {
-        save_store(data_dir, &store)?;
-    }
-    Ok(json!({ "imported": imported, "skipped": skipped }))
+    Ok(json!({ "schemaVersion": 1, "sourceKind": source_kind, "sessions": rows }))
 }
 
-fn build_entry(vault: &Vault, id: &str, name: String, session: &ImportedSession) -> ImportedEntry {
-    let empty = (String::new(), String::new(), String::new());
-    let (password_enc, key_content_enc, key_passphrase_enc, key_path) = match &session.auth {
-        ImportedAuth::None => (empty.0, empty.1, empty.2, String::new()),
-        ImportedAuth::Password { value } => (
-            value
-                .as_deref()
-                .map(|secret| vault.seal(FIELD_IMPORTED_PASSWORD, id, secret))
-                .unwrap_or_default(),
-            empty.1,
-            empty.2,
-            String::new(),
-        ),
-        ImportedAuth::PrivateKey {
-            path,
-            content,
-            passphrase,
-        } => (
-            empty.0,
-            content
-                .as_deref()
-                .map(|secret| vault.seal(FIELD_IMPORTED_KEY_CONTENT, id, secret))
-                .unwrap_or_default(),
-            passphrase
-                .as_deref()
-                .map(|secret| vault.seal(FIELD_IMPORTED_KEY_PASSPHRASE, id, secret))
-                .unwrap_or_default(),
-            path.clone().unwrap_or_default(),
-        ),
+fn normalized_session(session: &ImportedSession) -> Value {
+    let key_path = match &session.auth {
+        ImportedAuth::PrivateKey { path, .. } => path.as_deref().unwrap_or_default(),
+        _ => "",
     };
-    ImportedEntry {
-        id: id.to_string(),
-        name,
-        host: session.host.clone(),
-        port: session.port,
-        username: session.username.clone(),
-        group_path: session.group_path.clone(),
-        description: session.description.clone(),
-        auth_kind: auth_kind(&session.auth).to_string(),
-        key_path,
-        password_enc,
-        key_content_enc,
-        key_passphrase_enc,
-    }
+    json!({
+        "name": preview_text(&session.name),
+        "host": preview_text(&session.host),
+        "port": session.port,
+        "username": preview_text(&session.username),
+        "groupPath": session.group_path.iter().map(|part| preview_text(part)).collect::<Vec<_>>(),
+        "description": preview_text(&session.description),
+        "auth": {
+            "kind": auth_kind(&session.auth),
+            "hasSecret": has_secret(&session.auth),
+            "keyPath": preview_text(key_path),
+            "secretNote": session.secret_note,
+        },
+    })
 }
 
-/// Same name + host + port is treated as a duplicate; the new entry gets a
-/// " (2)" suffix (incrementing on repeated collisions). `taken` is the
-/// [`taken_index`] of the store plus the names already handed out in this
-/// batch; output semantics match the previous whole-store scan.
-fn unique_name(
-    taken: &HashMap<(String, u16), HashSet<String>>,
-    name: &str,
-    host: &str,
-    port: u16,
-) -> String {
-    let is_taken = |candidate: &str| {
-        taken
-            .get(&(host.to_string(), port))
-            .is_some_and(|names| names.contains(candidate))
-    };
-    if !is_taken(name) {
-        return name.to_string();
-    }
-    let mut suffix = 2usize;
-    loop {
-        let candidate = format!("{name} ({suffix})");
-        if !is_taken(&candidate) {
-            return candidate;
-        }
-        suffix += 1;
-    }
+fn preview_view(index: usize, session: &Value) -> Value {
+    json!({
+        "index": index,
+        "name": session["name"],
+        "host": session["host"],
+        "port": session["port"],
+        "username": session["username"],
+        "groupPath": session["groupPath"].as_array().map(|parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("/")).unwrap_or_default(),
+        "description": session["description"],
+        "authKind": session["auth"]["kind"],
+        "hasSecret": session["auth"]["hasSecret"],
+        "secretNote": session["auth"]["secretNote"],
+    })
 }
 
-/// Index of every stored entry by (host, port) -> set of names, so
-/// [`unique_name`] checks are O(1) instead of a full store scan per candidate
-/// (a 5000-entry same-key batch degraded to minutes of string comparisons).
-fn taken_index(store: &ImportedStore) -> HashMap<(String, u16), HashSet<String>> {
-    let mut taken: HashMap<(String, u16), HashSet<String>> = HashMap::new();
-    for entry in &store.connections {
-        taken
-            .entry((entry.host.clone(), entry.port))
-            .or_default()
-            .insert(entry.name.clone());
+fn preview_text(value: &str) -> String {
+    if value.len() <= MAX_PREVIEW_TEXT_BYTES {
+        return value.to_string();
     }
-    taken
+    let mut end = MAX_PREVIEW_TEXT_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &value[..end])
 }
 
 // ---------------------------------------------------------------------------
@@ -2780,40 +2721,6 @@ mod tests {
     }
 
     #[test]
-    fn commit_large_same_key_batch_produces_sequential_suffixes() {
-        // A2 回归：一批同名 + 同主机 + 同端口条目曾以 O(n³) 线性探测退化
-        // （5000 条卡顿分钟级）；索引化后输出语义不变、复杂度线性。
-        let dir = temp_dir();
-        let sessions: Vec<ImportedSession> = (0..1500)
-            .map(|_| ImportedSession {
-                name: "dev".to_string(),
-                host: "10.9.9.9".to_string(),
-                port: 22,
-                username: "root".to_string(),
-                group_path: Vec::new(),
-                description: String::new(),
-                auth: ImportedAuth::None,
-                secret_note: String::new(),
-            })
-            .collect();
-        let selected: Vec<usize> = (0..sessions.len()).collect();
-        let result = commit_sessions(&dir, &sessions, &selected).unwrap();
-        assert_eq!(result["imported"], 1500);
-        let store = load_store(&dir);
-        assert_eq!(store.connections.len(), 1500);
-        // 去重语义不变：首条保名，其余按序 "dev (2)"、"dev (3)"……
-        assert_eq!(store.connections[0].name, "dev");
-        assert_eq!(store.connections[1].name, "dev (2)");
-        assert_eq!(store.connections[2].name, "dev (3)");
-        assert_eq!(store.connections[1499].name, "dev (1500)");
-        let mut names: Vec<&str> = store.connections.iter().map(|e| e.name.as_str()).collect();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), 1500, "all names must be unique");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn securecrt_entity_and_attribute_decoding() {
         let xml = concat!(
             "<VanDyke><key name=\"Sessions\"><key name=\"gr&amp;oup\"><key name=\"sess\">\n",
@@ -3199,13 +3106,7 @@ mod tests {
         assert!(!is_termius_encrypted_blob("plain password"));
     }
 
-    // -- Store / commit -----------------------------------------------------
-
-    fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("dbx-import-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    // -- Sanitized export ----------------------------------------------------
 
     fn sample_sessions() -> Vec<ImportedSession> {
         vec![
@@ -3235,186 +3136,67 @@ mod tests {
                 },
                 secret_note: String::new(),
             },
-            ImportedSession {
-                name: "none".to_string(),
-                host: "10.0.0.3".to_string(),
-                port: 22,
-                username: "root".to_string(),
-                group_path: Vec::new(),
-                description: String::new(),
-                auth: ImportedAuth::None,
-                secret_note: String::new(),
-            },
         ]
     }
 
     #[test]
-    fn commit_seals_secrets_and_reports_counts() {
-        let dir = temp_dir();
-        let sessions = sample_sessions();
-        let result = commit_sessions(&dir, &sessions, &[0, 1, 7]).unwrap();
-        assert_eq!(result["imported"], 2);
-        assert_eq!(result["skipped"], 1);
-        let file_text = std::fs::read_to_string(store_path(&dir)).unwrap();
-        // No plaintext secret material ever reaches the store file.
-        assert!(!file_text.contains("s3cret"));
-        assert!(!file_text.contains("p@55phrase"));
-        assert!(file_text.contains("/home/u/key"));
-        let store = load_store(&dir);
-        assert_eq!(store.connections.len(), 2);
-        assert_eq!(store.connections[0].auth_kind, "password");
-        assert!(!store.connections[0].password_enc.is_empty());
-        assert_eq!(store.connections[1].auth_kind, "private-key");
-        assert!(!store.connections[1].key_passphrase_enc.is_empty());
-        // The sealed password opens again through the same keyfile vault.
-        let provider = vault::resolve_provider(None, &dir);
-        let vault = Vault::new(provider.as_ref());
-        assert_eq!(
-            vault.open(
-                "importedPassword",
-                &store.connections[0].id,
-                &store.connections[0].password_enc
-            ),
-            "s3cret"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn commit_dedupes_same_name_host_port() {
-        let dir = temp_dir();
-        let sessions = sample_sessions();
-        commit_sessions(&dir, &sessions, &[0]).unwrap();
-        commit_sessions(&dir, &sessions, &[0]).unwrap();
-        let store = load_store(&dir);
-        assert_eq!(store.connections.len(), 2);
-        assert_eq!(store.connections[1].name, "web (2)");
-        // Different host/port with the same name is not a duplicate.
-        let mut other = sample_sessions()[2].clone();
-        other.name = "web".to_string();
-        commit_sessions(&dir, std::slice::from_ref(&other), &[0]).unwrap();
-        let store = load_store(&dir);
-        assert_eq!(store.connections.len(), 3);
-        assert_eq!(store.connections[2].name, "web");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn corrupted_store_file_falls_back_to_empty() {
-        let dir = temp_dir();
-        std::fs::write(store_path(&dir), "{not json").unwrap();
-        assert!(load_store(&dir).connections.is_empty());
-        // Saving after corruption rewrites a valid store.
-        commit_sessions(&dir, &sample_sessions(), &[2]).unwrap();
-        assert_eq!(load_store(&dir).connections.len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn store_roundtrip_preserves_entries() {
-        let dir = temp_dir();
-        let store = ImportedStore {
-            connections: vec![
-                ImportedEntry {
-                    id: "id-1".to_string(),
-                    name: "web".to_string(),
-                    host: "h".to_string(),
-                    port: 22,
-                    username: "root".to_string(),
-                    group_path: vec!["a".to_string(), "b".to_string()],
-                    description: "d".to_string(),
-                    auth_kind: "none".to_string(),
-                    key_path: String::new(),
-                    password_enc: String::new(),
-                    key_content_enc: String::new(),
-                    key_passphrase_enc: String::new(),
-                },
-                ImportedEntry {
-                    port: 2222,
-                    auth_kind: "private-key".to_string(),
-                    key_path: "k".to_string(),
-                    key_passphrase_enc: "env".to_string(),
-                    id: "id-2".to_string(),
-                    name: "k".to_string(),
-                    host: "h2".to_string(),
-                    username: "u".to_string(),
-                    ..Default::default()
-                },
-            ],
+    fn normalized_export_never_contains_password_or_key_material() {
+        let mut sessions = sample_sessions();
+        sessions[1].auth = ImportedAuth::PrivateKey {
+            path: Some("/home/u/key".to_string()),
+            content: Some("-----BEGIN PRIVATE KEY-----\nsecret".to_string()),
+            passphrase: Some("p@55phrase".to_string()),
         };
-        save_store(&dir, &store).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(store_path(&dir))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-        assert_eq!(load_store(&dir), store);
-        let _ = std::fs::remove_dir_all(&dir);
+        let exported = normalized_export("windterm", &sessions, &[0, 1]).unwrap();
+        let rendered = exported.to_string();
+        assert!(rendered.contains("schemaVersion"));
+        assert!(rendered.contains("/home/u/key"));
+        assert!(!rendered.contains("s3cret"));
+        assert!(!rendered.contains("PRIVATE KEY"));
+        assert!(!rendered.contains("p@55phrase"));
+        assert_eq!(exported["sessions"][0]["auth"]["kind"], "password");
+        assert_eq!(exported["sessions"][0]["auth"]["hasSecret"], true);
+        assert!(exported["sessions"][0]["auth"].get("password").is_none());
     }
 
-    // -- Protocol handlers ---------------------------------------------------
+    // -- Streaming preview protocol -----------------------------------------
 
     #[test]
-    fn handle_parse_previews_without_leaking_secrets() {
-        let auto_login = json!({ "PasswordEnabled": true, "Password": "p@ss" }).to_string();
-        let file = json!([{
-            "session": {
-                "protocol": "SSH",
-                "target": "root@10.5.0.1",
-                "label": "preview",
-                "autoLogin": auto_login,
-            }
-        }])
-        .to_string();
-        let params = json!({
-            "kind": "windterm",
-            "fileBase64": BASE64.encode(file.as_bytes()),
-        });
-        let result = handle_parse(&params).unwrap();
-        let rendered = result.to_string();
-        assert!(!rendered.contains("p@ss"));
-        let session = &result["sessions"][0];
-        assert_eq!(session["index"], 0);
-        assert_eq!(session["name"], "preview");
-        assert_eq!(session["authKind"], "password");
-        assert_eq!(session["hasSecret"], true);
-        assert!(session.get("passwordEnc").is_none());
+    fn streaming_preview_requires_contiguous_offsets_and_cleans_up_on_failure() {
+        let stream = ImportStream::default();
+        let started = stream
+            .start(&json!({ "kind": "moba", "mainSize": 4 }))
+            .unwrap();
+        let task_id = started["taskId"].as_str().unwrap();
+        assert_eq!(started["chunkSize"], IMPORT_CHUNK_LIMIT);
+        let mut first = 0u64.to_be_bytes().to_vec();
+        first.extend_from_slice(b"[Boo");
+        assert_eq!(stream.append(task_id, "main", &first).unwrap(), 4);
+        let mut wrong = 3u64.to_be_bytes().to_vec();
+        wrong.extend_from_slice(b"x");
+        assert!(stream.append(task_id, "main", &wrong).is_err());
+        assert!(!stream.cancel(task_id));
     }
 
     #[test]
-    fn handle_parse_rejects_bad_params() {
-        assert!(handle_parse(&json!({})).is_err());
-        assert!(handle_parse(&json!({ "kind": "moba" })).is_err());
-        assert!(handle_parse(&json!({ "kind": "moba", "fileBase64": "!!!" })).is_err());
-        assert!(handle_parse(&json!({ "kind": "ftp", "fileBase64": "" })).is_err());
-    }
-
-    #[test]
-    fn handle_commit_end_to_end() {
-        let dir = temp_dir();
-        let text = concat!(
-            "[Bookmarks]\n",
-            "web=#109#0%10.6.0.1%22%root%\n",
-            "db=#109#0%10.6.0.2%5432%postgres%\n",
+    fn streaming_preview_finishes_with_sanitized_rows_and_discards_source() {
+        let text = b"[Bookmarks]\nweb=#109#0%10.6.0.1%22%root%\n";
+        let stream = ImportStream::default();
+        let started = stream
+            .start(&json!({ "kind": "moba", "mainSize": text.len() }))
+            .unwrap();
+        let task_id = started["taskId"].as_str().unwrap();
+        let mut frame = 0u64.to_be_bytes().to_vec();
+        frame.extend_from_slice(text);
+        assert_eq!(
+            stream.append(task_id, "main", &frame).unwrap(),
+            text.len() as u64
         );
-        let params = json!({
-            "kind": "moba",
-            "fileBase64": BASE64.encode(text.as_bytes()),
-            "selectedIndexes": [0, 1, 2, 99],
-        });
-        let result = handle_commit(&dir, &params).unwrap();
-        assert_eq!(result["imported"], 2);
-        assert_eq!(result["skipped"], 2);
-        let store = load_store(&dir);
-        assert_eq!(store.connections.len(), 2);
-        assert_eq!(store.connections[0].name, "web");
-        assert_eq!(store.connections[0].port, 22);
-        assert_eq!(store.connections[1].port, 5432);
-        let _ = std::fs::remove_dir_all(&dir);
+        let preview = stream.finish(task_id).unwrap();
+        assert_eq!(preview["sessions"][0]["name"], "web");
+        assert_eq!(preview["sessions"][0]["groupPath"], "");
+        assert!(!preview.to_string().contains("password"));
+        assert!(stream.finish(task_id).is_err());
     }
 
     #[test]

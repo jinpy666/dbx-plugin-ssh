@@ -76,6 +76,7 @@ struct Plugin {
     rdp: Arc<rdp_session::RdpSessionRuntime>,
     mcp: Arc<mcp::McpState>,
     watcher: Arc<file_watch::WatchRuntime>,
+    connection_import: connection_import::ImportStream,
 }
 
 impl Plugin {
@@ -103,6 +104,7 @@ impl Plugin {
             vnc: Arc::new(vnc_session::VncSessionRuntime::new()),
             rdp: Arc::new(rdp_session::RdpSessionRuntime::new()),
             watcher: Arc::new(file_watch::WatchRuntime::new()),
+            connection_import: connection_import::ImportStream::default(),
         })
     }
 
@@ -1777,12 +1779,15 @@ impl Plugin {
                 let id = required_string(&params, "id")?;
                 sftp_bookmarks::delete(&self.ssh.data_dir(), id)
             }
-            // 会话导入（Xshell .xts / MobaXterm .mxtsessions / WindTerm
-            // .sessions）：parse 只回脱敏预览（凭据以 hasSecret 表示），
-            // commit 按选中下标重新解析并入库（凭据经 vault 加密落盘到
-            // imported-connections.json，0600）。
-            "import/parse" => connection_import::handle_parse(&params),
-            "import/commit" => connection_import::handle_commit(&plugin_data_dir(), &params),
+            // 会话导入：主文件与可选 WindTerm user.config 走二进制 offset
+            // 分块，finish 只返回脱敏预览；不持久化连接或任何凭据。
+            "import/preview/start" => self.connection_import.start(&params),
+            "import/preview/finish" => self
+                .connection_import
+                .finish(required_string(&params, "taskId")?),
+            "import/preview/cancel" => Ok(json!({
+                "cancelled": self.connection_import.cancel(required_string(&params, "taskId")?)
+            })),
             "filesystem/list" => self.filesystem_list(params),
             "filesystem/read" => self.filesystem_read(params),
             "filesystem/write" => self.filesystem_write(params),
@@ -2038,6 +2043,30 @@ impl PluginHandler for Plugin {
                 json!({ "sessionId": session_id, "sequence": sequence }),
             )?;
             return Ok(());
+        }
+        if let Some(rest) = channel.strip_prefix("import/preview/") {
+            let Some((task_id, part)) = rest.rsplit_once('/') else {
+                return Err(PluginError::new(
+                    -32601,
+                    format!("Unknown import preview binary channel: {channel}"),
+                ));
+            };
+            match self.connection_import.append(task_id, part, &data) {
+                Ok(next_offset) => {
+                    emitter.event(
+                        "import/preview/ack",
+                        json!({ "taskId": task_id, "part": part, "nextOffset": next_offset }),
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let _ = emitter.event(
+                        "import/preview/error",
+                        json!({ "taskId": task_id, "part": part, "error": error }),
+                    );
+                    return Err(to_plugin_error(error));
+                }
+            }
         }
         if let Some(task_id) = channel.strip_prefix("sftp/upload/") {
             // Binary handler failures are only logged by the SDK loop, so the
