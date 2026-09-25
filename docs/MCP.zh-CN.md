@@ -147,10 +147,10 @@ MCP 调用方是 LLM，`sftp_upload`（本地读）与 `sftp_download`（本地�
 | `ssh_test_connection` | 验证连通性与认证（含跳板链），返回延迟；支持全部连接寻址（`connectionId` / `connectionName` / 唯一 endpoint），保存连接经桥或注册表解析凭据，不解析成功时报自愈引导（启动 DBX app → `ssh_list_connections` → 内联凭据） |
 | `ssh_list_known_hosts` / `ssh_remove_known_host` | 管理插件 known_hosts（不改系统 `~/.ssh/known_hosts`） |
 | `ssh_close` | 关闭缓存的连接（方式二按连接键；方式一由 sidecar 生命周期管理） |
-| `sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_pwd` | 浏览、检查远端路径与登录家目录；**懒建立连接**：无需先 `ssh_exec` 预热，首次调用即按寻址解析并拨号 |
+| `sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_pwd` | 浏览、检查远端路径与登录家目录；**懒建立连接**：无需先 `ssh_exec` 预热，首次调用即按寻址解析并拨号。文件名编码跟随连接级偏好（连接覆盖 > 全局 `sftp_name_encoding` > auto，见 PROTOCOL「扩展文件操作」M17 节）：latin-1 连接上 `sftp_list_dir` 返回的 `name`/`path` 为显示形式（与工作台一致），把返回的 `path` 原样回传给 `sftp_mkdir`/`sftp_remove`/`sftp_rename` 即落回同一组服务器字节 |
 | `sftp_read_file` / `sftp_write_file` | 读写远端文件（文本或 base64，支持 offset 分页） |
 | `sftp_upload` / `sftp_download` | 本地 ↔ 远端单文件传输（受 `maxUploadBytes` / `maxDownloadBytes` 限制；本地路径校验先于拨号，校验拒绝不清连接池）。本地路径受传输根约束：必须落在 `localTransferRoot`（未配置时为系统临时目录 + 插件数据目录）之内，且任何模式下都拒绝敏感路径（凭据库、shell 启动文件等，见下文「本地传输路径约束」） |
-| `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` | 目录与文件管理。`sftp_chmod` 的 `mode` 兼容多种写法：字符串 `"0644"`/`"0o644"` 按八进制数字读；数字全部由 0-7 组成时也按八进制读（`644` → `0644`），其余数字按原始权限位读（`384` = `0600`） |
+| `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` | 目录与文件管理。latin-1 连接上前三者按显示路径还原服务器字节走裸包操作（非 UTF-8 文件名保真，回退策略同工作台）；`sftp_chmod` 的 `mode` 兼容多种写法：字符串 `"0644"`/`"0o644"` 按八进制数字读；数字全部由 0-7 组成时也按八进制读（`644` → `0644`），其余数字按原始权限位读（`384` = `0600`） |
 | `sftp_disk_usage` | 路径所在挂载的磁盘用量 |
 | `sftp_copy` / `sftp_move` | 服务器内复制 / 剪切（`from` 单值或数组 → `toDir`，逐项返回成败） |
 | `ssh_alert_triage` | 告警分诊（**无连接参数、从不执行**）：异构告警 JSON（任意 schema）或纯文本 → 结构化 + 双语关键词分类（`cpu/memory/disk/inode/network/oom/service/generic`）+ 只读诊断命令清单（每条带 `purposeKey`；playbook 全部命中只读命令白名单，只读连接上可直接执行）。执行由调用方经 `ssh_exec` 等门禁完成 |

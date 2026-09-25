@@ -31,8 +31,14 @@ use crate::host_key::HostKeyVerifier;
 use crate::mcp_safety::{self, CommandRisk};
 use crate::model::{AuthenticationMethod, JumpHost, StoredConnection, SudoSource};
 use crate::multi_exec;
+use crate::preferences;
 use crate::sftp_copy;
-use crate::ssh::{SshClient, SshRuntime, NO_TERMINAL_SESSION_MESSAGE};
+use crate::sftp_name;
+use crate::sftp_raw;
+use crate::ssh::{
+    classify_raw_kind, raw_delete_tree, RawSftpClient, SshClient, SshRuntime,
+    NO_TERMINAL_SESSION_MESSAGE,
+};
 use crate::sudo_allowlist;
 use crate::sudo_profiles;
 
@@ -537,6 +543,22 @@ impl McpConnection {
         ));
         self.sftp = Some(sftp.clone());
         Ok(sftp)
+    }
+
+    /// 独立打开一条 sftp 子系统通道跑裸包客户端（严格串行请求/响应），与
+    /// 高层会话并存不复用：latin-1 编码模式下列表/写操作保原始字节专用
+    /// （M17，语义与 `ssh.rs::raw_sftp_client` 一致）。
+    async fn raw_sftp(&mut self) -> Result<RawSftpClient, String> {
+        let channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|error| format!("Failed to open SFTP channel: {error}"))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|error| format!("Failed to start SFTP: {error}"))?;
+        sftp_raw::RawSftp::init(channel.into_stream()).await
     }
 }
 
@@ -2256,9 +2278,43 @@ impl McpState {
         let entry = guard
             .get_mut(&connection_pool_key(arguments))
             .ok_or("Connection is not established")?;
+        // 文件名编码判定（M17，连接级）：连接覆盖 > 全局偏好 > 缺省 auto。
+        // dispatch 层已把 connectionName/端点选择器归一化为显式 connectionId
+        // （见 call_tool_inner），这里只需读 connectionId；内联拨号按未覆盖
+        // 处理（跟随全局），与工作台 resolve_sftp_encoding_opt 同构。
+        let encoding = mcp_sftp_encoding(&self.runtime.data_dir(), arguments);
         match name {
             "sftp_list_dir" => {
                 let path = required_str(arguments, "path")?;
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M17）：裸包 READDIR 保原始字节，名字口径为显示
+                    // 形式（latin-1 解码忠实可逆，AI 回传同一路径即落回原始
+                    // 字节）。裸包路径任何失败回退高层（读操作回退安全，与
+                    // 工作台 sftp_list_path 同策略）。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => match client
+                            .readdir(&sftp_name::latin1_encode_display(path))
+                            .await
+                        {
+                            Ok(raw_entries) => {
+                                return Ok(json!({
+                                    "path": path,
+                                    "entries": raw_list_items(path, raw_entries),
+                                }));
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "[ssh] MCP sftp_list_dir: raw byte listing unavailable, falling back: {error}"
+                                );
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_list_dir: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 let entries = sftp.lock().await.read_dir(path).await.map_err(sftp_error)?;
                 let items: Vec<Value> = entries
@@ -2386,6 +2442,25 @@ impl McpState {
             }
             "sftp_mkdir" => {
                 let path = required_str(arguments, "path")?;
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M17）：显示路径整条按 latin1_encode_display 还原
+                    // 字节后走裸包 MKDIR。仅裸包通道建立失败回退高层（建立阶段
+                    // 尚未发出任何请求，回退不会重复执行）；操作错误原样上抛，
+                    // 不回退（与工作台 sftp_create_directory 同策略）。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => {
+                            client
+                                .mkdir(&sftp_name::latin1_encode_display(path))
+                                .await?;
+                            return Ok(json!({ "path": path, "created": true }));
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_mkdir: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 sftp.lock()
                     .await
@@ -2397,6 +2472,33 @@ impl McpState {
             "sftp_remove" => {
                 let path = required_str(arguments, "path")?;
                 let recursive = arg_bool(arguments, "recursive")?.unwrap_or(false);
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M17）：显示路径还原字节后走裸包删除。LSTAT 判型
+                    // 分派与高层分支一致（symlink/文件 REMOVE、目录递归树删、
+                    // 非递归目录报错），符号链接绝不跟随。回退策略同 mkdir。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => {
+                            let raw_path = sftp_name::latin1_encode_display(path);
+                            let attrs = client.lstat(&raw_path).await?;
+                            if classify_raw_kind(attrs.permissions) == "directory" {
+                                if !recursive {
+                                    return Err(format!(
+                                        "{path} is a directory; pass recursive=true"
+                                    ));
+                                }
+                                raw_delete_tree(&mut client, &raw_path).await?;
+                            } else {
+                                client.remove(&raw_path).await?;
+                            }
+                            return Ok(json!({ "path": path, "removed": true }));
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_remove: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 let metadata = sftp
                     .lock()
@@ -2420,6 +2522,33 @@ impl McpState {
             "sftp_rename" => {
                 let source = required_str(arguments, "sourcePath")?;
                 let target = required_str(arguments, "targetPath")?;
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M17）：源是列表回传的显示路径（latin1_encode_
+                    // display 精确逆变换还原字节），目标是 AI 新输入/组合的
+                    // 显示文本（latin-1 域内字符映回同值字节，域外 UTF-8 兜底，
+                    // 与工作台新输入语义一致）。裸包 RENAME 保证改名不破坏
+                    // 非 UTF-8 字节。回退策略同 mkdir。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => {
+                            client
+                                .rename(
+                                    &sftp_name::latin1_encode_display(source),
+                                    &sftp_name::latin1_encode_display(target),
+                                )
+                                .await?;
+                            return Ok(json!({
+                                "sourcePath": source,
+                                "targetPath": target,
+                                "renamed": true,
+                            }));
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_rename: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 sftp.lock()
                     .await
@@ -2870,6 +2999,41 @@ async fn remove_tree(sftp: &Arc<AsyncMutex<SftpSession>>, root: String) -> Resul
             .map_err(sftp_error)?;
     }
     Ok(())
+}
+
+/// MCP 工具面的连接级文件名编码判定（M17）：arguments 携带的 connectionId
+/// （保存连接；dispatch 层已把 connectionName/端点选择器归一化为该字段）
+/// 命中 `sftp_name_encoding_overrides` 时优先，否则跟随全局
+/// `sftp_name_encoding`，缺省 auto——与工作台
+/// `Plugin::resolve_sftp_encoding_opt` 同构（内联拨号按未覆盖处理）。
+fn mcp_sftp_encoding(data_dir: &Path, arguments: &Value) -> sftp_name::NameEncoding {
+    preferences::sftp_name_encoding_for(data_dir, non_empty_argument(arguments, "connectionId"))
+}
+
+/// latin-1 裸包列表条目 → MCP 工具响应条目（M17）。名字口径为**显示形式**：
+/// `name`/`path` 都是 latin-1 解码文本（解码输出恒在 U+0000..=U+00FF 域内，
+/// `latin1_encode_display` 是其精确逆变换——AI 把返回的 path 原样回传给
+/// sftp_mkdir/sftp_remove/sftp_rename 即落回服务器原始字节，不引入 %XX
+/// 转义噪声）。kind 按 v3 permissions 类型位归类（缺 permissions 退回
+/// file，非标准服务器不会把普通文件误渲染成目录）；`.`/`..` 跳过。
+fn raw_list_items(dir: &str, entries: Vec<sftp_raw::RawEntry>) -> Vec<Value> {
+    entries
+        .into_iter()
+        .filter(|entry| entry.name.as_slice() != b"." && entry.name.as_slice() != b"..")
+        .map(|entry| {
+            let display =
+                sftp_name::decode_display_name(&entry.name, sftp_name::NameEncoding::Latin1);
+            // 目录 + 显示名的拼接与 join_wire_name 同形（纯字符串 join，无转
+            // 义语义），直接复用避免重复实现。
+            json!({
+                "name": display.text,
+                "path": sftp_name::join_wire_name(dir, &display.text),
+                "kind": classify_raw_kind(entry.attrs.permissions),
+                "size": entry.attrs.size,
+                "modifiedAt": entry.attrs.mtime,
+            })
+        })
+        .collect()
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -4355,7 +4519,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "sftp_list_dir",
-            "description": "List a remote directory over SFTP.",
+            "description": "List a remote directory over SFTP. Names follow the connection's file-name encoding preference: on latin-1 connections entries are decoded from raw server bytes to display form, and a returned path passed back to sftp_mkdir/sftp_remove/sftp_rename addresses the same server bytes.",
             "inputSchema": { "type": "object", "properties": connection_properties(&[("path", "string", "Remote directory path")]), "required": ["path"], "anyOf": connection_selector_requirements() },
         },
         {
@@ -4412,12 +4576,12 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "sftp_mkdir",
-            "description": "Create a remote directory.",
+            "description": "Create a remote directory. Paths follow the same display convention as sftp_list_dir responses (on latin-1 connections a display path maps back to the original server bytes).",
             "inputSchema": { "type": "object", "properties": connection_properties(&[("path", "string", "Remote directory path")]), "required": ["path"], "anyOf": connection_selector_requirements() },
         },
         {
             "name": "sftp_remove",
-            "description": "Remove a remote file or directory (directories need recursive=true).",
+            "description": "Remove a remote file or directory (directories need recursive=true). Paths follow the same display convention as sftp_list_dir responses (on latin-1 connections a display path maps back to the original server bytes).",
             "inputSchema": { "type": "object", "properties": connection_properties(&[
                 ("path", "string", "Remote path"),
                 ("recursive", "boolean", "Set true to remove directories recursively"),
@@ -4425,7 +4589,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "sftp_rename",
-            "description": "Rename or move a remote path.",
+            "description": "Rename or move a remote path. Paths follow the same display convention as sftp_list_dir responses (on latin-1 connections display paths map back to the original server bytes).",
             "inputSchema": { "type": "object", "properties": connection_properties(&[
                 ("sourcePath", "string", "Existing remote path"),
                 ("targetPath", "string", "New remote path"),
@@ -8449,6 +8613,106 @@ mod dbx_bridge_tests {
         assert!(
             err.contains("No connection named 'ghost'") && err.contains("ssh_list_connections"),
             "unexpected error: {err}"
+        );
+    }
+
+    // —— M17：MCP 工具面文件名编码模式 ——
+
+    #[test]
+    fn mcp_encoding_prefers_connection_override_then_global() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let store = preferences::store_path(data_dir.path());
+        // 只设连接覆盖：命中覆盖 → latin-1；未命中的连接 → 全局缺省 auto。
+        std::fs::write(
+            &store,
+            r#"{"prefs":{"sftp_name_encoding_overrides":{"conn-1":"latin-1"}}}"#,
+        )
+        .expect("write prefs");
+        assert_eq!(
+            mcp_sftp_encoding(data_dir.path(), &json!({ "connectionId": "conn-1" })),
+            sftp_name::NameEncoding::Latin1
+        );
+        assert_eq!(
+            mcp_sftp_encoding(data_dir.path(), &json!({ "connectionId": "conn-2" })),
+            sftp_name::NameEncoding::Auto
+        );
+        // 全局 latin-1：内联拨号（无 connectionId，dispatch 层也无法归一化）
+        // 按未覆盖处理，跟随全局。
+        std::fs::write(&store, r#"{"prefs":{"sftp_name_encoding":"latin-1"}}"#)
+            .expect("write prefs");
+        assert_eq!(
+            mcp_sftp_encoding(data_dir.path(), &json!({})),
+            sftp_name::NameEncoding::Latin1
+        );
+        // 连接覆盖压过全局偏好（优先级链第三态）。
+        std::fs::write(
+            &store,
+            r#"{"prefs":{"sftp_name_encoding":"latin-1","sftp_name_encoding_overrides":{"conn-9":"auto"}}}"#,
+        )
+        .expect("write prefs");
+        assert_eq!(
+            mcp_sftp_encoding(data_dir.path(), &json!({ "connectionId": "conn-9" })),
+            sftp_name::NameEncoding::Auto
+        );
+    }
+
+    #[test]
+    fn raw_list_items_display_paths_round_trip_to_server_bytes() {
+        let entry = |name: &[u8], size: Option<u64>, permissions: Option<u32>| sftp_raw::RawEntry {
+            name: name.to_vec(),
+            attrs: sftp_raw::RawAttrs {
+                size,
+                permissions,
+                mtime: Some(100),
+                ..sftp_raw::RawAttrs::default()
+            },
+        };
+        let items = raw_list_items(
+            "/data",
+            vec![
+                entry(b"caf\xe9.txt", Some(12), Some(0o100644)),
+                entry(b"dir\xe9", None, Some(0o040755)),
+                entry(b".", None, Some(0o040755)),
+                entry(b"..", None, None),
+                entry(b"\xff\xfe.bin", Some(3), None),
+            ],
+        );
+        // `.`/`..` 跳过；名字口径 = 显示形式（latin-1 解码，忠实可逆）。
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["name"], json!("caf\u{e9}.txt"));
+        assert_eq!(items[0]["path"], json!("/data/caf\u{e9}.txt"));
+        assert_eq!(items[0]["kind"], json!("file"));
+        assert_eq!(items[0]["size"], json!(12));
+        assert_eq!(items[0]["modifiedAt"], json!(100));
+        assert_eq!(items[1]["name"], json!("dir\u{e9}"));
+        assert_eq!(items[1]["path"], json!("/data/dir\u{e9}"));
+        assert_eq!(items[1]["kind"], json!("directory"));
+        // attrs 缺 permissions（非标准服务器）退回 file，不误判成目录。
+        assert_eq!(items[2]["name"], json!("\u{ff}\u{fe}.bin"));
+        assert_eq!(items[2]["kind"], json!("file"));
+
+        // 往返闭环：AI 把列表返回的 path 原样回传给 sftp_remove 等写工具时，
+        // latin1_encode_display 精确还原服务器原始字节（显示 → 字节是 latin-1
+        // 解码的逆变换，目录 ASCII 前缀按字面量透传）。
+        assert_eq!(
+            sftp_name::latin1_encode_display(items[0]["path"].as_str().unwrap()),
+            b"/data/caf\xe9.txt".to_vec()
+        );
+        // 子目录导航同样闭环：父列表返回的显示目录路径进入下一次列表/
+        // rename 目标组合时还原字节。
+        assert_eq!(
+            sftp_name::latin1_encode_display(items[1]["path"].as_str().unwrap()),
+            b"/data/dir\xe9".to_vec()
+        );
+        // rename 往返：源 = 列表回传显示路径；目标 = 同目录 + 新输入显示文本
+        //（latin-1 域内字符映回同值字节）。
+        assert_eq!(
+            sftp_name::latin1_encode_display(items[0]["path"].as_str().unwrap()),
+            b"/data/caf\xe9.txt".to_vec()
+        );
+        assert_eq!(
+            sftp_name::latin1_encode_display("/data/caf\u{e9}2.txt"),
+            b"/data/caf\xe92.txt".to_vec()
         );
     }
 }

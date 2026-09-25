@@ -8399,7 +8399,8 @@ async fn raw_delete_path(
 }
 
 /// 裸包递归删除：后序遍历（先文件后目录），单通道串行，`.`/`..` 跳过。
-async fn raw_delete_tree(client: &mut RawSftpClient, root: &[u8]) -> Result<(), String> {
+/// pub(crate)：MCP 工具面 sftp_remove 的 latin-1 递归分支复用（M17）。
+pub(crate) async fn raw_delete_tree(client: &mut RawSftpClient, root: &[u8]) -> Result<(), String> {
     let mut pending = vec![root.to_vec()];
     let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -8713,8 +8714,9 @@ pub(crate) type RawSftpClient = sftp_raw::RawSftp<russh::ChannelStream<russh::cl
 
 /// 裸包客户端路径的 kind 判定：按 v3 permissions 的 POSIX 类型位归类；
 /// attrs 缺 permissions（非标准服务器）时退回 file（与高层路径的 Other
-/// 语义一致），避免把普通文件误渲染成目录。
-fn classify_raw_kind(permissions: Option<u32>) -> &'static str {
+/// 语义一致），避免把普通文件误渲染成目录。pub(crate)：MCP 工具面
+/// latin-1 裸包列表/删除判型复用（M17）。
+pub(crate) fn classify_raw_kind(permissions: Option<u32>) -> &'static str {
     let Some(mode) = permissions else {
         return "file";
     };
