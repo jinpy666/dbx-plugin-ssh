@@ -11,6 +11,12 @@ pub enum AuthenticationMethod {
     PrivateKey,
     PrivateKeyPassword,
     Agent,
+    /// Tabby-style ordered fallback: try password → private key →
+    /// keyboard-interactive (incl. TOTP) → ssh-agent, in that fixed order,
+    /// until one succeeds or every attempt has failed. Stage prerequisites
+    /// (no password, no key material, unreachable agent) are recorded as
+    /// skipped attempts instead of aborting the chain.
+    Auto,
     None,
 }
 
@@ -23,7 +29,7 @@ impl AuthenticationMethod {
             .and_then(Value::as_str)
             .unwrap_or("password");
         match value {
-            "password" | "private-key" | "private-key-password" | "agent" | "none" => {
+            "password" | "private-key" | "private-key-password" | "agent" | "none" | "auto" => {
                 Ok(Self::from_method_name(value))
             }
             _ => Err(format!("Unsupported SSH authentication method '{value}'")),
@@ -36,6 +42,7 @@ impl AuthenticationMethod {
             "private-key-password" => Self::PrivateKeyPassword,
             "agent" => Self::Agent,
             "none" => Self::None,
+            "auto" => Self::Auto,
             _ => Self::Password,
         }
     }
@@ -49,6 +56,7 @@ impl AuthenticationMethod {
             Self::PrivateKeyPassword => "private-key-password",
             Self::Agent => "agent",
             Self::None => "none",
+            Self::Auto => "auto",
             Self::Password => "password",
         }
     }
@@ -1301,6 +1309,7 @@ mod tests {
             "private-key",
             "private-key-password",
             "agent",
+            "auto",
             "none",
         ] {
             // Name round-trip is a pure enum mapping; credential validation is
@@ -2409,6 +2418,15 @@ mod manifest_contract_tests {
                 serde_json::json!({}),
                 serde_json::json!({}),
                 AuthenticationMethod::Agent,
+            ),
+            // Auto 按序回退不要求任何前置凭据：密码/私钥缺失只是对应阶段
+            // 被跳过（回退链里的既有记录），解析层必须接受零凭据组合。
+            (
+                "auto",
+                None,
+                serde_json::json!({}),
+                serde_json::json!({}),
+                AuthenticationMethod::Auto,
             ),
             (
                 "none",
