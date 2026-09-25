@@ -24,13 +24,13 @@ const WRITE_CHUNK_BYTES: usize = 96 * 1024;
 
 /// Wraps a path in single quotes for safe shell interpolation, replacing any
 /// embedded quote with the POSIX `'\''` escape (tiny-rdm's shQuoted).
-fn shell_quote(path: &str) -> String {
+pub(crate) fn shell_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 /// Runs one command with Quick Sudo and returns its output, failing on a
 /// non-zero exit code (mirrors tiny-rdm's execSudoResultMap handling).
-async fn sudo_exec(
+pub(crate) async fn sudo_exec(
     runtime: &SshRuntime,
     session_id: &str,
     command: &str,

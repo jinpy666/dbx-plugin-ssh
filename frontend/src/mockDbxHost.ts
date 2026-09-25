@@ -960,6 +960,22 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     for (const listener of eventListeners) listener({ method: "sftp/transfer/progress", params: { taskId, sessionId: "visual-session", direction: "download", fileName: task.fileName, transferred: task.size, size: task.size, status: "completed" } });
     fixtureDownloads.delete(taskId);
     result = { success: true };
+  } else if (method === "sudo/download/start") {
+    // M14-C DownloadSudo mock：参数名 path（sudo 族），分块/finish 复用
+    // fixtureDownloads，与 sftp/download/next、finish 完全同构。
+    const remotePath = normalizeMockPath(String((params as Record<string, unknown>)?.path || "root.bin"));
+    const node = findMockNode(remotePath);
+    const taskId = `sudo-download-${fixtureDownloads.size + 1}`;
+    const fileName = node?.kind === "file" ? node.name : remotePath.split("/").pop() || "root.bin";
+    const size = node?.kind === "file" ? node.size : 32;
+    fixtureDownloads.set(taskId, { fileName, size, offset: 0 });
+    for (const listener of eventListeners) listener({ method: "sftp/transfer/progress", params: { taskId, sessionId: "visual-session", direction: "download", fileName, transferred: 0, size, status: "queued" } });
+    result = { taskId, fileName, size, chunkSize: 262144, sudo: true };
+  } else if (method === "sudo/download/cancel") {
+    const taskId = String((params as Record<string, unknown>)?.taskId || "");
+    fixtureDownloads.delete(taskId);
+    for (const listener of eventListeners) listener({ method: "sftp/transfer/progress", params: { taskId, sessionId: "visual-session", direction: "download", transferred: 0, size: 0, status: "cancelled" } });
+    result = { success: true };
   } else if (method === "ssh/exec") {
     const input = params as Record<string, unknown>;
     const command = String(input.command || "");
