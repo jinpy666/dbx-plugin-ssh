@@ -1561,6 +1561,215 @@ def main() -> None:
         report.run("ssh/recording start/stop/list/get/delete", "ssh/recording/start",
                    case_recording_flow)
 
+        # -- M14-M17 编码 / 管线偏好 / MCP 工具面 group ---------------------------
+        # 补批次欠账：latin-1 编码族真容器链路（M14/M16/M17）、每连接编码覆盖
+        # （M16）、SFTP 管线偏好（M14-B）、MCP 工具面 SFTP 往返（M17-B）。
+        # local/preferences 是插件级持久档：进组前先快照原值，组内自建自清理、
+        # 末尾 cleanup 再兜底还原，保证整组幂等。latin-1 文件名一律以 \uXXXX /
+        # %XX 转义书写，避免源码编码歧义。
+        enc_dir = f"{home}/.dbx-enc-smoke"
+        # 显示文本（latin-1 域内：U+00E9 按 latin1_encode_display 映回 0xE9 字节）。
+        enc_name_display = "caf\u00e9.txt"
+        enc_name_renamed = "caf\u00e9-renamed.txt"
+        # 列表回传的 wire 形式（escape_wire 的 %XX 转义）。
+        enc_name_wire = "caf%E9.txt"
+        enc_name_renamed_wire = "caf%E9-renamed.txt"
+        enc_payload = b"latin-1 smoke payload\n"
+        enc_tree_local = Path(tempfile.mkdtemp(prefix="dbx-ssh-smoke-enc-tree-"))
+        prefs_snapshot = req("local/preferences/get", {})
+        mcp_stamp = int(time.time())
+        mcp_dir = f"{home}/.dbx-mcp-smoke-{mcp_stamp}"
+        mcp_dir_renamed = f"{home}/.dbx-mcp-smoke-renamed-{mcp_stamp}"
+
+        def prefs_get(key):
+            return req("local/preferences/get", {}).get(key)
+
+        def case_prefs_pipeline_preferences():
+            # M14-B：transfer_max_active 越界钳制（1..=8）读回 + sftp_compat_mode
+            # 开关读回；非布尔值拒绝写入。只验证偏好读写链，不要求真机并发行为。
+            try:
+                for raw, want in ((99, 8), (0, 1), (5, 5)):
+                    req("local/preferences/set", {"transfer_max_active": raw})
+                    got = prefs_get("transfer_max_active")
+                    if got != want:
+                        raise AssertionError(f"transfer_max_active {raw} -> {got!r}, want {want}")
+                for enabled in (True, False):
+                    req("local/preferences/set", {"sftp_compat_mode": enabled})
+                    got = prefs_get("sftp_compat_mode")
+                    if got is not enabled:
+                        raise AssertionError(f"sftp_compat_mode={got!r}, want {enabled}")
+                try:
+                    req("local/preferences/set", {"sftp_compat_mode": "yes"})
+                except SidecarError as error:
+                    if "must be a boolean" not in str(error):
+                        raise AssertionError(f"unexpected compat error: {error}")
+                else:
+                    raise AssertionError("non-bool sftp_compat_mode accepted")
+            finally:
+                req("local/preferences/set", {
+                    "transfer_max_active": prefs_snapshot.get("transfer_max_active", 3),
+                    "sftp_compat_mode": bool(prefs_snapshot.get("sftp_compat_mode")),
+                })
+            print("    clamped 99->8 / 0->1 / 5->5; compat toggle read back")
+
+        def case_latin1_pref_set():
+            # M16 全局偏好：latin-1 写入并读回；原值由 cleanup 还原。
+            req("local/preferences/set", {"sftp_name_encoding": "latin-1"})
+            got = prefs_get("sftp_name_encoding")
+            if got != "latin-1":
+                raise AssertionError(f"sftp_name_encoding={got!r}, want 'latin-1'")
+
+        def case_latin1_create_and_list():
+            # M16 真容器链路①：touch（目录 wire 前缀 + 末段显示文本）落 0xE9
+            # 字节名，列表走裸包 READDIR latin-1 解码回忠实显示名 + %E9 wire uri。
+            req("sftp/createDirectory", {"sessionId": session_id, "path": enc_dir})
+            req("sftp/touch", {"sessionId": session_id, "path": f"{enc_dir}/{enc_name_display}"})
+            listing = req("sftp/list", {"sessionId": session_id, "path": enc_dir})
+            entry = next((e for e in listing.get("entries", []) if e.get("name") == enc_name_display), None)
+            if entry is None:
+                raise AssertionError(f"{enc_name_display!r} missing from latin-1 listing: "
+                                     f"{[e.get('name') for e in listing.get('entries', [])]}")
+            if "%E9" not in str(entry.get("uri", "")):
+                raise AssertionError(f"uri missing %E9 wire escape: {entry.get('uri')!r}")
+            if entry.get("lossy"):
+                raise AssertionError(f"latin-1 decode must be faithful (lossy=true): {entry!r}")
+            print(f"    listed {entry.get('name')!r} uri={entry.get('uri')!r}")
+
+        def case_latin1_write_read_exists():
+            # M16/M17 增量①：wire 路径写读往返；exists 双形态（form:"wire" 整条
+            # %XX 还原 / 缺省目录 wire + 末段显示文本）+ 交叉反例（显示文本按
+            # UTF-8 还原 0xC3A9 ≠ 0xE9，wire 形态必须探不到）。
+            wire_path = f"{enc_dir}/{enc_name_wire}"
+            req("sftp/write", {"sessionId": session_id, "remotePath": wire_path,
+                               "dataBase64": base64.b64encode(enc_payload).decode()})
+            read_back = req("sftp/read", {"sessionId": session_id, "path": wire_path, "maxBytes": 4096})
+            if base64.b64decode(read_back.get("dataBase64", "")) != enc_payload:
+                raise AssertionError(f"wire-path read-back mismatch: {read_back!r}")
+            present = req("sftp/exists", {"sessionId": session_id, "path": wire_path, "form": "wire"})
+            if present.get("exists") is not True:
+                raise AssertionError(f"exists(form=wire) -> {present!r}, want true")
+            present_default = req("sftp/exists",
+                                  {"sessionId": session_id, "path": f"{enc_dir}/{enc_name_display}"})
+            if present_default.get("exists") is not True:
+                raise AssertionError(f"exists(default form) -> {present_default!r}, want true")
+            crossed = req("sftp/exists",
+                          {"sessionId": session_id, "path": f"{enc_dir}/{enc_name_display}", "form": "wire"})
+            if crossed.get("exists") is not False:
+                raise AssertionError(f"exists(form=wire, display text) -> {crossed!r}, want false")
+            print("    wire write/read ok; exists wire/default/crossed = true/true/false")
+
+        def case_latin1_tree_download():
+            # M16/M17：latin-1 整树下载——远端裸包 READDIR 遍历字节保真，本地
+            # 根名/文件名按显示名落盘、内容逐字节一致，空子目录骨架保留。
+            req("sftp/createDirectory", {"sessionId": session_id, "path": f"{enc_dir}/sub"})
+            try:
+                info = req("sftp/download/tree/start",
+                           {"sessionId": session_id, "remotePath": enc_dir,
+                            "downloadDir": str(enc_tree_local)})
+                task_id = str(info.get("taskId") or "")
+                if not task_id:
+                    raise AssertionError(f"tree/start shape: {json.dumps(info)[:160]}")
+                drained = 0
+                while True:  # 与前端分块等待器同构：跑到 eof，而非字节总量
+                    chunk = req("sftp/download/next", {"taskId": task_id, "offset": drained})
+                    drained += int(chunk.get("length") or 0)
+                    if chunk.get("eof"):
+                        break
+                finish = req("sftp/download/finish", {"taskId": task_id})
+                local_root = finish.get("localPath")
+                if not local_root:
+                    raise AssertionError(f"tree finish returned no localPath: {json.dumps(finish)[:160]}")
+                local_file = Path(local_root) / enc_name_display
+                if not local_file.is_file():
+                    raise AssertionError(f"latin-1 named file missing under {local_root}: "
+                                         f"{sorted(p.name for p in Path(local_root).rglob('*'))}")
+                if local_file.read_bytes() != enc_payload:
+                    raise AssertionError(f"tree download content mismatch: {local_file.read_bytes()!r}")
+                if not (Path(local_root) / "sub").is_dir():
+                    raise AssertionError(f"empty subdir 'sub' not mirrored under {local_root}")
+                print(f"    tree downloaded to {local_root} ({drained} bytes)")
+            finally:
+                req("sftp/delete", {"sessionId": session_id, "path": f"{enc_dir}/sub", "recursive": True})
+
+        def case_latin1_rename_delete():
+            # M17 增量③：raw RENAME（源 wire / 目标末段显示文本）+ wire 删除 +
+            # exists 收口。删完目录清空，交给每连接覆盖组复用。
+            req("sftp/rename", {"sessionId": session_id, "sourcePath": f"{enc_dir}/{enc_name_wire}",
+                                "targetPath": f"{enc_dir}/{enc_name_renamed}"})
+            listing = req("sftp/list", {"sessionId": session_id, "path": enc_dir})
+            names = [e.get("name") for e in listing.get("entries", [])]
+            if enc_name_renamed not in names:
+                raise AssertionError(f"renamed file missing from latin-1 listing: {names}")
+            req("sftp/delete", {"sessionId": session_id,
+                                "path": f"{enc_dir}/{enc_name_renamed_wire}"})
+            gone = req("sftp/exists", {"sessionId": session_id,
+                                       "path": f"{enc_dir}/{enc_name_renamed_wire}", "form": "wire"})
+            if gone.get("exists") is not False:
+                raise AssertionError(f"deleted file still exists: {gone!r}")
+            print(f"    renamed to {enc_name_renamed!r}, deleted via wire path")
+
+        def case_encoding_override_active():
+            # M16 连接级覆盖：全局 auto + {connectionId: latin-1} 时本连接列表
+            # 仍走原始字节路径（显示名忠实、无 lossy 标记）。
+            req("local/preferences/set", {"sftp_name_encoding": "auto",
+                                          "sftp_name_encoding_overrides": {connection_id: "latin-1"}})
+            req("sftp/touch", {"sessionId": session_id, "path": f"{enc_dir}/{enc_name_display}"})
+            listing = req("sftp/list", {"sessionId": session_id, "path": enc_dir})
+            entry = next((e for e in listing.get("entries", [])
+                          if str(e.get("name", "")).endswith(".txt")), None)
+            if entry is None:
+                raise AssertionError(f"no .txt entry under {enc_dir}: {listing.get('entries')}")
+            if entry.get("name") != enc_name_display or entry.get("lossy"):
+                raise AssertionError(f"connection override not applied: {entry!r}")
+            print(f"    override latin-1 active for {connection_id}: {entry.get('name')!r}")
+
+        def case_encoding_override_fallback():
+            # M16 回退语义：删除覆盖后回全局 auto，0xE9 字节名经高层客户端
+            # lossy 解码（U+FFFD + lossy 标记）。auto 下高层客户端按字面量发
+            # UTF-8 删不掉 0xE9 字节名——先临时恢复覆盖整目录递归删，再还原
+            # 全局 auto + 空覆盖桶（与进组前状态一致）。
+            req("local/preferences/set", {"sftp_name_encoding_overrides": {}})
+            listing = req("sftp/list", {"sessionId": session_id, "path": enc_dir})
+            entry = next((e for e in listing.get("entries", [])
+                          if str(e.get("name", "")).endswith(".txt")), None)
+            if entry is None:
+                raise AssertionError(f"no .txt entry under {enc_dir}: {listing.get('entries')}")
+            if "\ufffd" not in str(entry.get("name", "")) or entry.get("lossy") is not True:
+                raise AssertionError(f"expected lossy auto decode after override removal: {entry!r}")
+            print(f"    fallback to global auto: {entry.get('name')!r} (lossy=true)")
+            req("local/preferences/set", {"sftp_name_encoding_overrides": {connection_id: "latin-1"}})
+            req("sftp/delete", {"sessionId": session_id, "path": enc_dir, "recursive": True})
+            req("local/preferences/set", {"sftp_name_encoding": "auto",
+                                          "sftp_name_encoding_overrides": {}})
+
+        def case_mcp_sftp_toolface():
+            # M17-B MCP 工具面：sftp_mkdir/sftp_list_dir/sftp_rename/sftp_remove
+            # （+ sftp_exists 收口）在 autonomous 模式经 mcp/call 基本往返。
+            # smoke_mcp.py 走独立 --mcp stdio 进程；这里沿既有 ssh_exec 先例走
+            # embedded 桥（mcp/call + lifecycle），同一工具实现、无需第二进程。
+            created = call_tool_embedded("sftp_mkdir", {"path": mcp_dir}, connection_id=connection_id)
+            if created.get("created") is not True:
+                raise AssertionError(f"sftp_mkdir result: {created}")
+            listing = call_tool_embedded("sftp_list_dir", {"path": home}, connection_id=connection_id)
+            names = [str(e.get("name")) for e in listing.get("entries", [])]
+            if mcp_dir.rsplit("/", 1)[-1] not in names:
+                raise AssertionError(f"mcp sftp_list_dir missing {mcp_dir}: {names[:10]}…")
+            renamed = call_tool_embedded("sftp_rename",
+                                         {"sourcePath": mcp_dir, "targetPath": mcp_dir_renamed},
+                                         connection_id=connection_id)
+            if renamed.get("renamed") is not True:
+                raise AssertionError(f"sftp_rename result: {renamed}")
+            removed = call_tool_embedded("sftp_remove",
+                                         {"path": mcp_dir_renamed, "recursive": True},
+                                         connection_id=connection_id)
+            if removed.get("removed") is not True:
+                raise AssertionError(f"sftp_remove result: {removed}")
+            exists = call_tool_embedded("sftp_exists", {"path": mcp_dir_renamed},
+                                        connection_id=connection_id)
+            if exists.get("exists") is not False:
+                raise AssertionError(f"removed dir still exists per MCP tool: {exists}")
+            print("    mcp mkdir/list/rename/remove/exists round-trip ok")
+
         print("\n--- alert triage + audit group ---")
         report.run("ssh/alert/triage normalize+classify+playbook", "ssh/alert/triage",
                    case_alert_triage)
@@ -1570,6 +1779,28 @@ def main() -> None:
         report.run("ssh/audit/clear truncates the ledger", "ssh/audit/clear",
                    case_audit_clear,
                    needs="ssh/audit/list returns approval trail")
+
+        print("\n--- encoding / pipeline preferences group (M14-M17) ---")
+        report.run("local/preferences pipeline clamps read back", "local/preferences/set",
+                   case_prefs_pipeline_preferences)
+        report.run("local/preferences latin-1 encoding set", "local/preferences/set",
+                   case_latin1_pref_set)
+        report.run("latin-1 container create + list decode", "sftp/touch",
+                   case_latin1_create_and_list, needs="local/preferences latin-1 encoding set")
+        report.run("latin-1 wire write/read + exists both forms", "sftp/write",
+                   case_latin1_write_read_exists, needs="latin-1 container create + list decode")
+        report.run("latin-1 tree download keeps byte-faithful names", "sftp/download/tree/start",
+                   case_latin1_tree_download,
+                   needs="latin-1 wire write/read + exists both forms")
+        report.run("latin-1 raw rename + wire delete", "sftp/rename",
+                   case_latin1_rename_delete,
+                   needs="latin-1 tree download keeps byte-faithful names")
+        report.run("per-connection encoding override applies", "local/preferences/set",
+                   case_encoding_override_active, needs="latin-1 raw rename + wire delete")
+        report.run("per-connection override falls back to global auto", "local/preferences/set",
+                   case_encoding_override_fallback, needs="per-connection encoding override applies")
+        report.run("MCP tool-face sftp round-trip (autonomous)", "mcp/call",
+                   case_mcp_sftp_toolface)
 
         step("cleanup leftovers")
         # Best-effort mode/secret restore even when a late case failed: the
@@ -1581,10 +1812,30 @@ def main() -> None:
                                                 "sudoPassword": ""})
         except SidecarError:
             pass
+        # M14-M17 组兜底清理：先借 latin-1 原始字节路径删掉编码组残留（auto
+        # 下高层客户端删不掉 0xE9 字节名），再还原进组前的偏好快照。
+        try:
+            client.request("local/preferences/set", {"sftp_name_encoding": "latin-1"})
+            client.request("sftp/delete", {"sessionId": session_id, "path": enc_dir, "recursive": True})
+            print(f"    deleted {enc_dir}")
+        except SidecarError:
+            pass  # already cleaned by its case / never created
+        try:
+            client.request("local/preferences/set", {
+                "sftp_name_encoding": prefs_snapshot.get("sftp_name_encoding") or "auto",
+                "sftp_name_encoding_overrides": prefs_snapshot.get("sftp_name_encoding_overrides") or {},
+                "transfer_max_active": prefs_snapshot.get("transfer_max_active", 3),
+                "sftp_compat_mode": bool(prefs_snapshot.get("sftp_compat_mode")),
+            })
+            print("    preferences restored to pre-group snapshot")
+        except SidecarError:
+            pass
+        shutil.rmtree(enc_tree_local, ignore_errors=True)
         for path, recursive in ((touch_path, False), (write_path, False), (resume_src, False),
                                 (archive_path, False), (extract_dir, True), (sudo_dir, True),
                                 (f"{home}/.dbx-fs-smoke-sink", False),
-                                (f"{home}/.dbx-fs-smoke-sink2", False)):
+                                (f"{home}/.dbx-fs-smoke-sink2", False),
+                                (mcp_dir, True), (mcp_dir_renamed, True)):
             try:
                 client.request("sftp/delete",
                                {"sessionId": session_id, "path": path, "recursive": recursive})
