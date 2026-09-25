@@ -702,7 +702,12 @@ pub fn sanitize_prompt_hint(input: &str) -> String {
     normalized
 }
 
-fn strip_ansi_control_sequences(input: &str) -> String {
+/// Strips ANSI escape sequences (CSI/OSC/2-byte escapes) while keeping every
+/// other byte, including CR/LF and whitespace. Shared by the auth-prompt
+/// normalizer and the telnet declarative watch, which matches anchored
+/// success/failure regexes against terminal output (NyaTerm strips ANSI the
+/// same way before its auto-login matching).
+pub(crate) fn strip_ansi_control_sequences(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;

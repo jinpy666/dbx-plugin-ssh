@@ -57,6 +57,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
 
+use crate::exec::strip_ansi_control_sequences;
 use crate::model::TerminalStream;
 use crate::ssh::ReplayBuffer;
 use crate::triggers;
@@ -362,9 +363,22 @@ impl fmt::Debug for DeclarativeAutoLogin {
 /// declarative config works without any pattern field filled in. Matched
 /// with the same regex engine the expect stages use (substring `find`
 /// semantics over a rolling tail).
-const DECL_USERNAME_PROMPT_DEFAULT: &str = r#"(?i)(?:user\s*name|username|login|logon|account|userid|user\s*id|用户名|帐号|账号|登录|登入)\s*[:：>]"#;
+///
+/// Both defaults are end-anchored (NyaTerm `auto_login.rs` matches its
+/// defaults against line candidates the same way): a live prompt is keyword +
+/// punctuation + only whitespace up to the end of the rolling buffer. A
+/// `Last login: <time>` MOTD banner therefore cannot trigger an answer — the
+/// trailing timestamp breaks `\s*$` — which is NyaTerm's explicit
+/// `last_login_regex` exclusion expressed structurally (the Rust `regex`
+/// engine has no look-around for a line-start negative guard, and a `^` anchor
+/// would miss prompts split across chunk boundaries, where the per-chunk
+/// normalization trims the separating newline). A banner line consisting of
+/// only `Last login:` with the timestamp on the next line would still match —
+/// the same unavoidable fused-line behavior NyaTerm's last-line exclusion
+/// tolerates — but that banner shape does not occur in practice.
+const DECL_USERNAME_PROMPT_DEFAULT: &str = r#"(?i)(?:user\s*name|username|login|logon|account|userid|user\s*id|用户名|帐号|账号|登录|登入)\s*[:：>]\s*$"#;
 const DECL_PASSWORD_PROMPT_DEFAULT: &str =
-    r#"(?i)(?:password|passwd|passcode|passphrase|pin|密码|口令)\s*[:：>]"#;
+    r#"(?i)(?:password|passwd|passcode|passphrase|pin|密码|口令)\s*[:：>]\s*$"#;
 const DECL_SUCCESS_DEFAULT: &str = r#"[$#>]\s*$"#;
 const DECL_FAILURE_DEFAULT: &str =
     r#"(?i)(login\s+incorrect|authentication\s+failed|access\s+denied|密码错误|认证失败)"#;
@@ -1033,11 +1047,18 @@ fn spawn_pump(
                     .await;
                     // Declarative supervision first: failure takes precedence
                     // over answering further prompts (NyaTerm order), so a
-                    // rejection banner never feeds the expect engine.
+                    // rejection banner never feeds the expect engine. The
+                    // watch matches anchored success/failure regexes on this
+                    // text, so ANSI escapes are stripped first (NyaTerm's
+                    // `strip_ansi_escapes`): a colored `$ ` prompt still hits
+                    // `[$#>]\s*$`. Only the matching window is cleaned — the
+                    // published payload above stays the raw bytes.
                     let watch_event = auto_login
                         .as_mut()
                         .and_then(|runtime| runtime.watch.as_mut())
-                        .and_then(|watch| watch.observe(&chunk_text, answered_stages));
+                        .and_then(|watch| {
+                            watch.observe(&strip_ansi_control_sequences(&chunk_text), answered_stages)
+                        });
                     match watch_event {
                         // D6: the event carries the outcome only — never the
                         // matched text, never an answer.
@@ -1535,6 +1556,75 @@ mod tests {
         let mut watch = plan.watch.expect("watch present");
         assert_eq!(
             watch.observe("dev@host:~$ ", true),
+            Some(WatchEvent::Success)
+        );
+    }
+
+    #[test]
+    fn declarative_default_prompts_ignore_last_login_banner() {
+        // E1 回归：行尾锚定后，`Last login: <time>` MOTD 横幅不再命中内置
+        // 用户名提示（旧行为会把用户名提前打进远端并回显）。
+        let plan = parse_auto_login(&decl_spec("dev", "pw", 0))
+            .expect("declarative parse")
+            .expect("enabled");
+        let mut engine = triggers::TriggerEngine::new(
+            plan.triggers.clone(),
+            triggers::CommandPlaceholders::new("host", "", 23, "host"),
+        );
+        assert!(
+            engine
+                .observe(
+                    "Welcome to host\r\nLast login: 10.0.0.1 on Mon Sep 24 22:00:00 2026\r\n",
+                    1_000
+                )
+                .is_none(),
+            "MOTD banner must not answer the username prompt"
+        );
+        // 横幅之后的真实 login: 提示照常命中（跨 chunk 场景：引擎按 chunk
+        // 归一化拼接，提示符在缓冲末尾即活提示）。
+        let decision = engine.observe("login: ", 1_001).expect("username prompt");
+        assert_eq!(decision.segments, vec![(b"dev\r".to_vec(), 0)]);
+        // 内置密码提示同源修复：帮助文本中的 "password:" 子串不再误发密码。
+        let plan = parse_auto_login(&decl_spec("", "pw", 0))
+            .expect("declarative parse")
+            .expect("enabled");
+        let mut engine = triggers::TriggerEngine::new(
+            plan.triggers,
+            triggers::CommandPlaceholders::new("host", "", 23, "host"),
+        );
+        assert!(
+            engine
+                .observe("Type 'run password: reset' to rotate it\r\n", 1_000)
+                .is_none(),
+            "embedded 'password:' text must not answer the password stage"
+        );
+        let decision = engine
+            .observe("Password: ", 1_001)
+            .expect("password prompt");
+        assert_eq!(decision.kind, triggers::TriggerKind::Secret);
+    }
+
+    #[test]
+    fn declarative_watch_strips_ansi_before_matching_success() {
+        // E2 回归：带颜色的 `$ ` 成功提示（ANSI 包裹）必须先剥离再匹配
+        // （NyaTerm strip_ansi_escapes 同语义；未剥离时默认成功正则不命中）。
+        let colored = "\x1b[32mdev@host:~$ \x1b[0m";
+        // 旧行为锚定：原始转义字节尾随 `m`，默认成功正则不命中。
+        let mut plan = parse_auto_login(&decl_spec("dev", "pw", 0))
+            .expect("declarative parse")
+            .expect("enabled");
+        let mut watch = plan.watch.take().expect("watch present");
+        assert!(
+            watch.observe(colored, true).is_none(),
+            "raw escapes must not match"
+        );
+        // 读循环喂给 watch 前剥离（publish 的透传字节不动）。
+        let mut plan = parse_auto_login(&decl_spec("dev", "pw", 0))
+            .expect("declarative parse")
+            .expect("enabled");
+        let mut watch = plan.watch.take().expect("watch present");
+        assert_eq!(
+            watch.observe(&strip_ansi_control_sequences(colored), true),
             Some(WatchEvent::Success)
         );
     }
