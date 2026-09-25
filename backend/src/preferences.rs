@@ -471,6 +471,15 @@ pub fn load_preferences(data_dir: &Path) -> Value {
     Value::Object(prefs)
 }
 
+/// RDP is intentionally opt-in until the real-server validation matrix is complete.
+/// Missing, malformed, or false values fail closed.
+pub fn rdp_experimental_enabled(data_dir: &Path) -> bool {
+    load_preferences(data_dir)
+        .get("rdp_experimental_enabled")
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
 /// Merges the allowlisted keys present in `params` into the store and persists
 /// atomically (tmp + rename). Returns the stored preferences.
 pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String> {
@@ -936,6 +945,24 @@ mod tests {
         let prefs = load_preferences(data_dir.path());
         assert!(prefs.get("startup_commands").is_some());
         assert_eq!(prefs["downloadDir"], "/tmp/x");
+    }
+
+    #[test]
+    fn rdp_experimental_gate_defaults_closed_and_only_accepts_true() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        assert!(!rdp_experimental_enabled(data_dir.path()));
+        save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_experimental_enabled": true }),
+        )
+        .expect("enable experimental RDP");
+        assert!(rdp_experimental_enabled(data_dir.path()));
+        save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_experimental_enabled": false }),
+        )
+        .expect("disable experimental RDP");
+        assert!(!rdp_experimental_enabled(data_dir.path()));
     }
 
     #[test]

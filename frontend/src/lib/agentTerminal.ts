@@ -37,6 +37,15 @@ export function agentPromptCommandReadOnly(prompt: Pick<AgentPromptPayload, "sou
   return prompt.source === "mcp" && prompt.tool === "docker_action";
 }
 
+/** MCP confirmations are process-level and arrive without a terminal session;
+ * legacy SSH prompts remain isolated to the active SSH session. */
+export function acceptsAgentPrompt(
+  prompt: Pick<AgentPromptPayload, "source" | "tool"> & { sessionId?: string },
+  activeSessionId: string | undefined,
+): boolean {
+  return (prompt.source === "mcp" && !prompt.sessionId) || prompt.sessionId === activeSessionId;
+}
+
 export interface AgentNoticePayload {
   sessionId: string;
   tool: string;
@@ -74,6 +83,16 @@ export function enqueueAgentPrompt<Q extends { challengeId: string }>(
 ): Q[] {
   if (queue.some((item) => item.challengeId === payload.challengeId)) return [...queue];
   return [...queue, payload];
+}
+
+/** Routes a prompt into the approval queue only when it belongs to the active
+ * SSH session or is an MCP process-level confirmation with no session id. */
+export function enqueueAcceptedAgentPrompt<Q extends { challengeId: string; source?: "mcp"; sessionId?: string; tool: string }>(
+  queue: readonly Q[],
+  payload: Q,
+  activeSessionId: string | undefined,
+): Q[] {
+  return acceptsAgentPrompt(payload, activeSessionId) ? enqueueAgentPrompt(queue, payload) : [...queue];
 }
 
 /** 移除指定 challengeId 的挑战；未命中返回等价浅拷贝。 */

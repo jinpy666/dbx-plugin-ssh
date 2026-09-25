@@ -181,7 +181,7 @@ import { formatBytes, formatRate } from "./lib/format";
 import { mergeTransferProgress, transferCancelReason, type TransferPhase } from "./lib/transferProgress";
 import { DBX_POPOVER, resolveAppearance, TERMINAL_ANSI, type DbxPluginAppearanceInput } from "./lib/appearance";
 import { isDbxPluginTheme, onHostThemeChange, themeToAppearance } from "./lib/hostTheme";
-import { AGENT_MODES, agentPromptCommandReadOnly, approvalRemainingSecs, buildAgentResolveBody, dropAgentPrompt, enqueueAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload, type AgentTerminalMode } from "./lib/agentTerminal";
+import { AGENT_MODES, agentPromptCommandReadOnly, approvalRemainingSecs, buildAgentResolveBody, dropAgentPrompt, enqueueAcceptedAgentPrompt, enqueueAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload, type AgentTerminalMode } from "./lib/agentTerminal";
 import { purposeKeyLabel, sanitizeTriagePayload, severityClass, type TriageResult } from "./lib/alertTriage";
 import {
   compileRules,
@@ -3987,8 +3987,15 @@ function handleEvent(event: DbxPluginEvent) {
     }
     return;
   }
-  if (event.method === "ssh/agent/prompt" && event.params.sessionId === session.value?.sessionId) {
-    agentPromptQueue.value = enqueueAgentPrompt(agentPromptQueue.value, event.params as unknown as AgentPromptPayload);
+  // MCP confirm-mode prompts are process-level (no sessionId), while ordinary
+  // SSH prompts must remain isolated to the active SSH session.
+  if (event.method === "ssh/agent/prompt") {
+    const prompt = event.params as unknown as AgentPromptPayload;
+    const nextQueue = enqueueAcceptedAgentPrompt(agentPromptQueue.value, prompt, session.value?.sessionId);
+    if (nextQueue.length === agentPromptQueue.value.length && !agentPromptQueue.value.some((item) => item.challengeId === prompt.challengeId)) {
+      return;
+    }
+    agentPromptQueue.value = nextQueue;
     return;
   }
   if (event.method === "ssh/agent/notice" && event.params.sessionId === session.value?.sessionId) {

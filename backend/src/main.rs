@@ -707,6 +707,7 @@ impl Plugin {
             // 确认窗、remember 记入 rdp-known-certs.json）；剪贴板 text-only
             // + 16 MiB 上限；认证类失败不自动重连。
             "rdp/start" => {
+                rdp_start_gate(&plugin_data_dir())?;
                 let request: rdp_session::RdpStartRequest = parse(params)?;
                 self.runtime
                     .block_on(self.rdp.start(request, emitter.clone(), &plugin_data_dir()))
@@ -2308,6 +2309,17 @@ fn resolve_plugin_data_dir(lookup: impl Fn(&str) -> Option<OsString>) -> PathBuf
         })
 }
 
+/// RDP is experimental and must be explicitly enabled in persisted preferences;
+/// keep this backend gate independent of UI visibility so direct RPC cannot
+/// bypass the release posture.
+fn rdp_start_gate(data_dir: &std::path::Path) -> Result<(), String> {
+    if preferences::rdp_experimental_enabled(data_dir) {
+        Ok(())
+    } else {
+        Err("rdp/start is disabled until experimental RDP is explicitly enabled".to_string())
+    }
+}
+
 fn plugin_data_dir() -> PathBuf {
     // Closure (not the generic `var_os` fn item) so the HRTB bound unifies.
     let requested = resolve_plugin_data_dir(|key| std::env::var_os(key));
@@ -2446,6 +2458,18 @@ fn spawn_terminal_input_counter() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rdp_start_gate_refuses_by_default_and_allows_explicit_experimental_opt_in() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        assert!(rdp_start_gate(data_dir.path()).is_err());
+        preferences::save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_experimental_enabled": true }),
+        )
+        .expect("enable experimental RDP");
+        assert!(rdp_start_gate(data_dir.path()).is_ok());
+    }
 
     #[test]
     fn trigger_validation_reports_format_without_secret_content() {

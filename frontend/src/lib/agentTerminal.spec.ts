@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_MODES,
   approvalRemainingSecs,
+  acceptsAgentPrompt,
   agentPromptCommandReadOnly,
   buildAgentResolveBody,
   dropAgentPrompt,
   enqueueAgentPrompt,
+  enqueueAcceptedAgentPrompt,
   findAgentPrompt,
   REMEMBERED_COMMAND_LINE_LIMIT,
   REMEMBERED_COMMAND_LIST_LIMIT,
@@ -39,6 +41,28 @@ describe("agent terminal mode contract", () => {
     expect(approvalRemainingSecs(payload, 2_000_000)).toBe(0);
     // 未到期时仍返回微小的正剩余（0.001s），前端 250ms tick 会立即收口到 0。
     expect(approvalRemainingSecs(payload, 999_999)).toBeCloseTo(0.001, 6);
+  });
+});
+
+describe("agent prompt routing", () => {
+  const activeSessionId = "ssh-session";
+
+  it("queues an MCP Docker confirmation without sessionId while preserving SSH session isolation", () => {
+    const mcpDocker = {
+      challengeId: "docker-1",
+      source: "mcp" as const,
+      tool: "docker_action",
+      command: "docker kill d4a7c9f1e2b3",
+      risk: "elevated" as const,
+      requestedAt: 1000,
+      timeoutSecs: 120,
+    };
+    expect(enqueueAcceptedAgentPrompt([], mcpDocker, activeSessionId)).toEqual([mcpDocker]);
+    expect(acceptsAgentPrompt({ source: "mcp", tool: "docker_action" }, activeSessionId)).toBe(true);
+    expect(acceptsAgentPrompt({ source: "mcp", sessionId: "other-session", tool: "docker_action" }, activeSessionId)).toBe(false);
+    expect(acceptsAgentPrompt({ sessionId: activeSessionId, tool: "ssh_exec" }, activeSessionId)).toBe(true);
+    expect(acceptsAgentPrompt({ sessionId: "other-session", tool: "ssh_exec" }, activeSessionId)).toBe(false);
+    expect(acceptsAgentPrompt({ tool: "ssh_exec" }, activeSessionId)).toBe(false);
   });
 });
 
