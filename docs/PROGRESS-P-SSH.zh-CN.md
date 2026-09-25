@@ -3897,3 +3897,10 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **动机**：M17-M19 的 MCP 工具面改动（参数校验、编码家族、quick sudo 等）此前只有两条覆盖通道——其它 CI job 的离线 stdio 段（无真服务器），与本机 workbench 面的真容器联调；CI 里"独立 stdio 进程 × 真容器"的组合（`ssh_test_connection` browse-first、SFTP 全家族、run_bg/task_status、metrics、上传下载字节回环、live enum/pipelining 尾段）零覆盖。
 - **改动**：`.github/workflows/ci.yml` ssh-smoke job 在既有两条 smoke 命令后追加 `scripts/smoke_mcp.py` 在线段（`--host 127.0.0.1 --port 2222 --username sshuser`，复用 job 内一次性测试容器凭据；密码经步骤 env `DBX_SSH_SMOKE_PASSWORD` 注入而非命令行参数，避免 ps 泄露）。脚本本身零改动。
 - **验证**：YAML 解析通过（PyYAML 本机缺失，用系统 ruby YAML 全文解析 OK）；Mac 本机真容器（dbx-ssh-test:2222）以 debug sidecar 跑通 `smoke_mcp.py --binary <debug> --host 127.0.0.1` 全绿——`live round-trip ok (test/browse/exec/background/family/metrics/transfer)`、`live pipelining ok`、`MCP smoke: all green`，exit 0。
+
+## M22 收口巡检补记（2026-09-26）
+
+- **M20/M21 smoke 批次 CI 复验全绿**：run 36168745204 success（SSH container smoke 2m46s，watcher 组在 CI 真容器通过，PR #98 同代码 push CI 36168736222 同绿）。此前 36165580277 / 36166909296 的失败（watch/start 报 "File watching is only available on desktop"）根因为 headless runner 的 `can_save_local` 探测误判，`DBX_SSH_LOCAL_SAVE=1`（3ba0e574，smoke 与 DBX_SSH_DOWNLOAD_DIR 同点注入）覆盖修复。
+- **M22-A**（parity-np22-ci-mcp-smoke c0581681）：ssh-smoke job 追加 smoke_mcp.py 在线段（MCP stdio 独立进程真容器全链；密码走步骤 env DBX_SSH_SMOKE_PASSWORD 注入）——M17-M19 的 MCP 工具面由此获得独立 stdio 进程口径的 CI 覆盖。
+- **M22-B**（parity-np22-protocol-audit e168c41f）：协议-实现对账审计（报告 docs/AUDIT-PROTOCOL-IMPL.zh-CN.md）——12 条差异修文档 8 处（watch/* 族补协议专节、递归下载 latin-1 段批次标注、FEATURE_PARITY 方法数重清点 68→182 等）；实现层仅登记 4 条待人工确认，最重要 R1：工作台与 MCP 两个 sftp/exists 面对 LSTAT 错误的语义不一致（M18「权限错误绝不误报 false」契约只覆盖 MCP 面）。
+- M22 合并后 CI run 36174063661 进行中（本补记时点）。
