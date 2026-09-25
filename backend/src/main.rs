@@ -63,7 +63,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 
-use crate::model::{path_from_sftp_uri, SessionOpenRequest, StoredConnection, MAX_TRANSFER_SIZE};
+use crate::model::{
+    path_from_sftp_uri, RuntimeEndpoint, SessionOpenRequest, StoredConnection, MAX_TRANSFER_SIZE,
+};
 use crate::ssh::{connection_id_param, filesystem_path, PromptDecision, SshRuntime};
 
 struct Plugin {
@@ -300,19 +302,29 @@ impl Plugin {
                 }))
             }
             "connection/test" => {
-                let connection = StoredConnection::from_lifecycle_params(&params)?;
-                // 协议路由守卫（M9）：telnet/vnc 连接由工作台驱动各自的
-                // 会话协议；SSH 握手对它们是无意义的错误拨号（还会把明文
-                // TELNET banner 误报成握手失败）。这里给出指路错误。
-                if connection.protocol != "ssh" {
-                    return Ok(json!({
-                        "success": false,
-                        "message": format!(
-                            "This connection uses the {} protocol; open it from the workbench session toolbar instead of testing it as SSH.",
-                            connection.protocol
-                        ),
-                    }));
+                let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
+                if endpoint.protocol == "telnet" || endpoint.protocol == "vnc" {
+                    let reachable = self
+                        .runtime
+                        .block_on(tcp_probe(&endpoint.runtime_host, endpoint.runtime_port));
+                    return Ok(match reachable {
+                        Ok(()) => json!({
+                            "success": true,
+                            "message": format!(
+                                "{} TCP endpoint {}:{} is reachable",
+                                endpoint.protocol, endpoint.host, endpoint.port
+                            ),
+                        }),
+                        Err(error) => json!({
+                            "success": false,
+                            "message": format!(
+                                "{} TCP endpoint {}:{} is unreachable: {error}",
+                                endpoint.protocol, endpoint.host, endpoint.port
+                            ),
+                        }),
+                    });
                 }
+                let connection = StoredConnection::from_lifecycle_params(&params)?;
                 let operation_id = operation_id(&params);
                 self.runtime.block_on(self.ssh.test_connection(
                     &connection,
@@ -324,18 +336,11 @@ impl Plugin {
                 )
             }
             "connection/connect" => {
-                let connection = StoredConnection::from_lifecycle_params(&params)?;
-                // 协议路由守卫（M9）：同 connection/test——telnet/vnc 连接
-                // 不进 SSH 连接池；工作台按 protocol 路由到各自会话。
-                if connection.protocol != "ssh" {
-                    return Ok(json!({
-                        "success": false,
-                        "message": format!(
-                            "This connection uses the {} protocol; open it from the workbench session toolbar instead of connecting it as SSH.",
-                            connection.protocol
-                        ),
-                    }));
+                let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
+                if endpoint.protocol == "telnet" || endpoint.protocol == "vnc" {
+                    return Ok(json!({ "success": true }));
                 }
+                let connection = StoredConnection::from_lifecycle_params(&params)?;
                 self.ssh.store_connection(connection)?;
                 Ok(json!({ "success": true }))
             }
@@ -347,6 +352,10 @@ impl Plugin {
                     .ok_or("Missing connection id")?;
                 self.runtime
                     .block_on(self.ssh.disconnect_connection(connection_id))?;
+                self.runtime
+                    .block_on(self.telnet.close_connection(connection_id));
+                self.runtime
+                    .block_on(self.vnc.close_connection(connection_id));
                 Ok(json!({ "success": true }))
             }
             "ssh/session/open" => {
@@ -681,6 +690,10 @@ impl Plugin {
                 self.runtime.block_on(self.vnc.close(session_id))?;
                 Ok(json!({ "success": true }))
             }
+            "vnc/replay" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.vnc.replay(session_id, emitter))
+            }
             "vnc/list" => Ok(self.runtime.block_on(self.vnc.list())),
             // RDP 远程桌面会话（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1
             // vendored IronRDP 链（0.17 lockstep）。范围（评审定案，见
@@ -749,6 +762,10 @@ impl Plugin {
                 let session_id = required_string(&params, "sessionId")?;
                 self.runtime.block_on(self.rdp.close(session_id))?;
                 Ok(json!({ "success": true }))
+            }
+            "rdp/replay" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.rdp.replay(session_id, emitter))
             }
             "rdp/list" => Ok(self.runtime.block_on(self.rdp.list())),
             "workbench/close" => {
@@ -2203,6 +2220,20 @@ fn bounded_bytes(params: &Value, key: &str, default: usize) -> usize {
 
 /// Reads an optional non-negative integer parameter, falling back to the
 /// default when the key is absent or not a `u64` (negative/invalid).
+async fn tcp_probe(host: &str, port: u16) -> Result<(), String> {
+    const TCP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(
+        TCP_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(format!("connect {host}:{port}: {error}")),
+        Err(_) => Err(format!("connect {host}:{port} timed out after 10s")),
+    }
+}
+
 fn optional_u64(params: &Value, key: &str, default: u64) -> u64 {
     params.get(key).and_then(Value::as_u64).unwrap_or(default)
 }

@@ -102,6 +102,64 @@ impl SudoSource {
     }
 }
 
+/// Logical connection identity plus the host-provided runtime dial target.
+/// Non-SSH saved connections use this small lifecycle shape instead of the
+/// SSH credential parser; the logical endpoint remains the UI identity while
+/// TCP traffic always targets `runtime_host:runtime_port`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeEndpoint {
+    pub connection_id: String,
+    pub protocol: String,
+    pub host: String,
+    pub port: u16,
+    pub runtime_host: String,
+    pub runtime_port: u16,
+}
+
+impl RuntimeEndpoint {
+    pub fn from_lifecycle_params(params: &Value) -> Result<Self, String> {
+        let connection = params
+            .get("connection")
+            .and_then(Value::as_object)
+            .ok_or("Missing connection payload")?;
+        let connection_id = string_field(connection, "id")?;
+        let host = validate_host_field(string_field(connection, "host")?)?;
+        let port = connection
+            .get("port")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or("Connection port must be between 1 and 65535")?;
+        let runtime = params.get("runtime").and_then(Value::as_object);
+        let runtime_host = optional_string(runtime, "host");
+        let runtime_port = runtime
+            .and_then(|value| value.get("port"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(port);
+        let protocol = optional_string(
+            connection.get("external_config").and_then(Value::as_object),
+            "protocol",
+        );
+        Ok(Self {
+            connection_id,
+            protocol: match protocol.as_str() {
+                "telnet" | "vnc" => protocol,
+                _ => "ssh".to_string(),
+            },
+            host: host.clone(),
+            port,
+            runtime_host: if runtime_host.is_empty() {
+                host
+            } else {
+                runtime_host
+            },
+            runtime_port,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredConnection {
     pub id: String,
@@ -115,10 +173,9 @@ pub struct StoredConnection {
     pub runtime_host: String,
     pub runtime_port: u16,
     pub username: String,
-    /// 宿主连接表单的 protocol 字段（`external_config.protocol`）：`ssh`
-    /// （缺省）/`telnet`/`vnc`。telnet/vnc 连接由工作台路由到各自的会话
-    /// 视图，sidecar 侧仅解析并透传记录（连接测试对非 SSH 协议返回明确
-    /// 指路错误，而不是拿着 SSH 参数去拨一个 TELNET 端口）。
+    /// Retained for the SSH/MCP parser's forward-compatible lifecycle model;
+    /// non-SSH routing is handled by [`RuntimeEndpoint`] before SSH parsing.
+    #[allow(dead_code)]
     pub protocol: String,
     pub password: String,
     pub authentication: AuthenticationMethod,
@@ -296,7 +353,6 @@ impl JumpHost {
             runtime_host: self.host.clone(),
             runtime_port: self.port,
             username: self.username.clone(),
-            // 跳板合成连接恒为 SSH（JumpHost 只描述 SSH 跳板）。
             protocol: "ssh".to_string(),
             password: self.password.clone(),
             authentication: AuthenticationMethod::from_method_name(&self.authentication),
@@ -375,6 +431,14 @@ impl StoredConnection {
             .filter(|value| *value > 0)
             .unwrap_or(port);
         let username = string_field(connection, "username")?;
+        let protocol = optional_string(
+            connection.get("external_config").and_then(Value::as_object),
+            "protocol",
+        );
+        let protocol = match protocol.as_str() {
+            "telnet" | "vnc" => protocol,
+            _ => "ssh".to_string(),
+        };
         let mut password = connection
             .get("password")
             .and_then(Value::as_str)
@@ -382,14 +446,6 @@ impl StoredConnection {
             .to_string();
         let authentication = AuthenticationMethod::from_connection(connection)?;
         let external_config = connection.get("external_config").and_then(Value::as_object);
-        // 协议字段（manifest `protocol`，binding=config）：未知/缺省值一律
-        // 归一化为 ssh，避免宿主侧手改配置把 sidecar 引入未定义协议。
-        let protocol_raw = optional_string(external_config, "protocol");
-        let protocol = if protocol_raw == "telnet" || protocol_raw == "vnc" {
-            protocol_raw
-        } else {
-            "ssh".to_string()
-        };
         let connection_secrets = connection
             .get("connection_secrets")
             .and_then(Value::as_object);
@@ -1449,6 +1505,27 @@ mod tests {
         );
         assert_eq!(connection.private_key_path, "C:/keys/id_ed25519");
         assert_eq!(connection.private_key_passphrase, "key-secret");
+    }
+
+    #[test]
+    fn runtime_endpoint_parses_non_ssh_lifecycle_without_ssh_credentials() {
+        let endpoint = RuntimeEndpoint::from_lifecycle_params(&serde_json::json!({
+            "connection": {
+                "id": "telnet-tunnel",
+                "host": "logical.telnet.internal",
+                "port": 23,
+                "external_config": { "protocol": "telnet" }
+            },
+            "runtime": { "host": "127.0.0.1", "port": 39123 }
+        }))
+        .expect("Telnet lifecycle endpoint must not require SSH credentials");
+
+        assert_eq!(endpoint.connection_id, "telnet-tunnel");
+        assert_eq!(endpoint.protocol, "telnet");
+        assert_eq!(endpoint.host, "logical.telnet.internal");
+        assert_eq!(endpoint.port, 23);
+        assert_eq!(endpoint.runtime_host, "127.0.0.1");
+        assert_eq!(endpoint.runtime_port, 39123);
     }
 
     #[test]

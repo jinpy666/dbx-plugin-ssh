@@ -52,7 +52,7 @@
 //! `rdp/frame/{sessionId}` binary channel (same 44-byte patch header as
 //! `vnc/frame`, see docs/PROTOCOL.zh-CN.md § VNC 帧补丁) — no pending queue.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -1232,6 +1232,8 @@ enum RdpCommand {
     Close,
 }
 
+const RDP_REPLAY_FRAME_LIMIT: usize = 8;
+
 struct RdpSessionEntry {
     workbench_id: String,
     host: String,
@@ -1254,6 +1256,9 @@ struct RdpSessionEntry {
     /// Monotonic across generations so the frontend can drop out-of-order
     /// patches after a reconnect.
     frame_sequence: AtomicU64,
+    /// Recent patches are enough to repaint a remounted webview until the
+    /// server emits its next damage; bounded to avoid retaining desktop video.
+    replay_frames: tokio::sync::Mutex<VecDeque<Vec<u8>>>,
     close_requested: AtomicBool,
     /// Sender of the *current* generation's command channel; `None` while
     /// dialling/reconnecting (input fails fast instead of queueing).
@@ -1353,6 +1358,7 @@ impl RdpSessionRuntime {
             created_at_secs: unix_now_secs(),
             generation: Arc::new(AtomicU64::new(0)),
             frame_sequence: AtomicU64::new(0),
+            replay_frames: tokio::sync::Mutex::new(VecDeque::new()),
             close_requested: AtomicBool::new(false),
             command_sender: tokio::sync::Mutex::new(None),
             clipboard_stage: Arc::new(ClipboardStage::default()),
@@ -1524,6 +1530,16 @@ impl RdpSessionRuntime {
                 .then_with(|| a["sessionId"].as_str().cmp(&b["sessionId"].as_str()))
         });
         json!({ "sessions": list })
+    }
+
+    /// Re-emits the bounded recent patch sequence after a webview remount.
+    pub async fn replay(&self, session_id: &str, emitter: &PluginEmitter) -> Result<Value, String> {
+        let entry = self.session(session_id).await?;
+        let frames = entry.replay_frames.lock().await;
+        for frame in frames.iter() {
+            publish_frame(session_id, frame, emitter);
+        }
+        Ok(json!({ "frameCount": frames.len(), "complete": true }))
     }
 
     /// Certificate-prompt resolution (`rdp/certificate/resolve`).
@@ -1824,7 +1840,15 @@ async fn handle_output_event(
                 height,
                 sequence,
             ) {
-                Ok(frame) => publish_frame(session_id, &frame, emitter),
+                Ok(frame) => {
+                    let mut replay = entry.replay_frames.lock().await;
+                    replay.push_back(frame.clone());
+                    if replay.len() > RDP_REPLAY_FRAME_LIMIT {
+                        replay.pop_front();
+                    }
+                    drop(replay);
+                    publish_frame(session_id, &frame, emitter);
+                }
                 Err(error) => {
                     // A malformed patch is visual-only damage (the frame is
                     // dropped); the engine keeps running. NyaTerm logs and

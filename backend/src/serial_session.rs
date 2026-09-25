@@ -670,6 +670,7 @@ impl SerialSessionRuntime {
                     "workbenchId": session.workbench_id,
                     "port": session.port_name,
                     "baudRate": session.baud_rate,
+                    "binaryInput": true,
                     "createdAt": session.created_at_secs,
                 })
             })

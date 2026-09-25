@@ -4046,7 +4046,6 @@ fn stored_connection_from_arguments(arguments: &Value) -> Result<StoredConnectio
         runtime_host: host.to_string(),
         runtime_port: port,
         username: username.to_string(),
-        // MCP inline dial 直拨 SSH；协议字段随表单协议化统一引入。
         protocol: "ssh".to_string(),
         password,
         authentication,

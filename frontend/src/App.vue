@@ -223,7 +223,7 @@ import { canKillProcess, sortProcessRows, type ProcessSortKey } from "./lib/proc
 import { distroBadge, type DistroBadge } from "./lib/distroBadge";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel, sanitizeAuditEntries, type AuditEntry } from "./lib/auditLog";
 import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
-import { pickLiveSessionForReattach, type SessionSummary } from "./lib/sessionRestore";
+import { pickLiveSessionForReattach, pickProtocolSessionForReattach, type SessionSummary } from "./lib/sessionRestore";
 import { toolbarTintStyle } from "./lib/toolbarTint";
 import { createGhostClickGuard } from "./lib/ghostClickGuard";
 import { createRequestEpoch } from "./lib/requestEpoch";
@@ -462,6 +462,11 @@ interface WorkbenchState {
   sftpNameWidth?: number | null;
   /** 列配置版本标记：六列默认（issue #35）上线后的一次性迁移，老偏好重置为全开。 */
   columnsV2?: boolean;
+}
+
+interface RuntimeEndpoint {
+  host?: string;
+  port?: number;
 }
 
 interface ConnectionSummary {
@@ -1639,6 +1644,15 @@ const connectionId = computed(() => normalizeConnectionText(hostContext.value.co
 const fallbackWorkbenchId = randomUUID();
 const workbenchId = computed(() => resolveWorkbenchId(hostContext.value, fallbackWorkbenchId));
 const restored = computed(() => hostContext.value.restored === true);
+const runtimeEndpoint = computed<RuntimeEndpoint>(() => {
+  const value = hostContext.value.runtime;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  return {
+    host: normalizeConnectionText(raw.host),
+    port: normalizeConnectionPort(raw.port),
+  };
+});
 const connection = computed<ConnectionSummary>(() => {
   const value = hostContext.value.connection;
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -4503,9 +4517,12 @@ async function startTelnetSession(options: TelnetConnectOptions): Promise<boolea
       : undefined;
   try {
     const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("telnet/start", {
+      connectionId: connectionId.value || undefined,
       workbenchId: workbenchId.value,
       host: options.host,
       port: options.port,
+      runtimeHost: runtimeEndpoint.value.host || options.host,
+      runtimePort: runtimeEndpoint.value.port || options.port,
       enterMode: options.enterMode,
       backspaceMode: options.backspaceMode,
       cols: terminal?.cols || 120,
@@ -4558,9 +4575,12 @@ async function startVncSession(options: VncConnectOptions): Promise<boolean> {
   if (vncSession.value && vncState.value !== "closed") await closeVncSession();
   try {
     const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("vnc/start", {
+      connectionId: connectionId.value || undefined,
       workbenchId: workbenchId.value,
       host: options.host,
       port: options.port,
+      runtimeHost: runtimeEndpoint.value.host || options.host,
+      runtimePort: runtimeEndpoint.value.port || options.port,
       scaleMode: options.scaleMode,
       ...(options.password ? { password: options.password } : {}),
     });
@@ -10976,6 +10996,9 @@ async function initialize() {
     terminalError.value = t("restartDisconnected");
     return;
   }
+  // Webview 重建必须先按 workbenchId 接回所有非 SSH 协议会话；这些会话不
+  // 写 SSH workbench state，若先走 openSession 会重新创建 Telnet/VNC/RDP/Serial。
+  if (await reattachProtocolSession()) return;
   if (typeof state.sessionId === "string" && state.sessionId) await attachSession(state.sessionId);
   else {
     // 宿主切 tab / 左侧菜单重开可能整体重建工作台 webview。只恢复
@@ -11013,6 +11036,67 @@ async function findReattachSession(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+type ProtocolSessionKind = "telnet" | "vnc" | "rdp" | "serial";
+interface ProtocolSessionSummary extends SessionSummary {
+  host?: string;
+  port?: number;
+  baudRate?: number;
+  binaryInput?: boolean;
+}
+
+async function reattachProtocolSession(): Promise<boolean> {
+  const lists: Array<{ kind: ProtocolSessionKind; method: string }> = [
+    { kind: "telnet", method: "telnet/list" },
+    { kind: "vnc", method: "vnc/list" },
+    { kind: "rdp", method: "rdp/list" },
+    { kind: "serial", method: "serial/list" },
+  ];
+  const candidates = await Promise.all(lists.map(async ({ kind, method }) => {
+    try {
+      const result = await window.dbxPlugin.invoke<{ sessions?: ProtocolSessionSummary[] }>(method, {}, { timeoutMs: 10_000 });
+      const sessionId = pickProtocolSessionForReattach(result?.sessions, workbenchId.value);
+      const session = result?.sessions?.find((entry) => entry?.sessionId === sessionId);
+      return session ? { kind, session } : null;
+    } catch {
+      return null;
+    }
+  }));
+  const live = candidates
+    .filter((candidate): candidate is { kind: ProtocolSessionKind; session: ProtocolSessionSummary } => candidate !== null)
+    .sort((left, right) => (right.session.createdAt ?? 0) - (left.session.createdAt ?? 0))[0];
+  if (!live) return false;
+
+  if (live.kind === "telnet") {
+    telnetSession.value = { sessionId: live.session.sessionId, host: live.session.host || "", port: live.session.port || 23 };
+    telnetState.value = "running";
+    telnetLastSequence.value = 0;
+    telnetPendingFrames.clear();
+    await window.dbxPlugin.invoke<ReplayResult>("telnet/replay", { sessionId: live.session.sessionId, afterSequence: 0 });
+  } else if (live.kind === "vnc") {
+    vncSession.value = { sessionId: live.session.sessionId, host: live.session.host || "", port: live.session.port || 5900 };
+    vncState.value = "running";
+    await window.dbxPlugin.invoke("vnc/replay", { sessionId: live.session.sessionId });
+  } else if (live.kind === "rdp") {
+    rdpSession.value = { sessionId: live.session.sessionId, host: live.session.host || "", port: live.session.port || 3389 };
+    rdpState.value = { state: "running", error: "", errorKind: "", attempt: 0, maxAttempts: 0 };
+    await window.dbxPlugin.invoke("rdp/replay", { sessionId: live.session.sessionId });
+  } else {
+    serialSession.value = {
+      sessionId: live.session.sessionId,
+      port: live.session.port ? String(live.session.port) : "",
+      baudRate: live.session.baudRate || 115_200,
+    };
+    serialState.value = "running";
+    serialLastSequence.value = 0;
+    serialPendingFrames.clear();
+    serialBinaryInput.value = live.session.binaryInput !== false;
+    await window.dbxPlugin.invoke<ReplayResult>("serial/replay", { sessionId: live.session.sessionId, afterSequence: 0 });
+  }
+  await nextTick();
+  scheduleFit();
+  return true;
 }
 
 watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });

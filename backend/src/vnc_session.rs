@@ -291,10 +291,16 @@ impl ScaleMode {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VncStartRequest {
+    pub connection_id: Option<String>,
     pub workbench_id: String,
+    /// Logical endpoint retained for identity and display.
     pub host: String,
-    /// Defaults to 5900.
+    /// Logical endpoint port. Defaults to 5900.
     pub port: Option<u16>,
+    /// Runtime endpoint supplied by the host transport; it is the only target
+    /// dialed by the TCP pump. Missing fields fall back to the logical endpoint.
+    pub runtime_host: Option<String>,
+    pub runtime_port: Option<u16>,
     /// Absent/empty → RFB None security. Present → classic VNC-Auth
     /// (≤ 8 bytes). Held in `Zeroizing`, never logged.
     pub password: Option<String>,
@@ -389,9 +395,12 @@ enum VncCommand {
 }
 
 struct VncSessionEntry {
+    connection_id: Option<String>,
     workbench_id: String,
     host: String,
     port: u16,
+    runtime_host: String,
+    runtime_port: u16,
     password: Option<Zeroizing<String>>,
     scale_mode: ScaleMode,
     reconnect_attempts: u32,
@@ -457,6 +466,17 @@ impl VncSessionRuntime {
         if port == 0 {
             return Err("vnc/start: port must be between 1 and 65535".to_string());
         }
+        let runtime_host = request
+            .runtime_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(host.as_str())
+            .to_string();
+        let runtime_port = request.runtime_port.unwrap_or(port);
+        if runtime_port == 0 {
+            return Err("vnc/start: runtimePort must be between 1 and 65535".to_string());
+        }
         let password = request
             .password
             .filter(|password| !password.is_empty())
@@ -473,9 +493,12 @@ impl VncSessionRuntime {
             .min(MAX_RECONNECT_ATTEMPTS);
         let session_id = uuid::Uuid::new_v4().to_string();
         let entry = Arc::new(VncSessionEntry {
+            connection_id: request.connection_id.clone(),
             workbench_id: request.workbench_id.clone(),
             host: host.clone(),
             port,
+            runtime_host,
+            runtime_port,
             password,
             scale_mode,
             reconnect_attempts,
@@ -586,6 +609,20 @@ impl VncSessionRuntime {
 
     /// Closing a workbench tears down its VNC sessions (same contract as the
     /// local shells and Telnet); a webview reload never passes through here.
+    pub async fn close_connection(&self, connection_id: &str) {
+        let session_ids: Vec<String> = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|(_, entry)| entry.connection_id.as_deref() == Some(connection_id))
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in session_ids {
+            let _ = self.close(&session_id).await;
+        }
+    }
+
     pub async fn close_workbench(&self, workbench_id: &str) {
         let session_ids: Vec<String> = self
             .sessions
@@ -601,6 +638,21 @@ impl VncSessionRuntime {
     }
 
     /// Read-only inventory of live VNC sessions.
+    /// Re-emits the retained desktop as a full patch after a webview remount.
+    /// VNC frames are stateful images rather than terminal bytes, so one
+    /// complete repaint is the protocol's replay unit.
+    pub async fn replay(&self, session_id: &str, emitter: &PluginEmitter) -> Result<Value, String> {
+        let entry = self.session(session_id).await?;
+        let framebuffer = entry.framebuffer.lock().await;
+        let Some(desktop) = framebuffer.as_ref() else {
+            return Ok(json!({ "frameCount": 0, "complete": true }));
+        };
+        let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
+        let frame = desktop.full_frame_bytes(sequence)?;
+        publish_frame(session_id, &frame, emitter);
+        Ok(json!({ "frameCount": 1, "complete": true }))
+    }
+
     pub async fn list(&self) -> Value {
         let sessions = self.sessions.read().await;
         let mut list: Vec<Value> = sessions
@@ -608,9 +660,12 @@ impl VncSessionRuntime {
             .map(|(session_id, entry)| {
                 json!({
                     "sessionId": session_id,
+                    "connectionId": entry.connection_id,
                     "workbenchId": entry.workbench_id,
                     "host": entry.host,
                     "port": entry.port,
+                    "runtimeHost": entry.runtime_host,
+                    "runtimePort": entry.runtime_port,
                     "hasPassword": entry.password.is_some(),
                     "scaleMode": entry.scale_mode.as_str(),
                     "createdAt": entry.created_at_secs,
@@ -741,14 +796,17 @@ async fn run_generation(
     let password = entry.password.clone().unwrap_or_default();
     let stream = match tokio::time::timeout(
         CONNECT_TIMEOUT,
-        TcpStream::connect((entry.host.as_str(), entry.port)),
+        TcpStream::connect((entry.runtime_host.as_str(), entry.runtime_port)),
     )
     .await
     {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
             return GenerationEnd::Failed {
-                error: format!("connect {}:{}: {error}", entry.host, entry.port),
+                error: format!(
+                    "connect {}:{}: {error}",
+                    entry.runtime_host, entry.runtime_port
+                ),
                 retryable: true,
             };
         }
@@ -756,8 +814,8 @@ async fn run_generation(
             return GenerationEnd::Failed {
                 error: format!(
                     "connect {}:{} timed out after {}s",
-                    entry.host,
-                    entry.port,
+                    entry.runtime_host,
+                    entry.runtime_port,
                     CONNECT_TIMEOUT.as_secs()
                 ),
                 retryable: true,
