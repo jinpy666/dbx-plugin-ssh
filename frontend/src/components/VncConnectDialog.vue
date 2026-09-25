@@ -3,7 +3,7 @@
 // 纯 UI：不做连接编排，App.vue 持有会话状态；密码 ≤8 字符是 classic VNC
 // 认证的协议上限（sidecar 也会拒绝），明文安全提示与 Telnet 同款常驻。
 import { reactive, ref, watch } from "vue";
-import { TriangleAlert } from "@lucide/vue";
+import { TriangleAlert, X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
 import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";

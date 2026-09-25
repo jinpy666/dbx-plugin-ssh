@@ -4,6 +4,7 @@
 // 无串口支持时渲染手输提示，输入框保持可编辑（datalist 不限制自由输入）。
 // 纯 UI：不做连接编排，App.vue 持有会话状态。
 import { reactive, ref, watch } from "vue";
+import { X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
 import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
