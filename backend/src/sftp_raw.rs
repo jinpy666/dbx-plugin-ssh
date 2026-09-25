@@ -10,6 +10,12 @@
 //!
 //! 已知边界：attrs 只按 v3 布局解析（INIT 显式请求版本 3，RFC 要求服务器
 //! 回应版本不高于请求值）；本模块不发起任何 extended 请求（兼容模式友好）。
+//!
+//! 真机回归（CI ssh-smoke run 36146663371）：MKDIR 的 wire 布局必须携带
+//! ATTRS 字段（draft-ietf-secsh-filexfer-02 §5.2）——OpenSSH sftp-server
+//! 对缺失 attrs 的 MKDIR 直接 fatal 退出，客户端侧表现为通道 EOF
+//! （"SFTP raw read failed: early eof"）。测试模块的严格一致性桩
+//! （`test_support::validate_request`）把这一语义搬进了离线回归。
 
 use std::time::Duration;
 
@@ -122,6 +128,18 @@ pub fn build_string_request(kind: u8, id: u32, path: &[u8]) -> Vec<u8> {
 /// 构造 READDIR 请求。
 pub fn build_readdir(id: u32, handle: &[u8]) -> Vec<u8> {
     build_string_request(FXP_READDIR, id, handle)
+}
+
+/// 构造 MKDIR 请求：`type + id + 路径字符串 + ATTRS`。draft-ietf-secsh-filexfer-02
+/// §5.2 规定 MKDIR 的最后一个字段是 ATTRS——不可省略（OpenSSH sftp-server
+/// 的 `process_mkdir` 对缺失 attrs 走 `fatal`，进程退出即通道 EOF）。
+pub fn build_mkdir(id: u32, path: &[u8], attrs: &RawAttrs) -> Vec<u8> {
+    let mut payload = vec![FXP_MKDIR];
+    payload.extend_from_slice(&id.to_be_bytes());
+    payload.extend_from_slice(&(path.len() as u32).to_be_bytes());
+    payload.extend_from_slice(path);
+    payload.extend_from_slice(&encode_attrs(attrs));
+    frame_packet(&payload)
 }
 
 /// 构造 CLOSE 请求。
@@ -557,7 +575,11 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
 
     /// REMOVE：删除一个文件（或符号链接）。
     pub async fn remove(&mut self, path: &[u8]) -> Result<(), String> {
-        self.status_ok_op(FXP_REMOVE, "remove", path).await
+        let id = self.next_id();
+        let reply = self
+            .request(build_string_request(FXP_REMOVE, id, path), id)
+            .await?;
+        self.expect_status_ok(&reply, "remove").await
     }
 
     /// 打开一个可写句柄：OPEN(CREAT|WRITE|TRUNC) → HANDLE。上传族/直写的
@@ -660,14 +682,26 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
         }
     }
 
-    /// MKDIR：创建目录。
+    /// MKDIR：创建目录。v3 wire 上 MKDIR 必须携带 ATTRS 字段
+    /// （draft-ietf-secsh-filexfer-02 §5.2）；缺该字段时 OpenSSH 的
+    /// sftp-server 在 `decode_attrib` 处 fatal 退出（通道 EOF，CI smoke 的
+    /// "SFTP raw read failed: early eof" 即此根因）。空 attrs（flags=0）时
+    /// OpenSSH 按 0777 & umask 建目录，与高层客户端缺省行为一致。
     pub async fn mkdir(&mut self, path: &[u8]) -> Result<(), String> {
-        self.status_ok_op(FXP_MKDIR, "mkdir", path).await
+        let id = self.next_id();
+        let reply = self
+            .request(build_mkdir(id, path, &RawAttrs::default()), id)
+            .await?;
+        self.expect_status_ok(&reply, "mkdir").await
     }
 
     /// RMDIR：删除空目录。
     pub async fn rmdir(&mut self, path: &[u8]) -> Result<(), String> {
-        self.status_ok_op(FXP_RMDIR, "rmdir", path).await
+        let id = self.next_id();
+        let reply = self
+            .request(build_string_request(FXP_RMDIR, id, path), id)
+            .await?;
+        self.expect_status_ok(&reply, "rmdir").await
     }
 
     /// RENAME：单个路径重命名/移动（SFTPv3 不覆盖已存在目标）。
@@ -689,13 +723,9 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
         }
     }
 
-    /// 「type + id + 单路径 → STATUS 0 即成功」的公共骨架（REMOVE/MKDIR/RMDIR）。
-    async fn status_ok_op(&mut self, kind: u8, op: &str, path: &[u8]) -> Result<(), String> {
-        let id = self.next_id();
-        let reply = self
-            .request(build_string_request(kind, id, path), id)
-            .await?;
-        let (reply_kind, _, body) = parse_response_header(&reply)?;
+    /// 「STATUS 回包 → 0 即成功」的公共骨架（REMOVE/MKDIR/RMDIR）。
+    async fn expect_status_ok(&mut self, reply: &[u8], op: &str) -> Result<(), String> {
+        let (reply_kind, _, body) = parse_response_header(reply)?;
         match reply_kind {
             FXP_STATUS => {
                 let code = parse_status_code(body)?;
@@ -1204,6 +1234,110 @@ mod tests {
         assert_eq!(error_status("SFTP raw read failed: boom"), None);
         assert_eq!(error_status(""), None);
     }
+
+    /// CI run 36146663371 根因回归：MKDIR 帧必须携带 ATTRS 字段
+    /// （draft-ietf-secsh-filexfer-02 §5.2）。修复前的帧（path 后即截断）
+    /// 让 OpenSSH sftp-server 的 `decode_attrib` fatal 退出。此处逐字节
+    /// 锁定修复后的帧布局。
+    #[test]
+    fn mkdir_request_carries_attrs_field() {
+        let frame = build_mkdir(4, b"/d/n\xE9", &RawAttrs::default());
+        // len = type(1) + id(4) + path_len(4) + path(5) + attrs flags(4) = 18。
+        assert_eq!(
+            frame,
+            vec![
+                0, 0, 0, 18, // 帧长
+                FXP_MKDIR, 0, 0, 0, 4, // type + id
+                0, 0, 0, 5, b'/', b'd', b'/', b'n', 0xE9, // len + path 原始字节
+                0, 0, 0, 0, // ATTRS flags=0（空 attrs）
+            ]
+        );
+        // 修复前的错误形态（build_string_request 装的 MKDIR，缺 attrs）必须
+        // 被严格桩拒绝——CI "early eof" 的离线复现锚点。
+        let malformed = build_string_request(FXP_MKDIR, 4, b"/d/n\xE9");
+        assert_ne!(frame, malformed);
+        assert!(test_support::validate_request(&malformed[4..]).is_err());
+        assert!(test_support::validate_request(&frame[4..]).is_ok());
+    }
+
+    /// 严格桩一致性回归：客户端所有操作构造器产出的帧都必须恰好通过
+    /// draft-02 布局校验；典型畸形帧（截断/拖尾/缺字段）必须被拒绝。
+    #[test]
+    fn strict_validator_accepts_all_client_frames_and_rejects_malformed() {
+        let attrs = RawAttrs {
+            permissions: Some(0o644),
+            ..RawAttrs::default()
+        };
+        let frames = vec![
+            build_init(),
+            build_open(1, b"/a", PFLAGS_READ, &RawAttrs::default()),
+            build_close(2, b"h"),
+            build_read(3, b"h", 5, 10),
+            build_write(4, b"h", 5, b"abc"),
+            build_string_request(FXP_LSTAT, 5, b"/a"),
+            build_setstat(6, b"/a", &attrs),
+            build_string_request(FXP_OPENDIR, 7, b"/a"),
+            build_string_request(FXP_REMOVE, 8, b"/a"),
+            build_mkdir(9, b"/a", &RawAttrs::default()),
+            build_string_request(FXP_RMDIR, 10, b"/a"),
+            build_readdir(11, b"h"),
+            build_string_request(FXP_STAT, 12, b"/a"),
+            build_rename(13, b"/a", b"/b"),
+            build_readlink(14, b"/a"),
+            build_symlink(15, b"t", b"/l"),
+        ];
+        for frame in &frames {
+            let payload = &frame[4..];
+            if let Err(error) = test_support::validate_request(payload) {
+                panic!(
+                    "client frame rejected by strict stub ({error}); hexdump: {}",
+                    test_support::hexdump(payload)
+                );
+            }
+        }
+        // 截断（id 都不完整）/ INIT 拖尾 / STAT 拖尾 / READ 缺 offset / MKDIR
+        // 缺 attrs。
+        let v = test_support::validate_request;
+        assert!(v(&[FXP_STAT, 0, 0]).is_err());
+        assert!(v(&[FXP_INIT, 0, 0, 0, 3, 0]).is_err());
+        assert!(v(
+            &build_string_request(FXP_STAT, 1, b"/a")[4..] // 拖尾一个字节
+                .iter()
+                .copied()
+                .chain([0_u8])
+                .collect::<Vec<_>>()
+        )
+        .is_err());
+        let mut short_read = build_read(1, b"h", 0, 8)[4..].to_vec();
+        short_read.truncate(short_read.len() - 8); // 掐掉 offset+len
+        assert!(v(&short_read).is_err());
+        assert!(v(&build_string_request(FXP_MKDIR, 1, b"/a")[4..]).is_err());
+    }
+
+    #[tokio::test]
+    async fn mkdir_round_trips_through_strict_stub() {
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        tokio::spawn(scripted_server(server_side, vec![status_body(0)]));
+        let mut client = RawSftp::init(client_side).await.unwrap();
+        client.mkdir(b"/d/n\xE9").await.unwrap();
+    }
+
+    /// CI run 36146663371 的离线复现：OpenSSH 语义桩（解析失败即 fatal
+    /// 断流）收到修复前的畸形 MKDIR（path 后无 attrs）时，客户端读响应
+    /// 得到 "early eof"——与真机 smoke 的错误串逐字一致。
+    #[tokio::test]
+    async fn attrless_mkdir_reproduces_ci_early_eof_against_openssh_fatal_stub() {
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        tokio::spawn(test_support::openssh_fatal_server(server_side, vec![]));
+        let mut client = RawSftp::init(client_side).await.unwrap();
+        // 修复前的错误帧形态：MKDIR 用 build_string_request 装（缺 ATTRS）。
+        client
+            .send(&build_string_request(FXP_MKDIR, 99, b"/d/n\xE9"))
+            .await
+            .unwrap();
+        let error = client.recv().await.unwrap_err();
+        assert!(error.contains("early eof"), "{error}");
+    }
 }
 
 /// 内存桩的跨模块复用（`#[cfg(test)]`）：mcp.rs 的 M18 工具级闭环测试用
@@ -1228,10 +1362,41 @@ pub(crate) mod test_support {
     /// 内存双工流的桩服务器（先例：本文件测试模块 M14-B 起）：INIT 回
     /// VERSION，随后每个请求按脚本回预置包体（自动回填请求帧里的 id），
     /// 并把收到的请求 payload 记入 `requests`（None 则不记录）。
+    ///
+    /// 严格一致性（CI "early eof" 复现线）：每个请求帧先过
+    /// [`validate_request`] 按 draft-ietf-secsh-filexfer-02 精确校验字段
+    /// 布局（旧宽松桩对帧内容不设防，正是 MKDIR 缺 ATTRS 这种畸形帧在
+    /// 本地全绿、真机 OpenSSH 上炸掉的原因）。违规时按
+    /// [`StrictMode`] 语义处置。
     pub async fn scripted_server(
+        stream: tokio::io::DuplexStream,
+        replies: Vec<Vec<u8>>,
+        requests: Option<RequestLog>,
+    ) {
+        scripted_server_mode(stream, replies, requests, StrictMode::Panic).await
+    }
+
+    /// OpenSSH 语义的负路径桩：请求布局违规 = sftp-server `fatal` ——进程
+    /// 退出、通道 EOF（直接断开流，绝不回包）。用于离线复现 CI 的
+    /// "SFTP raw read failed: early eof"（run 36146663371）。
+    pub async fn openssh_fatal_server(stream: tokio::io::DuplexStream, replies: Vec<Vec<u8>>) {
+        scripted_server_mode(stream, replies, None, StrictMode::Fatal).await
+    }
+
+    /// 桩的违规处置模式。
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum StrictMode {
+        /// 测试桩自检：违规即 panic（带 hexdump），让测试用例第一时间炸在桩上。
+        Panic,
+        /// 模拟 OpenSSH sftp-server：解析失败即 fatal 退出（静默断流）。
+        Fatal,
+    }
+
+    async fn scripted_server_mode(
         mut stream: tokio::io::DuplexStream,
         mut replies: Vec<Vec<u8>>,
         requests: Option<RequestLog>,
+        mode: StrictMode,
     ) {
         let mut header = [0_u8; 4];
         loop {
@@ -1241,6 +1406,15 @@ pub(crate) mod test_support {
             let len = u32::from_be_bytes(header) as usize;
             let mut payload = vec![0_u8; len];
             stream.read_exact(&mut payload).await.unwrap();
+            if let Err(error) = validate_request(&payload) {
+                match mode {
+                    StrictMode::Panic => panic!(
+                        "strict stub rejected malformed request ({error}); hexdump: {}",
+                        hexdump(&payload)
+                    ),
+                    StrictMode::Fatal => break, // sftp-server fatal：通道 EOF
+                }
+            }
             if let Some(log) = requests.as_ref() {
                 log.lock().unwrap().push(payload.clone());
             }
@@ -1248,7 +1422,14 @@ pub(crate) mod test_support {
                 (FXP_VERSION, 3_u32.to_be_bytes().to_vec())
             } else {
                 let id = u32::from_be_bytes(payload[1..5].try_into().unwrap());
-                let mut scripted = replies.remove(0);
+                let scripted = if mode == StrictMode::Fatal && replies.is_empty() {
+                    // fatal 模式下只承诺对合法请求维持连接；无脚本时回 STATUS 0
+                    // 维持会话（负路径测试只关心畸形帧触发 fatal）。
+                    status_body(0)
+                } else {
+                    replies.remove(0)
+                };
+                let mut scripted = scripted;
                 scripted[1..5].copy_from_slice(&id.to_be_bytes());
                 let kind = scripted.remove(0);
                 (kind, scripted)
@@ -1259,6 +1440,106 @@ pub(crate) mod test_support {
             frame.extend_from_slice(&packet);
             stream.write_all(&frame).await.unwrap();
             stream.flush().await.unwrap();
+        }
+    }
+
+    /// 严格按 draft-ietf-secsh-filexfer-02 校验一个去帧请求 payload 的字段
+    /// 布局：字段存在、顺序、长度与类型逐一核对，且必须恰好消费完
+    /// （多发/漏发/截断都拒绝）。客户端所有 [`super::RawSftp`] 操作都应通过。
+    pub fn validate_request(payload: &[u8]) -> Result<(), String> {
+        if payload.is_empty() {
+            return Err("empty payload".to_string());
+        }
+        let kind = payload[0];
+        if kind == FXP_INIT {
+            if payload.len() != 5 {
+                return Err(format!(
+                    "INIT must be exactly type + u32 version, got {} bytes",
+                    payload.len()
+                ));
+            }
+            return Ok(());
+        }
+        if payload.len() < 5 {
+            return Err(format!("request type {kind} truncated before id"));
+        }
+        let mut cursor = 5_usize;
+        match kind {
+            // 单路径：STAT/LSTAT/OPENDIR/REMOVE/RMDIR/READLINK。
+            FXP_STAT | FXP_LSTAT | FXP_OPENDIR | FXP_REMOVE | FXP_RMDIR | FXP_READLINK => {
+                expect_string(payload, &mut cursor, "path")?;
+            }
+            // 单句柄：CLOSE/READDIR。
+            FXP_CLOSE | FXP_READDIR => {
+                expect_string(payload, &mut cursor, "handle")?;
+            }
+            FXP_READ => {
+                expect_string(payload, &mut cursor, "handle")?;
+                expect_u64(payload, &mut cursor, "offset")?;
+                expect_u32(payload, &mut cursor, "len")?;
+            }
+            FXP_WRITE => {
+                expect_string(payload, &mut cursor, "handle")?;
+                expect_u64(payload, &mut cursor, "offset")?;
+                expect_string(payload, &mut cursor, "data")?;
+            }
+            FXP_OPEN => {
+                expect_string(payload, &mut cursor, "path")?;
+                expect_u32(payload, &mut cursor, "pflags")?;
+                expect_attrs(payload, &mut cursor, "attrs")?;
+            }
+            // MKDIR 与 SETSTAT 是「路径 + ATTRS」布局：MKDIR 的 attrs 正是
+            // CI 现场缺失的字段（OpenSSH process_mkdir fatal 的直接原因）。
+            FXP_MKDIR | FXP_SETSTAT => {
+                expect_string(payload, &mut cursor, "path")?;
+                expect_attrs(payload, &mut cursor, "attrs")?;
+            }
+            FXP_RENAME | FXP_SYMLINK => {
+                expect_string(payload, &mut cursor, "first string")?;
+                expect_string(payload, &mut cursor, "second string")?;
+            }
+            _ => return Err(format!("unexpected request type {kind}")),
+        }
+        if cursor != payload.len() {
+            return Err(format!(
+                "type {kind}: consumed {cursor} of {} bytes (missing or trailing fields)",
+                payload.len()
+            ));
+        }
+        Ok(())
+    }
+
+    fn expect_string(payload: &[u8], cursor: &mut usize, what: &str) -> Result<(), String> {
+        skip_string(payload, cursor).map_err(|_| format!("{what} truncated"))
+    }
+
+    fn expect_u32(payload: &[u8], cursor: &mut usize, what: &str) -> Result<u32, String> {
+        read_u32(payload, cursor).map_err(|_| format!("{what} truncated"))
+    }
+
+    fn expect_u64(payload: &[u8], cursor: &mut usize, what: &str) -> Result<u64, String> {
+        read_u64(payload, cursor).map_err(|_| format!("{what} truncated"))
+    }
+
+    fn expect_attrs(payload: &[u8], cursor: &mut usize, what: &str) -> Result<(), String> {
+        let (_, consumed) =
+            parse_attrs(&payload[*cursor..]).map_err(|_| format!("{what} truncated"))?;
+        *cursor += consumed;
+        Ok(())
+    }
+
+    /// 测试诊断用 hexdump（空格分隔的大写十六进制，超长截断）。
+    pub fn hexdump(bytes: &[u8]) -> String {
+        let limit = bytes.len().min(64);
+        let dump = bytes[..limit]
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if bytes.len() > limit {
+            format!("{dump}… (+{} bytes)", bytes.len() - limit)
+        } else {
+            dump
         }
     }
 
