@@ -1734,6 +1734,48 @@ impl PluginHandler for Plugin {
             )?;
             return Ok(());
         }
+        if let Some(session_id) = channel.strip_prefix("serial/terminal/in/") {
+            // 串口 B1 二进制写通道：帧与输出同构（流标签 + u64 序号 + 数据），
+            // 非 Stdin 标签/截断帧 → 参数错误。上传活动期间一律拒绝（互斥
+            // 后盾，第一道闸门在前端）；死会话/互斥拒绝镜像 `serial/terminal/
+            // error` 事件，工作台不至于看着在线却打不进字。
+            TERMINAL_INPUT_FRAMES_RECEIVED.fetch_add(1, Ordering::Relaxed);
+            let (sequence, payload) = match serial_session::decode_input_frame(&data) {
+                Ok(split) => split,
+                Err(error) => return Err(to_plugin_error(error)),
+            };
+            let session = match self.runtime.block_on(self.serial.session(session_id)) {
+                Ok(session) => session,
+                Err(error) => {
+                    let _ = emitter.event(
+                        "serial/terminal/error",
+                        json!({ "sessionId": session_id, "error": error }),
+                    );
+                    return Err(to_plugin_error(error));
+                }
+            };
+            if session.upload_active() {
+                let error =
+                    "Serial input is rejected while a file upload is in progress".to_string();
+                let _ = emitter.event(
+                    "serial/terminal/error",
+                    json!({ "sessionId": session_id, "error": error }),
+                );
+                return Err(to_plugin_error(error));
+            }
+            if let Err(error) = self.serial.write_input(&session, &payload) {
+                let _ = emitter.event(
+                    "serial/terminal/error",
+                    json!({ "sessionId": session_id, "error": error }),
+                );
+                return Err(to_plugin_error(error));
+            }
+            emitter.event(
+                "serial/terminal/inputAck",
+                json!({ "sessionId": session_id, "sequence": sequence }),
+            )?;
+            return Ok(());
+        }
         if let Some(task_id) = channel.strip_prefix("sftp/upload/") {
             // Binary handler failures are only logged by the SDK loop, so the
             // workbench would otherwise learn about a desynced/missing upload

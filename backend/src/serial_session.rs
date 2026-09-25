@@ -184,6 +184,17 @@ pub(crate) struct SerialSession {
     upload: Mutex<Option<SerialUploadJob>>,
 }
 
+impl SerialSession {
+    /// 上传互斥开关（B1）：上传 job 存在即为活动期，二进制写帧被 sidecar
+    /// 直接拒绝，作为单一前端闸门的后盾；引擎取消/完成清掉 job 后自动释放。
+    pub(crate) fn upload_active(&self) -> bool {
+        self.upload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+}
+
 /// 一次串口文件上传的运行时状态：引擎 + 进度限流。
 pub(crate) struct SerialUploadJob {
     engine: UploadEngine,
@@ -761,6 +772,31 @@ pub fn decode_write_payload(data_base64: &str) -> Result<Vec<u8>, String> {
     crate::telnet_session::decode_write_payload(data_base64)
 }
 
+/// 解码一条 `serial/terminal/in/{id}` 入站写帧：与输出帧同构的
+/// `TerminalFrame` 形状（首字节流标签 + 大端 `u64` 序号 + 数据）。
+///
+/// B1 契约（docs/SERIAL_ENHANCE_DESIGN.zh-CN.md §2）：本通道只接受
+/// `Stdin = 3` 标签，其余标签（含未知值）一律返回参数错误；长度不足帧头的
+/// 数据同样报参数错误，绝不 panic。
+pub(crate) fn decode_input_frame(data: &[u8]) -> Result<(u64, Vec<u8>), String> {
+    if data.len() < 9 {
+        return Err("serial/terminal/in: frame is shorter than the 9-byte TerminalFrame header".to_string());
+    }
+    let tag = data[0];
+    if tag != TerminalStream::Stdin as u8 {
+        return Err(format!(
+            "serial/terminal/in: stream tag {tag} is rejected (only {} / Stdin is accepted)",
+            TerminalStream::Stdin as u8
+        ));
+    }
+    let sequence = u64::from_be_bytes(
+        data[1..9]
+            .try_into()
+            .map_err(|_| "serial/terminal/in: invalid sequence".to_string())?,
+    );
+    Ok((sequence, data[9..].to_vec()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,5 +1012,62 @@ mod tests {
                 "{bad} error names the field: {error}"
             );
         }
+    }
+
+    // —— B1 二进制写通道（serial/terminal/in）—————————————————
+
+    fn stdin_frame(sequence: u64, data: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(9 + data.len());
+        frame.push(TerminalStream::Stdin as u8);
+        frame.extend_from_slice(&sequence.to_be_bytes());
+        frame.extend_from_slice(data);
+        frame
+    }
+
+    #[test]
+    fn input_frame_roundtrips_stream_tag_sequence_and_payload() {
+        // 编解码对称性：Stdin 标签 + 大端序号 + 原始键序字节。
+        let (sequence, payload) = decode_input_frame(&stdin_frame(42, b"ls\r")).unwrap();
+        assert_eq!(sequence, 42);
+        assert_eq!(payload, b"ls\r");
+        // 空负载（纯确认帧）同样合法。
+        let (sequence, payload) = decode_input_frame(&stdin_frame(0, b"")).unwrap();
+        assert_eq!(sequence, 0);
+        assert!(payload.is_empty());
+        // 大序号不截断。
+        let (sequence, _) = decode_input_frame(&stdin_frame(u64::MAX, b"x")).unwrap();
+        assert_eq!(sequence, u64::MAX);
+    }
+
+    #[test]
+    fn input_frame_rejects_non_stdin_tags_as_parameter_errors() {
+        // 已知标签但方向不对（Stdout/Stderr/State）→ 参数错误，绝不当作键入。
+        for tag in [0u8, 1, 2] {
+            let mut frame = stdin_frame(1, b"x");
+            frame[0] = tag;
+            let error = decode_input_frame(&frame).unwrap_err();
+            assert!(error.contains("serial/terminal/in"), "tag {tag}: {error}");
+            assert!(error.contains("rejected"), "tag {tag}: {error}");
+        }
+        // 未知标签同样参数错误（不静默、不断连——错误由宿主桥按参数错误回）。
+        let mut frame = stdin_frame(1, b"x");
+        frame[0] = 99;
+        assert!(decode_input_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn input_frame_rejects_truncated_headers_without_panicking() {
+        for len in 0..9usize {
+            let frame = stdin_frame(1, b"payload");
+            assert!(
+                decode_input_frame(&frame[..len]).is_err(),
+                "length {len} must be rejected"
+            );
+        }
+        // 恰好 9 字节（帧头无负载）合法。
+        assert_eq!(
+            decode_input_frame(&stdin_frame(3, b"")).unwrap(),
+            (3, Vec::<u8>::new())
+        );
     }
 }
