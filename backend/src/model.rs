@@ -1245,7 +1245,8 @@ mod tests {
             "password_prompt_hint must follow the sudo source and fold with the 2FA trio when OTP auto-answer is off"
         );
         // passphrase_command 只服务密钥解密：密码 / agent 认证下是死 UI，
-        // 需要同时满足高级区与密钥类认证。
+        // 需要同时满足高级区与密钥类认证（Auto 按序回退同样解密密钥，纳入
+        // 密钥类门控）。
         assert_eq!(
             fields
                 .iter()
@@ -1255,7 +1256,7 @@ mod tests {
                 "all_of": [
                     protocol_gate,
                     { "field": "advanced_options", "one_of": ["true"] },
-                    { "field": "authentication", "one_of": ["private-key", "private-key-password"] },
+                    { "field": "authentication", "one_of": ["private-key", "private-key-password", "auto"] },
                 ]
             }),
             "passphrase_command must combine the advanced switch with key-based auth"
