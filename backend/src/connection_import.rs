@@ -41,7 +41,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -1901,7 +1901,7 @@ struct ImportState {
 /// error and TTL sweep) drops `Zeroizing` source bytes and WindTerm passwords.
 #[derive(Default)]
 pub struct ImportStream {
-    state: Arc<Mutex<ImportState>>,
+    state: Mutex<ImportState>,
 }
 
 impl ImportStream {
@@ -1965,15 +1965,6 @@ impl ImportStream {
                 reserved_bytes,
             },
         );
-        drop(state);
-        let state = Arc::clone(&self.state);
-        let expiry_task_id = task_id.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(IMPORT_TASK_TTL);
-            if let Ok(mut state) = state.lock() {
-                let _ = remove_upload(&mut state, &expiry_task_id);
-            }
-        });
         Ok(json!({ "taskId": task_id, "chunkSize": IMPORT_CHUNK_LIMIT }))
     }
 
@@ -2084,10 +2075,29 @@ impl ImportStream {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
+    fn active_task_count(&self) -> usize {
+        self.state
+            .lock()
+            .map(|state| state.uploads.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn reserved_bytes(&self) -> u64 {
+        self.state
+            .lock()
+            .map(|state| state.reserved_bytes)
+            .unwrap_or(0)
+    }
+
     fn clear(&self, task_id: &str) -> bool {
         self.state
             .lock()
-            .map(|mut state| remove_upload(&mut state, task_id).is_some())
+            .map(|mut state| {
+                expire_locked(&mut state, Instant::now());
+                remove_upload(&mut state, task_id).is_some()
+            })
             .unwrap_or(false)
     }
 }
@@ -3262,6 +3272,35 @@ mod tests {
         assert!(bounded
             .start(&json!({ "kind": "moba", "mainSize": MAX_IMPORT_MEMORY_BYTES + 1 }))
             .is_err());
+    }
+
+    #[test]
+    fn repeated_start_cancel_releases_every_slot_without_spawning_workers() {
+        let stream = ImportStream::default();
+        for _ in 0..MAX_IMPORT_TASKS * 32 {
+            let task = stream
+                .start(&json!({ "kind": "moba", "mainSize": 1 }))
+                .unwrap();
+            let task_id = task["taskId"].as_str().unwrap();
+            assert!(stream.cancel(task_id));
+        }
+        assert_eq!(stream.active_task_count(), 0);
+        assert_eq!(stream.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn start_lazily_reclaims_expired_tasks_before_enforcing_limits() {
+        let stream = ImportStream::default();
+        for _ in 0..MAX_IMPORT_TASKS {
+            stream
+                .start(&json!({ "kind": "moba", "mainSize": 1 }))
+                .unwrap();
+        }
+        assert!(stream.expire_before(Instant::now() + IMPORT_TASK_TTL));
+        assert_eq!(stream.active_task_count(), 0);
+        assert!(stream
+            .start(&json!({ "kind": "moba", "mainSize": 1 }))
+            .is_ok());
     }
 
     #[test]
