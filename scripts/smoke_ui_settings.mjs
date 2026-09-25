@@ -98,10 +98,12 @@ let stdoutBuf = "";
 vite.stdout.on("data", (d) => {
   stdoutBuf += String(d);
 });
+vite.on("error", (e) => process.stderr.write(`[vite spawn error] ${e}\n`));
+vite.on("exit", (code, sig) => { if (code !== 0 && code !== null) process.stderr.write(`[vite exited] code=${code} sig=${sig}\n`); });
 vite.stderr.on("data", (d) => process.stderr.write(d));
 
 let origin = "";
-const upDeadline = Date.now() + 60_000;
+const upDeadline = Date.now() + 180_000; // 冷缓存下 vite optimizeDeps 可能远超 60s
 while (Date.now() < upDeadline) {
   const match = /(https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):\d+)\//.exec(stdoutBuf);
   if (match) {
@@ -110,7 +112,7 @@ while (Date.now() < upDeadline) {
   }
   await sleep(500);
 }
-if (!origin) skip("vite dev server did not report a URL in time");
+if (!origin) skip(`vite dev server did not report a URL in time; vite stdout tail: ${stdoutBuf.slice(-400) || "(empty)"}`);
 const baseUrl = `${origin}/mock.html`;
 console.log(`==> dev server up: ${baseUrl}`);
 

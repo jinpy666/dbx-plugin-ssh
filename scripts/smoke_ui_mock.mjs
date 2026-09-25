@@ -79,19 +79,22 @@ if (!hasChrome) skip("no system Chrome/Chromium");
 
 // --- vite dev server ---
 console.log("==> starting vite dev server");
-const vite = spawn("pnpm", ["--dir", "frontend", "exec", "vite"], {
-  cwd: ROOT,
+// 直启 repo 内 vite 二进制（不经 pnpm exec）：CI runner 的 PATH/pnpm 包装
+// 层可能静默吞掉 stdout，导致 URL 永远匹配不上（首次 runner 观测实录）。
+const vite = spawn(process.execPath, [join(ROOT, "frontend", "node_modules", "vite", "bin", "vite.js")], {
+  cwd: join(ROOT, "frontend"),
   stdio: ["ignore", "pipe", "pipe"],
-  // Windows: pnpm 是 .cmd 包装，Node ≥18.20/20.12 起无 shell 直接 spawn 报 EINVAL。
-  shell: process.platform === "win32",
+  env: { ...process.env, NO_COLOR: "1" },
 });
+vite.on("error", (e) => process.stderr.write(`[vite spawn error] ${e}\n`));
+vite.on("exit", (code, sig) => { if (code !== 0 && code !== null) process.stderr.write(`[vite exited] code=${code} sig=${sig}\n`); });
 vite.stderr.on("data", (d) => process.stderr.write(d));
 let stdoutBuf = "";
 vite.stdout.on("data", (d) => {
   stdoutBuf += String(d);
 });
 let baseUrl = "";
-const upDeadline = Date.now() + 60_000;
+const upDeadline = Date.now() + 180_000; // 冷缓存下 vite optimizeDeps 可能远超 60s
 while (Date.now() < upDeadline) {
   const match = /(https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):\d+)\//.exec(stdoutBuf);
   if (match) {
@@ -100,7 +103,7 @@ while (Date.now() < upDeadline) {
   }
   await sleep(500);
 }
-if (!baseUrl) skip("vite dev server did not report a URL in time");
+if (!baseUrl) skip(`vite dev server did not report a URL in time; vite stdout tail: ${stdoutBuf.slice(-400) || "(empty)"}`);
 console.log(`==> dev server up: ${baseUrl}`);
 
 const failures = [];
