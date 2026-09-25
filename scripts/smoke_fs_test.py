@@ -148,6 +148,10 @@ def main() -> None:
     # sidecar 启动前注入（sidecar 启动时读取一次环境变量）。
     download_dir = Path(tempfile.mkdtemp(prefix="dbx-ssh-smoke-downloads-"))
     os.environ["DBX_SSH_DOWNLOAD_DIR"] = str(download_dir)
+    # watcher 组的 watch/start 有 desktop gate（can_save_local 探测）。CI
+    # runner 是 headless 环境，探针会误判为非桌面并拒绝注册——显式声明
+    # 桌面落盘语义（sidecar 子进程继承本环境，生产语义不受影响）。
+    os.environ["DBX_SSH_LOCAL_SAVE"] = "1"
     client = SidecarClient.start(timeout=30)
     try:
         step("plugin/initialize")
