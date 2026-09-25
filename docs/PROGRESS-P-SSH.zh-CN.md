@@ -3891,3 +3891,9 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **批次来源**：M20 的真机门清单明确承认「latin-1 连接下的 watcher 回写」只有单测覆盖——本轮补真容器全链：wire 路径注册 → 外部保存事件 → `watch/upload` 裸包回写 → `sftp/read` wire 车道字节校验（smoke 83/0/0）。
 - **第五层 wire 缺口修复**：`sftp/download/start` 转义路径的 size 探测发 raw LSTAT 时漏 `unescape_wire`（字面 `%XX` 字节当路径，start 即 NO_SUCH_FILE）——M21 用例真机曝露。修复一行探测调用 + 注释；与下载分片（`raw_read_chunk`）、树扫描（`scan_tree_with_raw`）的既有还原口径拉齐。该缺口此前不可见：wire 单文件下载此前无真容器用例，树下载 size 走扫描不经探测点。
 - **Mac 真机终值**：smoke_fs_test **83 PASS / 0 SKIP / 0 FAIL**；cargo 963 / clippy 0 / fmt 0。
+
+## M22-A 批次（2026-09-26，MCP stdio 在线段纳入 CI ssh-smoke：真容器 tools/call 全链进流水线）
+
+- **动机**：M17-M19 的 MCP 工具面改动（参数校验、编码家族、quick sudo 等）此前只有两条覆盖通道——其它 CI job 的离线 stdio 段（无真服务器），与本机 workbench 面的真容器联调；CI 里"独立 stdio 进程 × 真容器"的组合（`ssh_test_connection` browse-first、SFTP 全家族、run_bg/task_status、metrics、上传下载字节回环、live enum/pipelining 尾段）零覆盖。
+- **改动**：`.github/workflows/ci.yml` ssh-smoke job 在既有两条 smoke 命令后追加 `scripts/smoke_mcp.py` 在线段（`--host 127.0.0.1 --port 2222 --username sshuser`，复用 job 内一次性测试容器凭据；密码经步骤 env `DBX_SSH_SMOKE_PASSWORD` 注入而非命令行参数，避免 ps 泄露）。脚本本身零改动。
+- **验证**：YAML 解析通过（PyYAML 本机缺失，用系统 ruby YAML 全文解析 OK）；Mac 本机真容器（dbx-ssh-test:2222）以 debug sidecar 跑通 `smoke_mcp.py --binary <debug> --host 127.0.0.1` 全绿——`live round-trip ok (test/browse/exec/background/family/metrics/transfer)`、`live pipelining ok`、`MCP smoke: all green`，exit 0。
