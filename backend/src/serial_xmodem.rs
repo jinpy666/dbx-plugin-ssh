@@ -70,6 +70,10 @@ const ZMODEM_MAX_SUBPACKET: usize = 8 * 1024;
 /// 对端连续取消字节阈值（ZMODEM 计 ZDLE，X/Y 计 CAN）。
 const XY_CANCEL_COUNT: usize = 2;
 const Z_CANCEL_COUNT: usize = 5;
+/// 两个有效帧头之间连续坏帧（ZNAK）上限：恶意对端的持续垃圾流会让每个坏帧
+/// 都回一个 ZNAK 且刷新 last_activity（永不超时 + 字节写放大）；与
+/// MAX_RETRIES 同语义，收到任一有效帧头即复位。
+const MAX_CORRUPT_FRAMES: usize = 32;
 
 /// RPC 入口约束：前端 File API 分块 ≤64 KiB，单次上传总量 ≤256 MiB。
 pub const UPLOAD_CHUNK_LIMIT: usize = 64 * 1024;
@@ -965,6 +969,8 @@ pub(crate) struct ZEngine {
     chunk: usize,
     scanner: HeaderScanner,
     cancel_count: usize,
+    /// 自上一个有效帧头以来的连续坏帧数（ZNAK 预算，见 MAX_CORRUPT_FRAMES）。
+    corrupt_count: usize,
     retries: u8,
     /// 可重发的最后一帧（ZRQINIT/ZFILE/ZDATA+数据/ZEOF/ZFIN）。
     last_frame: Vec<u8>,
@@ -986,6 +992,7 @@ impl ZEngine {
             chunk: ZMODEM_MAX_SUBPACKET,
             scanner: HeaderScanner::default(),
             cancel_count: 0,
+            corrupt_count: 0,
             retries: 0,
             last_frame: zrqinit.clone(),
             last_activity: now,
@@ -1052,11 +1059,20 @@ impl ZEngine {
                 self.cancel_count = 0;
             }
             match self.scanner.feed_byte(byte) {
-                Some(ScanEvent::Header(header)) => actions.extend(self.handle_header(header, now)),
+                Some(ScanEvent::Header(header)) => {
+                    // 有效帧头恢复 ZNAK 预算：线路抖动下的零星坏帧可长期
+                    // 重试，持续垃圾流则在上限处判失败。
+                    self.corrupt_count = 0;
+                    actions.extend(self.handle_header(header, now));
+                }
                 Some(ScanEvent::Corrupt) => {
                     // 坏帧：ZNAK 重扫（与 zmodem2 CRC 错误降级一致）。
                     self.last_activity = now;
                     actions.push(Output::Write(hex_header(FRAME_ZNAK, [0; 4])));
+                    self.corrupt_count += 1;
+                    if self.corrupt_count >= MAX_CORRUPT_FRAMES {
+                        actions.extend(self.fail("Too many corrupt frames from the receiver"));
+                    }
                 }
                 None => {}
             }
@@ -1883,6 +1899,93 @@ mod tests {
         // 帧流仍然可以恢复。
         let outputs = feed(&mut engine, &peer_hex_header(FRAME_ZRINIT, [0; 4]));
         assert_eq!(writes(&outputs)[0][3], FRAME_ZFILE);
+    }
+
+    #[test]
+    fn zmodem_garbage_stream_fails_after_the_corrupt_frame_budget() {
+        // D2 回归：恶意对端的持续垃圾流曾让每个坏帧都回 ZNAK 并刷新
+        // last_activity（永不超时 + 写放大）；连续坏帧达到预算即判失败。
+        let mut engine = engine_with_data(UploadProtocol::Zmodem, b"abc");
+        let garbage = vec![ZPAD, ZDLE, b'Z'];
+        let mut frames = 0usize;
+        while !engine.is_done() && frames < MAX_CORRUPT_FRAMES * 3 {
+            let outputs = feed(&mut engine, &garbage);
+            frames += 1;
+            if frames < MAX_CORRUPT_FRAMES {
+                assert!(
+                    !has_state(&outputs, ProgressState::Failed),
+                    "budget not exhausted yet at frame {frames}"
+                );
+            }
+        }
+        assert!(engine.is_done(), "garbage stream must fail at the budget");
+        assert!(frames < MAX_CORRUPT_FRAMES * 3, "must not loop forever");
+    }
+
+    #[test]
+    fn zmodem_valid_header_resets_the_corrupt_frame_budget() {
+        // 预算是「两个有效帧头之间」的：线路抖动下的零星坏帧 + 恢复后
+        // 重新计数，不得累积成永久失败。
+        let mut engine = engine_with_data(UploadProtocol::Zmodem, b"abc");
+        let garbage = vec![ZPAD, ZDLE, b'Z'];
+        for _ in 0..10 {
+            let _ = feed(&mut engine, &garbage);
+        }
+        let _ = feed(&mut engine, &peer_hex_header(FRAME_ZRINIT, [0; 4]));
+        for _ in 0..10 {
+            let outputs = feed(&mut engine, &garbage);
+            assert!(
+                !has_state(&outputs, ProgressState::Failed),
+                "a valid header must reset the corrupt-frame budget"
+            );
+        }
+        assert!(!engine.is_done());
+    }
+
+    #[test]
+    fn xymodem_zero_byte_file_completes_after_the_final_chunk() {
+        // D1 回归：0 字节文件以前端循环不发分块 → 源永不收尾 → 引擎停在
+        // 握手挂起态且时钟被抑制（永不超时）。final 空分块收尾后，握手
+        // 消费即直接走 EOT 收束。
+        let mut engine = engine_with_data(UploadProtocol::Xmodem, b"");
+        let outputs = feed(&mut engine, &[NAK]);
+        assert_eq!(writes(&outputs).len(), 1);
+        assert_eq!(
+            writes(&outputs)[0][0],
+            EOT,
+            "empty source answers the handshake with EOT"
+        );
+        let outputs = feed(&mut engine, &[ACK]);
+        assert!(has_state(&outputs, ProgressState::Complete));
+        assert!(engine.is_done());
+    }
+
+    #[test]
+    fn ymodem_zero_byte_file_walks_header_eot_and_closing_block() {
+        // D1 的 YMODEM 面：空文件同样要走出 头块(0) → EOT → 收尾全零块 的
+        // 完整批次，不得挂在数据挂起态。
+        let mut engine = engine_with_data(UploadProtocol::Ymodem, b"");
+        // 'C' → 头块（name + size 0）。
+        let outputs = feed(&mut engine, &[CRC_REQUEST]);
+        assert_eq!(
+            writes(&outputs).len(),
+            1,
+            "header block 0 for the empty file"
+        );
+        // ACK + 'C' → 数据读直接 EOF → EOT。
+        let _ = feed(&mut engine, &[ACK]);
+        let outputs = feed(&mut engine, &[CRC_REQUEST]);
+        assert_eq!(writes(&outputs).len(), 1);
+        assert_eq!(writes(&outputs)[0][0], EOT);
+        // EOT ACK → 本文件完成（FileComplete 在 ACK 上回报）；'C' → 收尾
+        // 全零头块；ACK → 批次结束。
+        let outputs = feed(&mut engine, &[ACK]);
+        assert!(has_state(&outputs, ProgressState::FileComplete));
+        let outputs = feed(&mut engine, &[CRC_REQUEST]);
+        assert_eq!(writes(&outputs).len(), 1, "closing all-zero header block");
+        let outputs = feed(&mut engine, &[ACK]);
+        assert!(has_state(&outputs, ProgressState::Complete));
+        assert!(engine.is_done());
     }
 
     #[test]
