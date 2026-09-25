@@ -3886,3 +3886,8 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **用例开发中顺带确认的行为点**（非缺陷，均已登记进用例注释）：pump 有 SUPPRESS_WINDOW=2s 启动抑制窗（编辑器预热噪音丢弃），外部编辑用例须先越过；持久档 `sftp_name_encoding` 历史残留会让 auto 语义用例误走 latin-1 裸包分支，watcher 组进组显式归位 auto 自洽。
 - **Mac 真机终值**：smoke_fs_test **82 PASS / 0 SKIP / 0 FAIL**；backend 代码零改动，cargo 963 / clippy 0 / fmt 0 沿 M19.5。
 
+## M21 批次（2026-09-26，latin-1 watcher 回写收口 + 第五层 wire 缺口修复）
+
+- **批次来源**：M20 的真机门清单明确承认「latin-1 连接下的 watcher 回写」只有单测覆盖——本轮补真容器全链：wire 路径注册 → 外部保存事件 → `watch/upload` 裸包回写 → `sftp/read` wire 车道字节校验（smoke 83/0/0）。
+- **第五层 wire 缺口修复**：`sftp/download/start` 转义路径的 size 探测发 raw LSTAT 时漏 `unescape_wire`（字面 `%XX` 字节当路径，start 即 NO_SUCH_FILE）——M21 用例真机曝露。修复一行探测调用 + 注释；与下载分片（`raw_read_chunk`）、树扫描（`scan_tree_with_raw`）的既有还原口径拉齐。该缺口此前不可见：wire 单文件下载此前无真容器用例，树下载 size 走扫描不经探测点。
+- **Mac 真机终值**：smoke_fs_test **83 PASS / 0 SKIP / 0 FAIL**；cargo 963 / clippy 0 / fmt 0。

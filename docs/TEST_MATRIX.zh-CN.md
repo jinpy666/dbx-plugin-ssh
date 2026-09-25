@@ -205,3 +205,14 @@ smoke_fs_test.py +3 用例（watcher external-edit 组，PASS 82 / SKIP 0 / FAIL
 用例自洽设计：进组显式 `sftp_name_encoding=auto`（不依赖持久档历史值——此前多轮 FAIL 轮的偏好残留会让 auto 语义的用例误走 latin-1 裸包分支）；外部编辑前越过 pump 启动抑制窗（SUPPRESS_WINDOW=2s）；事件经 sidecar_client 事件池以无害请求泵出。
 
 仍保持未验收（依赖真机/人工）：watcher 工作台 GUI 手测（编辑器打开/确认弹窗/always-upload 流）、latin-1 连接下的 watcher 回写（write_bytes latin-1 分支已有单测与 MCP 往返覆盖）、既有真机门不变。
+
+
+## M21（latin-1 watcher 回写批次，2026-09-26，Mac linuxserver/openssh-server 容器实测）
+
+smoke_fs_test.py +1 用例（PASS **83** / SKIP 0 / FAIL 0）：latin-1 连接口径下 wire 路径的 watcher 全链——`watch/start` 注册 `caf%E9.txt` wire 目标、外部保存事件路由、`watch/upload` 经 `write_bytes` latin-1 分支裸包回写、`sftp/read` wire 车道字节级校验；用例自愈（趁 latin-1 偏好在位删 0xE9 残留再归位 auto）。
+
+**真机曝露并修复第五层 wire 缺口**：`sftp/download/start` 对转义路径的 size 探测直接 `remote_path.as_bytes()` 发 raw LSTAT（字面 `%XX` 当路径 → NO_SUCH_FILE）——读侧 `raw_read_chunk` 早已 `unescape_wire`，唯独探测点漏了。修复后与下载分片/树扫描口径一致。此前未爆的原因：wire 单文件下载此前无真容器用例（树下载的 size 来自 raw READDIR 扫描，不经此探测点）。
+
+单测：cargo **963/963** / clippy 0 / fmt 0（修复为 ssh.rs 一处探测调用 + 注释）。
+
+仍保持未验收（依赖真机/人工）：watcher 工作台 GUI 手测、既有真机门不变。

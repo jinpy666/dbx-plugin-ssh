@@ -5992,8 +5992,11 @@ impl SshRuntime {
         // 命中不了远端文件（M14-B：传输用服务器原始字节）。
         let size = if sftp_name::has_wire_escapes(&remote_path) {
             let mut client = self.raw_sftp_client(session_id).await?;
+            // 整条 wire 还原为服务器字节再 LSTAT——探测点曾漏掉这一步（把
+            // 字面 "%XX" 字节当路径，转义名单文件下载 start 即 NO_SUCH_FILE；
+            // M21 smoke 的 latin-1 watcher 用例真机曝露）。
             client
-                .stat(remote_path.as_bytes())
+                .stat(&sftp_name::unescape_wire(&remote_path))
                 .await
                 .map_err(sftp_error)?
                 .size
