@@ -599,7 +599,7 @@ VNC 远程桌面的帧缓冲更新以 patch 帧推送：`44 字节头 | RGBA 像
 RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRDP 链（ironrdp 0.17 lockstep，`backend/vendor/`），连接序列（X.224 协商 → TLS → CredSSP/NLA → 虚通道）与 NyaTerm `src/core/rdp.rs` 同构。**范围（评审定案，见 `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）**：密码/NLA（CredSSP）+ TLS + 文本剪贴板 + 断线重连；不做音频、驱动器重定向、键盘捕获、网关/RDCleanPath、UDP 传输、Kerberos。仅 TCP 直连形态。
 
 - `rdp/start {workbenchId, host, port?=3389, username, password?, domain?, width?=1280, height?=800, useNla?, certificatePolicy?, clipboard?=true, reconnectAttempts?=5}` → `{sessionId, host, port, useNla, certificatePolicy, clipboard, reconnectAttempts}`。`width/height` 须在 640x480..3840x2160（下界沿 NyaTerm，上界沿插件远程桌面上界，保证补丁负载 < 64 MiB）。`useNla`/`certificatePolicy` 缺省依次回落偏好（`rdp_use_nla`/`rdp_certificate_policy`，见下）与评审锁定缺省（`true`/`prompt`）。密码仅本地 IPC 传输，sidecar 以 `Zeroizing` 持有，不落日志/审计/错误信息。
-- `rdp/input`（别名 `rdp/write`）`{sessionId, kind, ...}`：`kind ∈ key-down | key-up | mouse-move | mouse-button | mouse-wheel | unicode | release-all`。键盘字段 `scan_code`（camelCase `scanCode` 别名）+ `extended`；鼠标 `button ∈ left|middle|right|back|forward`、`pressed`、`x/y`；滚轮 `deltaX/deltaY`（浏览器增量，取反映射为 RDP 旋转单位，NyaTerm 语义）；`unicode` 按字符 press+release。右 Shift（非扩展 0x36）走直发 fast-path（NyaTerm 修复），其余经输入数据库派生 fast-path 事件。返回 `{success}`。
+- `rdp/input`（别名 `rdp/write`）`{sessionId, kind, ...}`：`kind ∈ key-down | key-up | mouse-move | mouse-button | mouse-wheel | unicode | release-all`。键盘字段 `scan_code`（camelCase `scanCode` 别名）+ `extended`；鼠标 `button ∈ left|middle|right|back|forward`、`pressed`、`x/y`；滚轮 `deltaX/deltaY`（浏览器增量，取反映射为 RDP 旋转单位，NyaTerm 语义）；`unicode` 按字符 press+release（每条 `unicode` 文本 ≤4096 字符，超限整包拒绝——字符逐一展开为 press+release 对，无界文本即无界操作列表；收官审查 E5 修复）。右 Shift（非扩展 0x36）走直发 fast-path（NyaTerm 修复），其余经输入数据库派生 fast-path 事件。返回 `{success}`。
 - `rdp/resize {sessionId, width, height}`：服务端动态分辨率，尺寸门限同 start。返回 `{success}`。
 - `rdp/set-clipboard {sessionId, text}`：本地文本 → 远端（暂存 + 以 CF_UNICODETEXT 广告）。**仅文本**；上限 16 MiB，超限整包拒绝（不截断）。返回 `{success}`。
 - `rdp/reconnect {sessionId}`：手动重连（generation 计数防串话）。返回 `{sessionId, success}`。
@@ -611,11 +611,11 @@ RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRD
 
 - `rdp/session/state {sessionId, workbenchId, state, errorKind?, error?, attempt?, maxAttempts?}`：`state ∈ connecting | connected | reconnecting | closed | error`；`connected` 在首个桌面帧到达时发布。`errorKind ∈ transport | tls | certificate | authentication | negotiation | session | clipboard`。**认证失败文案统一为 "RDP authentication failed"**（不区分用户名/密码错误、不回显凭据）。
 - `rdp/frame/{sessionId}`（二进制）：44 字节 patch 头 + RGBA 负载，与 `vnc/frame` 同格式（见上文），`sequence` 跨重连单调。
-- `rdp/clipboard {sessionId, text}`：远端 → 本地文本（≤16 MiB，仅 CF_UNICODETEXT；由后端格式过滤保证，非 UI 约束）。
+- `rdp/clipboard {sessionId, text, chunkIndex?, chunkTotal?}`：远端 → 本地文本（≤16 MiB，仅 CF_UNICODETEXT；由后端格式过滤保证，非 UI 约束）。JSON 转义后超过单事件预算（7 MiB，超出会被 SDK 传输静默丢弃）的文本由后端按字符边界分片发送，多片事件附带 `chunkIndex`/`chunkTotal`，前端按会话隔离缓冲拼接（收官审查 C2 修复；单片事件不附这两个字段）。
 - `rdp/pointer {sessionId, type, ...}`：`type ∈ default | hidden | position(x,y) | bitmap(width,height,hotspotX,hotspotY,rgbaBase64)`（服务端光标形状，NyaTerm 同族事件）。
 - `connection/challenge {challengeId, kind: "rdp-certificate", sessionId, host, port, fingerprint, knownHostStatus}`：证书确认请求（`knownHostStatus ∈ match | changed | unknown`）。确认窗 **120s**，超时即拒绝；generation 变更后到达的应答一律拒绝（防串话）。
 
-重连门控（NyaTerm 同款分类器）：证书/认证/协商类失败**永不**自动重试；TLS/传输类失败有限重试，退避 1/2/4/8/15s 封顶 30s，默认 5 次（上限 10；`reconnectAttempts` 可调）。会话曾进入 active（收到过帧）后失败则重置重试预算；服务端主动断开（graceful disconnect）不自动重连，由用户 `rdp/reconnect` 决定。`rdp/close` 与 `rdp/reconnect` 递增 generation，旧代 worker 静默退出，帧/事件/证书应答均按 generation 过滤。
+重连门控（NyaTerm 同款分类器）：证书/认证/协商类失败**永不**自动重试；TLS/传输类失败有限重试，退避 1/2/4/8/15s 封顶 30s，默认 5 次（上限 10；`reconnectAttempts` 可调）。会话曾进入 active（收到过帧）后失败则重置重试预算；服务端主动断开（graceful disconnect）不自动重连，由用户 `rdp/reconnect` 决定。`rdp/close` 与 `rdp/reconnect` 递增 generation，旧代 worker 静默退出，帧/事件/证书应答均按 generation 过滤。另有**会话生命周期累计重连总预算 50 次**（`MAX_TOTAL_RECONNECTS`，永不重置——active 重置只回退退避步长、不回补总预算，防恶意服务器把有限退避变成无限循环；收官审查 D3 修复），预算耗尽即终局关闭。
 
 安全红线（实现与评审对照见 `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）：NTLMv2-only（vendored sspi 明示不支持 NTLMv1/LM，源码断言钉在 `vendored_sspi_marks_ntlmv1_and_lm_as_unsupported`）；CredSSP 仅在 TLS 之上（`with_tls(true)` 恒开）；证书策略 fail-closed（`prompt` 默认 / `strict` / `accept-temporarily`，无「静默接受」路径）；剪贴板 text-only + 16 MiB + 不落审计；凭据 `Zeroizing` 持有、不进日志/事件/错误。用户文档保留「连接期间远端可读写会话剪贴板、凭据实质交付目标主机，仅连接可信主机」警示。
 

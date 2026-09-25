@@ -31,6 +31,12 @@ profile 分组、全局外观）不重复实现。
 | 点击定位光标（iTerm2/kitty 风格）+ 细竖线光标 | iTerm2 Option+Click / kitty click-to-move | ✅ 已有（2026-09-09：`frontend/src/lib/terminalClickCursor.ts` 纯几何计算——同逻辑行内原地点击按字符差值代发左右方向键，宽字符 2 格记 1、折行跨行展开、备用屏/鼠标上报应用/trzsz·zmodem 占流一律不动作；光标 `cursorStyle: "bar"`。终端协议无直接落点能力，readline 只认按键，行外点击不动作防翻历史） | — |
 | **终端配色方案与多套主题**（Tabby 对标：192 内置配色 / 深浅双槽自动切换 / 字体·间距·光标·渲染细项 / 四格式方案导入 / 实时可视化预览） | Tabby `TerminalColorScheme` + `colorSchemeSelector` + `colorSchemePreview`；tabby-community-color-schemes（上游 iTerm2-Color-Schemes） | ✅ 已有（2026-09-22，`codex/ssh/terminal-themes` 分支）：见下文专节。**默认仍为「跟随宿主」，不改变既有观感**——只有用户显式选方案才覆盖 | — |
 | known_hosts 管理（list/remove，宿主侧文件） | ssh_service.go ListKnownHosts/RemoveKnownHost | ✅ 已有（第一批，实测通过） | — |
+| RDP 远程桌面（NLA/CredSSP + TLS、文本剪贴板、断线重连） | NyaTerm `src/core/rdp.rs` | ✅ 已有（2026-09-25 RDP-1/2/3 全链收官，merge 09c84b5e；vendored IronRDP 六 crate 锁步链，lockstep CI 断言；协议 `rdp/start`、`rdp/input`、`rdp/resize`、`rdp/set-clipboard`、`rdp/reconnect`、`rdp/certificate/resolve`、`rdp/close`、`rdp/list`，见 PROTOCOL「RDP 远程桌面会话」节；对抗审查 7 问题修复后收官，merge 89302914。遗留人工门：真机 RDP server 联调、WKWebView 位图光标走查、CBT 端到端核对） | — |
+| 终端行内 ghost 自动建议（Warp/fish 对齐） | Warp inline autosuggest | ✅ 已有（2026-09-25，parity-warp-ghost cee2c90）：`terminalGhostSuggest.ts` 纯状态机 + 终端区 overlay 渲染（→ 一次接受、IME/粘贴/远端命令中隐藏），设置自治开关（默认开） | — |
+| 结构化命令补全（三级下拉：flag/子命令/值候选） | Warp/fig spec completions | ✅ 已有（2026-09-25，parity-warp-spec 9717fa1）：`lib/completions/spec.ts` schema/评分纯函数 + 首批 12 个精选 CLI spec（git/docker/kubectl/ssh 等）+ `CompletionMenu.vue` 三级下拉，命令条接线 spec 优先/历史回落，设置开关（默认开）；与 ghost 建议互斥（M10 fe-fix） | — |
+| 终端行为与快捷键设置（右键四档/粘贴变换/响铃三态/键位录制编辑器） | Tabby Terminal/Hotkeys 设置页 | ✅ 已有（2026-09-22 两轮合入，见下文「Tabby 终端行为与快捷键对标补充」专节） | — |
+| 连接表单协议化（protocol 字段 ssh/telnet/vnc，工作台直启对应协议会话） | Tabby 连接设置 protocol | ✅ 已有（2026-09-25，M9：manifest `protocol` select（ssh 默认/telnet/vnc）+ 29 个 SSH 特有字段 `visible_when` 联动 + openSession 按 protocol 直启 telnet/vnc 会话（失败回落预填弹窗）；serial 协议化 deferred（参数组不同构）、RDP 表单暴露待后续） | — |
+| 外部客户端会话导入（MobaXterm/Xshell/WindTerm/SecureCRT/FinalShell/Electerm/Termius） | NyaTerm `core/importer/` | ✅ 已有（前三格式既有；2026-09-25 补齐 SecureCRT .xml/FinalShell .zip/Electerm .json/Termius .json 四解析器，f9fed3c）：统一 `secret_note` 原因码（encrypted/not-carried），密文一律不解码，预览横幅七语 | — |
 | 主机密钥预检/接受/拒绝（profile 维度） | CheckHostKey/Accept/RejectHostKey | ✅ ssh/host-key/check（探针预检三态，真机验证）+ 挑战流程；2026-09-22 起**连接表单内主机密钥确认 = 支持**（需宿主 ≥0.6.17 / Host API 1.1：`plugin/initialize` 广告 `host.requestUserInput` 时走 `host/requestUserInput` 宿主弹窗，弹窗期间宿主暂停 connection/test 截止，表单内即可信任；旧宿主降级为工作台 `connection/challenge` 确认，cancel/timeout/不应答一律 fail closed，见 PROTOCOL「主机密钥确认通道(requestUserInput)」节） | P1 完成 |
 | 本地 SSH 私钥发现（~/.ssh 扫描 + 指纹） | DiscoverKeys | ✅ 已有（第一批，实测通过）；2026-09-15 起另供 `keys/discover/options` 下拉形态（`{options:[{value,label}]}`），只出元数据不出密钥材料；2026-09-17 起 **label 即路径本身**（不再拼算法/指纹，避免下拉控件被撑长），算法与指纹保留在 `keys/discover` 返回值里 | P0 |
 | 连接表单私钥录入：手工输入 + 建议下拉 + 任意文件选择 + 粘贴私钥内容 | Electerm 连接表单（选 key 文件 / 直接贴 key 内容）；宿主隧道密钥字段（输入框 + 浏览） | ✅ 已有（2026-09-15；2026-09-17 补文件选择与「可手输」修正）：① 手工输入——`private_key_path` 是普通 text 字段；**刻意不声明 `options_action`**，因为宿主对这类字段渲染纯下拉（`selectOptionsFor()` 优先），既不能手输、也和宿主隧道密钥字段不一致，`~/.ssh` 之外的密钥无法录入。② 建议下拉——宿主内置本地密钥建议器（字段 key 恰为 `private_key_path`，桌面端生效；Web 后端返回空）。`keys/discover/options` RPC 保留为后端能力，label 改为路径本身避免撑长控件。③ 文件选择——`private_key_path` 声明宿主 `picker`（Host API 1.1：`{"kind":"file","content_field":"private_key"}`，**不设 `accept`** 以免 `id_rsa`/`id_ed25519` 这类无扩展名密钥被原生对话框置灰）：桌面端原生对话框写回绝对路径，Web/Docker 无客户端文件系统时同一按钮降级为上传，内容写入 `private_key` 并清空路径（保存时互删，避免旧上传继续命中「内容优先」）。④ 粘贴——`private_key` 可见 textarea（secret 绑定，多行掩码），OpenSSH/PEM/PPK 直贴；内容非空优先于路径（ssh.rs `resolve_private_key_text`，CRLF 归一化），「路径或内容」二选一由 sidecar 连接时校验；MCP 内联拨号同步支持 `privateKeyContent`。⚠️ `picker` 需宿主含该能力的发行版：`engines.dbx` 已固定为 `>=0.6.16`（0.6.16 首个提供该属性；旧宿主 `deny_unknown_fields` 会拒绝整份 manifest，`verify.mjs` 断言只许上移）；另注意上传通道会把私钥内容复制到服务端连接密钥库 | — |
@@ -177,9 +183,10 @@ React 19 独立桌面 SSH 工作台）为参照的能力借鉴（实施计划
 产品形态不同（宿主内插件 vs 独立终端），仅取终端/SFTP/监控域内可对齐项。本节登记时
 「协议广度（RDP/VNC/Telnet/串口）、端口转发、X11 转发」仍列为不做——其后已分批翻转：
 Telnet/串口/VNC 已全栈落地（M2/M4/M5，见 PROGRESS 2026-09-24 收口记录）、X11 转发已实现
-（M4，merge 75c5219）、端口转发 -L/-R 已内置（2026-09-22 用户决策翻转，见 tssh 节）；
-仍不做的收敛为 RDP（vendored fork+CredSSP 人工评审门）、多标签分屏（宿主工作台承担）、
-云同步/导入、隐私遮蔽等（宿主承担或超出插件契约）。
+（M4，merge 75c5219）、端口转发 -L/-R 已内置（2026-09-22 用户决策翻转，见 tssh 节）、
+RDP 已收官（2026-09-25，vendored IronRDP 链 RDP-1/2/3，真机 server 联调为人工门，
+见能力总表 RDP 行）、会话导入已补齐 7 种外部客户端格式（M7 P0-2，见能力总表）；
+仍不做的收敛为多标签分屏（宿主工作台承担）、云同步、隐私遮蔽等（宿主承担或超出插件契约）。
 
 | iShell Pro 能力 | 插件状态 | 说明 |
 | --- | --- | --- |
@@ -296,6 +303,11 @@ python3 scripts/gen-terminal-schemes.py   # 重新扫描 Xresources → 覆写 t
 - 未新增任何运行时依赖（YAML 导入为手写扫描器）。
 
 ## Tabby 终端行为与快捷键对标补充（2026-09-22，同分支第二轮）
+
+> 状态补注（2026-09-25 M13 文档同步轮核实）：本节与上一轮主题对标的改动已随
+> `codex/ssh/terminal-themes` 线合入 `codex/ssh/nyaterm-parity-integration`
+> （`f1c764c3 feat(settings): add Tabby-parity terminal behaviour and hotkey settings`），
+> 能力总表对应行已补。以下原文保留，供实现细节与验收口径查证。
 
 接上一轮的「外观」对标，补齐 Tabby 设置面的另外两块：**Terminal**（行为）与 **Hotkeys**
 （快捷键）。同时按 Tabby 的分类粒度把原「外观」拆成「外观 / 配色方案」两页。仍然是
