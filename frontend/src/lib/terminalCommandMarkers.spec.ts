@@ -3,7 +3,7 @@
 // updates 曾被 A 携带的 lastExitCode=null 覆写，导致退出码标记永远显示不出
 // 来（本地终端注入脚本与远端 VS Code 兼容脚本同样受害）。
 import { describe, expect, it } from "vitest";
-import { getOsc633ParserState, parseOsc633StreamChunk } from "./terminalCommandMarkers";
+import { getOsc633ParserState, Osc633CommandParser, parseOsc633StreamChunk } from "./terminalCommandMarkers";
 
 describe("terminalCommandMarkers parser", () => {
   it("keeps the D-mark exit code when the prompt A-mark follows in the same chunk", () => {
@@ -32,5 +32,21 @@ describe("terminalCommandMarkers parser", () => {
     const again = parseOsc633StreamChunk("\u001b]633;E;true\u0007", state);
     expect(again.updates.commandActive).toBe(true);
     expect(state.lastExitCode).toBeNull();
+  });
+
+  it("skips plain byte chunks without ESC and still completes a marker split across chunks", () => {
+    // 快路径（首帧优化）：不含 ESC 且无 carry 的字节块零解析直接返回，
+    // 大量纯输出不再进解码器；带 ESC 的块与跨块 carry 仍完整解析。
+    const parser = new Osc633CommandParser();
+    expect(parser.push(new TextEncoder().encode("plain ptY output without escape\r\n"))).toEqual({});
+    // ESC 序列跨块：carry 非空时，即使续块不含 ESC 也必须继续解码。
+    const head = parser.push(new TextEncoder().encode("\u001b]633;E;cargo bu"));
+    expect(head.commandActive).toBeUndefined();
+    const tail = parser.push(new TextEncoder().encode("ild\u0007"));
+    expect(tail.commandActive).toBe(true);
+    expect(tail.command).toBe("cargo build");
+    // reset 后 carry/decoder 全清：续块不再拼接旧序列。
+    parser.reset();
+    expect(parser.push(new TextEncoder().encode("ild\u0007"))).toEqual({});
   });
 });
