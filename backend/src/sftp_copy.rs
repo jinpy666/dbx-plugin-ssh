@@ -4,12 +4,13 @@
 //! Moves inside one directory first try an SFTP rename and fall back to the
 //! shell. No sudo variant (tiny-rdm has none either).
 //!
-//! latin-1 字节保真（M17 增量①）：`from`/`toDir` 是列表回传的 wire 形式。
-//! 覆盖预检（裸包 LSTAT，目标整条 [`sftp_name::unescape_wire`] 还原）与
-//! 同目录 move 的 RENAME 快路径（裸包 RENAME）走原始字节；底层 shell
-//! `cp`/`mv` 的 exec 命令串是 UTF-8 String，服务器原始字节经 shell 参数
-//! 不可控——copy 与跨目录 move 的执行层保持字面量发送（clean 名不受影响，
-//! 转义名由服务器侧报错），边界登记见 PROTOCOL。
+//! latin-1 字节保真（M17 增量①工作台、M18 MCP 工具面）：工作台 `from`/
+//! `toDir` 是列表回传的 wire 形式（MCP 面为显示形式，见 [`PathForm`]）。
+//! 覆盖预检（逐个裸包 LSTAT，目标按 [`PathForm`] 还原字节）与同目录 move
+//! 的 RENAME 快路径（裸包 RENAME）走原始字节；底层 shell `cp`/`mv` 的
+//! exec 命令串是 UTF-8 String，服务器原始字节经 shell 参数不可控——copy
+//! 与跨目录 move 的执行层保持字面量发送（clean 名不受影响，转义/非 ASCII
+//! 名由服务器侧报错），边界登记见 PROTOCOL。
 
 use std::sync::Arc;
 
@@ -32,6 +33,27 @@ const REMOTE_COPY_TIMEOUT_SECS: u64 = 300;
 pub enum CopyOp {
     Copy,
     Move,
+}
+
+/// latin-1 模式下源/目标路径的字节还原口径：工作台 RPC（`sftp/copy`）传
+/// 列表回传的 wire 形式（%XX 转义，[`sftp_name::unescape_wire`] 还原）；
+/// MCP 工具面（M18）传显示形式（latin-1 解码文本，
+/// [`sftp_name::latin1_encode_display`] 还原——与 MCP 面 sftp_rename 等
+/// 工具的名字口径一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathForm {
+    WireEscaped,
+    Display,
+}
+
+impl PathForm {
+    /// 显示/wire 文本 → 服务器原始字节。
+    pub fn decode(self, path: &str) -> Vec<u8> {
+        match self {
+            PathForm::WireEscaped => sftp_name::unescape_wire(path),
+            PathForm::Display => sftp_name::latin1_encode_display(path),
+        }
+    }
 }
 
 impl CopyOp {
@@ -295,19 +317,13 @@ impl CopyExecutor<'_> {
             CopyExecutor::Headless(_, sftp) => sftp.clone(),
         }
     }
-
-    /// latin-1（M17 增量①）裸包客户端：Session 路径按会话新开一条 sftp 子系统
-    /// 通道；Headless（MCP 工具面）没有会话上下文且工具面无编码偏好，恒为
-    /// None（MCP 面保持字面量发送，见 PROTOCOL 遗留登记）。
-    async fn raw_client(&self) -> Option<RawSftpClient> {
-        match self {
-            CopyExecutor::Session(runtime, session_id) => {
-                runtime.raw_sftp_client(session_id).await.ok()
-            }
-            CopyExecutor::Headless(_, _) => None,
-        }
-    }
 }
+
+/// latin-1 裸包车道（M17-A 工作台 / M18 MCP 工具面）：客户端 + 路径还原
+/// 口径。工作台按会话新开一条 sftp 子系统通道（wire 形式还原）；MCP 工具面
+/// 由调用方传入连接级裸包客户端（显示形式还原）。None = auto 语义或裸包
+/// 客户端建立失败（回退字面量路径，M15 先例）。
+type RawLane = Option<(RawSftpClient, PathForm)>;
 
 /// `sftp/copy` / `sftp/move` entry for the plugin RPC. The session is
 /// resolved by the caller (connection id or session id).
@@ -320,22 +336,34 @@ pub async fn run(
 ) -> Result<Value, String> {
     runtime.ensure_writable(session_id).await?;
     let request = parse_request(params)?;
+    // latin-1（M17-A）：按会话新开一条裸包通道（wire 形式还原）；建立失败
+    // 回退既有字面量路径（raw = None，M15 先例）。
+    let raw: RawLane = match encoding {
+        NameEncoding::Latin1 => runtime
+            .raw_sftp_client(session_id)
+            .await
+            .ok()
+            .map(|client| (client, PathForm::WireEscaped)),
+        NameEncoding::Auto => None,
+    };
     let outcome = execute_with(
         CopyExecutor::Session(runtime, session_id),
         op,
         &request,
-        encoding,
+        raw,
     )
     .await;
     Ok(outcome.into_json())
 }
 
 /// `sftp_copy` / `sftp_move` MCP tool entry over a pooled headless
-/// connection. `sftp` enables the SFTP-rename fast path for moves.
-/// MCP 工具面无编码偏好（PROTOCOL 遗留登记），固定按 auto 语义执行。
+/// connection. `sftp` enables the SFTP-rename fast path for moves. `raw`
+/// 传 latin-1 连接的裸包客户端（M18：Some = latin-1，覆盖预检/同目录
+/// RENAME 快路径字节保真，路径按显示形式还原）；None = auto 语义执行。
 pub async fn execute(
     handle: &Handle<SshClient>,
     sftp: Option<Arc<AsyncMutex<SftpSession>>>,
+    raw: Option<RawSftpClient>,
     op: CopyOp,
     request: &CopyMoveRequest,
 ) -> CopyMoveOutcome {
@@ -343,7 +371,7 @@ pub async fn execute(
         CopyExecutor::Headless(handle, sftp),
         op,
         request,
-        NameEncoding::Auto,
+        raw.map(|client| (client, PathForm::Display)),
     )
     .await
 }
@@ -352,7 +380,7 @@ async fn execute_with(
     executor: CopyExecutor<'_>,
     op: CopyOp,
     request: &CopyMoveRequest,
-    encoding: NameEncoding,
+    mut raw: RawLane,
 ) -> CopyMoveOutcome {
     let targets: Vec<String> = request
         .from
@@ -360,35 +388,27 @@ async fn execute_with(
         .map(|source| target_path(&request.to_dir, source))
         .collect();
 
-    // latin-1（M17 增量①）：from/toDir 是列表回传的 wire 形式。裸包客户端
-    // 可用时，覆盖预检（逐个裸包 LSTAT，目标整条 unescape_wire 还原字节）与
-    // 同目录 move 的 RENAME 快路径都走字节保真；裸包客户端**建立**失败回退
-    // 既有字面量路径（M15 先例）。
+    // latin-1：from/toDir 按调用方面（工作台 wire 形式 / MCP 显示形式）整条
+    // 还原字节。裸包客户端可用时，覆盖预检（逐个裸包 LSTAT）与同目录 move
+    // 的 RENAME 快路径都走字节保真；None（auto 或建立失败）回退既有字面量
+    // 路径（M15 先例）。
     //
     // 设计边界（登记，PROTOCOL 同步）：底层执行仍是远端服务器侧 `cp -a` /
     // `mv -f` shell 命令——SSH exec 的命令串是 UTF-8 String，含转义（%XX）
-    // 的 wire 名只能按字面量拼接，服务器原始字节经 shell 参数不可控，故
-    // copy 与跨目录 move 的执行层不做字节保真迁移：clean 名（无转义）行为
-    // 不变，转义名由服务器侧报错（`cp: cannot stat '%E9'` 类），预检/改名
-    // 快路径已迁移的部分保证覆盖判定与同目录移动正确。
-    let mut raw = match encoding {
-        NameEncoding::Latin1 => executor.raw_client().await,
-        NameEncoding::Auto => None,
-    };
+    // /非 ASCII 的路径只能按字面量拼接，服务器原始字节经 shell 参数不可控，
+    // 故 copy 与跨目录 move 的执行层不做字节保真迁移：clean 名（无转义）
+    // 行为不变，非 ASCII 名由服务器侧报错（`cp: cannot stat` 类），预检/
+    // 改名快路径已迁移的部分保证覆盖判定与同目录移动正确。
 
     // With overwrite disabled, block every item whose target already exists
-    // before running anything. latin-1 + raw client：逐个裸包 LSTAT；其余走
-    // 一轮 shell 探测（整批一个往返）。
+    // before running anything. latin-1 + 裸包车道：逐个裸包 LSTAT（按
+    // PathForm 口径还原目标字节）；其余走一轮 shell 探测（整批一个往返）。
     let mut blocked = vec![false; targets.len()];
     if !request.overwrite {
         let mut probed = false;
-        if let Some(client) = raw.as_mut() {
+        if let Some((client, form)) = raw.as_mut() {
             for (index, target) in targets.iter().enumerate() {
-                if client
-                    .lstat(&sftp_name::unescape_wire(target))
-                    .await
-                    .is_ok()
-                {
+                if client.lstat(&form.decode(target)).await.is_ok() {
                     blocked[index] = true;
                 }
             }
@@ -437,16 +457,13 @@ async fn execute_with(
         }
 
         // Fast path: same-directory moves are a plain rename. latin-1 优先
-        // 走裸包 RENAME（字节保真；SFTPv3 不覆盖已存在目标，撞名/跨设备失败
-        // 与高层快路径同样回落 shell mv）。
+        // 走裸包 RENAME（按 PathForm 口径还原字节，字节保真；SFTPv3 不覆盖
+        // 已存在目标，撞名/跨设备失败与高层快路径同样回落 shell mv）。
         if op == CopyOp::Move && same_directory(source, &request.to_dir) {
             let attempted = match raw.as_mut() {
-                Some(client) => Some(
+                Some((client, form)) => Some(
                     client
-                        .rename(
-                            &sftp_name::unescape_wire(source),
-                            &sftp_name::unescape_wire(target),
-                        )
+                        .rename(&form.decode(source), &form.decode(target))
                         .await,
                 ),
                 None => match &sftp {
@@ -627,6 +644,24 @@ mod tests {
         // '%' 自转义闭环：真实名字里的字面 %XX 往返不吞。
         let target = target_path("/tmp", "/src/a%2541b");
         assert_eq!(sftp_name::unescape_wire(&target), b"/tmp/a%41b".to_vec());
+    }
+
+    #[test]
+    fn display_paths_encode_to_server_bytes() {
+        // M18 MCP 工具面（PathForm::Display）：from/toDir 是 latin-1 连接上
+        // 列表回传的显示形式，target_path 拼接后整条 latin1_encode_display
+        // 还原字节——与 MCP 面 sftp_rename 的名字口径一致。
+        let target = target_path("/tmp/caf\u{e9}", "/src/\u{ff}item.txt");
+        assert_eq!(
+            PathForm::Display.decode(&target),
+            b"/tmp/caf\xe9/\xffitem.txt".to_vec()
+        );
+        // ASCII 路径按字面量透传，行为与 auto 一致。
+        let target = target_path("/tmp", "/var/log/app.log");
+        assert_eq!(PathForm::Display.decode(&target), b"/tmp/app.log".to_vec());
+        // 显示形式不引入 %XX 转义语义：字面 %XX 是真实名字的一部分。
+        let target = target_path("/tmp", "/src/a%41b");
+        assert_eq!(PathForm::Display.decode(&target), b"/tmp/a%41b".to_vec());
     }
 
     #[test]

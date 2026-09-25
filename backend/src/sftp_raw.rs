@@ -49,6 +49,9 @@ const FXP_ATTRS: u8 = 105;
 
 // STATUS 错误码。
 const SSH_FX_EOF: u32 = 1;
+/// SSH_FX_NO_SUCH_FILE（draft-ietf-secsh-filexfer-02 §7）：`sftp_exists`
+/// 等「存在性」语义只认这个码，其余错误必须如实上抛。
+pub const SSH_FX_NO_SUCH_FILE: u32 = 2;
 
 // ATTRS 标志位（v3）。
 const ATTR_SIZE: u32 = 0x1;
@@ -66,6 +69,11 @@ const PFLAGS_TRUNC: u32 = 0x10;
 /// WRITE 单包数据上限：SFTPv3 规范建议 ≤32768 以保证最大兼容（OpenSSH 的
 /// 包上限是 256 KiB，但旧服务器可能更小），调用方按此切分数据。
 pub const MAX_WRITE_CHUNK: usize = 32 * 1024;
+
+/// READ 单请求建议长度：与写侧同取 v3 规范建议的 32 KiB（`read_file` 的
+/// 分块粒度；workbench 下载逐 chunk 的 256 KiB 是高层客户端语义，这里按
+/// 裸包最大兼容口径）。
+const READ_CHUNK: usize = 32 * 1024;
 
 /// v3 attrs 的传输子集（列表/下载/写侧 SETSTAT 所需）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -312,6 +320,15 @@ pub fn parse_attrs_packet(body: &[u8]) -> Result<RawAttrs, String> {
     Ok(attrs)
 }
 
+/// 从裸包客户端的错误串里提取 STATUS 码（错误串形如
+/// `"SFTP raw lstat failed with status 2"`）：调用方据此区分
+/// [`SSH_FX_NO_SUCH_FILE`]（存在性语义）与其他失败。非错误串/无码返回 None。
+pub fn error_status(error: &str) -> Option<u32> {
+    error
+        .rsplit_once("status ")
+        .and_then(|(_, tail)| tail.trim().parse().ok())
+}
+
 fn read_u32(buf: &[u8], cursor: &mut usize) -> Result<u32, String> {
     if buf.len() < *cursor + 4 {
         return Err("SFTP raw packet is truncated".to_string());
@@ -467,6 +484,53 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
                 }
                 _ => Err("SFTP raw read got an unexpected reply".to_string()),
             }
+        }
+        .await;
+        self.close(&handle).await?;
+        result
+    }
+
+    /// 读整个文件（M18，MCP `sftp_read_file` 用）：OPEN(READ) 一次，READ 按
+    /// [`READ_CHUNK`] 分块循环（offset 显式推进，STATUS EOF / 空 DATA 收尾），
+    /// 最后 CLOSE。至多读 `cap` 字节（调用方用 `max_bytes + 1` 探测截断），
+    /// `offset` 支持 TCP 式分页起点；offset 在/超过 EOF 时回空 Vec。
+    pub async fn read_file(
+        &mut self,
+        path: &[u8],
+        offset: u64,
+        cap: u64,
+    ) -> Result<Vec<u8>, String> {
+        let handle = self
+            .open_handle(path, PFLAGS_READ, &RawAttrs::default())
+            .await?;
+        let result = async {
+            let mut data = Vec::new();
+            let mut position = offset;
+            while (data.len() as u64) < cap {
+                let requested = (cap - data.len() as u64).min(READ_CHUNK as u64) as u32;
+                let id = self.next_id();
+                let reply = self
+                    .request(build_read(id, &handle, position, requested), id)
+                    .await?;
+                let (kind, _, body) = parse_response_header(&reply)?;
+                let chunk = match kind {
+                    FXP_DATA => parse_data(body)?,
+                    FXP_STATUS => {
+                        let code = parse_status_code(body)?;
+                        if code == SSH_FX_EOF {
+                            break;
+                        }
+                        return Err(format!("SFTP raw read failed with status {code}"));
+                    }
+                    _ => return Err("SFTP raw read got an unexpected reply".to_string()),
+                };
+                if chunk.is_empty() {
+                    break;
+                }
+                position += chunk.len() as u64;
+                data.extend_from_slice(&chunk);
+            }
+            Ok(data)
         }
         .await;
         self.close(&handle).await?;
@@ -977,67 +1041,29 @@ mod tests {
     /// 内存双工流的桩服务器：INIT 回 VERSION，随后每个请求按脚本回预置
     /// 包体（自动回填请求帧里的 id）。纯内存往返，不连 SSH。
     /// 脚本包体格式：`[type, id 占位 4 字节, 剩余包体]`。
-    async fn scripted_server(mut stream: tokio::io::DuplexStream, mut replies: Vec<Vec<u8>>) {
-        let mut header = [0_u8; 4];
-        loop {
-            if stream.read_exact(&mut header).await.is_err() {
-                break;
-            }
-            let len = u32::from_be_bytes(header) as usize;
-            let mut payload = vec![0_u8; len];
-            stream.read_exact(&mut payload).await.unwrap();
-            let (kind, body) = if payload[0] == FXP_INIT {
-                (FXP_VERSION, 3_u32.to_be_bytes().to_vec())
-            } else {
-                let id = u32::from_be_bytes(payload[1..5].try_into().unwrap());
-                let mut scripted = replies.remove(0);
-                scripted[1..5].copy_from_slice(&id.to_be_bytes());
-                let kind = scripted.remove(0);
-                (kind, scripted)
-            };
-            let mut packet = vec![kind];
-            packet.extend_from_slice(&body);
-            let mut frame = (packet.len() as u32).to_be_bytes().to_vec();
-            frame.extend_from_slice(&packet);
-            stream.write_all(&frame).await.unwrap();
-            stream.flush().await.unwrap();
-        }
+    async fn scripted_server(stream: tokio::io::DuplexStream, replies: Vec<Vec<u8>>) {
+        test_support::scripted_server(stream, replies, None).await
     }
 
     fn status_body(code: u32) -> Vec<u8> {
-        let mut body = vec![FXP_STATUS];
-        body.extend_from_slice(&0_u32.to_be_bytes());
-        body.extend_from_slice(&code.to_be_bytes());
-        body
+        test_support::status_body(code)
     }
 
     fn attrs_body(size: u64, permissions: u32) -> Vec<u8> {
-        let mut body = vec![FXP_ATTRS];
-        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
-        body.extend_from_slice(&(ATTR_SIZE | ATTR_PERMISSIONS).to_be_bytes());
-        body.extend_from_slice(&size.to_be_bytes());
-        body.extend_from_slice(&permissions.to_be_bytes());
-        body
+        test_support::attrs_body(size, permissions)
     }
 
     fn handle_body(value: &[u8]) -> Vec<u8> {
-        let mut body = vec![FXP_HANDLE];
-        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
-        body.extend_from_slice(&(value.len() as u32).to_be_bytes());
-        body.extend_from_slice(value);
-        body
+        test_support::handle_body(value)
+    }
+
+    fn data_body(data: &[u8]) -> Vec<u8> {
+        test_support::data_body(data)
     }
 
     /// NAME 单条目回包（READLINK 用）：name + 空 longname + 空 attrs。
     fn name_body_one(name: &[u8]) -> Vec<u8> {
-        let mut body = vec![FXP_NAME];
-        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
-        body.extend_from_slice(&1_u32.to_be_bytes());
-        body.extend_from_slice(&(name.len() as u32).to_be_bytes());
-        body.extend_from_slice(name);
-        body.extend_from_slice(&0_u32.to_be_bytes()); // longname 空
-        body.extend_from_slice(&0_u32.to_be_bytes()); // attrs flags=0
-        body
+        test_support::name_body_one(name)
     }
 
     #[tokio::test]
@@ -1112,5 +1138,189 @@ mod tests {
         let mut client = RawSftp::init(client_side).await.unwrap();
         let error = client.remove(b"/a").await.unwrap_err();
         assert!(error.contains("unexpected reply"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn read_file_loops_reads_until_cap_and_sends_raw_path_bytes() {
+        let requests = test_support::request_log();
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        tokio::spawn(test_support::scripted_server(
+            server_side,
+            vec![
+                handle_body(b"h1"), // OPEN(READ)
+                data_body(b"ab"),   // READ#1
+                data_body(b"cde"),  // READ#2 → 累计达到 cap
+                status_body(0),     // CLOSE
+            ],
+            Some(requests.clone()),
+        ));
+        let mut client = RawSftp::init(client_side).await.unwrap();
+        let data = client.read_file(b"/d/caf\xE9.txt", 0, 5).await.unwrap();
+        assert_eq!(data, b"abcde".to_vec());
+        // INIT 之后的 OPEN 帧携带原始路径字节（latin-1 往返的字节级证据）：
+        // payload = type + id + path_len + path + pflags + attrs。
+        let open = &test_support::recorded_requests(&requests)[1];
+        assert_eq!(open[0], FXP_OPEN);
+        let path = b"/d/caf\xE9.txt";
+        assert_eq!(&open[9..9 + path.len()], &path[..]);
+        // READ 帧 offset 从 0 推进。
+        let read = &test_support::recorded_requests(&requests)[2];
+        assert_eq!(read[0], FXP_READ);
+        assert_eq!(&read[11..19], &0_u64.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn read_file_stops_on_eof_and_honors_offset() {
+        let requests = test_support::request_log();
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        tokio::spawn(test_support::scripted_server(
+            server_side,
+            vec![
+                handle_body(b"h1"),      // OPEN(READ)
+                data_body(b"xy"),        // READ#1（短读但未到 cap）
+                status_body(SSH_FX_EOF), // READ#2 → EOF 收尾
+                status_body(0),          // CLOSE
+            ],
+            Some(requests.clone()),
+        ));
+        let mut client = RawSftp::init(client_side).await.unwrap();
+        let data = client.read_file(b"/f", 100, 10).await.unwrap();
+        assert_eq!(data, b"xy".to_vec());
+        // READ#1 的 offset 显式携带调用方给的起点。
+        let read = &test_support::recorded_requests(&requests)[2];
+        assert_eq!(&read[11..19], &100_u64.to_be_bytes());
+    }
+
+    #[test]
+    fn error_status_extracts_codes_from_error_strings() {
+        assert_eq!(
+            error_status("SFTP raw lstat failed with status 2"),
+            Some(SSH_FX_NO_SUCH_FILE)
+        );
+        assert_eq!(
+            error_status("SFTP raw read failed with status 11"),
+            Some(11)
+        );
+        assert_eq!(error_status("SFTP raw read failed: boom"), None);
+        assert_eq!(error_status(""), None);
+    }
+}
+
+/// 内存桩的跨模块复用（`#[cfg(test)]`）：mcp.rs 的 M18 工具级闭环测试用
+/// 同一套桩服务器与回包构造器做 latin-1 往返验证，不连真实 SSH。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// 桩服务器收到的请求帧（去掉长度前缀的 payload），供测试断言「发出的
+    /// 路径/数据字节」——latin-1 往返闭环的字节级证据。
+    pub type RequestLog = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    pub fn request_log() -> RequestLog {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    pub fn recorded_requests(log: &RequestLog) -> Vec<Vec<u8>> {
+        log.lock().unwrap().clone()
+    }
+
+    /// 内存双工流的桩服务器（先例：本文件测试模块 M14-B 起）：INIT 回
+    /// VERSION，随后每个请求按脚本回预置包体（自动回填请求帧里的 id），
+    /// 并把收到的请求 payload 记入 `requests`（None 则不记录）。
+    pub async fn scripted_server(
+        mut stream: tokio::io::DuplexStream,
+        mut replies: Vec<Vec<u8>>,
+        requests: Option<RequestLog>,
+    ) {
+        let mut header = [0_u8; 4];
+        loop {
+            if stream.read_exact(&mut header).await.is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(header) as usize;
+            let mut payload = vec![0_u8; len];
+            stream.read_exact(&mut payload).await.unwrap();
+            if let Some(log) = requests.as_ref() {
+                log.lock().unwrap().push(payload.clone());
+            }
+            let (kind, body) = if payload[0] == FXP_INIT {
+                (FXP_VERSION, 3_u32.to_be_bytes().to_vec())
+            } else {
+                let id = u32::from_be_bytes(payload[1..5].try_into().unwrap());
+                let mut scripted = replies.remove(0);
+                scripted[1..5].copy_from_slice(&id.to_be_bytes());
+                let kind = scripted.remove(0);
+                (kind, scripted)
+            };
+            let mut packet = vec![kind];
+            packet.extend_from_slice(&body);
+            let mut frame = (packet.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&packet);
+            stream.write_all(&frame).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+    }
+
+    pub fn status_body(code: u32) -> Vec<u8> {
+        let mut body = vec![FXP_STATUS];
+        body.extend_from_slice(&0_u32.to_be_bytes());
+        body.extend_from_slice(&code.to_be_bytes());
+        body
+    }
+
+    pub fn attrs_body(size: u64, permissions: u32) -> Vec<u8> {
+        attrs_body_full(size, permissions, None, None)
+    }
+
+    /// 带 atime/mtime 的 attrs 回包（stat 映射测试用）。
+    pub fn attrs_body_full(
+        size: u64,
+        permissions: u32,
+        atime: Option<u32>,
+        mtime: Option<u32>,
+    ) -> Vec<u8> {
+        let mut body = vec![FXP_ATTRS];
+        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
+        let mut flags = ATTR_SIZE | ATTR_PERMISSIONS;
+        if atime.is_some() || mtime.is_some() {
+            flags |= ATTR_ACMODTIME;
+        }
+        body.extend_from_slice(&flags.to_be_bytes());
+        body.extend_from_slice(&size.to_be_bytes());
+        body.extend_from_slice(&permissions.to_be_bytes());
+        if flags & ATTR_ACMODTIME != 0 {
+            body.extend_from_slice(&atime.unwrap_or(0).to_be_bytes());
+            body.extend_from_slice(&mtime.unwrap_or(0).to_be_bytes());
+        }
+        body
+    }
+
+    pub fn handle_body(value: &[u8]) -> Vec<u8> {
+        let mut body = vec![FXP_HANDLE];
+        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
+        body.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        body.extend_from_slice(value);
+        body
+    }
+
+    pub fn data_body(data: &[u8]) -> Vec<u8> {
+        let mut body = vec![FXP_DATA];
+        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
+        body.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        body.extend_from_slice(data);
+        body
+    }
+
+    /// NAME 单条目回包（READLINK 用）：name + 空 longname + 空 attrs。
+    pub fn name_body_one(name: &[u8]) -> Vec<u8> {
+        let mut body = vec![FXP_NAME];
+        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
+        body.extend_from_slice(&1_u32.to_be_bytes());
+        body.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        body.extend_from_slice(name);
+        body.extend_from_slice(&0_u32.to_be_bytes()); // longname 空
+        body.extend_from_slice(&0_u32.to_be_bytes()); // attrs flags=0
+        body
     }
 }

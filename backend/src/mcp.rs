@@ -2338,6 +2338,27 @@ impl McpState {
             }
             "sftp_stat" => {
                 let path = required_str(arguments, "path")?;
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M18）：显示路径还原字节后走裸包 LSTAT（不跟随
+                    // 符号链接，与工作台 sftp/stat M17 同口径）。裸包 v3
+                    // attrs 不携带 uid/gid：shell 查询尽力而为补齐（M17 先例，
+                    // 非 ASCII 名的字节参数边界登记在案）。仅裸包客户端建立
+                    // 失败回退高层；操作错误原样上抛（工作台 stat 同策略）。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => {
+                            let attrs = client
+                                .lstat(&sftp_name::latin1_encode_display(path))
+                                .await?;
+                            let (uid, gid) = lookup_remote_uid_gid(&entry.handle, path).await;
+                            return Ok(raw_stat_json(path, attrs, uid, gid));
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_stat: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 let metadata = sftp.lock().await.metadata(path).await.map_err(sftp_error)?;
                 Ok(json!({
@@ -2352,6 +2373,22 @@ impl McpState {
             }
             "sftp_exists" => {
                 let path = required_str(arguments, "path")?;
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M18）：裸包 LSTAT，只认 NO_SUCH_FILE 为
+                    // 「不存在」，其余错误如实上抛。仅裸包客户端建立失败回退
+                    // 高层（M17-B 写工具同策略）。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => {
+                            let exists = raw_sftp_exists(&mut client, path).await?;
+                            return Ok(json!({ "path": path, "exists": exists }));
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_exists: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 // Only "no such file" means absent: a permission error or a
                 // dead channel must surface as an error, never as a
@@ -2384,6 +2421,34 @@ impl McpState {
                     .clamp(1, limits.max_download_bytes);
                 let as_base64 = arg_bool(arguments, "base64")?.unwrap_or(false);
                 let offset = arg_u64(arguments, "offset")?.unwrap_or(0);
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M18）：显示路径还原字节后 OPEN(READ)+READ 分块
+                    // （32 KiB 粒度）。大文件策略沿既有 MCP 边界：单次至多
+                    // maxBytes（上限 maxDownloadBytes），超出标记 truncated。
+                    // 读操作回退安全（M17-B readdir 同策略）：裸包路径任何
+                    // 失败回退高层重读。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => {
+                            match raw_sftp_read_file(&mut client, path, offset, max_bytes).await {
+                                Ok((data, truncated)) => {
+                                    return Ok(read_file_response(
+                                        path, &data, truncated, as_base64,
+                                    ));
+                                }
+                                Err(error) => {
+                                    eprintln!(
+                                        "[ssh] MCP sftp_read_file: raw byte read unavailable, falling back: {error}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_read_file: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 let mut file = sftp.lock().await.open(path).await.map_err(sftp_error)?;
                 if offset > 0 {
@@ -2401,17 +2466,7 @@ impl McpState {
                     .map_err(|error| format!("SFTP read failed: {error}"))?;
                 let truncated = data.len() as u64 > max_bytes;
                 data.truncate(max_bytes as usize);
-                if as_base64 {
-                    Ok(
-                        json!({ "path": path, "dataBase64": BASE64_STANDARD.encode(&data), "truncated": truncated }),
-                    )
-                } else {
-                    Ok(json!({
-                        "path": path,
-                        "content": String::from_utf8_lossy(&data),
-                        "truncated": truncated,
-                    }))
-                }
+                Ok(read_file_response(path, &data, truncated, as_base64))
             }
             "sftp_write_file" => {
                 let path = required_str(arguments, "path")?;
@@ -2425,6 +2480,30 @@ impl McpState {
                     ));
                 }
                 let overwrite = arg_bool(arguments, "overwrite")?.unwrap_or(false);
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M18）：显示路径还原字节后走裸包直写（选型：MCP
+                    // 面沿既有 sftp_write_file 直写语义——OPEN(CREAT|WRITE|
+                    // TRUNC) 截断 + WRITE 32 KiB 分块，无工作台上传族的
+                    // `.dbx-part` 暂存需求）。覆盖预检与写入同一字节口径
+                    // （裸包 LSTAT）。仅裸包客户端建立失败回退高层（M17-B 写
+                    // 工具同策略）；操作错误原样上抛，不回退（不会重复执行）。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => {
+                            return raw_sftp_write_file(
+                                &mut client,
+                                path,
+                                content.as_bytes(),
+                                overwrite,
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_write_file: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 if !overwrite && sftp.lock().await.metadata(path).await.is_ok() {
                     return Err(format!(
@@ -2565,6 +2644,21 @@ impl McpState {
                         .to_string()
                 })?;
                 let mode = parse_chmod_mode(mode)?;
+                if encoding == sftp_name::NameEncoding::Latin1 {
+                    // latin-1（M18）：显示路径还原字节后裸包 SETSTAT（只带
+                    // permissions 子集）。仅裸包客户端建立失败回退高层；操作
+                    // 错误原样上抛（与 M17-B 写工具同策略）。
+                    match entry.raw_sftp().await {
+                        Ok(mut client) => {
+                            return raw_sftp_chmod(&mut client, path, mode).await;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP sftp_chmod: raw byte client unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = entry.sftp().await?;
                 let metadata = russh_sftp::protocol::FileAttributes {
                     permissions: Some(mode),
@@ -2595,7 +2689,26 @@ impl McpState {
                         None
                     }
                 };
-                Ok(sftp_copy::execute(&entry.handle, sftp, op, &request)
+                // latin-1（M18）：裸包客户端可用时，覆盖预检与同目录 move 的
+                // RENAME 快路径走字节保真（工作台 M17-A 同模式；路径口径为
+                // 显示形式）。执行层边界（登记，同工作台 M17-A）：远端
+                // `cp`/`mv` 的 exec 命令串是 UTF-8 String，服务器原始字节经
+                // shell 参数不可控，copy 与跨目录 move 的执行层保持字面量
+                // 发送（clean 名不受影响，非 ASCII 名由服务器侧报错）。
+                let raw = if encoding == sftp_name::NameEncoding::Latin1 {
+                    match entry.raw_sftp().await {
+                        Ok(client) => Some(client),
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh] MCP {name}: raw byte client unavailable, literal precheck fallback: {error}"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                Ok(sftp_copy::execute(&entry.handle, sftp, raw, op, &request)
                     .await
                     .into_json())
             }
@@ -3034,6 +3147,173 @@ fn raw_list_items(dir: &str, entries: Vec<sftp_raw::RawEntry>) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// latin-1（M18）MCP 工具面裸包辅助：显示路径整条 latin1_encode_display 还原
+// 服务器字节后走裸包操作。泛型 over `RawSftp<S>` 是为了测试能用内存双工桩
+// （`sftp_raw::test_support`）做 latin-1 往返闭环，生产调用方传入的是
+// russh 通道流上的 `RawSftpClient`。
+// ---------------------------------------------------------------------------
+
+/// `sftp_stat` 响应装配（auto 与 latin-1 共用）。口径与 auto 分支一致：
+/// permissions 四位八进制、秒级时间戳。uid/gid 由调用方尽力而为补齐（裸包
+/// v3 attrs 不携带，见 [`lookup_remote_uid_gid`]）。
+fn raw_stat_json(
+    path: &str,
+    attrs: sftp_raw::RawAttrs,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Value {
+    json!({
+        "path": path,
+        "size": attrs.size,
+        "permissions": attrs.permissions.map(|bits| format!("{:04o}", bits & 0o7777)),
+        "modifiedAt": attrs.mtime,
+        "accessedAt": attrs.atime,
+        "uid": uid,
+        "gid": gid,
+    })
+}
+
+/// latin-1（M18）裸包 attrs 无 uid/gid（工作台 `sftp/stat` M17 先例同口径）：
+/// shell `stat -c '%u %g'` 尽力而为补齐属主数字。命令串是 UTF-8 String，非
+/// ASCII 显示名的字节参数不可控（M17-A 登记边界），exec 失败/解析不出按
+/// `(None, None)` 处理，主元数据不受影响。
+async fn lookup_remote_uid_gid(
+    handle: &Handle<SshClient>,
+    path: &str,
+) -> (Option<u32>, Option<u32>) {
+    let command = format!("stat -c '%u %g' -- {}", exec::shell_quote(path));
+    let Ok(outcome) = exec::exec_plain(handle, &command, Duration::from_secs(10), &[]).await else {
+        return (None, None);
+    };
+    let mut fields = outcome.output.split_whitespace();
+    (
+        fields.next().and_then(|field| field.parse().ok()),
+        fields.next().and_then(|field| field.parse().ok()),
+    )
+}
+
+/// latin-1（M18）`sftp_exists` 裸包分支：裸包 LSTAT，只把
+/// SSH_FX_NO_SUCH_FILE 映射为「不存在」，其余错误如实上抛——与 auto 分支
+/// 「权限错误/死通道绝不误报 exists:false」的契约一致。
+async fn raw_sftp_exists<S>(client: &mut sftp_raw::RawSftp<S>, path: &str) -> Result<bool, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin,
+{
+    match client.lstat(&sftp_name::latin1_encode_display(path)).await {
+        Ok(_) => Ok(true),
+        Err(error) => match sftp_raw::error_status(&error) {
+            Some(sftp_raw::SSH_FX_NO_SUCH_FILE) => Ok(false),
+            _ => Err(error),
+        },
+    }
+}
+
+/// latin-1（M18）`sftp_read_file` 裸包分支：显示路径还原字节后
+/// OPEN(READ) + READ 分块循环（`RawSftp::read_file`，32 KiB 粒度，v3 规范
+/// 建议口径）。大文件策略沿既有 MCP 边界：单次至多 `max_bytes`（上限
+/// maxDownloadBytes），用 `max_bytes + 1` 探测截断——与 auto 分支 `take()`
+/// 语义一致。返回 `(数据, 是否截断)`。
+async fn raw_sftp_read_file<S>(
+    client: &mut sftp_raw::RawSftp<S>,
+    path: &str,
+    offset: u64,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, bool), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin,
+{
+    let mut data = client
+        .read_file(
+            &sftp_name::latin1_encode_display(path),
+            offset,
+            max_bytes.saturating_add(1),
+        )
+        .await?;
+    let truncated = data.len() as u64 > max_bytes;
+    if truncated {
+        data.truncate(max_bytes as usize);
+    }
+    Ok((data, truncated))
+}
+
+/// `sftp_read_file` 响应装配（auto 与 latin-1 共用）。
+fn read_file_response(path: &str, data: &[u8], truncated: bool, as_base64: bool) -> Value {
+    if as_base64 {
+        json!({
+            "path": path,
+            "dataBase64": BASE64_STANDARD.encode(data),
+            "truncated": truncated,
+        })
+    } else {
+        json!({
+            "path": path,
+            "content": String::from_utf8_lossy(data),
+            "truncated": truncated,
+        })
+    }
+}
+
+/// latin-1（M18）`sftp_write_file` 裸包分支：显示路径还原字节后
+/// OPEN(CREAT|WRITE|TRUNC) 截断直写 + WRITE 32 KiB 分块（选型：MCP 面沿
+/// 既有 sftp_write_file 直写语义，无工作台上传族的 `.dbx-part` 暂存需求）。
+/// `overwrite=false` 的覆盖预检走裸包 LSTAT，与写入同一字节口径；操作错误
+/// 原样上抛不回退（与 M17-B 写工具同策略，避免重复执行）。
+async fn raw_sftp_write_file<S>(
+    client: &mut sftp_raw::RawSftp<S>,
+    path: &str,
+    content: &[u8],
+    overwrite: bool,
+) -> Result<Value, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin,
+{
+    let raw_path = sftp_name::latin1_encode_display(path);
+    if !overwrite && client.lstat(&raw_path).await.is_ok() {
+        return Err(format!(
+            "Remote path already exists: {path} (pass overwrite=true to replace)"
+        ));
+    }
+    let handle = client.open_write(&raw_path).await?;
+    let result = async {
+        for (index, chunk) in content.chunks(sftp_raw::MAX_WRITE_CHUNK).enumerate() {
+            client
+                .write_chunk(&handle, (index * sftp_raw::MAX_WRITE_CHUNK) as u64, chunk)
+                .await?;
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+    // 写失败也先 CLOSE 释放句柄，再上抛原错误。
+    let closed = client.close(&handle).await;
+    result?;
+    closed?;
+    Ok(json!({ "path": path, "bytes": content.len() }))
+}
+
+/// latin-1（M18）`sftp_chmod` 裸包分支：显示路径还原字节后 SETSTAT 只带
+/// permissions 子集（与 auto 分支 set_metadata 的 attrs 语义一致；mode 解析
+/// 复用 [`parse_chmod_mode`]，建立失败回退高层、操作错误原样上抛）。
+async fn raw_sftp_chmod<S>(
+    client: &mut sftp_raw::RawSftp<S>,
+    path: &str,
+    mode: u32,
+) -> Result<Value, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + std::marker::Unpin,
+{
+    client
+        .setstat(
+            &sftp_name::latin1_encode_display(path),
+            &sftp_raw::RawAttrs {
+                permissions: Some(mode),
+                ..sftp_raw::RawAttrs::default()
+            },
+        )
+        .await?;
+    Ok(json!({ "path": path, "mode": format!("{mode:04o}") }))
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -8714,5 +8994,186 @@ mod dbx_bridge_tests {
             sftp_name::latin1_encode_display("/data/caf\u{e9}2.txt"),
             b"/data/caf\xe92.txt".to_vec()
         );
+    }
+
+    // —— M18：MCP 工具面剩余 SFTP 工具的 latin-1 往返闭环 ——
+
+    /// 带请求日志的内存桩裸包客户端（复用 `sftp_raw::test_support` 的
+    /// duplex 桩服务器，不连 SSH）。请求日志记录的是去帧 payload：
+    /// `[type, id 4 字节, 包体]`。
+    async fn stub_raw_sftp(
+        replies: Vec<Vec<u8>>,
+    ) -> (
+        sftp_raw::RawSftp<tokio::io::DuplexStream>,
+        sftp_raw::test_support::RequestLog,
+    ) {
+        let log = sftp_raw::test_support::request_log();
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        tokio::spawn(sftp_raw::test_support::scripted_server(
+            server_side,
+            replies,
+            Some(log.clone()),
+        ));
+        let client = sftp_raw::RawSftp::init(client_side).await.unwrap();
+        (client, log)
+    }
+
+    #[tokio::test]
+    async fn raw_stat_maps_v3_attrs_and_lstat_carries_latin1_path_bytes() {
+        let (mut client, log) = stub_raw_sftp(vec![sftp_raw::test_support::attrs_body_full(
+            12,
+            0o100644,
+            Some(111),
+            Some(222),
+        )])
+        .await;
+        let path = "/data/caf\u{e9}.txt";
+        let attrs = client
+            .lstat(&sftp_name::latin1_encode_display(path))
+            .await
+            .unwrap();
+        // 裸包 attrs 无 uid/gid：调用方 shell 查询尽力而为（此处按缺省
+        // None 验证装配口径），主元数据不受影响。
+        let stat = raw_stat_json(path, attrs, None, None);
+        assert_eq!(stat["size"], json!(12));
+        assert_eq!(stat["permissions"], json!("0644"));
+        assert_eq!(stat["modifiedAt"], json!(222));
+        assert_eq!(stat["accessedAt"], json!(111));
+        assert_eq!(stat["uid"], Value::Null);
+        assert_eq!(stat["gid"], Value::Null);
+        // 字节级闭环：LSTAT 帧携带显示路径还原出的服务器原始字节。
+        let lstat = &sftp_raw::test_support::recorded_requests(&log)[1];
+        assert_eq!(lstat[0], 7); // FXP_LSTAT
+        assert_eq!(&lstat[9..], b"/data/caf\xe9.txt");
+        // 响应里的 path 原样回传工具面即落回原始字节（精确逆变换）。
+        assert_eq!(
+            sftp_name::latin1_encode_display(stat["path"].as_str().unwrap()),
+            b"/data/caf\xe9.txt".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_sftp_exists_maps_no_such_file_only() {
+        // 存在：LSTAT → ATTRS。
+        let (mut client, log) =
+            stub_raw_sftp(vec![sftp_raw::test_support::attrs_body(1, 0o100644)]).await;
+        assert!(raw_sftp_exists(&mut client, "/d/caf\u{e9}.txt")
+            .await
+            .unwrap());
+        let lstat = &sftp_raw::test_support::recorded_requests(&log)[1];
+        assert_eq!(lstat[0], 7); // FXP_LSTAT
+        assert_eq!(&lstat[9..], b"/d/caf\xe9.txt");
+
+        // 不存在：LSTAT → SSH_FX_NO_SUCH_FILE。
+        let (mut client, _) = stub_raw_sftp(vec![sftp_raw::test_support::status_body(2)]).await;
+        assert!(!raw_sftp_exists(&mut client, "/d/caf\u{e9}.txt")
+            .await
+            .unwrap());
+
+        // 其余错误如实上抛：绝不把权限失败误报成 exists:false（auto 分支
+        // 同契约）。
+        let (mut client, _) = stub_raw_sftp(vec![sftp_raw::test_support::status_body(3)]).await;
+        let error = raw_sftp_exists(&mut client, "/d/x").await.unwrap_err();
+        assert!(error.contains("status 3"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn raw_sftp_read_file_round_trips_latin1_path_and_flags_truncation() {
+        // 截断：max_bytes=5，服务器回 11 字节 → truncated=true + 截到 5。
+        let (mut client, log) = stub_raw_sftp(vec![
+            sftp_raw::test_support::handle_body(b"h1"),
+            sftp_raw::test_support::data_body(b"hello world"),
+            sftp_raw::test_support::status_body(0),
+        ])
+        .await;
+        let (data, truncated) = raw_sftp_read_file(&mut client, "/d/caf\u{e9}.txt", 0, 5)
+            .await
+            .unwrap();
+        assert!(truncated);
+        assert_eq!(data, b"hello".to_vec());
+        // OPEN 帧路径字节 = 显示路径的 latin1_encode_display 逆变换
+        // （payload = type + id + path_len + path + pflags + attrs）。
+        let open = &sftp_raw::test_support::recorded_requests(&log)[1];
+        assert_eq!(open[0], 3); // FXP_OPEN
+        assert_eq!(&open[9..20], b"/d/caf\xe9.txt");
+
+        // 未截断 + offset 分页起点显式携带（READ 循环读到 EOF 收尾）。
+        let (mut client, log) = stub_raw_sftp(vec![
+            sftp_raw::test_support::handle_body(b"h1"),
+            sftp_raw::test_support::data_body(b"rld"),
+            sftp_raw::test_support::status_body(1), // SSH_FX_EOF：数据读完
+            sftp_raw::test_support::status_body(0), // CLOSE
+        ])
+        .await;
+        let (data, truncated) = raw_sftp_read_file(&mut client, "/d/f", 8, 100)
+            .await
+            .unwrap();
+        assert!(!truncated);
+        assert_eq!(data, b"rld".to_vec());
+        let read = &sftp_raw::test_support::recorded_requests(&log)[2];
+        assert_eq!(read[0], 5); // FXP_READ
+        assert_eq!(&read[11..19], &8_u64.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn raw_sftp_write_file_chunks_at_32kib_and_round_trips_latin1_path() {
+        let content = vec![0xA9_u8; sftp_raw::MAX_WRITE_CHUNK + 5];
+        let (mut client, log) = stub_raw_sftp(vec![
+            sftp_raw::test_support::status_body(2), // LSTAT 预检：目标不存在
+            sftp_raw::test_support::handle_body(b"h1"),
+            sftp_raw::test_support::status_body(0), // WRITE#1
+            sftp_raw::test_support::status_body(0), // WRITE#2
+            sftp_raw::test_support::status_body(0), // CLOSE
+        ])
+        .await;
+        let written = raw_sftp_write_file(&mut client, "/d/caf\u{e9}.txt", &content, false)
+            .await
+            .unwrap();
+        assert_eq!(written["bytes"], json!(content.len()));
+        let requests = sftp_raw::test_support::recorded_requests(&log);
+        // 覆盖预检与 OPEN 同一字节口径（显示路径 → 服务器原始字节）。
+        let lstat = &requests[1];
+        assert_eq!(lstat[0], 7); // FXP_LSTAT
+        assert_eq!(&lstat[9..], b"/d/caf\xe9.txt");
+        let open = &requests[2];
+        assert_eq!(open[0], 3); // FXP_OPEN
+        assert_eq!(&open[9..20], b"/d/caf\xe9.txt");
+        // WRITE 按 32 KiB 切块、offset 显式推进（payload 坐标：type+id+
+        // handle_len+handle 之后是 offset 8 字节）。
+        let write1 = &requests[3];
+        assert_eq!(write1[0], 6); // FXP_WRITE
+        assert_eq!(&write1[11..19], &0_u64.to_be_bytes());
+        let write2 = &requests[4];
+        assert_eq!(
+            &write2[11..19],
+            &(sftp_raw::MAX_WRITE_CHUNK as u64).to_be_bytes()
+        );
+        assert_eq!(write2[23..].len(), 5);
+    }
+
+    #[tokio::test]
+    async fn raw_sftp_write_file_refuses_existing_target_without_overwrite() {
+        let (mut client, _) =
+            stub_raw_sftp(vec![sftp_raw::test_support::attrs_body(1, 0o100644)]).await;
+        let error = raw_sftp_write_file(&mut client, "/d/caf\u{e9}.txt", b"x", false)
+            .await
+            .unwrap_err();
+        assert!(error.contains("already exists"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn raw_sftp_chmod_sends_setstat_with_latin1_path_bytes() {
+        let (mut client, log) = stub_raw_sftp(vec![sftp_raw::test_support::status_body(0)]).await;
+        let result = raw_sftp_chmod(&mut client, "/d/caf\u{e9}.txt", 0o600)
+            .await
+            .unwrap();
+        assert_eq!(result["mode"], json!("0600"));
+        let setstat = &sftp_raw::test_support::recorded_requests(&log)[1];
+        assert_eq!(setstat[0], 9); // FXP_SETSTAT
+        assert_eq!(&setstat[9..20], b"/d/caf\xe9.txt");
+        // attrs 只带 permissions 子集：flags=ATTR_PERMISSIONS(0x4) + mode。
+        let attrs = &setstat[20..]; // path 之后紧跟编码 attrs
+        assert_eq!(&attrs[..4], &4_u32.to_be_bytes());
+        assert_eq!(&attrs[4..], &0o600_u32.to_be_bytes());
     }
 }

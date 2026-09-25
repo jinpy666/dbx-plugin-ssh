@@ -147,12 +147,12 @@ MCP 调用方是 LLM，`sftp_upload`（本地读）与 `sftp_download`（本地�
 | `ssh_test_connection` | 验证连通性与认证（含跳板链），返回延迟；支持全部连接寻址（`connectionId` / `connectionName` / 唯一 endpoint），保存连接经桥或注册表解析凭据，不解析成功时报自愈引导（启动 DBX app → `ssh_list_connections` → 内联凭据） |
 | `ssh_list_known_hosts` / `ssh_remove_known_host` | 管理插件 known_hosts（不改系统 `~/.ssh/known_hosts`） |
 | `ssh_close` | 关闭缓存的连接（方式二按连接键；方式一由 sidecar 生命周期管理） |
-| `sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_pwd` | 浏览、检查远端路径与登录家目录；**懒建立连接**：无需先 `ssh_exec` 预热，首次调用即按寻址解析并拨号。文件名编码跟随连接级偏好（连接覆盖 > 全局 `sftp_name_encoding` > auto，见 PROTOCOL「扩展文件操作」M17 节）：latin-1 连接上 `sftp_list_dir` 返回的 `name`/`path` 为显示形式（与工作台一致），把返回的 `path` 原样回传给 `sftp_mkdir`/`sftp_remove`/`sftp_rename` 即落回同一组服务器字节 |
-| `sftp_read_file` / `sftp_write_file` | 读写远端文件（文本或 base64，支持 offset 分页） |
+| `sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_pwd` | 浏览、检查远端路径与登录家目录；**懒建立连接**：无需先 `ssh_exec` 预热，首次调用即按寻址解析并拨号。文件名编码跟随连接级偏好（连接覆盖 > 全局 `sftp_name_encoding` > auto，见 PROTOCOL「扩展文件操作」M17/M18 节）：latin-1 连接上 `sftp_list_dir` 返回的 `name`/`path` 为显示形式（与工作台一致），把返回的 `path` 原样回传给其余 SFTP 工具即落回同一组服务器字节；latin-1 下 `sftp_stat`/`sftp_exists` 走裸包 LSTAT（stat 的 uid/gid 经 shell 查询尽力而为，非 ASCII 名可能为 `null`；exists 只认「无此文件」为不存在，其余错误如实上抛） |
+| `sftp_read_file` / `sftp_write_file` | 读写远端文件（文本或 base64，支持 offset 分页）。latin-1 连接上按显示路径还原服务器字节走裸包 OPEN/READ/WRITE（32 KiB 分块；读侧 `maxBytes` 截断语义不变） |
 | `sftp_upload` / `sftp_download` | 本地 ↔ 远端单文件传输（受 `maxUploadBytes` / `maxDownloadBytes` 限制；本地路径校验先于拨号，校验拒绝不清连接池）。本地路径受传输根约束：必须落在 `localTransferRoot`（未配置时为系统临时目录 + 插件数据目录）之内，且任何模式下都拒绝敏感路径（凭据库、shell 启动文件等，见下文「本地传输路径约束」） |
-| `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` | 目录与文件管理。latin-1 连接上前三者按显示路径还原服务器字节走裸包操作（非 UTF-8 文件名保真，回退策略同工作台）；`sftp_chmod` 的 `mode` 兼容多种写法：字符串 `"0644"`/`"0o644"` 按八进制数字读；数字全部由 0-7 组成时也按八进制读（`644` → `0644`），其余数字按原始权限位读（`384` = `0600`） |
+| `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` | 目录与文件管理。latin-1 连接上均按显示路径还原服务器字节走裸包操作（非 UTF-8 文件名保真，回退策略同工作台）；`sftp_chmod` 的 `mode` 兼容多种写法：字符串 `"0644"`/`"0o644"` 按八进制数字读；数字全部由 0-7 组成时也按八进制读（`644` → `0644`），其余数字按原始权限位读（`384` = `0600`） |
 | `sftp_disk_usage` | 路径所在挂载的磁盘用量 |
-| `sftp_copy` / `sftp_move` | 服务器内复制 / 剪切（`from` 单值或数组 → `toDir`，逐项返回成败） |
+| `sftp_copy` / `sftp_move` | 服务器内复制 / 剪切（`from` 单值或数组 → `toDir`，逐项返回成败）。latin-1 连接上覆盖预检与同目录 move 的 RENAME 快路径走裸包字节保真；远端 `cp`/`mv` 执行层按字面量发送（非 ASCII 名由服务器侧报错，边界见 PROTOCOL） |
 | `ssh_alert_triage` | 告警分诊（**无连接参数、从不执行**）：异构告警 JSON（任意 schema）或纯文本 → 结构化 + 双语关键词分类（`cpu/memory/disk/inode/network/oom/service/generic`）+ 只读诊断命令清单（每条带 `purposeKey`；playbook 全部命中只读命令白名单，只读连接上可直接执行）。执行由调用方经 `ssh_exec` 等门禁完成 |
 
 **连接寻址（保存连接优先，内联凭据兜底）**：上表除 `ssh_list_connections`、known_hosts 管理与本地工具外的连接类工具，都可用 `connectionId` 精确定位；也可用 `connectionName`，重名时补充 `host` / `port` / `username` 做唯一筛选。若不传 id/name，提供完整 endpoint（`host` + `username`，`port` 默认 22）也会唯一复用已注册连接，因此不需要重复传密码。候选为零时才回落内联凭据/stdio bridge 兜底；候选超过一个时拒绝并列出候选 id，避免静默连错主机或账户。`connectionId` 与其它 selector 同时出现但不一致也会拒绝。
