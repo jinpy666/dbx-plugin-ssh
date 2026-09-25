@@ -4494,12 +4494,14 @@ function requestTelnet() {
   telnetDialogOpen.value = true;
 }
 
-// 确认后：关掉占用终端视图的 SSH/本地/VNC 会话，再弹 Telnet 连接表单。
+// 确认后：关掉占用终端视图的 SSH/本地/VNC/串口会话，再弹 Telnet 连接表单。
+// 串口与 requestTelnet 的占用判定同链：漏关会留下孤儿串口会话占用 sidecar PTY。
 async function confirmTelnetOpen() {
   telnetConfirmOpen.value = false;
   await closeSession();
   if (localSession.value) await closeLocalTerminal();
   if (vncSession.value) await closeVncSession();
+  if (serialSession.value) await closeSerialSession();
   telnetDialogOpen.value = true;
 }
 
