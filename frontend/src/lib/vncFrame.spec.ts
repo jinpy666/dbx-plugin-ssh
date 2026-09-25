@@ -84,6 +84,32 @@ describe("decodeVncFramePatch", () => {
     expect(bad((v) => v.setUint32(16, 9, true))).toThrow("exceeds desktop bounds");
     expect(bad((v) => v.setUint32(36, 1, true))).toThrow("Unsupported VNC pixel format 1");
   });
+
+  // —— 跨端 golden 向量 ————————————————————————————————————————
+  // 与 backend/src/vnc_session.rs 的 patch_frame_golden_vector_matches_frontend
+  // 断言硬编码同一 hex 字符串（互指）；字段序/字节序/stride 语义的权威契约见
+  // docs/PROTOCOL.zh-CN.md「VNC 帧补丁」小节。
+  //
+  // 向量定义：desktop 8x8，patch 位于 (2,1) 尺寸 4x4，sequence=42，
+  // stride=16（紧排 width*4），payload = 0x00..=0x3F（64 字节 RGBA）。
+  // 改协议字段序/字节序时两侧同步更新，任何一侧单独变化即测试失败。
+  const GOLDEN_FRAME_HEX = "2a00000000000000080000000800000002000000010000000400000004000000100000000200000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+
+  it("decodes the sidecar's cross-side golden vector field by field", () => {
+    const frame = new Uint8Array((GOLDEN_FRAME_HEX.match(/.{2}/g) ?? []).map((byte) => Number.parseInt(byte, 16)));
+    expect(frame.byteLength).toBe(108); // 44 header + 64 payload
+    const patch = decodeVncFramePatch(frame);
+    expect(patch.sequence).toBe(42);
+    expect(patch.desktopWidth).toBe(8);
+    expect(patch.desktopHeight).toBe(8);
+    expect(patch.x).toBe(2);
+    expect(patch.y).toBe(1);
+    expect(patch.width).toBe(4);
+    expect(patch.height).toBe(4);
+    expect(patch.stride).toBe(16);
+    expect(patch.pixelFormat).toBe("RGBA8888");
+    expect(Array.from(patch.payload)).toEqual(Array.from({ length: 0x40 }, (_, i) => i));
+  });
 });
 
 describe("keysym mapping", () => {

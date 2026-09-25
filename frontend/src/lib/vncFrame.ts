@@ -3,7 +3,10 @@
 // decodeVncFramePatch 对齐 sidecar 44 字节 patch 头（sequence u64 LE +
 // desktop W/H + x/y/w/h + stride + pixel_format + payload_len，各 u32 LE，
 // RGBA8888 线制值 2）——与 NyaTerm remoteDesktopFrame.ts 同一协议，字节序
-// 与校验规则一致；键盘/指针映射改写自 NyaTerm vncInput.ts（MIT）。
+// 与校验规则一致；字段序/字节序/stride 语义的权威契约见
+// docs/PROTOCOL.zh-CN.md「VNC 帧补丁」小节。跨端 golden 向量与 sidecar
+// 测试（backend/src/vnc_session.rs patch_frame_golden_vector_matches_frontend）
+// 硬编码同一 hex。键盘/指针映射改写自 NyaTerm vncInput.ts（MIT）。
 // 全部为纯函数：不触 DOM/桥接，便于单测。
 
 export type VncPixelFormat = "RGBA8888";
