@@ -105,6 +105,27 @@ describe("ImportWizard", () => {
     expect(new TextDecoder().decode(call[1])).not.toContain("s3cret");
   });
 
+  it("falls back to a top-level Blob download when Host API 1.0 has neither save bridge", async () => {
+    installBridge();
+    delete (window as unknown as { dbxPlugin: { saveFile?: unknown } }).dbxPlugin.saveFile;
+    const createObjectUrl = vi.fn(() => "blob:preview");
+    const revokeObjectUrl = vi.fn();
+    const click = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL: createObjectUrl, revokeObjectURL: revokeObjectUrl });
+    const originalCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
+      const element = originalCreateElement(tagName);
+      if (tagName === "a") element.click = click;
+      return element;
+    });
+    const wrapper = mount(ImportWizard, { props: { t } });
+    await reachPreviewStep(wrapper);
+    await wrapper.find(".import-nav .primary-button").trigger("click");
+    await flushPromises();
+    expect(createObjectUrl).toHaveBeenCalledOnce();
+    expect(click).toHaveBeenCalledOnce();
+  });
+
   it("maps the WindTerm master-password error after streaming", async () => {
     const bridge = installBridge();
     bridge.invoke.mockImplementation(async (method: string) => {

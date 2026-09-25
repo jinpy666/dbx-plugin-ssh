@@ -84,9 +84,9 @@ Telnet/VNC 的 saved connection 生命周期也走同一入口，但不会进入
 
 文件内容不经 JSON/base64 RPC 传输。前端按 SFTP 上传同款发送二进制通道 `import/preview/<taskId>/main`；WindTerm 可选文件使用 `import/preview/<taskId>/user-config`。每帧是 `[u64 BE offset][raw bytes]`，必须连续、从 offset 0 开始，单块至多 `chunkSize`。sidecar 成功接收后发 `import/preview/ack { taskId, part, nextOffset }`；前端等待 ACK 再发下一块。协议错误会发 `import/preview/error { taskId, part, error }`，并立即清理该任务。
 
-`import/preview/finish { taskId }` 只接受所有声明字节已到齐的任务；它在返回前移除原始文件字节和 WindTerm 主密码，返回 `{ sourceKind, sessions, totalSessions, truncated, export }`。`sessions` 是最多 1000 行的脱敏预览（仅名称、主机、端口、用户、分组、描述、认证类别、`hasSecret` 与 `secretNote`）；`export` 是可供前端保存的规范化 JSON：`{ schemaVersion, sourceKind, sessions }`。每一行认证信息只有 `kind`、`hasSecret`、`keyPath`（路径元数据）和 `secretNote`；**密码、私钥内容和私钥口令在任何响应、导出或插件私有文件中均不存在**。该插件不再创建或读取 `imported-connections.json`，也没有 `import/commit` 成功语义。
+`import/preview/finish { taskId }` 只接受所有声明字节已到齐的任务；它在返回前移除原始文件字节和 WindTerm 主密码，返回 `{ sourceKind, sessions, totalSessions, truncated, export }`。这是一次性**临时 preview/export**：不创建连接、没有 `import/commit` 成功语义、也不持久化导入结果。所有格式（含 ZIP）使用解析前受限 accumulator，在每个 session `push` 前强制 `MAX_PREVIEW_SESSIONS=1000`，超限 fail-closed 而不是先构造巨大 `Vec` 后截断；ZIP 另受条目、单项与总解压预算限制。`sessions` 是最多 1000 行的脱敏预览（仅名称、主机、端口、用户、分组、描述、认证类别、`hasSecret` 与 `secretNote`）；`export` 是可供前端保存的规范化 JSON：`{ schemaVersion, sourceKind, sessions }`。每一行认证信息只有 `kind`、`hasSecret`、`keyPath`（路径元数据）和 `secretNote`；普通密码、私钥内容和私钥口令都不进入 `ImportedAuth` 预览模型，解密/检查仅用 `Zeroizing` 临时缓冲后立即释放；因此它们在任何响应、导出或插件私有文件中均不存在。该插件不再创建或读取 `imported-connections.json`。
 
-`import/preview/cancel { taskId }` 幂等地丢弃未完成的内存上传；组件卸载、读取失败、ACK 超时和用户返回均应调用它。sidecar 进程退出同样释放进程内状态。
+`import/preview/cancel { taskId }` 幂等地丢弃未完成的内存上传；组件卸载、读取失败、ACK 超时和用户返回均应调用它。sidecar 进程退出同样释放进程内状态。导出优先使用宿主 `saveFile`，其次 `fileTransfer`；Host API 1.0 同时缺失两项时，顶层、非 sandbox 页面使用浏览器 Blob 下载。因 issue #93，sandbox iframe **不得**尝试 `<a download>`：它必须失败并提示用户升级到带 `saveFile`/`fileTransfer` 的宿主或在顶层浏览器上下文打开，不能静默返回无导出结果。
 
 ## 运行时设置
 
@@ -660,7 +660,7 @@ RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRD
 
 安全红线（实现与评审对照见 `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）：NTLMv2-only（vendored sspi 明示不支持 NTLMv1/LM，源码断言钉在 `vendored_sspi_marks_ntlmv1_and_lm_as_unsupported`）；CredSSP 仅在 TLS 之上（`with_tls(true)` 恒开）；证书策略 fail-closed（`prompt` 默认 / `strict` / `accept-temporarily`，无「静默接受」路径）；剪贴板 text-only + 16 MiB + 不落审计；凭据 `Zeroizing` 持有、不进日志/事件/错误。用户文档保留「连接期间远端可读写会话剪贴板、凭据实质交付目标主机，仅连接可信主机」警示。
 
-偏好（`local/preferences/*` 白名单新增，RDP-2）：`rdp_use_nla`（布尔，缺省 true）、`rdp_certificate_policy`（`prompt`（缺省）| `strict` | `accept-temporarily`，白名单外拒绝写入）。不新增 manifest 字段。
+实验门控与偏好（`local/preferences/*` 白名单，RDP-2）：`rdp_experimental_enabled` 仅显式布尔 `true` 才启用，缺失、非法或 false 均默认关闭；用户在**设置 → 实验性 RDP → 启用实验性 RDP**写入该键，前端才展示入口。后端在 `rdp/start` 前独立检查同一偏好，因此门关闭时直接 RPC 默认拒绝，不能绕过 UI。另有 `rdp_use_nla`（布尔，缺省 true）、`rdp_certificate_policy`（`prompt`（缺省）| `strict` | `accept-temporarily`，白名单外拒绝写入）。不新增 manifest 字段。
 
 ## 主机密钥确认通道(requestUserInput)
 

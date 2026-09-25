@@ -86,54 +86,22 @@ pub const SECRET_NOTE_NOT_CARRIED: &str = "not-carried";
 const WINDTERM_PBKDF2_ROUNDS: u32 = 100_000;
 const WINDTERM_DERIVED_BYTES: usize = 48;
 
-/// Authentication material carried by one imported session. Plaintext in
-/// memory only — the store seals every secret field through the vault.
-/// `Debug` is manual and redacts the secret fields: sessions legitimately end
-/// up in derived `Debug` output (e.g. `ImportedSession`), and a future log or
-/// panic message must never be able to carry a credential.
-#[derive(Clone, PartialEq)]
+/// Non-sensitive authentication metadata carried by one imported preview.
+///
+/// This is deliberately not a credential container: plaintext passwords,
+/// private-key content and key passphrases must never survive parsing into the
+/// preview model. Parsers may inspect those fields in `Zeroizing` temporaries
+/// only to derive this metadata before the temporary is dropped.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ImportedAuth {
     Password {
-        value: Option<String>,
+        has_secret: bool,
     },
     PrivateKey {
         path: Option<String>,
-        content: Option<String>,
-        passphrase: Option<String>,
+        has_secret: bool,
     },
     None,
-}
-
-impl std::fmt::Debug for ImportedAuth {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ImportedAuth::Password { value } => formatter
-                .debug_struct("Password")
-                .field("value", &redacted_secret_flag(value))
-                .finish(),
-            ImportedAuth::PrivateKey {
-                path,
-                content,
-                passphrase,
-            } => formatter
-                .debug_struct("PrivateKey")
-                .field("path", &path)
-                .field("content", &redacted_secret_flag(content))
-                .field("passphrase", &redacted_secret_flag(passphrase))
-                .finish(),
-            ImportedAuth::None => formatter.write_str("None"),
-        }
-    }
-}
-
-/// `<set>`/`None` instead of the secret itself, mirroring the redaction style
-/// of the telnet auto-login `Debug` impls.
-fn redacted_secret_flag(value: &Option<String>) -> &'static str {
-    if value.is_some() {
-        "<set>"
-    } else {
-        "None"
-    }
 }
 
 /// One imported session in the common shape shared by all parsers.
@@ -179,14 +147,27 @@ pub fn auth_kind(auth: &ImportedAuth) -> &'static str {
 /// alone is not a secret).
 fn has_secret(auth: &ImportedAuth) -> bool {
     match auth {
-        ImportedAuth::Password { value } => value.is_some(),
-        ImportedAuth::PrivateKey {
-            content,
-            passphrase,
-            ..
-        } => content.is_some() || passphrase.is_some(),
+        ImportedAuth::Password { has_secret } | ImportedAuth::PrivateKey { has_secret, .. } => {
+            *has_secret
+        }
         ImportedAuth::None => false,
     }
+}
+
+/// Bounded accumulator shared by every parser. It checks before `Vec::push`,
+/// so hostile exports cannot construct an unbounded session preview only to be
+/// truncated later by `finish`.
+fn push_preview_session(
+    sessions: &mut Vec<ImportedSession>,
+    session: ImportedSession,
+) -> Result<(), String> {
+    if sessions.len() >= MAX_PREVIEW_SESSIONS {
+        return Err(format!(
+            "Import exceeds the {MAX_PREVIEW_SESSIONS} session limit"
+        ));
+    }
+    sessions.push(session);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +198,7 @@ pub fn parse_moba_ini(text: &str) -> Result<Vec<ImportedSession>, String> {
             }
             if let Some(mut session) = parse_moba_session_value(key, value) {
                 session.group_path = group_path.clone();
-                sessions.push(session);
+                push_preview_session(&mut sessions, session)?;
             }
         }
     }
@@ -384,7 +365,7 @@ pub fn parse_xshell(zip_bytes: &[u8]) -> Result<Vec<ImportedSession>, String> {
         }
         let text = String::from_utf8_lossy(&content);
         if let Some(session) = parse_xsh_file(&name, &text) {
-            sessions.push(session);
+            push_preview_session(&mut sessions, session)?;
         }
     }
     Ok(sessions)
@@ -430,8 +411,7 @@ fn parse_xsh_file(entry_name: &str, text: &str) -> Option<ImportedSession> {
         .and_then(|auth| section_value(auth, "UserKey"))
         .map(|key| ImportedAuth::PrivateKey {
             path: Some(key.to_string()),
-            content: None,
-            passphrase: None,
+            has_secret: false,
         })
         .unwrap_or(ImportedAuth::None);
     let mut session = ImportedSession::new(
@@ -561,7 +541,7 @@ fn derive_windterm_key(master_password: &str, salt: &[u8]) -> ([u8; 32], [u8; 16
 
 /// AES-256-CBC/PKCS7 decryption; `None` on any failure (wrong password,
 /// tampered blob, bad padding) — callers skip the credentials.
-fn windterm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
+fn windterm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     use aes::cipher::block_padding::Pkcs7;
     use aes::cipher::{BlockModeDecrypt, KeyIvInit};
     type Aes256CbcDecryptor = cbc::Decryptor<aes::Aes256>;
@@ -569,6 +549,7 @@ fn windterm_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>>
         .ok()?
         .decrypt_padded_vec::<Pkcs7>(ciphertext)
         .ok()
+        .map(Zeroizing::new)
 }
 
 /// Parses a WindTerm `.sessions` JSON array. `user_config` supplies the
@@ -590,7 +571,7 @@ pub fn parse_windterm(
     let mut sessions = Vec::new();
     for item in &items {
         if let Some(session) = parse_windterm_item(item, &config, master_password) {
-            sessions.push(session);
+            push_preview_session(&mut sessions, session)?;
         }
     }
     Ok(sessions)
@@ -716,7 +697,8 @@ fn windterm_credentials(
 }
 
 /// Reads the decrypted (or plaintext) autoLogin JSON: `PasswordEnabled` +
-/// `Password` wins, then `Public Key.<platform>.path/pass`, else none.
+/// `Password` wins, then `Public Key.<platform>.path/pass`, else none. No
+/// credential string is copied into `ImportedAuth`.
 fn auto_login_auth(value: &Value) -> ImportedAuth {
     let password_enabled = match value.get("PasswordEnabled") {
         Some(Value::Bool(flag)) => *flag,
@@ -728,9 +710,7 @@ fn auto_login_auth(value: &Value) -> ImportedAuth {
         .and_then(Value::as_str)
         .filter(|password| !password.is_empty());
     if password_enabled && password.is_some() {
-        return ImportedAuth::Password {
-            value: password.map(str::to_owned),
-        };
+        return ImportedAuth::Password { has_secret: true };
     }
     let public_key = value.get("Public Key").or_else(|| value.get("PublicKey"));
     let key_entry = public_key.and_then(|public_key| {
@@ -750,8 +730,7 @@ fn auto_login_auth(value: &Value) -> ImportedAuth {
     if key_path.is_some() || key_passphrase.is_some() {
         return ImportedAuth::PrivateKey {
             path: key_path.map(expand_home_prefix),
-            content: None,
-            passphrase: key_passphrase.map(str::to_owned),
+            has_secret: key_passphrase.is_some(),
         };
     }
     ImportedAuth::None
@@ -801,7 +780,7 @@ struct SecureCrtFrame {
 ///
 /// SecureCRT only ever writes encrypted password blobs to the export, so —
 /// like the NyaTerm importer — nothing is decrypted here: every session keeps
-/// `ImportedAuth::Password { value: None }` plus the [`SECRET_NOTE_ENCRYPTED`]
+/// `ImportedAuth::Password { has_secret: false }` plus the [`SECRET_NOTE_ENCRYPTED`]
 /// preview note.
 ///
 /// The XML subset is scanned by hand (no XML crate dependency): the
@@ -810,10 +789,13 @@ struct SecureCrtFrame {
 /// with a readable error.
 pub fn parse_securecrt(text: &str) -> Result<Vec<ImportedSession>, String> {
     let frames = scan_securecrt_xml(text)?;
-    Ok(frames
-        .iter()
-        .filter_map(securecrt_session_from_frame)
-        .collect())
+    let mut sessions = Vec::new();
+    for frame in &frames {
+        if let Some(session) = securecrt_session_from_frame(frame) {
+            push_preview_session(&mut sessions, session)?;
+        }
+    }
+    Ok(sessions)
 }
 
 fn scan_securecrt_xml(text: &str) -> Result<Vec<SecureCrtFrame>, String> {
@@ -888,6 +870,11 @@ fn scan_securecrt_xml(text: &str) -> Result<Vec<SecureCrtFrame>, String> {
                     return Err(format!("{ERR_PREFIX}: unbalanced </key>"));
                 };
                 let ancestors = stack.iter().map(|(name, _)| name.clone()).collect();
+                if frames.len() >= MAX_PREVIEW_SESSIONS {
+                    return Err(format!(
+                        "Import exceeds the {MAX_PREVIEW_SESSIONS} session limit"
+                    ));
+                }
                 frames.push(SecureCrtFrame {
                     name: frame_name,
                     fields,
@@ -1122,7 +1109,7 @@ fn securecrt_session_from_frame(frame: &SecureCrtFrame) -> Option<ImportedSessio
         username.to_string(),
     );
     session.group_path = group_path;
-    session.auth = ImportedAuth::Password { value: None };
+    session.auth = ImportedAuth::Password { has_secret: false };
     session.secret_note = SECRET_NOTE_ENCRYPTED.to_string();
     Some(session)
 }
@@ -1193,10 +1180,13 @@ pub fn parse_finalshell(zip_bytes: &[u8]) -> Result<Vec<ImportedSession>, String
             "FinalShell source does not contain any *_connect_config.json entries".to_string(),
         );
     }
-    Ok(connections
-        .into_iter()
-        .filter_map(|connection| finalshell_session(connection, &folders))
-        .collect())
+    let mut sessions = Vec::new();
+    for connection in connections {
+        if let Some(session) = finalshell_session(connection, &folders) {
+            push_preview_session(&mut sessions, session)?;
+        }
+    }
+    Ok(sessions)
 }
 
 fn read_finalshell_entries(
@@ -1258,6 +1248,11 @@ fn read_finalshell_entries(
                 }
             } else if let Ok(connection) = serde_json::from_slice::<FinalShellConnection>(&content)
             {
+                if connections.len() >= MAX_PREVIEW_SESSIONS {
+                    return Err(format!(
+                        "Import exceeds the {MAX_PREVIEW_SESSIONS} session limit"
+                    ));
+                }
                 connections.push(connection);
             }
         }
@@ -1276,10 +1271,17 @@ fn read_finalshell_entries(
             )
         }
     };
-    let connections = items
-        .into_iter()
-        .filter_map(|item| serde_json::from_value::<FinalShellConnection>(item).ok())
-        .collect();
+    let mut connections = Vec::new();
+    for item in items {
+        if let Ok(connection) = serde_json::from_value::<FinalShellConnection>(item) {
+            if connections.len() >= MAX_PREVIEW_SESSIONS {
+                return Err(format!(
+                    "Import exceeds the {MAX_PREVIEW_SESSIONS} session limit"
+                ));
+            }
+            connections.push(connection);
+        }
+    }
     Ok((HashMap::new(), connections))
 }
 
@@ -1313,7 +1315,7 @@ fn finalshell_session(
     let mut session = ImportedSession::new(name, host.to_string(), port, username.to_string());
     session.group_path = finalshell_group_path(connection.parent_id.as_deref(), folders);
     session.description = normalize_import_text(connection.description.as_deref());
-    session.auth = ImportedAuth::Password { value: None };
+    session.auth = ImportedAuth::Password { has_secret: false };
     session.secret_note = SECRET_NOTE_ENCRYPTED.to_string();
     Some(session)
 }
@@ -1441,7 +1443,7 @@ pub fn parse_electerm(bytes: &[u8]) -> Result<Vec<ImportedSession>, String> {
     let mut sessions = Vec::new();
     for bookmark in &bookmarks {
         if let Some(session) = electerm_session(bookmark, &groups, &bookmark_groups) {
-            sessions.push(session);
+            push_preview_session(&mut sessions, session)?;
         }
     }
     Ok(sessions)
@@ -1510,7 +1512,7 @@ fn electerm_session(
         .map(str::trim)
         .is_some_and(|auth| auth.eq_ignore_ascii_case("password"))
     {
-        session.auth = ImportedAuth::Password { value: None };
+        session.auth = ImportedAuth::Password { has_secret: false };
         session.secret_note = SECRET_NOTE_NOT_CARRIED.to_string();
     }
     Some(session)
@@ -1610,7 +1612,7 @@ pub fn parse_termius(bytes: &[u8]) -> Result<Vec<ImportedSession>, String> {
     let mut sessions = Vec::new();
     for host in hosts {
         if let Some(session) = termius_session(host, &groups, &configs, &identities, &keys) {
-            sessions.push(session);
+            push_preview_session(&mut sessions, session)?;
         }
     }
     Ok(sessions)
@@ -1748,24 +1750,18 @@ fn termius_session(
             .to_string();
     }
     let password_present = !password_raw.is_empty();
-    let password = if password_present && !is_termius_encrypted_blob(&password_raw) {
-        Some(password_raw)
-    } else {
-        None
-    };
-    // Key material: only real PEM content is carried; encrypted key blobs
-    // (and their passphrases) are dropped.
+    let plaintext_password = password_present && !is_termius_encrypted_blob(&password_raw);
+    // Key material is never carried into the preview model: we only derive
+    // whether a plaintext PEM/passphrase existed before the parsed JSON drops.
     let key = identity
         .and_then(|identity| identity.ssh_key_id.as_deref())
         .and_then(|id| keys.get(id));
-    let key_content = key
+    let has_key_content = key
         .map(|key| key.private_key.trim())
-        .filter(|private_key| private_key.starts_with("-----BEGIN"))
-        .map(str::to_owned);
-    let key_passphrase = key
+        .is_some_and(|private_key| private_key.starts_with("-----BEGIN"));
+    let has_key_passphrase = key
         .map(|key| key.passphrase.as_str())
-        .filter(|passphrase| !passphrase.is_empty() && !is_termius_encrypted_blob(passphrase))
-        .map(str::to_owned);
+        .is_some_and(|passphrase| !passphrase.is_empty() && !is_termius_encrypted_blob(passphrase));
     let mut session = ImportedSession::new(
         name.to_string(),
         address.to_string(),
@@ -1776,25 +1772,19 @@ fn termius_session(
         json_id_ref(object, "group").or_else(|| json_text(object, "group_id")),
         groups,
     );
-    let encrypted_password = password_present && password.is_none();
-    let (auth, note) = if let Some(password) = password {
-        (
-            ImportedAuth::Password {
-                value: Some(password),
-            },
-            None,
-        )
+    let encrypted_password = password_present && !plaintext_password;
+    let (auth, note) = if plaintext_password {
+        (ImportedAuth::Password { has_secret: true }, None)
     } else if encrypted_password {
         (
-            ImportedAuth::Password { value: None },
+            ImportedAuth::Password { has_secret: false },
             Some(SECRET_NOTE_ENCRYPTED),
         )
-    } else if let Some(content) = key_content {
+    } else if has_key_content || has_key_passphrase {
         (
             ImportedAuth::PrivateKey {
                 path: None,
-                content: Some(content),
-                passphrase: key_passphrase,
+                has_secret: has_key_content || has_key_passphrase,
             },
             None,
         )
@@ -2371,8 +2361,7 @@ mod tests {
             web.auth,
             ImportedAuth::PrivateKey {
                 path: Some("my-key".to_string()),
-                content: None,
-                passphrase: None,
+                has_secret: false,
             }
         );
         // Defaults: port 22, user root, no group at the Sessions root.
@@ -2549,9 +2538,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(
             sessions[0].auth,
-            ImportedAuth::Password {
-                value: Some("p@ss".to_string())
-            }
+            ImportedAuth::Password { has_secret: true }
         );
     }
 
@@ -2585,9 +2572,7 @@ mod tests {
         // Password wins over the public key entry.
         assert_eq!(
             sessions[0].auth,
-            ImportedAuth::Password {
-                value: Some("enc-p@ss".to_string())
-            }
+            ImportedAuth::Password { has_secret: true }
         );
 
         // Without the PasswordEnabled flag the public key entry applies, with
@@ -2614,13 +2599,11 @@ mod tests {
         )
         .unwrap();
         match &sessions[0].auth {
-            ImportedAuth::PrivateKey {
-                path, passphrase, ..
-            } => {
+            ImportedAuth::PrivateKey { path, has_secret } => {
                 let path = path.as_deref().unwrap();
                 assert!(path.ends_with("keys/id_rsa"), "unexpected path: {path}");
                 assert_ne!(path, "~/keys/id_rsa");
-                assert_eq!(passphrase.as_deref(), Some("key-phr"));
+                assert!(*has_secret, "passphrase is represented only as metadata");
             }
             other => panic!("expected private key auth, got {other:?}"),
         }
@@ -2721,7 +2704,7 @@ mod tests {
         assert_eq!(web.username, "deploy");
         // The export only carries encrypted password blobs: password
         // semantics with no material plus the encrypted note.
-        assert_eq!(web.auth, ImportedAuth::Password { value: None });
+        assert_eq!(web.auth, ImportedAuth::Password { has_secret: false });
         assert_eq!(web.secret_note, SECRET_NOTE_ENCRYPTED);
         // Decimal fallback for hand-written dword values.
         assert_eq!(sessions[1].port, 34);
@@ -2768,37 +2751,18 @@ mod tests {
     }
 
     #[test]
-    fn imported_auth_debug_redacts_secret_material() {
-        // Z3 回归：派生 Debug 曾把明文密码/密钥内容带进任何 {:?} 输出；
-        // 现在手动脱敏，宿主名等非敏感字段保持可读。
-        let password = ImportedAuth::Password {
-            value: Some("s3cret-password".to_string()),
-        };
-        let rendered = format!("{password:?}");
-        assert!(!rendered.contains("s3cret-password"), "{rendered}");
-        assert!(rendered.contains("<set>"), "{rendered}");
+    fn imported_auth_debug_has_no_credential_fields() {
+        let password = ImportedAuth::Password { has_secret: true };
         let key = ImportedAuth::PrivateKey {
             path: Some("/home/u/id_ed25519".to_string()),
-            content: Some("-----BEGIN OPENSSH PRIVATE KEY-----".to_string()),
-            passphrase: Some("p@55phrase".to_string()),
+            has_secret: true,
         };
-        let rendered = format!("{key:?}");
-        assert!(!rendered.contains("BEGIN OPENSSH"), "{rendered}");
-        assert!(!rendered.contains("p@55phrase"), "{rendered}");
+        let rendered = format!("{password:?} {key:?}");
+        assert!(rendered.contains("has_secret"), "{rendered}");
         assert!(rendered.contains("/home/u/id_ed25519"), "{rendered}");
-        // ImportedSession 派生 Debug 时只经由脱敏后的 auth 字段。
-        let session = ImportedSession {
-            name: "web".to_string(),
-            host: "10.0.0.1".to_string(),
-            port: 22,
-            username: "root".to_string(),
-            group_path: Vec::new(),
-            description: String::new(),
-            auth: password,
-            secret_note: String::new(),
-        };
-        let rendered = format!("{session:?}");
-        assert!(!rendered.contains("s3cret-password"), "{rendered}");
+        assert!(!rendered.contains("value"), "{rendered}");
+        assert!(!rendered.contains("content"), "{rendered}");
+        assert!(!rendered.contains("passphrase"), "{rendered}");
     }
 
     #[test]
@@ -2895,7 +2859,7 @@ mod tests {
         assert_eq!(web.description, "primary");
         // FinalShell passwords stay encrypted in the source: no material,
         // flagged in the preview.
-        assert_eq!(web.auth, ImportedAuth::Password { value: None });
+        assert_eq!(web.auth, ImportedAuth::Password { has_secret: false });
         assert_eq!(web.secret_note, SECRET_NOTE_ENCRYPTED);
         assert_eq!(sessions[1].name, "10.1.0.2");
         assert_eq!(sessions[1].port, 22);
@@ -2990,7 +2954,7 @@ mod tests {
         assert_eq!(web.username, "deploy");
         // Electerm bookmarks carry no credential material: password bookmarks
         // keep the kind with the not-carried note.
-        assert_eq!(web.auth, ImportedAuth::Password { value: None });
+        assert_eq!(web.auth, ImportedAuth::Password { has_secret: false });
         assert_eq!(web.secret_note, SECRET_NOTE_NOT_CARRIED);
         assert!(web.group_path.is_empty());
         // Defaults: no port → 22, no user → root, no title → host, no
@@ -3093,13 +3057,8 @@ mod tests {
         // Port and identity resolve through the ssh_config reference.
         assert_eq!(web.port, 2222);
         assert_eq!(web.username, "deploy");
-        // Plaintext identity password is carried over, no note.
-        assert_eq!(
-            web.auth,
-            ImportedAuth::Password {
-                value: Some("plain-pw".to_string())
-            }
-        );
+        // Plaintext identity password becomes metadata only, no note.
+        assert_eq!(web.auth, ImportedAuth::Password { has_secret: true });
         assert_eq!(web.secret_note, "");
         assert_eq!(web.group_path, vec!["Prod", "Web"]);
         // Defaults: no label → host, no group/config → 22 / root / no group.
@@ -3122,11 +3081,11 @@ mod tests {
         // The blob is never decoded: password semantics without material
         // plus the encrypted note.
         assert_eq!(encrypted.username, "ops");
-        assert_eq!(encrypted.auth, ImportedAuth::Password { value: None });
+        assert_eq!(encrypted.auth, ImportedAuth::Password { has_secret: false });
         assert_eq!(encrypted.secret_note, SECRET_NOTE_ENCRYPTED);
 
-        // An identity with an ssh_key reference carries the PEM content and
-        // its plaintext passphrase; the encrypted password blob wins nothing.
+        // An identity with an ssh_key reference reports key-auth metadata only;
+        // PEM content and its passphrase never enter the preview model.
         let key_only = TERMIUS_EXPORT
             .replace(
                 "\"id\":\"i2\",\"username\":\"ops\",\"password\":\"BAAAAAAA0123456789012345678901234567890123456789\"",
@@ -3138,16 +3097,9 @@ mod tests {
             );
         let sessions = parse_termius(key_only.as_bytes()).unwrap();
         match &sessions[1].auth {
-            ImportedAuth::PrivateKey {
-                path,
-                content,
-                passphrase,
-            } => {
+            ImportedAuth::PrivateKey { path, has_secret } => {
                 assert!(path.is_none());
-                assert!(content
-                    .as_deref()
-                    .is_some_and(|pem| pem.starts_with("-----BEGIN")));
-                assert_eq!(passphrase.as_deref(), Some("key-phr"));
+                assert!(*has_secret);
             }
             other => panic!("expected private key auth, got {other:?}"),
         }
@@ -3198,9 +3150,7 @@ mod tests {
                 username: "root".to_string(),
                 group_path: vec!["Prod".to_string()],
                 description: String::new(),
-                auth: ImportedAuth::Password {
-                    value: Some("s3cret".to_string()),
-                },
+                auth: ImportedAuth::Password { has_secret: true },
                 secret_note: String::new(),
             },
             ImportedSession {
@@ -3212,8 +3162,7 @@ mod tests {
                 description: "d".to_string(),
                 auth: ImportedAuth::PrivateKey {
                     path: Some("/home/u/key".to_string()),
-                    content: None,
-                    passphrase: Some("p@55phrase".to_string()),
+                    has_secret: true,
                 },
                 secret_note: String::new(),
             },
@@ -3221,20 +3170,57 @@ mod tests {
     }
 
     #[test]
+    fn parsed_preview_auth_never_retains_plaintext_credentials() {
+        let sessions_json = json!([{
+            "session": {
+                "protocol": "SSH",
+                "target": "root@10.2.0.1",
+                "autoLogin": json!({ "PasswordEnabled": true, "Password": "do-not-retain" }).to_string(),
+            }
+        }])
+        .to_string();
+        let sessions = parse_windterm(sessions_json.as_bytes(), None, None).unwrap();
+        let rendered = format!("{:?}", sessions[0]);
+        assert!(!rendered.contains("do-not-retain"), "{rendered}");
+        let exported = normalized_export("windterm", &sessions, &[0])
+            .unwrap()
+            .to_string();
+        assert!(!exported.contains("do-not-retain"), "{exported}");
+    }
+
+    #[test]
+    fn parsers_reject_session_counts_before_building_an_unbounded_preview_vec() {
+        let mut text = String::from("[Bookmarks]\n");
+        for index in 0..=MAX_PREVIEW_SESSIONS {
+            text.push_str(&format!("s{index}=#109#0%10.0.0.1%22%root%\n"));
+        }
+        let error = parse_moba_ini(&text).expect_err("oversized preview must fail closed");
+        assert!(error.contains("session limit"), "{error}");
+
+        let entries = (0..=MAX_PREVIEW_SESSIONS)
+            .map(|index| (format!("Xshell/Sessions/s{index}.xsh"), WEB_XSH.to_string()))
+            .collect::<Vec<_>>();
+        let refs = entries
+            .iter()
+            .map(|(name, body)| (name.as_str(), body.as_str()))
+            .collect::<Vec<_>>();
+        let error = parse_xshell(&xshell_zip(&refs))
+            .expect_err("ZIP preview must fail before a giant session Vec");
+        assert!(error.contains("session limit"), "{error}");
+    }
+
+    #[test]
     fn normalized_export_never_contains_password_or_key_material() {
-        let mut sessions = sample_sessions();
-        sessions[1].auth = ImportedAuth::PrivateKey {
-            path: Some("/home/u/key".to_string()),
-            content: Some("-----BEGIN PRIVATE KEY-----\nsecret".to_string()),
-            passphrase: Some("p@55phrase".to_string()),
-        };
+        let sessions = sample_sessions();
         let exported = normalized_export("windterm", &sessions, &[0, 1]).unwrap();
         let rendered = exported.to_string();
         assert!(rendered.contains("schemaVersion"));
         assert!(rendered.contains("/home/u/key"));
-        assert!(!rendered.contains("s3cret"));
-        assert!(!rendered.contains("PRIVATE KEY"));
-        assert!(!rendered.contains("p@55phrase"));
+        assert!(rendered.contains("\"hasSecret\":true"));
+        assert!(rendered.contains("\"keyPath\":\"/home/u/key\""));
+        assert!(!rendered.contains("\"password\":"));
+        assert!(!rendered.contains("\"privateKey\":"));
+        assert!(!rendered.contains("\"passphrase\":"));
         assert_eq!(exported["sessions"][0]["auth"]["kind"], "password");
         assert_eq!(exported["sessions"][0]["auth"]["hasSecret"], true);
         assert!(exported["sessions"][0]["auth"].get("password").is_none());

@@ -13,6 +13,7 @@ import {
   type ImportKind,
   type ImportSessionView,
 } from "../lib/otpPanel";
+import { exportSanitizedJson } from "../lib/sanitizedDownload";
 
 const props = defineProps<{ t: (key: string, values?: Record<string, string | number>) => string }>();
 interface ImportSource { kind: ImportKind; labelKey: string; accept: string; windtermExtras: boolean; hintKey?: string }
@@ -113,14 +114,7 @@ async function exportPreview() {
   try {
     const bytes = new TextEncoder().encode(`${JSON.stringify(normalizedExport.value, null, 2)}\n`);
     const name = `${kind.value}-sessions-sanitized.json`;
-    if (window.dbxPlugin.saveFile) {
-      const saved = await window.dbxPlugin.saveFile({ fileName: name, contentType: "application/json" }, bytes);
-      if (!saved) return;
-    } else if (window.dbxPlugin.fileTransfer) {
-      const target = await window.dbxPlugin.fileTransfer.beginSave({ name, contentType: "application/json", size: bytes.byteLength });
-      await window.dbxPlugin.fileTransfer.write(target.handleId, 0, bytes);
-      await window.dbxPlugin.fileTransfer.finish(target.handleId);
-    } else throw new Error("Host file export is unavailable");
+    await exportSanitizedJson(bytes, name);
   } catch (cause) { exportError.value = cause instanceof Error ? cause.message : String(cause); }
   finally { exporting.value = false; }
 }
