@@ -290,14 +290,14 @@ export function parseOsc633StreamChunk(output: string | Uint8Array, state: Osc63
   return { clean, updates, state };
 }
 
-const decoder = new TextDecoder();
-
 /** Stateful wrapper mirroring `Osc7DirectoryParser`: feed raw terminal bytes, get updates. */
 export class Osc633CommandParser {
   private state = getOsc633ParserState();
+  private readonly decoder = new TextDecoder();
 
   push(chunk: Uint8Array | string): Osc633StreamUpdates {
-    const text = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+    if (typeof chunk !== "string" && this.state.carry.length === 0 && !chunk.includes(0x1b)) return {};
+    const text = typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true });
     return parseOsc633StreamChunk(text, this.state).updates;
   }
 
@@ -307,6 +307,7 @@ export class Osc633CommandParser {
 
   reset() {
     this.state = getOsc633ParserState();
+    this.decoder.decode();
   }
 }
 

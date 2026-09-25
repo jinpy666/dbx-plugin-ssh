@@ -825,6 +825,10 @@ pub struct SessionOpenRequest {
     /// the user clicked instead of an arbitrary same-connection session.
     #[serde(default)]
     pub reuse_authenticated_session_id: Option<String>,
+    /// Optional caller-provided id lets the frontend subscribe to terminal output
+    /// before the long-running open RPC returns. Older callers keep server UUIDs.
+    #[serde(default)]
+    pub requested_session_id: Option<String>,
     #[serde(default = "default_cols")]
     pub cols: u32,
     #[serde(default = "default_rows")]
@@ -898,6 +902,37 @@ mod tests {
         assert_eq!(encoded[0], 1);
         assert_eq!(u64::from_be_bytes(encoded[1..9].try_into().unwrap()), 42);
         assert_eq!(&encoded[9..], b"x");
+    }
+
+    #[test]
+    fn session_open_request_accepts_legacy_payload() {
+        let request: SessionOpenRequest = serde_json::from_value(serde_json::json!({
+            "connectionId": "conn",
+            "workbenchId": "wb"
+        }))
+        .unwrap();
+        assert_eq!(request.connection_id, "conn");
+        assert_eq!(request.workbench_id, "wb");
+        assert!(!request.reuse_authenticated_transport);
+        assert!(request.reuse_authenticated_session_id.is_none());
+        assert!(request.requested_session_id.is_none());
+        assert_eq!(request.cols, 120);
+        assert_eq!(request.rows, 32);
+    }
+
+    #[test]
+    fn session_open_request_accepts_requested_id_and_unknown_fields() {
+        let request: SessionOpenRequest = serde_json::from_value(serde_json::json!({
+            "connectionId": "conn",
+            "requestedSessionId": "session-1",
+            "futureField": true,
+            "cols": 80,
+            "rows": 24
+        }))
+        .unwrap();
+        assert_eq!(request.requested_session_id.as_deref(), Some("session-1"));
+        assert_eq!(request.cols, 80);
+        assert_eq!(request.rows, 24);
     }
 
     #[test]
