@@ -9955,7 +9955,7 @@ async function exportRecordingTranscript(item: RecordingSummary) {
       if (setDefaultAfter) applyChosenDirAsDefault(targetDir);
       return;
     }
-    saveBrowserDownload([bytes], fileName);
+    await saveHostFile([bytes], fileName);
     showNotice(t("replayExported"));
   } catch (cause) {
     showError(cause);
