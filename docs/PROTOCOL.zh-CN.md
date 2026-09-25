@@ -69,7 +69,7 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `local/terminal/start`、`local/terminal/resize`、`local/terminal/replay` | 本地终端：sidecar 所在机器的交互式登录 shell（工作台显式入口触发，见「本地终端」节；`start` 支持显式 `shell` 与继承用的 `cwd`） |
 | `local/shells/list` | 本机可启动 shell 清单（用户登录 shell 置顶，含 `isDefault`/`isUserShell`/`injectable` 标记——最后一项表示该 shell 是否支持 integration 注入，不支持的在选择器中灰掉开关；Unix 读 `/etc/shells`+`dscl`，Windows 枚举 PATH 下的 pwsh/PowerShell/cmd/wsl），工作台 shell 选择器数据源 |
 | `local/session/list`、`local/session/close` | 本地终端会话清单（webview 重载后接回）与关闭 |
-| `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
+| `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。`transfer_concurrency`（u64，1..=10，默认 3）、`transfer_duplicate_policy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`transfer_max_active`（M14-B 会话级并发传输深度，u64，1..=8，默认 3；sidecar 每次任务启动现读现用——改动即时生效，新任务按新深度启动，进行中任务按旧深度自然完成）、`sftp_compat_mode`（M14-B 老旧服务器兼容模式，bool，默认 false；开启后 SFTP 会话不做流水线并发（读写各 1 路）并把并发深度强制 1，对新建 SFTP 会话生效（重连后应用）；SFTP 探测失败时 sidecar 对该会话一次性在错误信息中附带建议开启的提示）、`sftp_name_encoding`（M14-B 文件名显示编码，`auto`/`latin-1`，默认 `auto`，语义见 `sftp/list` 节）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
 | `serial/upload/start`、`serial/upload/data`、`serial/upload/cancel` | 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：协议状态机在 sidecar（`backend/src/serial_xmodem.rs` 纯状态机，由串口读线程喂数据/取输出），文件字节由前端 File API 分块（≤64KiB）经 `data` 送入，sidecar 不落盘；单次上传总量上限 256 MiB；进度事件 `serial/upload/progress`（`sent`/`total`，不含文件内容）；同一会话同一时刻至多一个上传（并发第二次 `start` 报错），见「串口文件上传（X/Y/ZMODEM）」节 |
 
 ## 运行时设置
@@ -393,6 +393,8 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 | `includeOwner` | boolean | 否 | 是否附加属主/属组信息，默认 `false` |
 
 返回 `{ entries: SftpEntry[] }`。`SftpEntry` 基础字段：`name`、`uri`、`kind`（`file`/`directory`/`symlink`/`other`）、`size`、`modifiedAt`、`permissions`、`contentType`（可选字段缺省时省略）。
+
+**文件名编码（M14-B）**：偏好 `sftp_name_encoding`（`auto`/`latin-1`，默认 `auto`）控制列表文件名的显示解码。`auto` 走高层客户端（合法 UTF-8 服务器字节往返无损），wire 名含 U+FFFD（上游 lossy 解码已替换非法字节）时条目附带 `lossy: true`（false 时字段省略）。`latin-1` 改走独立裸包客户端（SFTPv3，严格串行）拿原始文件名字节：`name` 为 latin-1 解码的显示文本，`uri` 中的文件名为 `%XX` 转义的 wire 形式——**传输路径始终用服务器原始字节/转义形式，显示层解码绝不回灌**；下载这类条目时 sidecar 自动把转义还原为原始字节走 raw OPEN/READ（每 chunk 独立 open/close）。raw 路径失败（服务器版本协商/异常包）自动回退高层客户端。重命名/删除等其余操作对转义名按字面量发送，非 UTF-8 名字会得到服务器 not-found 错误（已知边界）；目录树（`tree`）下载仍走高层客户端。
 
 `includeOwner: true` 时，每个条目可携带可选 `owner`、`group` 字符串字段（属主用户、属组）：优先服务器直接提供的名字（SFTPv4+ 属主属性），数字 uid/gid 次之，SFTPv3 服务器（如 OpenSSH）再经一次只读 `ls -l` 往返升级为名字——该次往返失败（无 shell、无 `ls`、超时）时静默保留数字或省略字段，不影响列表本身。字段缺失即"未知"，由 UI 显示 `-`。省略 `includeOwner`（或为 `false`）时不输出这两个字段，与历史响应完全一致。`sudo/listDir` 恒定返回 `owner`/`group`（`ls -la` 解析附带，无额外往返）。
 

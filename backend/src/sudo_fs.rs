@@ -344,6 +344,8 @@ fn parse_ls_output(directory: &str, ls_output: &str) -> Vec<SftpEntry> {
         .map(|entry| {
             let path = format!("{}/{}", base, entry.name);
             SftpEntry {
+                // sudo 提权的 ls 输出已是文本层；没有原始字节可比对。
+                lossy: false,
                 name: entry.name,
                 uri: sftp_uri(&path),
                 kind: entry.kind,

@@ -31,6 +31,8 @@ mod session_recording;
 mod sftp_bookmarks;
 mod sftp_copy;
 mod sftp_ext;
+mod sftp_name;
+mod sftp_raw;
 mod sftp_tree;
 mod ssh;
 mod ssh_algorithms;
@@ -773,10 +775,13 @@ impl Plugin {
                     .get("includeOwner")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                // 文件名编码偏好（M14-B）：latin-1 时列表走原始字节路径。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 let entries = self.runtime.block_on(self.ssh.sftp_list_path(
                     session_id,
                     path,
                     include_owner,
+                    encoding,
                 ))?;
                 Ok(json!({ "entries": entries }))
             }
@@ -1672,9 +1677,13 @@ impl Plugin {
         let path = filesystem_path(&params)?;
         // Host filesystem-provider listings stay on the zero-round-trip path;
         // owner names are opt-in via `sftp/list` only.
-        let entries = self
-            .runtime
-            .block_on(self.ssh.sftp_list_path(&session_id, &path, false))?;
+        // 宿主 filesystem-provider 列表固定 auto：编码容错只面向 SFTP 面板。
+        let entries = self.runtime.block_on(self.ssh.sftp_list_path(
+            &session_id,
+            &path,
+            false,
+            sftp_name::NameEncoding::Auto,
+        ))?;
         Ok(json!({ "entries": entries }))
     }
 

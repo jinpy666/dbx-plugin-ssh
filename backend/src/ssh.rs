@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use russh::keys::agent::{client::AgentClient, AgentIdentity};
 use russh::keys::ssh_key::HashAlg;
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect, MethodKind};
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::{Config as SftpConfig, SftpSession};
 use russh_sftp::protocol::FileType;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -47,6 +47,8 @@ use crate::otp;
 use crate::otp_store;
 use crate::quick_commands;
 use crate::session_recording;
+use crate::sftp_name::{self, NameEncoding};
+use crate::sftp_raw;
 use crate::sftp_tree;
 use crate::ssh_algorithms;
 use crate::startup_commands;
@@ -1708,6 +1710,9 @@ pub struct SshRuntime {
     remote_tables: Mutex<HashMap<String, Arc<RemoteForwardTable>>>,
     /// Trust-on-first-use for unknown host keys (MCP stdio mode).
     auto_trust: bool,
+    /// 会话维度的「建议开启兼容模式」一次性提示标记（M14-B）：SFTP 探测
+    /// 失败时提示一次，之后同一会话静默。
+    compat_hinted: Mutex<HashSet<String>>,
     pub prompts: PromptBroker,
     data_dir: PathBuf,
     known_hosts_path: PathBuf,
@@ -1746,6 +1751,7 @@ impl SshRuntime {
             agent_modes: Mutex::new(agent_terminal::load_modes(&data_dir)),
             agent_challenges: Mutex::new(HashMap::new()),
             auto_trust: false,
+            compat_hinted: Mutex::new(HashSet::new()),
             prompts: PromptBroker::default(),
             data_dir,
             known_hosts_path,
@@ -3328,6 +3334,19 @@ impl SshRuntime {
         &self,
         session_id: &str,
     ) -> Result<Arc<AsyncMutex<SftpSession>>, String> {
+        self.sftp_with_compat(session_id)
+            .await
+            .map_err(|error| self.compat_hint(session_id, error))
+    }
+
+    /// SFTP 会话建立。老旧服务器兼容模式（M14-B，偏好 `sftp_compat_mode`）
+    /// 生效时：请求/响应不做流水线并发（读写各 1 路），并避免依赖服务器端
+    /// 扩展协商的路径。偏好改动对尚未建立的 SFTP 会话即时生效；已缓存的
+    /// 会话复用旧配置（重连后按新值建立）。
+    async fn sftp_with_compat(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<AsyncMutex<SftpSession>>, String> {
         let session = self.session(session_id).await?;
         let mut current = session.sftp.lock().await;
         if let Some(sftp) = current.as_ref() {
@@ -3342,13 +3361,43 @@ impl SshRuntime {
             .request_subsystem(true, "sftp")
             .await
             .map_err(|error| format!("Failed to start SFTP: {error}"))?;
-        let sftp = Arc::new(AsyncMutex::new(
+        let compat = crate::preferences::sftp_compat_mode(&self.data_dir);
+        let sftp = Arc::new(AsyncMutex::new(if compat {
+            SftpSession::new_with_config(
+                channel.into_stream(),
+                SftpConfig {
+                    max_concurrent_reads: 1,
+                    max_concurrent_writes: 1,
+                    ..SftpConfig::default()
+                },
+            )
+            .await
+            .map_err(sftp_error)?
+        } else {
             SftpSession::new(channel.into_stream())
                 .await
-                .map_err(sftp_error)?,
-        ));
+                .map_err(sftp_error)?
+        }));
         *current = Some(sftp.clone());
-        Ok(sftp)
+        Ok(sftp.clone())
+    }
+
+    /// 探测/建立失败的一次性兼容建议（M14-B）：每个会话只提示一次，避免
+    /// 重复打扰；连接老旧 OpenSSH/嵌入式 sftp-server 的用户可按提示到
+    /// 设置 → 传输里打开兼容模式。
+    fn compat_hint(&self, session_id: &str, error: String) -> String {
+        let fresh = self
+            .compat_hinted
+            .lock()
+            .map(|mut hinted| hinted.insert(session_id.to_string()))
+            .unwrap_or(false);
+        if fresh {
+            format!(
+                "{error} (hint: if this server is legacy, enable legacy server compatibility in Settings → Transfer)"
+            )
+        } else {
+            error
+        }
     }
 
     pub async fn sftp_home(&self, session_id: &str) -> Result<String, String> {
@@ -4120,21 +4169,66 @@ impl SshRuntime {
         }
     }
 
+    /// `sftp/list`：目录列表。编码偏好为 latin-1（M14-B）时改走裸包客户端
+    /// 拿原始文件名字节（russh-sftp 的反序列化层对文件名做 lossy UTF-8 解码，
+    /// 原始字节只能由 raw 路径取得），显示名按 latin-1 解码、传输路径用
+    /// `%XX` 转义形式；raw 不可用时回退高层客户端。auto 模式保持原路径
+    /// （字节往返无损），仅按 wire 名是否含 U+FFFD 标记 `lossy`。
     pub async fn sftp_list_path(
+        &self,
+        session_id: &str,
+        path: &str,
+        include_owner: bool,
+        encoding: NameEncoding,
+    ) -> Result<Vec<SftpEntry>, String> {
+        let path = normalize_remote_path(path)?;
+        let mut result = if encoding == NameEncoding::Latin1 {
+            match self.raw_list_entries(session_id, &path, encoding).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    eprintln!(
+                        "[ssh-sftp-plugin] raw byte listing unavailable, falling back: {error}"
+                    );
+                    self.crate_list_entries(session_id, &path, include_owner)
+                        .await?
+                }
+            }
+        } else {
+            self.crate_list_entries(session_id, &path, include_owner)
+                .await?
+        };
+        if include_owner {
+            // One extra read-only round trip upgrades numeric ids to names on
+            // SFTPv3 servers (OpenSSH): `ls -l` puts owner/group in fields 3/4.
+            // Any failure (no shell, no `ls`, timeout) keeps the numeric or
+            // absent values, never the listing itself.
+            enrich_owner_names(self, session_id, &path, &mut result).await;
+        }
+        result.sort_by(|left, right| {
+            let left_dir = left.kind == "directory";
+            let right_dir = right.kind == "directory";
+            right_dir
+                .cmp(&left_dir)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+        Ok(result)
+    }
+
+    /// 高层客户端（russh-sftp）路径：合法 UTF-8 服务器下字节往返无损。
+    async fn crate_list_entries(
         &self,
         session_id: &str,
         path: &str,
         include_owner: bool,
     ) -> Result<Vec<SftpEntry>, String> {
         let sftp = self.sftp(session_id).await?;
-        let path = normalize_remote_path(path)?;
         let entries = sftp
             .lock()
             .await
-            .read_dir(path.clone())
+            .read_dir(path.to_string())
             .await
             .map_err(sftp_error)?;
-        let mut result = entries
+        Ok(entries
             .map(|entry| {
                 let metadata = entry.metadata();
                 let kind = classify_entry_kind(entry.file_type());
@@ -4153,8 +4247,10 @@ impl SshRuntime {
                 } else {
                     (None, None)
                 };
+                let name = entry.file_name();
                 SftpEntry {
-                    name: entry.file_name(),
+                    lossy: sftp_name::is_lossy_wire(&name),
+                    name,
                     uri: sftp_uri(&entry.path()),
                     kind,
                     size: metadata.size,
@@ -4165,22 +4261,76 @@ impl SshRuntime {
                     group,
                 }
             })
-            .collect::<Vec<_>>();
-        if include_owner {
-            // One extra read-only round trip upgrades numeric ids to names on
-            // SFTPv3 servers (OpenSSH): `ls -l` puts owner/group in fields 3/4.
-            // Any failure (no shell, no `ls`, timeout) keeps the numeric or
-            // absent values, never the listing itself.
-            enrich_owner_names(self, session_id, &path, &mut result).await;
+            .collect())
+    }
+
+    /// latin-1 路径：裸包客户端取原始字节。显示名 = latin-1 解码（忠实）；
+    /// 传输名 = `%XX` 转义的 wire 形式（合法 UTF-8 字节按字符透传，与高层
+    /// 路径完全一致）。属主增强不做（exec 通道对转义名不可靠），保持空值。
+    async fn raw_list_entries(
+        &self,
+        session_id: &str,
+        path: &str,
+        encoding: NameEncoding,
+    ) -> Result<Vec<SftpEntry>, String> {
+        let mut client = self.raw_sftp_client(session_id).await?;
+        let raw_entries = client.readdir(path.as_bytes()).await?;
+        Ok(raw_entries
+            .into_iter()
+            .filter(|entry| entry.name.as_slice() != b"." && entry.name.as_slice() != b"..")
+            .map(|entry| {
+                let display = sftp_name::decode_display_name(&entry.name, encoding);
+                let wire_name = sftp_name::escape_wire(&entry.name);
+                let wire_path = sftp_name::join_wire_name(path, &wire_name);
+                SftpEntry {
+                    lossy: display.lossy,
+                    name: display.text,
+                    uri: sftp_uri(&wire_path),
+                    kind: classify_raw_kind(entry.attrs.permissions),
+                    size: entry.attrs.size,
+                    modified_at: entry.attrs.mtime.map(u64::from),
+                    permissions: entry.attrs.permissions.map(format_permissions),
+                    content_type: content_type_for_path(&wire_path),
+                    owner: None,
+                    group: None,
+                }
+            })
+            .collect())
+    }
+
+    /// 打开一条独立 sftp 子系统通道并跑裸包客户端（严格串行请求/响应）。
+    async fn raw_sftp_client(
+        &self,
+        session_id: &str,
+    ) -> Result<sftp_raw::RawSftp<russh::ChannelStream<russh::client::Msg>>, String> {
+        let session = self.session(session_id).await?;
+        let channel = session
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|error| format!("Failed to open SFTP channel: {error}"))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|error| format!("Failed to start SFTP: {error}"))?;
+        sftp_raw::RawSftp::init(channel.into_stream()).await
+    }
+
+    /// 裸包读一个下载分片（转义路径专用）：`%XX` 转义的 wire 路径先还原为
+    /// 服务器原始字节再交给 SFTP READ。requested=0 直接回空（EOF 语义）。
+    async fn raw_read_chunk(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+        offset: u64,
+        requested: u32,
+    ) -> Result<Vec<u8>, String> {
+        if requested == 0 {
+            return Ok(Vec::new());
         }
-        result.sort_by(|left, right| {
-            let left_dir = left.kind == "directory";
-            let right_dir = right.kind == "directory";
-            right_dir
-                .cmp(&left_dir)
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-        });
-        Ok(result)
+        let raw_path = sftp_name::unescape_wire(remote_path);
+        let mut client = self.raw_sftp_client(session_id).await?;
+        client.read_chunk(&raw_path, offset, requested).await
     }
 
     pub async fn sftp_read_path(
@@ -5025,8 +5175,11 @@ impl SshRuntime {
                 "Transfers are limited to {MAX_TRANSFER_SIZE} bytes"
             ));
         }
-        if self.active_transfer_count(&session_id)? >= 3 {
-            return Err("This SSH session already has three active transfers".to_string());
+        if self.active_transfer_count(&session_id)? as u64 >= self.transfer_depth_limit() {
+            return Err(format!(
+                "This SSH session already has {} active transfers",
+                self.transfer_depth_limit()
+            ));
         }
         let remote_path = normalize_remote_path(&remote_path)?;
         // Resume path: re-register a previously interrupted upload job. The
@@ -5440,23 +5593,40 @@ impl SshRuntime {
         emitter: &PluginEmitter,
     ) -> Result<Value, String> {
         let remote_path = normalize_remote_path(remote_path)?;
-        if self.active_transfer_count(session_id)? >= 3 {
-            return Err("This SSH session already has three active transfers".to_string());
+        if self.active_transfer_count(session_id)? as u64 >= self.transfer_depth_limit() {
+            return Err(format!(
+                "This SSH session already has {} active transfers",
+                self.transfer_depth_limit()
+            ));
         }
         // Resume re-attaches with bytes the caller already holds locally, which
         // the staging file would be missing — only fresh downloads may sink.
         if save_to_local && offset > 0 {
             return Err("Local save downloads cannot resume from an offset".to_string());
         }
-        let sftp = self.sftp(session_id).await?;
-        let size = sftp
-            .lock()
-            .await
-            .metadata(remote_path.clone())
-            .await
-            .map_err(sftp_error)?
-            .size
-            .unwrap_or(0);
+        // 传输路径含 `%XX` 转义（latin-1 列表产出的非 UTF-8 名字）时，走
+        // 裸包 STAT 取真实字节数——高层客户端会把转义串按字面量发出去，
+        // 命中不了远端文件（M14-B：传输用服务器原始字节）。
+        let size = if sftp_name::has_wire_escapes(&remote_path) {
+            let mut client = self.raw_sftp_client(session_id).await?;
+            client
+                .stat(remote_path.as_bytes())
+                .await
+                .map_err(sftp_error)?
+                .size
+                .unwrap_or(0)
+        } else {
+            let sftp = self.sftp(session_id).await?;
+            let size = sftp
+                .lock()
+                .await
+                .metadata(remote_path.clone())
+                .await
+                .map_err(sftp_error)?
+                .size
+                .unwrap_or(0);
+            size
+        };
         if size > MAX_TRANSFER_SIZE {
             return Err(format!(
                 "Transfers are limited to {MAX_TRANSFER_SIZE} bytes"
@@ -5569,8 +5739,11 @@ impl SshRuntime {
         download_dir: Option<&str>,
         emitter: &PluginEmitter,
     ) -> Result<Value, String> {
-        if self.active_transfer_count(session_id)? >= 3 {
-            return Err("This SSH session already has three active transfers".to_string());
+        if self.active_transfer_count(session_id)? as u64 >= self.transfer_depth_limit() {
+            return Err(format!(
+                "This SSH session already has {} active transfers",
+                self.transfer_depth_limit()
+            ));
         }
         let root_remote = normalize_remote_path(remote_path)?;
         let sftp = self.sftp(session_id).await?;
@@ -5884,25 +6057,40 @@ impl SshRuntime {
                 download.next_offset
             ));
         }
-        let sftp = self.sftp(&download.session_id).await?;
-        let mut source = sftp
-            .lock()
-            .await
-            .open(download.remote_path.clone())
-            .await
-            .map_err(sftp_error)?;
-        source
-            .seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(|error| format!("SFTP download seek failed: {error}"))?;
         let remaining = download.size.saturating_sub(offset);
         let requested = remaining.min(TRANSFER_CHUNK_SIZE as u64) as usize;
-        let mut chunk = vec![0_u8; requested];
-        let length = source
-            .read(&mut chunk)
-            .await
-            .map_err(|error| format!("SFTP download failed: {error}"))?;
-        chunk.truncate(length);
+        // 转义路径走裸包 READ（raw 字节打开远端文件）；普通路径保持高层
+        // 客户端的 seek+read。每 chunk 独立 open/close：转义名是极少数派，
+        // 简单性优先。raw EOF 回空 chunk，与高层路径的 eof 语义一致。
+        let chunk = if sftp_name::has_wire_escapes(&download.remote_path) {
+            self.raw_read_chunk(
+                &download.session_id,
+                &download.remote_path,
+                offset,
+                requested as u32,
+            )
+            .await?
+        } else {
+            let sftp = self.sftp(&download.session_id).await?;
+            let mut source = sftp
+                .lock()
+                .await
+                .open(download.remote_path.clone())
+                .await
+                .map_err(sftp_error)?;
+            source
+                .seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|error| format!("SFTP download seek failed: {error}"))?;
+            let mut chunk = vec![0_u8; requested];
+            let length = source
+                .read(&mut chunk)
+                .await
+                .map_err(|error| format!("SFTP download failed: {error}"))?;
+            chunk.truncate(length);
+            chunk
+        };
+        let length = chunk.len();
         if let Some(sink) = download.sink.as_ref() {
             sink.file
                 .lock()
@@ -6517,6 +6705,16 @@ impl SshRuntime {
             .get(session_id)
             .map(|session| session.connection_id.clone())
             .unwrap_or_default()
+    }
+
+    /// 会话级传输并发深度（M14-B）：偏好 `transfer_max_active` 可配
+    /// （1..=8，缺省 3 = 历史硬编码值）；老旧服务器兼容模式下强制 1。
+    /// 每次任务启动现读现用——改动即时生效，进行中的任务按原深度自然完成。
+    fn transfer_depth_limit(&self) -> u64 {
+        if crate::preferences::sftp_compat_mode(&self.data_dir) {
+            return 1;
+        }
+        crate::preferences::transfer_max_active(&self.data_dir)
     }
 
     fn active_transfer_count(&self, session_id: &str) -> Result<usize, String> {
@@ -7981,6 +8179,20 @@ fn classify_entry_kind(file_type: FileType) -> &'static str {
         FileType::Dir => "directory",
         FileType::Symlink => "symlink",
         FileType::Other => "file",
+    }
+}
+
+/// 裸包客户端路径的 kind 判定：按 v3 permissions 的 POSIX 类型位归类；
+/// attrs 缺 permissions（非标准服务器）时退回 file（与高层路径的 Other
+/// 语义一致），避免把普通文件误渲染成目录。
+fn classify_raw_kind(permissions: Option<u32>) -> &'static str {
+    let Some(mode) = permissions else {
+        return "file";
+    };
+    match mode & 0o170000 {
+        0o040000 => "directory",
+        0o120000 => "symlink",
+        _ => "file",
     }
 }
 
