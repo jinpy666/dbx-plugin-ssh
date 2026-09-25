@@ -35,6 +35,10 @@ const MAX_USERNAME_LEN: usize = 120;
 const MAX_SECRET_BYTES: usize = 64;
 /// import-qr 图片字节上限：二维码本身极小，8 MiB 足够任何手机截图。
 const MAX_QR_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+/// QR 解码像素边长/内存上限：压缩输入虽有 8 MiB 帽，但解压炸弹（如
+/// 60000×60000 的 PNG）仍会撑爆内存——8192² / 64 MiB 远超任何二维码截图。
+const MAX_QR_PIXEL_EDGE: u32 = 8192;
+const MAX_QR_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OtpEntry {
@@ -133,7 +137,7 @@ pub fn load_store(data_dir: &Path) -> OtpStore {
     OtpStore { entries, bindings }
 }
 
-/// 原子落盘（tmp + rename），Unix 上 0600。
+/// 原子落盘（tmp + rename），Unix 上 tmp 从创建起即 0600。
 pub fn save_store(data_dir: &Path, store: &OtpStore) -> Result<(), String> {
     let path = store_path(data_dir);
     if let Some(parent) = path.parent() {
@@ -148,12 +152,25 @@ pub fn save_store(data_dir: &Path, store: &OtpStore) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&value)
         .map_err(|error| format!("Failed to encode otp entries: {error}"))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text)
-        .map_err(|error| format!("Failed to write {}: {error}", tmp.display()))?;
+    // 先建后写：`fs::write` 会先以平台默认权限（0644）落明文密文文件、
+    // 再 chmod 0600，存在明文窗口；OpenOptions.mode 让首个字节前就是 0600。
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut file| file.write_all(text.as_bytes()))
+            .map_err(|error| format!("Failed to write {}: {error}", tmp.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp, text)
+            .map_err(|error| format!("Failed to write {}: {error}", tmp.display()))?;
     }
     std::fs::rename(&tmp, &path)
         .map_err(|error| format!("Failed to write {}: {error}", path.display()))
@@ -555,9 +572,7 @@ pub fn decode_otpauth_qr(image_base64: &str) -> Result<OtpUriParams, String> {
             "image exceeds {MAX_QR_IMAGE_BYTES} bytes; crop the QR code and retry"
         ));
     }
-    let image = image::load_from_memory(&raw)
-        .map_err(|error| format!("image could not be decoded: {error}"))?
-        .to_luma8();
+    let image = decode_with_limits(&raw)?.to_luma8();
     let mut prepared = rqrr::PreparedImage::prepare(image);
     for grid in prepared.detect_grids() {
         let Ok((_, text)) = grid.decode() else {
@@ -569,6 +584,24 @@ pub fn decode_otpauth_qr(image_base64: &str) -> Result<OtpUriParams, String> {
         }
     }
     Err("no otpauth:// QR code found in the image".to_string())
+}
+
+/// `image` 解码 with 硬上限（[`MAX_QR_PIXEL_EDGE`] / [`MAX_QR_ALLOC_BYTES`]）：
+/// `load_from_memory` 不设限，解压炸弹会直接吃满内存；`ImageReader::limits`
+/// 在解码前按声明尺寸与分配预算拒绝（`decode` 先 reserve 再 set_limits）。
+fn decode_with_limits(raw: &[u8]) -> Result<image::DynamicImage, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(raw));
+    // `Limits` 是 non_exhaustive，只能在 default 之上逐字段覆盖。
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_QR_PIXEL_EDGE);
+    limits.max_image_height = Some(MAX_QR_PIXEL_EDGE);
+    limits.max_alloc = Some(MAX_QR_ALLOC_BYTES);
+    reader.limits(limits);
+    reader
+        .with_guessed_format()
+        .map_err(|error| format!("image format could not be guessed: {error}"))?
+        .decode()
+        .map_err(|error| format!("image could not be decoded: {error}"))
 }
 
 #[cfg(test)]
@@ -976,5 +1009,22 @@ mod tests {
         // 合法 PNG 字节但没有二维码（1x1 透明像素）。
         let tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
         assert!(decode_otpauth_qr(tiny_png).is_err());
+    }
+
+    /// 解压炸弹防线：压缩后极小的 PNG 也可以声明 8193px 宽，超过
+    /// [`MAX_QR_PIXEL_EDGE`] 时必须在解码前被 limits 拒绝。
+    #[test]
+    fn decode_otpauth_qr_rejects_oversized_images() {
+        let oversized = image::DynamicImage::new_luma8(MAX_QR_PIXEL_EDGE + 1, 1);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        oversized
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .expect("encode oversized png");
+        let encoded = BASE64_STANDARD.encode(buf.get_ref());
+        let error = decode_otpauth_qr(&encoded).unwrap_err();
+        assert!(
+            error.starts_with("image could not be decoded"),
+            "oversized image must be refused by the decode limits, got: {error}"
+        );
     }
 }
