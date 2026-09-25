@@ -16,10 +16,10 @@
 //! enumeration labels are normalized so `path (description)` glue from some
 //! backends never leaks into the device path the UI dials.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::RwLock;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use dbx_plugin_sdk::PluginEmitter;
@@ -38,6 +38,154 @@ const READ_TIMEOUT: Duration = Duration::from_millis(10);
 /// whole session lifetime, far smaller than the shared 2 MiB terminal limit —
 /// serial output is console chatter, not full-screen repaints.
 const SERIAL_REPLAY_BYTE_LIMIT: usize = 128 * 1024;
+
+/// 写序列化常量（设计稿「写序列化与回压」节，草案参数实施定稿值）：
+/// - 键入大包按 4 KiB 小块分帧入队，单块持锁写时间有上界（@9600 波特约
+///   4 秒，键入与引擎 ACK 不再被 64 KiB 大块饿死 66 秒）；
+/// - 队列按 256 KiB 字节预算有界，满时按来源拒绝而非无界堆积；
+/// - 键入单包上限 16 KiB：覆盖 xterm 括号粘贴突发，更大的编程性写入整包
+///   丢弃并向前端回报丢弃事件。
+const SERIAL_WRITE_CHUNK_BYTES: usize = 4 * 1024;
+const SERIAL_WRITE_QUEUE_BUDGET: usize = 256 * 1024;
+const SERIAL_KEYSTROKE_MAX_BYTES: usize = 16 * 1024;
+
+/// 写入来源：准入策略不同（键入可丢并回报；上传引擎输出全有或全无）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteSource {
+    /// 键盘/粘贴（B1 二进制帧与 `serial/write` JSON 同源）。
+    Keystroke,
+    /// 上传引擎的协议块输出：保持块级原样（不切分），队列满时报错让上传
+    /// 以可读错误终止，绝不阻塞调用线程。
+    Bulk,
+}
+
+/// 准入拒绝原因（`message()` 面向前端/日志，绝不含写入内容）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteReject {
+    /// 键入单包超过 [`SERIAL_KEYSTROKE_MAX_BYTES`]。
+    Oversize,
+    /// 队列字节预算（[`SERIAL_WRITE_QUEUE_BUDGET`]）容不下整包。
+    QueueFull,
+    /// 队列已随会话关闭。
+    Closed,
+}
+
+impl WriteReject {
+    fn message(self) -> String {
+        match self {
+            Self::Oversize => {
+                "serial write queue: keystroke payload exceeds the per-write limit".to_string()
+            }
+            Self::QueueFull => "serial write queue is full".to_string(),
+            Self::Closed => "serial session is closed".to_string(),
+        }
+    }
+}
+
+/// 有界写队列：预分块 FIFO + 字节计数 + Condvar 唤醒专用写线程。
+/// 生产者只做无阻塞 try 入队——回压以「拒绝」的形式回到来源方（键入丢弃
+/// 并回报、引擎输出报错终止）；消费者（写线程）`pop` 阻塞等待。准入是
+/// 全有或全无：半个包入队会让线上字节流停在任意中断点，拒绝必须整体。
+struct WriteQueue {
+    inner: Mutex<WriteQueueInner>,
+    available: Condvar,
+}
+
+struct WriteQueueInner {
+    chunks: VecDeque<Vec<u8>>,
+    bytes: usize,
+    closed: bool,
+}
+
+impl WriteQueue {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(WriteQueueInner {
+                chunks: VecDeque::new(),
+                bytes: 0,
+                closed: false,
+            }),
+            available: Condvar::new(),
+        }
+    }
+
+    /// 准入（纯内存，无 IO，永不动端口锁）：键入按小块分帧，引擎输出整块
+    /// 入队；预算不足/超限/已关闭时整体拒绝。
+    fn push(&self, data: &[u8], source: WriteSource) -> Result<(), WriteReject> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        if source == WriteSource::Keystroke && data.len() > SERIAL_KEYSTROKE_MAX_BYTES {
+            return Err(WriteReject::Oversize);
+        }
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.closed {
+            return Err(WriteReject::Closed);
+        }
+        if inner.bytes + data.len() > SERIAL_WRITE_QUEUE_BUDGET {
+            return Err(WriteReject::QueueFull);
+        }
+        if source == WriteSource::Bulk {
+            // 引擎输出保持块级原样（协议块语义），不受切分影响；尺寸上界
+            // 由引擎设计保证（≤ 约 8 KiB 的 ZMODEM 块），远小于队列预算。
+            inner.chunks.push_back(data.to_vec());
+            inner.bytes += data.len();
+        } else {
+            // 键入大包按小块分帧：单块持锁写时间有上界。
+            let mut offset = 0;
+            while offset < data.len() {
+                let end = (offset + SERIAL_WRITE_CHUNK_BYTES).min(data.len());
+                inner.chunks.push_back(data[offset..end].to_vec());
+                inner.bytes += end - offset;
+                offset = end;
+            }
+        }
+        drop(inner);
+        self.available.notify_one();
+        Ok(())
+    }
+
+    /// 写线程取块：阻塞直到有块或队列关闭排空（None = 退出）。
+    fn pop(&self) -> Option<Vec<u8>> {
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(chunk) = inner.chunks.pop_front() {
+                inner.bytes = inner.bytes.saturating_sub(chunk.len());
+                return Some(chunk);
+            }
+            if inner.closed {
+                return None;
+            }
+            inner = self
+                .available
+                .wait(inner)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    /// 取消路径：清空尚未写出的块，返回丢弃字节数（诊断用）。
+    fn clear(&self) -> usize {
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dropped = inner.bytes;
+        inner.chunks.clear();
+        inner.bytes = 0;
+        dropped
+    }
+
+    /// 会话关闭：清空 + 置关闭 + 唤醒，写线程排空检查后随即退出。
+    fn shutdown(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.chunks.clear();
+        inner.bytes = 0;
+        inner.closed = true;
+        drop(inner);
+        self.available.notify_all();
+    }
+
+    fn queued_bytes(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).bytes
+    }
+}
 
 /// Erase-byte mapping shared with the telnet session (`BackspaceMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +338,9 @@ pub(crate) struct SerialSession {
     /// `serial/replay` 据此重发。std 互斥锁（读线程与 JSON 侧都是同步上下文，
     /// 临界区只做入队/拷贝，无 IO）。
     replay: Arc<std::sync::Mutex<crate::ssh::ReplayBuffer>>,
+    /// 有界写队列（设计稿「写序列化与回压」）：专用写线程独占端口写方向，
+    /// 异步侧只入队不碰锁。
+    write_queue: Arc<WriteQueue>,
 }
 
 impl SerialSession {
@@ -398,6 +549,7 @@ impl SerialSessionRuntime {
             replay: Arc::new(std::sync::Mutex::new(
                 crate::ssh::ReplayBuffer::with_byte_limit(SERIAL_REPLAY_BYTE_LIMIT),
             )),
+            write_queue: Arc::new(WriteQueue::new()),
         });
         self.sessions
             .write()
@@ -409,8 +561,9 @@ impl SerialSessionRuntime {
             Arc::clone(&session),
             Arc::clone(&port),
             cmd_rx,
-            emitter,
+            emitter.clone(),
         );
+        spawn_writer(session_id.clone(), Arc::clone(&session), emitter);
         Ok(json!({
             "sessionId": session_id,
             "port": port_name,
@@ -427,29 +580,40 @@ impl SerialSessionRuntime {
             .ok_or_else(|| "Serial session was not found".to_string())
     }
 
-    /// Writes keystroke bytes through the erase mapping. Keystroke-sized
-    /// writes on the async side are acceptable for an MVP; the mutex is held
-    /// only for the driver call.
-    pub fn write_input(&self, session: &SerialSession, data: &[u8]) -> Result<(), String> {
+    /// 键入路径（B1 二进制帧与 `serial/write` JSON 共用）：退格改写后有界
+    /// 入队；准入丢弃（超限/队满）按契约发 `serial/input/dropped` 事件回报
+    /// 前端（丢弃不是传输失败，返回 Ok）；队列已随会话关闭才报错。
+    pub fn write_input(
+        &self,
+        session: &SerialSession,
+        session_id: &str,
+        data: &[u8],
+        emitter: &PluginEmitter,
+    ) -> Result<(), String> {
         let payload = session.backspace.rewrite(data);
-        self.write_raw(session, &payload)
-    }
-
-    /// Writes raw bytes (protocol frames) without the erase mapping — upload
-    /// engines must not have their NAK/ACK bytes rewritten.
-    fn write_raw(&self, session: &SerialSession, data: &[u8]) -> Result<(), String> {
-        let mut port = session
-            .write
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        port.write_all(data)
-            .and_then(|_| port.flush())
-            .map_err(|error| format!("serial write failed: {error}"))
+        match session.write_queue.push(&payload, WriteSource::Keystroke) {
+            Ok(()) => Ok(()),
+            Err(reject @ (WriteReject::Oversize | WriteReject::QueueFull)) => {
+                let _ = emitter.event(
+                    "serial/input/dropped",
+                    json!({
+                        "sessionId": session_id,
+                        "bytes": payload.len(),
+                        "reason": if reject == WriteReject::Oversize { "oversize" } else { "queue_full" },
+                    }),
+                );
+                Ok(())
+            }
+            Err(WriteReject::Closed) => Err("Serial session is closed".to_string()),
+        }
     }
 
     pub async fn close(&self, session_id: &str) -> Result<(), String> {
         let session = self.session(session_id).await?;
         let _ = session.cmd_tx.send(SerialCommand::Close);
+        // 关闭写队列（清空 + 唤醒）：写线程丢弃在途之后的块并退出，端口
+        // 随最后一个 Arc 释放而关闭。
+        session.write_queue.shutdown();
         self.sessions
             .write()
             .expect("serial session registry poisoned")
@@ -624,6 +788,10 @@ impl SerialSessionRuntime {
             return Ok(json!({ "success": true }));
         };
         let outputs = job.engine.cancel();
+        // 可取消（设计稿）：清空尚未写出的队列块后再入队取消序列——取消
+        // 字节绝不能排在被取消的数据块之后。在途块（阻塞在 write_all 的
+        // 系统调用里）无法中断，属既定边界。
+        session.write_queue.clear();
         let result = apply_upload_outputs(&session, job, outputs, session_id, emitter);
         *guard = None;
         result?;
@@ -690,7 +858,7 @@ impl SerialSessionRuntime {
 }
 
 /// 引擎输出统一处理：写串口（不带退格改写）+ 进度事件（限流）。
-/// 端口写错误只报第一个，剩余写输出丢弃（协议随后会终止）。
+/// 端口/队列写错误只报第一个，剩余写输出丢弃（协议随后会终止）。
 fn apply_upload_outputs(
     session: &SerialSession,
     job: &mut SerialUploadJob,
@@ -702,13 +870,11 @@ fn apply_upload_outputs(
     for output in outputs {
         match output {
             Output::Write(bytes) => {
+                // 引擎输出走 Bulk 源入队：块级原样（不切分），队列满/关闭时
+                // 报错终止上传（与原直写失败同语义），绝不阻塞调用线程。
                 if write_error.is_none() {
-                    let mut port = session
-                        .write
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if let Err(error) = port.write_all(&bytes).and_then(|_| port.flush()) {
-                        write_error = Some(format!("serial write failed: {error}"));
+                    if let Err(reject) = session.write_queue.push(&bytes, WriteSource::Bulk) {
+                        write_error = Some(reject.message());
                     }
                 }
             }
@@ -804,6 +970,39 @@ fn spawn_reader(
                     );
                     return;
                 }
+            }
+        }
+    });
+}
+
+/// 专用写线程（设计稿「写序列化与回压」）：每会话一条，独占端口写方向；
+/// 键入与上传引擎输出只入队不碰锁，队列按 256 KiB 字节预算有界。单块持锁
+/// 时间被分帧上限约束（4 KiB @9600 波特约 4 秒），键入与引擎 ACK 不再被
+/// 64 KiB 大块持锁 66 秒饿死。
+///
+/// 写失败镜像为 `serial/write/error` 事件（二进制/JSON 调用方在入队时早已
+/// 拿到应答，错误无法回传）：清空队列（后续块大概率同样失败）后继续服务
+/// 后续写入；端口消失时读线程会以 error 状态收场。在途块（阻塞在 write_all
+/// 系统调用里）无法中断——取消/关闭保证的是其后队列内容不再写出。
+fn spawn_writer(session_id: String, session: Arc<SerialSession>, emitter: PluginEmitter) {
+    std::thread::spawn(move || {
+        while let Some(chunk) = session.write_queue.pop() {
+            let result = {
+                let mut port = session
+                    .write
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                port.write_all(&chunk).and_then(|_| port.flush())
+            };
+            if let Err(error) = result {
+                let _ = emitter.event(
+                    "serial/write/error",
+                    json!({
+                        "sessionId": session_id,
+                        "error": format!("serial write failed: {error}"),
+                    }),
+                );
+                session.write_queue.clear();
             }
         }
     });
@@ -1157,5 +1356,106 @@ mod tests {
         assert!(2 + 1 >= replay.first_sequence());
         // 串口实际预算常量为 128 KiB。
         assert_eq!(SERIAL_REPLAY_BYTE_LIMIT, 128 * 1024);
+    }
+
+    // —— 写序列化与回压（设计稿「写序列化与回压」节）———————————————
+
+    #[test]
+    fn write_queue_chunks_keystrokes_and_keeps_fifo_byte_order() {
+        // 键入大包按 4 KiB 小块分帧入队；FIFO 出队拼回字节流逐字节一致。
+        // （pop 在未关闭的队列上会阻塞，按预期块数出队。）
+        let queue = WriteQueue::new();
+        let payload: Vec<u8> = (0..(SERIAL_WRITE_CHUNK_BYTES * 2 + 3)).map(|i| i as u8).collect();
+        queue.push(&payload, WriteSource::Keystroke).unwrap();
+        assert_eq!(queue.queued_bytes(), payload.len());
+        let expected_chunks = payload.len().div_ceil(SERIAL_WRITE_CHUNK_BYTES);
+        let mut reassembled = Vec::new();
+        for _ in 0..expected_chunks {
+            let chunk = queue.pop().expect("queued chunk must be present");
+            assert!(chunk.len() <= SERIAL_WRITE_CHUNK_BYTES, "chunk is bounded");
+            reassembled.extend_from_slice(&chunk);
+        }
+        assert_eq!(reassembled, payload);
+        assert_eq!(queue.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn write_queue_keeps_upload_blocks_undivided() {
+        // 引擎输出（Bulk）保持块级原样，不受切分影响（哪怕超过分帧上限）。
+        let queue = WriteQueue::new();
+        let block = vec![0xAA; SERIAL_WRITE_CHUNK_BYTES + 512];
+        queue.push(&block, WriteSource::Bulk).unwrap();
+        let first = queue.pop().unwrap();
+        assert_eq!(first.len(), block.len(), "bulk stays one chunk");
+        // 排空检查前置关闭，pop 的 None 退出语义由 shutdown 用例覆盖。
+        assert_eq!(queue.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn write_queue_rejects_whole_packets_and_reports_the_reason() {
+        // 键入超单包上限 → Oversize；Bulk 无单包上限但受预算约束（超预算的
+        // 引擎块 → QueueFull）。两种拒绝都全有或全无（队列原样未动）。
+        let queue = WriteQueue::new();
+        let oversize = vec![0u8; SERIAL_KEYSTROKE_MAX_BYTES + 1];
+        assert_eq!(
+            queue.push(&oversize, WriteSource::Keystroke),
+            Err(WriteReject::Oversize)
+        );
+        assert_eq!(queue.queued_bytes(), 0, "all-or-nothing admission");
+
+        let beyond_budget = vec![0u8; SERIAL_WRITE_QUEUE_BUDGET + 1];
+        assert_eq!(
+            queue.push(&beyond_budget, WriteSource::Bulk),
+            Err(WriteReject::QueueFull)
+        );
+        assert_eq!(queue.queued_bytes(), 0, "all-or-nothing admission");
+
+        let filler = vec![0u8; SERIAL_WRITE_QUEUE_BUDGET - 8];
+        queue.push(&filler, WriteSource::Bulk).unwrap();
+        let budget = WriteQueue::new();
+        budget.push(&filler, WriteSource::Bulk).unwrap();
+        assert_eq!(
+            budget.push(b"late keystroke", WriteSource::Keystroke),
+            Err(WriteReject::QueueFull)
+        );
+        assert_eq!(budget.queued_bytes(), filler.len(), "queue untouched");
+        assert!(!WriteReject::QueueFull.message().contains("keystroke"));
+    }
+
+    #[test]
+    fn write_queue_clear_and_shutdown_bound_the_cancel_and_close_paths() {
+        // 取消：clear 丢掉未写出的块并返回字节数，队列随后可继续入队
+        // （取消序列本身在清空后入队）。关闭：shutdown 后 push 报 Closed，
+        // pop 排空即 None（写线程退出条件）。
+        let queue = WriteQueue::new();
+        queue.push(b"stale upload block", WriteSource::Bulk).unwrap();
+        assert_eq!(queue.clear(), "stale upload block".len());
+        assert_eq!(queue.queued_bytes(), 0);
+        queue.push(b"cancel sequence", WriteSource::Bulk).unwrap();
+
+        let closed = WriteQueue::new();
+        closed.push(b"pending", WriteSource::Keystroke).unwrap();
+        closed.shutdown();
+        assert_eq!(closed.push(b"late", WriteSource::Keystroke), Err(WriteReject::Closed));
+        assert_eq!(closed.pop(), None);
+    }
+
+    #[test]
+    fn write_queue_pop_blocks_until_a_producer_pushes() {
+        // 消费者阻塞等待 + Condvar 唤醒：写线程在无块时休眠，生产者入队即醒。
+        let queue = Arc::new(WriteQueue::new());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let consumer_queue = Arc::clone(&queue);
+        std::thread::spawn(move || {
+            done_tx.send(consumer_queue.pop()).expect("report pop");
+        });
+        // 生产者尚未入队：短暂窗口内不得拿到块（未唤醒即返回就是 bug）。
+        assert!(done_rx.recv_timeout(Duration::from_millis(40)).is_err());
+        queue.push(b"wake", WriteSource::Keystroke).unwrap();
+        let chunk = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("pop wakes on push")
+            .expect("closed queues yield None, open ones yield the chunk");
+        assert_eq!(chunk, b"wake".to_vec());
     }
 }

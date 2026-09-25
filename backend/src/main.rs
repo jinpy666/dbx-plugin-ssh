@@ -529,7 +529,8 @@ impl Plugin {
                 let data_base64 = required_string(&params, "dataBase64")?;
                 let data = serial_session::decode_write_payload(data_base64)?;
                 let session = self.runtime.block_on(self.serial.session(session_id))?;
-                self.serial.write_input(&session, &data)?;
+                self.serial
+                    .write_input(&session, session_id, &data, emitter)?;
                 Ok(json!({ "success": true }))
             }
             "serial/close" => {
@@ -1778,7 +1779,7 @@ impl PluginHandler for Plugin {
                 );
                 return Err(to_plugin_error(error));
             }
-            if let Err(error) = self.serial.write_input(&session, &payload) {
+            if let Err(error) = self.serial.write_input(&session, session_id, &payload, emitter) {
                 let _ = emitter.event(
                     "serial/terminal/error",
                     json!({ "sessionId": session_id, "error": error }),
