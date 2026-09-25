@@ -337,7 +337,9 @@ pub fn scope_allows(scope: &[String], id: &str, name: Option<&str>, host: &str) 
 }
 
 /// Confirm-mode gate set (§1.3): write tools plus the exec family.
-/// Read-only tools and `ssh_close` are never intercepted.
+/// Read-only tools and `ssh_close` are never intercepted. `docker_action` is
+/// intentionally structured; the frontend shows its canonical command but
+/// keeps that confirmation field read-only, unlike ordinary SSH commands.
 fn is_confirm_gated_tool(name: &str) -> bool {
     is_write_tool(name) || matches!(name, "ssh_exec" | "ssh_multi_exec" | "ssh_terminal_input")
 }

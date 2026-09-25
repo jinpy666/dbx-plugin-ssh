@@ -49,6 +49,7 @@ import {
 } from "../lib/terminalBehavior";
 import type { TerminalHotkeyBindings } from "../lib/terminalHotkeys";
 import { type ActionLinkMatcherToggles, type ActionLinksSettings } from "../lib/actionLinksMatcher";
+import { rdpExperimentalEnabled as parseRdpExperimentalEnabled } from "../lib/rdpExperimental";
 import { GUTTER_TIMESTAMP_DEFAULT_FORMAT, type GutterSettings } from "../lib/terminalGutter";
 import {
   createStartupEntry,
@@ -215,6 +216,28 @@ async function setX11Enabled(next: boolean) {
  * sidecar 偏好」模式，即时生效语义（之后 open 的会话才自动录制）。 */
 const autoRecordEnabled = ref(false);
 
+/** RDP 仍处实验阶段：默认关闭，必须由用户在设置中显式启用。 */
+const rdpExperimentalEnabled = ref(false);
+
+async function loadRdpExperimentalPreference() {
+  try {
+    const prefs = await window.dbxPlugin?.invoke<{ rdp_experimental_enabled?: unknown }>("local/preferences/get", {});
+    rdpExperimentalEnabled.value = parseRdpExperimentalEnabled(prefs?.rdp_experimental_enabled);
+  } catch {
+    rdpExperimentalEnabled.value = false;
+  }
+}
+
+async function setRdpExperimentalEnabled(next: boolean) {
+  rdpExperimentalEnabled.value = next;
+  try {
+    await window.dbxPlugin?.invoke("local/preferences/set", { rdp_experimental_enabled: next });
+    emit("update:rdpExperimental", next);
+  } catch {
+    rdpExperimentalEnabled.value = !next;
+  }
+}
+
 async function loadAutoRecordPreference() {
   try {
     const prefs = await window.dbxPlugin?.invoke<{ auto_record?: unknown }>("local/preferences/get", {});
@@ -234,6 +257,7 @@ async function setAutoRecordEnabled(next: boolean) {
 }
 
 void loadAutoRecordPreference();
+void loadRdpExperimentalPreference();
 
 void loadX11Preference();
 
@@ -369,6 +393,8 @@ const emit = defineEmits<{
   (e: "error", cause: unknown): void;
   (e: "browse-download-dir"): void;
   (e: "update:webgl", value: boolean): void;
+  /** RDP 是实验能力：App 仅同步工具栏入口的内存门。 */
+  (e: "update:rdpExperimental", value: boolean): void;
   /** 行内 ghost 自动建议开关（组件自治持久化 pluginStore，App 只同步内存态）。 */
   (e: "update:ghostSuggest", value: boolean): void;
   /** 行为设置局部增量：App 侧会归一化 + 持久化 + 即时落地到 xterm 选项。 */
@@ -1828,6 +1854,13 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("x11.enabledHint") }}</p>
             <p v-if="x11ReadOnlyNote" class="muted settings-note">{{ t("x11.readOnlyNote") }}</p>
+
+            <h3 class="settings-section-title">{{ t("rdp.experimentalSection") }}</h3>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="rdpExperimentalEnabled" size="sm" @update:model-value="setRdpExperimentalEnabled(Boolean($event))" />
+              <span>{{ t("rdp.experimentalEnabled") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("rdp.experimentalHint") }}</p>
 
             <!-- 会话自动录制（M14）：新会话自动挂录制器，标 iShell 录制增强。 -->
             <h3 class="settings-section-title">{{ t("autoRecord.sectionTitle") }}</h3>

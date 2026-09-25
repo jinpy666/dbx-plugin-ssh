@@ -181,7 +181,7 @@ import { formatBytes, formatRate } from "./lib/format";
 import { mergeTransferProgress, transferCancelReason, type TransferPhase } from "./lib/transferProgress";
 import { DBX_POPOVER, resolveAppearance, TERMINAL_ANSI, type DbxPluginAppearanceInput } from "./lib/appearance";
 import { isDbxPluginTheme, onHostThemeChange, themeToAppearance } from "./lib/hostTheme";
-import { AGENT_MODES, approvalRemainingSecs, buildAgentResolveBody, dropAgentPrompt, enqueueAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload, type AgentTerminalMode } from "./lib/agentTerminal";
+import { AGENT_MODES, agentPromptCommandReadOnly, approvalRemainingSecs, buildAgentResolveBody, dropAgentPrompt, enqueueAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload, type AgentTerminalMode } from "./lib/agentTerminal";
 import { purposeKeyLabel, sanitizeTriagePayload, severityClass, type TriageResult } from "./lib/alertTriage";
 import {
   compileRules,
@@ -324,6 +324,7 @@ import {
 import VncConnectDialog, { type VncConnectOptions } from "./components/VncConnectDialog.vue";
 import VncSurface from "./components/VncSurface.vue";
 import type { VncInputEvent } from "./lib/vncFrame";
+import { rdpExperimentalEnabled } from "./lib/rdpExperimental";
 // RDP 会话（nyaterm-parity P3-4）：画布与 VNC 同构（同一 44 字节 patch 头，
 // 解码复用 vncFrame），输入走扫描码/unicode 双通道，证书确认走
 // connection/challenge kind=rdp-certificate 分支。
@@ -1496,6 +1497,8 @@ const vncTarget = computed(() => (vncSession.value ? `${vncSession.value.host}:$
 const rdpSession = ref<{ sessionId: string; host: string; port: number } | null>(null);
 const rdpDialogOpen = ref(false);
 const rdpConfirmOpen = ref(false);
+// 默认不向普通用户暴露 RDP；仅设置中显式启用实验能力后才显示入口。
+const rdpExperimental = ref(false);
 const rdpState = ref<RdpSessionStateView>(initialRdpSessionState());
 const rdpScaleMode = ref<RdpConnectOptions["scaleMode"]>("fit");
 const rdpSurface = ref<InstanceType<typeof RdpSurface> | null>(null);
@@ -4757,7 +4760,7 @@ async function reconnectRdpSession() {
 
 // 工具栏 RDP 入口：SSH/本地/Telnet/串口/VNC 占用终端视图时先经确认。
 function requestRdp() {
-  if (isRdpMode.value) return;
+  if (!rdpExperimental.value || isRdpMode.value) return;
   if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || serialSession.value || vncSession.value) {
     rdpConfirmOpen.value = true;
     return;
@@ -5554,6 +5557,7 @@ async function resolveRdpCertificate(accept: boolean) {
 // 绝对期限，到 0 仅出队队首并标记 expired（后端超时同样拒绝）；排队中已到期的
 // 挑战会在露出为队首的首次 tick 即被跳过出队。
 const agentPromptHead = computed(() => agentPromptQueue.value[0]);
+const agentPromptCommandIsReadOnly = computed(() => agentPromptHead.value ? agentPromptCommandReadOnly(agentPromptHead.value) : false);
 
 watch(agentPromptHead, (head) => {
   stopAgentPromptTimer();
@@ -5601,7 +5605,8 @@ function clearAgentPrompts() {
 }
 
 // 审批语义对齐 host-key 挑战：先出队再 resolve（挑战一次性，重复 resolve 报错）；
-// 批准时提交编辑后的命令（所见即所执行）；勾选「记住」时携带 remember 标记。
+// 普通 SSH 命令仍可编辑（所见即所执行），但 MCP Docker 动作保留结构化参数，
+// 确认 UI 仅展示、不可改写其规范命令。勾选「记住」时携带 remember 标记。
 async function resolveAgentPrompt(decision: "approve" | "deny") {
   const prompt = agentPromptHead.value;
   if (!prompt) return;
@@ -6906,6 +6911,7 @@ async function hydratePrefsOnce() {
       ctx_search_engines?: unknown;
       wallpaper_enabled?: unknown;
       wallpaper_opacity?: unknown;
+      rdp_experimental_enabled?: unknown;
     }>("local/preferences/get", {});
     // 背景图本体与偏好同拉（旧 sidecar 无 wallpaper/* 时静默缺席）。
     void loadWallpaperImage();
@@ -6938,6 +6944,7 @@ async function hydratePrefsOnce() {
     // 背景图偏好：键缺省保持内存默认（关 / 45%）。
     if (typeof prefs.wallpaper_enabled === "boolean") wallpaperEnabled.value = prefs.wallpaper_enabled;
     if (prefs.wallpaper_opacity !== undefined) wallpaperOpacity.value = Math.min(90, Math.max(10, Math.round(Number(prefs.wallpaper_opacity) || 45)));
+    rdpExperimental.value = rdpExperimentalEnabled(prefs.rdp_experimental_enabled);
     cachePrefs();
   } catch {
     // 旧 sidecar：保留 localStorage 种子或默认。
@@ -11250,8 +11257,8 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button icon-amber" :title="t('telnet.open')" @click="requestTelnet"><Globe /></button>
         <!-- VNC 远程桌面入口（nyaterm-parity P2 2d）：与其它会话互斥，占用先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('vnc.open')" @click="requestVnc"><MonitorPlay /></button>
-        <!-- RDP 远程桌面入口（nyaterm-parity P3-4）：与其它会话互斥，占用先经确认。 -->
-        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('rdp.open')" @click="requestRdp"><MonitorUp /></button>
+        <!-- RDP 默认不向普通用户开放：仅设置中显式启用实验能力后显示。 -->
+        <button v-if="!localUiMode && rdpExperimental" class="icon-button icon-emerald" :title="t('rdp.open')" @click="requestRdp"><MonitorUp /></button>
         <!-- 串口会话入口（P3）：与 SSH/本地/Telnet 互斥，占用终态先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('serial.open')" @click="requestSerial"><Usb /></button>
         <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
@@ -12726,6 +12733,7 @@ onBeforeUnmount(() => {
       @error="showError"
       @browse-download-dir="folderPickerTarget = 'settings'"
       @update:webgl="setWebglEnabled"
+      @update:rdp-experimental="(enabled) => (rdpExperimental = enabled)"
       @update-behavior="updateTerminalBehavior"
       @update-hotkeys="updateTerminalHotkeys"
       @update:action-links="updateActionLinksSettings"
@@ -12842,7 +12850,7 @@ onBeforeUnmount(() => {
         </div>
         <label class="agent-prompt-command">
           <span>{{ t("agentPromptCommandLabel") }}</span>
-          <textarea v-model="agentPromptCommand" class="mono" rows="3" spellcheck="false" />
+          <textarea v-model="agentPromptCommand" class="mono" rows="3" spellcheck="false" :readonly="agentPromptCommandIsReadOnly" />
         </label>
         <!-- 记住不限风险档：strict 模式下低危命令同样每次弹审、同样需要免审
              记忆（IMPL_PLAN 预期 strict/auto 下 approve+remember 二次零弹窗）；

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_MODES,
   approvalRemainingSecs,
+  agentPromptCommandReadOnly,
   buildAgentResolveBody,
   dropAgentPrompt,
   enqueueAgentPrompt,
@@ -38,6 +39,14 @@ describe("agent terminal mode contract", () => {
     expect(approvalRemainingSecs(payload, 2_000_000)).toBe(0);
     // 未到期时仍返回微小的正剩余（0.001s），前端 250ms tick 会立即收口到 0。
     expect(approvalRemainingSecs(payload, 999_999)).toBeCloseTo(0.001, 6);
+  });
+});
+
+describe("MCP approval command editing", () => {
+  it("keeps structured Docker lifecycle actions read-only while normal SSH commands stay editable", () => {
+    expect(agentPromptCommandReadOnly({ source: "mcp", tool: "docker_action" })).toBe(true);
+    expect(agentPromptCommandReadOnly({ source: "mcp", tool: "ssh_exec" })).toBe(false);
+    expect(agentPromptCommandReadOnly({ tool: "docker_action" })).toBe(false);
   });
 });
 

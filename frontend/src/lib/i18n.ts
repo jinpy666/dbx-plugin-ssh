@@ -6826,6 +6826,9 @@ for (const locale of Object.keys(vncMessages)) {
 const rdpMessages: Record<string, Record<string, string>> = {
   en: {
     "rdp.open": "New RDP session",
+    "rdp.experimentalSection": "Experimental RDP",
+    "rdp.experimentalEnabled": "Enable experimental RDP",
+    "rdp.experimentalHint": "RDP stays disabled by default until real-server validation is complete.",
     "rdp.dialogTitle": "Connect to RDP server",
     "rdp.host": "Host",
     "rdp.hostPlaceholder": "hostname or IP address",
@@ -6884,6 +6887,9 @@ const rdpMessages: Record<string, Record<string, string>> = {
   },
   "zh-CN": {
     "rdp.open": "新建 RDP 会话",
+    "rdp.experimentalSection": "实验性 RDP",
+    "rdp.experimentalEnabled": "启用实验性 RDP",
+    "rdp.experimentalHint": "在完成真实服务器验证前，RDP 默认保持关闭。",
     "rdp.dialogTitle": "连接 RDP 服务器",
     "rdp.host": "主机",
     "rdp.hostPlaceholder": "主机名或 IP 地址",
@@ -6942,6 +6948,9 @@ const rdpMessages: Record<string, Record<string, string>> = {
   },
   "zh-TW": {
     "rdp.open": "新增 RDP 工作階段",
+    "rdp.experimentalSection": "實驗性 RDP",
+    "rdp.experimentalEnabled": "啟用實驗性 RDP",
+    "rdp.experimentalHint": "在完成真實伺服器驗證前，RDP 預設保持關閉。",
     "rdp.dialogTitle": "連線 RDP 伺服器",
     "rdp.host": "主機",
     "rdp.hostPlaceholder": "主機名稱或 IP 位址",
@@ -7000,6 +7009,9 @@ const rdpMessages: Record<string, Record<string, string>> = {
   },
   es: {
     "rdp.open": "Nueva sesión RDP",
+    "rdp.experimentalSection": "RDP experimental",
+    "rdp.experimentalEnabled": "Activar RDP experimental",
+    "rdp.experimentalHint": "RDP permanece desactivado por defecto hasta completar la validación con servidores reales.",
     "rdp.dialogTitle": "Conectar al servidor RDP",
     "rdp.host": "Host",
     "rdp.hostPlaceholder": "nombre de host o dirección IP",
@@ -7058,6 +7070,9 @@ const rdpMessages: Record<string, Record<string, string>> = {
   },
   it: {
     "rdp.open": "Nuova sessione RDP",
+    "rdp.experimentalSection": "RDP sperimentale",
+    "rdp.experimentalEnabled": "Abilita RDP sperimentale",
+    "rdp.experimentalHint": "RDP resta disabilitato per impostazione predefinita finché la convalida con server reali non è completa.",
     "rdp.dialogTitle": "Connetti al server RDP",
     "rdp.host": "Host",
     "rdp.hostPlaceholder": "nome host o indirizzo IP",
@@ -7116,6 +7131,9 @@ const rdpMessages: Record<string, Record<string, string>> = {
   },
   ja: {
     "rdp.open": "新規 RDP セッション",
+    "rdp.experimentalSection": "実験的な RDP",
+    "rdp.experimentalEnabled": "実験的な RDP を有効にする",
+    "rdp.experimentalHint": "実サーバーでの検証が完了するまで、RDP は既定で無効です。",
     "rdp.dialogTitle": "RDP サーバーに接続",
     "rdp.host": "ホスト",
     "rdp.hostPlaceholder": "ホスト名または IP アドレス",
@@ -7174,6 +7192,9 @@ const rdpMessages: Record<string, Record<string, string>> = {
   },
   "pt-BR": {
     "rdp.open": "Nova sessão RDP",
+    "rdp.experimentalSection": "RDP experimental",
+    "rdp.experimentalEnabled": "Ativar RDP experimental",
+    "rdp.experimentalHint": "O RDP permanece desativado por padrão até a validação com servidores reais ser concluída.",
     "rdp.dialogTitle": "Conectar ao servidor RDP",
     "rdp.host": "Host",
     "rdp.hostPlaceholder": "nome do host ou endereço IP",

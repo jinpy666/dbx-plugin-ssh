@@ -24,6 +24,13 @@ import {
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { normalizeBatchTargets } from "../lib/batchSend";
+import {
+  confirmDockerAction,
+  requestDockerAction,
+  type DockerActionDispatch,
+  type DockerActionName,
+  type DockerActionTarget,
+} from "../lib/dockerActions";
 
 const props = defineProps<{
   t: (key: string, values?: Record<string, string | number>) => string;
@@ -49,8 +56,6 @@ interface DockerInspectSummary {
   health: string | null;
   restartPolicy: string;
 }
-
-type DockerActionName = "start" | "stop" | "restart" | "kill" | "rm";
 
 // 动作动词 → 静态 i18n key（i18nKeyReferences.spec 只认字面量 key）。
 const ACTION_LABEL_KEYS: Record<DockerActionName, string> = {
@@ -199,25 +204,23 @@ function rowBusy(container: DockerContainer): boolean {
   return busyContainerId.value === container.id;
 }
 
-const confirmTarget = ref<{ id: string; name: string; action: DockerActionName } | null>(null);
+const confirmTarget = ref<(DockerActionTarget & { action: DockerActionName }) | null>(null);
 const confirmBusy = ref(false);
 
 function requestAction(container: DockerContainer, action: DockerActionName): void {
   actionError.value = "";
-  if (action === "kill" || action === "rm") {
-    confirmTarget.value = { id: container.id, name: container.name || container.id, action };
-    return;
-  }
-  void runAction(container.id, action);
+  const transition = requestDockerAction({ id: container.id, name: container.name || container.id }, action);
+  confirmTarget.value = transition.confirmation;
+  if (transition.dispatch) void runAction(transition.dispatch);
 }
 
-async function runAction(containerId: string, action: DockerActionName): Promise<void> {
+async function runAction(dispatch: DockerActionDispatch): Promise<void> {
   if (!(await resolveSession())) return;
-  busyContainerId.value = containerId;
+  busyContainerId.value = dispatch.id;
   try {
     await window.dbxPlugin.invoke<{ success: boolean; output: string }>(
       "docker/action",
-      { sessionId: sessionId.value, containerId, action },
+      { sessionId: sessionId.value, containerId: dispatch.id, action: dispatch.action },
       { timeoutMs: ACTION_TIMEOUT_MS },
     );
     await refresh();
@@ -228,13 +231,13 @@ async function runAction(containerId: string, action: DockerActionName): Promise
   }
 }
 
-async function confirmAction(): Promise<void> {
-  const target = confirmTarget.value;
-  if (!target) return;
+async function confirmAction(accepted: boolean): Promise<void> {
+  const transition = confirmDockerAction(confirmTarget.value, accepted);
+  confirmTarget.value = transition.confirmation;
+  if (!transition.dispatch) return;
   confirmBusy.value = true;
   try {
-    await runAction(target.id, target.action);
-    confirmTarget.value = null;
+    await runAction(transition.dispatch);
   } finally {
     confirmBusy.value = false;
   }
@@ -441,22 +444,23 @@ const running = (container: DockerContainer): boolean => container.state === "ru
     </div>
 
     <!-- kill/rm 强制确认 -->
-    <Dialog :open="!!confirmTarget" @update:open="(open: boolean) => { if (!open) confirmTarget = null; }">
+      <Dialog :open="!!confirmTarget" @update:open="(open: boolean) => { if (!open) void confirmAction(false); }">
+
       <DialogContent class="docker-dialog" @escape-key-down.prevent>
         <div class="docker-dialog-header">
           <DialogTitle>
             {{ confirmTarget ? props.t("docker.confirmTitle", { action: props.t(ACTION_LABEL_KEYS[confirmTarget.action]) }) : "" }}
           </DialogTitle>
-          <button type="button" class="icon-button" :title="props.t('docker.cancel')" @click="confirmTarget = null"><X /></button>
+          <button type="button" class="icon-button" :title="props.t('docker.cancel')" @click="confirmAction(false)"><X /></button>
         </div>
         <p class="docker-confirm-body mono">
           {{ confirmTarget ? props.t("docker.confirmBody", { action: confirmTarget.action, name: confirmTarget.name }) : "" }}
         </p>
         <div class="docker-dialog-actions">
-          <button type="button" class="docker-secondary-button" :disabled="confirmBusy" @click="confirmTarget = null">
+          <button type="button" class="docker-secondary-button" :disabled="confirmBusy" @click="confirmAction(false)">
             {{ props.t("docker.cancel") }}
           </button>
-          <button type="button" class="docker-danger-button" :disabled="confirmBusy" @click="confirmAction">
+          <button type="button" class="docker-danger-button" :disabled="confirmBusy" @click="confirmAction(true)">
             {{ confirmBusy ? props.t("docker.actionBusy") : props.t("docker.confirmOk") }}
           </button>
         </div>

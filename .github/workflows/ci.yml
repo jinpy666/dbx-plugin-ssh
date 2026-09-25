@@ -61,14 +61,16 @@ jobs:
           fi
       # UI e2e 门禁：架构 WATCH —— 环境损坏不得与测试通过共享静默绿路径。
       # playwright-core 按脚本约定装在仓库外的 runner 路径（/tmp/dbx-ui-mock，
-      # 与本地 SKIP 语义同一定位），项目 package.json 保持依赖冻结；
+      # 与本地 SKIP 语义同一定位），项目 package.json 保持依赖冻结；版本由
+      # 受控 lockfile 精确固定，禁止 CI 隐式安装 latest。
       # ubuntu-24.04 runner 自带 google-chrome-stable，脚本经 playwright
       # channel:"chrome" 命中（Linux Chrome 探测已加入两脚本）。
       # DBX_SMOKE_STRICT=1 把依赖缺失的 SKIP 变为非零失败。
-      # 首次 CI 观测项：runner Chrome 与最新 playwright-core 的协议匹配、
-      # headless 沙箱内核设置；跑不起来则回退为仅保留退出码分离。
-      - name: Install playwright-core outside the repo
-        run: npm install --prefix /tmp/dbx-ui-mock playwright-core
+      - name: Install locked playwright-core outside the repo
+        run: |
+          rm -rf /tmp/dbx-ui-mock
+          cp -R scripts/ui-smoke-deps /tmp/dbx-ui-mock
+          npm ci --prefix /tmp/dbx-ui-mock --ignore-scripts
       - name: UI smoke walkthroughs (strict gate)
         env:
           DBX_SMOKE_STRICT: "1"
@@ -98,6 +100,8 @@ jobs:
       # fmt/clippy/test 执行，坏锁秒失败。
       - name: Assert vendored RDP chain lockstep
         run: python3 scripts/check_vendor_lockstep.py
+      - name: Verify vendored RDP provenance registration
+        run: python3 scripts/verify_rdp_vendor_integrity.py
       - run: cargo fmt --manifest-path backend/Cargo.toml --check
       # -D warnings keeps new lints out; a stable-toolchain update that
       # introduces a new lint fails here and is fixed like any other red CI.

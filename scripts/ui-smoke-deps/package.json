@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Locked external dependency for CI UI smoke walkthroughs.",
+  "dependencies": {
+    "playwright-core": "1.57.0"
+  }
+}
