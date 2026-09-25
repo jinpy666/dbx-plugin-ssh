@@ -299,7 +299,8 @@ try {
   // elsewhere) and keyComboFromEvent derives the token from event.code
   // (shift/case-independent), so pressing the platform default reproduces the
   // owned combo exactly — a hardcoded Meta+f finds no owner on Linux runners.
-  const searchCombo = APPLE ? "Meta+f" : "Control+Shift+f"; // = DEFAULT_SEARCH_CHORD (declared below in the dispatch section)
+  // process.platform (host), not APPLE (defined later in the dispatch section).
+  const searchCombo = process.platform === "darwin" ? "Meta+f" : "Control+Shift+f";
   await page.keyboard.press(searchCombo);
   await sleep(250);
   const conflicting = page.locator(".settings-pane:visible .hotkey-chip.conflict");
