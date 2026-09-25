@@ -151,3 +151,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：同会话双文件 watcher 互不顶替/各自触发/事件按 watchId+remotePath 区分；modified 队列（未知 id 丢弃/同文件去重/队头出队/过期决议拒绝）；64 并发回传暂存名全不重名；FXP RENAME/REMOVE/MKDIR/RMDIR/LSTAT 帧编解码与 STATUS 错误映射；write_path_bytes 目录前缀 %XX 还原 + 末段显示编码（字面 %XX 不二次转义）；join_raw_path 字节级拼接；latin-1 树删 LSTAT 判型/symlink 不跟随；tokio duplex 内存桩 raw 往返。
 
 仍保持未验收（依赖真机/人工）：多文件 watcher 外部编辑器全链路真机手测；latin-1 真实服务器 rename/delete/mkdir/rmdir/树下载联调；既有真机门不变。
+
+
+## M16（候选缺口消化批次，2026-09-25）
+
+单测：cargo **937/937**（M15 后基线 929+8：A 线 raw 写侧/暂存提交/路径分工 6 + B 线 overrides sanitize/resolve 优先级 2）、vitest **1061/1061**（106 文件，1057+4：connectionNameEncoding 三态解析/白名单回退/merge 上限 4）、vue-tsc 0、build 过、clippy 0、fmt 0。
+
+新增可测面：OPEN/WRITE/SETSTAT/READLINK/SYMLINK 帧编解码与 OpenSSH wire 次序；暂存→SETSTAT→原子 rename 提交语义与失败清理；rename-unique 候选名编码探测闭环；resolve_sftp_name_encoding 三态（连接覆盖/全局/缺省）与白名单外回退；overrides 桶清洗（上限 512、非法值丢弃）；connectionNameEncoding 控件纯函数。
+
+仍保持未验收（依赖真机/人工）：latin-1 真实服务器上传写族/exists/rename-unique 联调；连接级覆盖切换即时生效的手工走查；既有真机门不变。

@@ -3805,3 +3805,19 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 2. 上传（sftp/upload/*、write、touch、symlink 三命令）新输入名仍按字面量发送；MCP 工具面 sftp_mkdir/remove/rename（mcp.rs 独立客户端）未迁移 raw 层。
 3. raw 客户端每操作独开 sftp 子系统通道（写操作低频，未做复用）；SFTPv3 RENAME 不覆盖已存在目标（与 auto 模式高层语义一致）。
 4. 多文件 watcher：外部编辑器全链路真机手测、FSEvents/inotify 真机联调（沿 M3 既有人工门）。
+
+
+## M16 收口（2026-09-25，候选缺口消化批次：SFTP 编码保真收尾 / 每连接编码选择 两线并发）
+
+- **SFTP 编码保真收尾 ✅**（parity-np16-sftp-enc-finish 80dad21，merge 0102267）：raw 客户端补齐写侧——OPEN(creat|write|trunc)/WRITE（32KiB 分块）/SETSTAT/READLINK/SYMLINK（OpenSSH wire 次序，与高层 symlink(target,linkPath) 生产语义一致）+ RawAttrs atime/encode_attrs 闭环；exists/rename_unique 迁 raw（LSTAT 探测，候选名 latin1_encode_display 编码逐候选探测、name 返回保持显示形式）；touch/write_file/write_bytes/symlink 三命令/upload_watched_file 迁 raw（暂存 ASCII 临时文件 → SETSTAT 0o7777 权限保留 → 原子 rename → 失败清理，对齐高层 issue #37 语义）；finish_upload 增 latin-1 raw 暂存分支（取消检查/进度事件与高层管线逐块对齐）。**路径来源两分工**：wire 目录前缀 + 用户新输入显示末段（write_path_bytes）＝touch/symlink-create/exists/rename-unique/upload start|finish；整条 wire 路径（unescape_wire）＝sftp/write（previewPath）/upload-local/symlink-update 链接路径/rename 源/delete。回退沿 M15 先例。
+- **每连接编码选择 ✅**（parity-np16-conn-encoding 3aeabb9，merge 76a619f）：对标候选表最后一项非观察项。侦察修正先例——auto_record 实为全局偏好链，真正的连接级先例是 M7 `startup_commands`（preferences 单键按 connectionId 分桶）；新键 `sftp_name_encoding_overrides`（sanitize 桶上限 512/白名单外静默丢弃）+ `resolve_sftp_name_encoding` 三态纯函数（连接覆盖 > 全局 > 缺省 auto）；5 个判定点切连接级；前端连接设置区控件 + connNameEncoding 七语 + mock 镜像。vitest 抓住并修复 merge 上限检查误用 `out.length` 的真实 bug。
+- **集成线统一 ✅**（6bbbc2d）：两线在 main.rs 编码判定点各有落点，融合期把 A 线按现状读全局的调用点全部统一到 B 线连接级判定（新增 `resolve_sftp_encoding_opt`；watch/upload 经 `watcher.session_for_watch`、sftp/upload/finish 经 `ssh.upload_session_id` 两个最小访问器取回所属会话）；`preferences::sftp_name_encoding` 无二进制调用者后删除（测试改走 `sftp_name_encoding_for(dir, None)`），死代码标注清零。
+- **COMPARISON.en.md 双语同步 ✅**（M13 遗留 3 消化）：M13 同步轮的 5 新行/RDP·Telnet·串口行更新/协议路线注记/Tabby 定位差异/如何选择各节镜像到英文版，双语结构对齐。
+- **全量终值（Windows 实测）**：backend cargo **937/937**（M15 后基线 929：A 线 +6、B 线 +2）/ clippy 0 / fmt 0；frontend vitest **1061/1061**（106 文件，1057+4）/ vue-tsc 0 / build 过（ui/ 重生成单独 commit 3af0d43）。两 merge 零冲突。
+
+### M16 遗留
+
+1. 粘贴预检（exists 的 paste 调用方，整条 wire 名）与底层 sftp/copy、sftp/move 在 latin-1 下仍未迁移。
+2. 终端拖入上传的手输/shell cwd 目标目录非 ASCII 路径无法还原 latin-1 字节。
+3. MCP 工具面 sftp_mkdir/remove/rename 字面量发送——需 MCP 面自身编码模式 + 列表层迁移的后续设计（单点迁移为零收益半迁移，已核实）。
+4. 候选缺口表仅剩：每连接编码选择本口消化完毕后为空（BiDi 为观察项不列），对标缺口表至此后备候选为零。

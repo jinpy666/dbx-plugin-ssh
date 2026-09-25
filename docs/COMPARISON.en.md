@@ -6,6 +6,10 @@ audit. Third-party capabilities vary by version, platform, plugins, and commerci
 requires a CLI, plugin, or additional configuration. Third-party labels reflect public product
 positioning and should be verified against the target platform and exact version before adoption.
 
+> Status note: this table is calibrated against the current state of
+> `codex/ssh/nyaterm-parity-integration` (2026-09-25, M13 docs sync round, baseline 7c405d1c);
+> rows for RDP/serial/completions/import reflect what actually merged on that branch.
+
 ## Capability matrix
 
 | Capability | DBX SSH & SFTP | OpenSSH + sftp | Tabby | Termius | FinalShell | electerm | iSHell Pro |
@@ -25,20 +29,27 @@ positioning and should be verified against the target platform and exact version
 | Zmodem / Trzsz transfer | Built in | External tool | Built in | — | Version dependent | Built in | Version dependent |
 | Session recording / replay / GIF export | Built in | External tool | Plugin/script dependent | — | Version dependent | Plugin/version dependent | Version dependent |
 | Command efficiency (history / quick commands / keyword highlight) | Built in | — | Plugin/config dependent | Built in/version dependent | Version dependent | Version dependent | Version dependent |
+| Inline ghost autosuggestions (Warp/fish aligned) | Built in (on by default, can be disabled; → accepts once) | — | Plugin/version dependent | Version dependent | Version dependent | Version dependent | Version dependent |
+| Structured command completions (three-level dropdown, CLI spec) | Built in (12 curated CLI specs, on by default) | — | Plugin/version dependent | Version dependent | Version dependent | Version dependent | Version dependent |
+| Terminal behavior & shortcut settings (key recording editor) | Built in | — | Built in | Version dependent | Version dependent | Version dependent | Version dependent |
+| Per-connection startup commands (Login scripts aligned) | Built in (≤20 per connection) | — | Built in | Version dependent | Version dependent | Version dependent | Version dependent |
+| External client session import | Built in (7 formats) | — | Built in/version dependent | Built in/version dependent | Version dependent | Version dependent | Version dependent |
 | Batch commands across sessions | Built in | External tool | Plugin/config dependent | Version dependent | Version dependent | Built in/version dependent | Version dependent |
 | Connection sync / multi-device workflow | DBX host workbench | — | Built in (account sync)/version dependent | Core selling point/plan dependent | Version dependent | Cross-platform desktop | Mobile-first |
 | MCP automation tools | Built in | — | — | — | — | — | — |
 | DBX host secret binding | Native | — | — | — | — | — | — |
-| RDP | Improving | External tool | Plugin/version dependent | Supported/plan dependent | Supported/version dependent | Version dependent | Version dependent |
-| Telnet | Built in | External `telnet` | Plugin/version dependent | Supported/version dependent | Supported/version dependent | Built in/version dependent | Version dependent |
-| Serial | Built in | External tool | Plugin/version dependent | Version dependent | Version dependent | Version dependent | Mobile/version dependent |
+| RDP | Built in (vendored chain; real-server interop is a manual gate) | External tool | Plugin/version dependent | Supported/plan dependent | Supported/version dependent | Version dependent | Version dependent |
+| Telnet | Built in (declarative auto_login) | External `telnet` | Plugin/version dependent | Supported/version dependent | Supported/version dependent | Built in/version dependent | Version dependent |
+| Serial | Built in (incl. X/Y/ZMODEM upload, binary write channel, output replay) | External tool | Plugin/version dependent | Version dependent | Version dependent | Version dependent | Mobile/version dependent |
 | VNC | Built in | — | — | — | — | — | Built in/version dependent |
 | Seven-language plugin UI | Built in | — | Partial/version dependent | Partial/plan dependent | Partial/version dependent | Version dependent | Version dependent |
 
 > **Protocol roadmap**: DBX SSH & SFTP currently focuses on SSH, SFTP, ProxyJump, PTY, and
-> governed server operations. Telnet is built in (M2), serial and X11 forwarding are built
-> in (M4), and VNC is built in (M5). RDP remains behind a manual review gate (vendored fork
-> + CredSSP) and is not a guaranteed production-ready replacement.
+> governed server operations. Telnet is built in (M2, incl. declarative auto_login), serial
+> and X11 forwarding are built in (M4), VNC is built in (M5), and RDP is built in (M12
+> closure: vendored IronRDP chain with NLA/CredSSP + TLS login, text-only clipboard bridge,
+> error-type-gated reconnection; real RDP server interop remains a manual gate and is not a
+> guaranteed production-ready replacement).
 
 ## Positioning versus Tabby
 
@@ -59,8 +70,12 @@ and cross-device config sync. DBX SSH & SFTP differs on the server operations ch
   ControlMaster are intentionally not built — covered by the DBX host transport layer
   or set aside by product decisions.
 - Terminal split panes live in the DBX host workbench; terminal appearance follows the
-  host by default with 192 built-in color schemes as opt-in overrides. Telnet, serial,
-  and VNC are shipped full stack; RDP remains behind a review gate.
+  host by default with 192 built-in color schemes as opt-in overrides. Inline ghost
+  autosuggestions and three-level structured completions (Warp aligned), the terminal
+  behavior & shortcut editor, per-connection startup commands, and external client
+  session import (7 formats) are all built in. Telnet, serial, VNC, and RDP are shipped
+  full stack (RDP via the vendored IronRDP chain: NLA/CredSSP auth, TLS, text clipboard,
+  reconnection; real-server interop remains a manual gate).
 
 ## Position in the DBX plugin family
 
@@ -86,6 +101,7 @@ secret, and workbench boundaries.
 - For a desktop tool combining SSH, SFTP, and server status, FinalShell is one direct option.
 - If you already use DBX host connections, MCP, and plugin workbenches, DBX SSH & SFTP keeps
   those workflows inside the same connection and permission boundary.
-- If you need RDP or additional protocols, follow the DBX roadmap; Telnet, serial, and VNC
-  are built in, RDP is still moving through review, and capabilities should be checked
-  against the release notes for the version you plan to deploy.
+- If you need RDP or additional protocols, Telnet, serial, VNC, and RDP are built in
+  (RDP covers NLA/CredSSP + TLS login, text clipboard, and reconnection; real-server
+  interop is still being validated — check the release notes for the version you plan
+  to deploy).
