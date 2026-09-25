@@ -157,6 +157,7 @@ import { matchSpecLine, type CompletionLevel, type CompletionRow } from "./lib/c
 import { COMPLETION_SPECS } from "./lib/completions/specs";
 import { clampTransferConcurrency, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
+import { mergeQuickCommandImport, parseQuickCommandImport } from "./lib/quickCommandImport";
 import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, normalizeLocalBatchTargets, quickPickCommandById, selectBatchTargets, summarizeBatchResults, toggleBatchTarget, type BatchSendSummary, type BatchSendTarget } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
 import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./lib/pluginContext";
@@ -810,6 +811,14 @@ const quickDraft = reactive<{ id?: string; name: string; command: string }>({ na
 const quickSearch = ref("");
 const quickExpandedId = ref<string | null>(null);
 const quickEditorOpen = ref(false);
+// 批量导入子视图（对标 Tabby/NetCatty）：粘贴文本或选择 JSON 文件 → 预览
+// （解析 + 同名跳过 + 上限截断）→ 确认逐条走 ssh/quickCommands/save。
+const quickImportOpen = ref(false);
+const quickImportText = ref("");
+const quickImportFileName = ref("");
+const quickImportBusy = ref(false);
+const quickImportPlan = computed(() => parseQuickCommandImport(quickImportText.value));
+const quickImportMerge = computed(() => mergeQuickCommandImport(quickCommands.value, quickImportPlan.value));
 const filteredQuickCommands = computed(() => filterQuickCommands(quickCommands.value, quickSearch.value));
 // 命令输入建议浮层（P1-1）运行时状态：条目/选中项/光标锚点与抑制门锁存。
 // 开关与长度上下限的权威值在上方 suggestions*State（sidecar 偏好）。
@@ -940,6 +949,57 @@ function closeQuickEditor() {
   quickDraft.command = "";
 }
 
+function openQuickImport() {
+  quickImportText.value = "";
+  quickImportFileName.value = "";
+  quickImportOpen.value = true;
+}
+
+function closeQuickImport() {
+  quickImportOpen.value = false;
+  quickImportText.value = "";
+  quickImportFileName.value = "";
+}
+
+async function onQuickImportFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  try {
+    quickImportText.value = await file.text();
+    quickImportFileName.value = file.name;
+  } catch (cause) {
+    showError(cause);
+  }
+}
+
+/** 确认导入：把预览 accepted 条目逐条走既有 ssh/quickCommands/save
+ *  （沿用后端 20 条上限校验），任一条失败即中止并提示已导入进度。 */
+async function confirmQuickImport() {
+  const merge = quickImportMerge.value;
+  if (!merge.accepted.length || quickImportBusy.value) return;
+  quickImportBusy.value = true;
+  try {
+    for (const item of merge.accepted) {
+      const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/save", {
+        id: "",
+        name: item.name,
+        command: item.command,
+      });
+      quickCommands.value = normalizeQuickCommands(response.commands);
+    }
+    showNotice(t("quickCommandsImportDone", { count: merge.accepted.length }));
+    closeQuickImport();
+    quickEditorOpen.value = false;
+  } catch (cause) {
+    showError(cause);
+  } finally {
+    quickImportBusy.value = false;
+  }
+}
+
+
 function toggleQuickExpand(id: string) {
   quickExpandedId.value = quickExpandedId.value === id ? null : id;
 }
@@ -1009,6 +1069,10 @@ interface ProcessRow {
   etime: string;
   state: string;
   command: string;
+  // iShell 对标列（best-effort）：句柄数与监听端口。旧 sidecar / 非 Linux
+  // 主机可能缺失，未知以 null/空数组表示并显示占位符。
+  fdCount?: number | null;
+  listenPorts?: number[];
 }
 const processesOpen = ref(false);
 const processRows = ref<ProcessRow[]>([]);
@@ -9317,10 +9381,11 @@ function toggleQuickMenu() {
   closeToolbarPopovers();
   quickMenuOpen.value = next;
   if (next) {
-    // 每次打开回到列表态：清空搜索/展开/编辑器子视图。
+    // 每次打开回到列表态：清空搜索/展开/编辑器与导入子视图。
     quickSearch.value = "";
     quickExpandedId.value = null;
     quickEditorOpen.value = false;
+    quickImportOpen.value = false;
   }
 }
 
@@ -9489,8 +9554,9 @@ function networkRateShare(net: { rxRate: number; txRate: number }) {
 // 列宽要放得下 7 位 PID、常见用户名与带天数的 etime（单元格 ellipsis 会截断关键值）；
 // 浮层同步放宽到 448px，满宽时命令列不窄于加宽前；终端面板窄于约 464px 时浮层被
 // calc 钳制、命令列会被压缩，属已接受行为。管理表总宽仍超浮层，横向滚动是既有状态。
+// 句柄/端口两列（M13-B）加入后总宽进一步增加，同样接受横向滚动。
 const metricsProcGridStyle = { gridTemplateColumns: "64px 80px 56px 56px minmax(0, 1fr)" };
-const procGridStyle = { gridTemplateColumns: "64px 80px 56px 56px 96px minmax(0, 1fr) 132px" };
+const procGridStyle = { gridTemplateColumns: "64px 80px 56px 56px 96px 56px 96px minmax(0, 1fr) 132px" };
 
 // —— F2：指标历史回填 + 进程管理 ———
 
@@ -10896,9 +10962,32 @@ onBeforeUnmount(() => {
               <button class="icon-button icon-amber" :title="t('quickCommands')" :disabled="!connected" @click.stop="toggleQuickMenu"><Zap /></button>
             </PopoverAnchor>
             <PopoverContent class="popover quick-commands-popover" align="end" :side-offset="5">
-            <!-- Termius Snippets 式结构：列表态（搜索 + 卡片 + 整宽新建按钮）与
-                 编辑器子视图（返回 + 名称 + 多行命令 + 保存）两个视图切换。 -->
-            <template v-if="!quickEditorOpen">
+            <!-- Termius Snippets 式结构：列表态（搜索 + 卡片 + 整宽新建按钮）、
+                 编辑器子视图与导入子视图（粘贴/文件 → 预览 → 确认）三个视图切换。 -->
+            <template v-if="quickImportOpen">
+              <header class="quick-editor-head">
+                <button class="icon-button compact" :title="t('cancel')" @click="closeQuickImport"><ArrowLeft /></button>
+                <h3>{{ t("quickCommandsImport") }}</h3>
+              </header>
+              <div class="quick-command-editor">
+                <label class="quick-import-file">
+                  <FileUp />
+                  <span>{{ quickImportFileName || t("quickCommandsImportFile") }}</span>
+                  <input type="file" accept=".json,application/json,text/plain" @change="onQuickImportFile" />
+                </label>
+                <textarea v-model="quickImportText" class="mono" rows="6" :placeholder="t('quickCommandsImportPlaceholder')" spellcheck="false" />
+                <p v-if="quickImportText.trim()" class="muted quick-import-summary">
+                  <template v-if="quickImportPlan.invalid < 0">{{ t("quickCommandsImportInvalid") }}</template>
+                  <template v-else>{{ t("quickCommandsImportSummary", { accepted: quickImportMerge.accepted.length, skipped: quickImportMerge.skippedExisting, dup: quickImportPlan.duplicates, invalid: quickImportPlan.invalid, overflow: quickImportMerge.overflow }) }}</template>
+                </p>
+                <div class="quick-command-editor-actions">
+                  <button class="primary-button" :disabled="quickImportBusy || !quickImportMerge.accepted.length" @click="confirmQuickImport">{{ t("quickCommandsImportConfirm", { count: quickImportMerge.accepted.length }) }}</button>
+                  <button @click="closeQuickImport">{{ t("cancel") }}</button>
+                </div>
+                <p class="muted quick-import-note">{{ t("quickCommandsImportPolicy") }}</p>
+              </div>
+            </template>
+            <template v-else-if="!quickEditorOpen">
               <h3>{{ t("quickCommands") }}</h3>
               <p class="quick-command-global-hint">{{ t("quickCommandsGlobalHint") }}</p>
               <div v-if="quickCommands.length" class="quick-search">
@@ -10925,6 +11014,7 @@ onBeforeUnmount(() => {
               </div>
               <footer class="quick-command-footer">
                 <button class="quick-new-btn" :disabled="quickCommands.length >= 20" @click="openQuickEditor()"><Plus />{{ t("quickCommandsNew") }}</button>
+                <button class="quick-new-btn quick-import-btn" :disabled="quickCommands.length >= 20" @click="openQuickImport()"><FileUp />{{ t("quickCommandsImport") }}</button>
                 <span class="quick-command-limit">{{ t("quickCommandsLimit", { count: quickCommands.length, limit: 20 }) }}</span>
               </footer>
             </template>
@@ -11431,7 +11521,7 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
                 <div class="proc-sort-row">
-                  <label v-for="key in (['cpu', 'mem', 'pid'] as const)" :key="key" class="proc-sort-option">
+                  <label v-for="key in (['cpu', 'mem', 'pid', 'fd', 'ports'] as const)" :key="key" class="proc-sort-option">
                     <input type="radio" name="procSort" :value="key" v-model="processSortKey" />{{ t(`procSort.${key}`) }}
                   </label>
                 </div>
@@ -11444,6 +11534,8 @@ onBeforeUnmount(() => {
                     <span class="numeric">{{ t("metricsProcCpu") }}</span>
                     <span class="numeric">{{ t("metricsProcMem") }}</span>
                     <span>{{ t("procEtime") }}</span>
+                    <span class="numeric">{{ t("procFd") }}</span>
+                    <span>{{ t("procPorts") }}</span>
                     <span>{{ t("metricsProcCommand") }}</span>
                     <span></span>
                   </div>
@@ -11453,6 +11545,8 @@ onBeforeUnmount(() => {
                     <span class="numeric" :class="{ 'proc-hot': proc.cpuPercent >= 50 }">{{ proc.cpuPercent }}%</span>
                     <span class="numeric" :class="{ 'proc-hot': proc.memPercent >= 30 }">{{ proc.memPercent }}%</span>
                     <span class="mono">{{ proc.etime }}</span>
+                    <span class="numeric mono">{{ proc.fdCount ?? "—" }}</span>
+                    <span class="mono" :title="proc.listenPorts?.join(', ')">{{ proc.listenPorts?.length ? proc.listenPorts.join(", ") : "—" }}</span>
                     <span class="mono" :title="proc.command">{{ proc.command }}</span>
                     <span class="proc-kill-group">
                       <button class="link-button" @click="killProcessRow(proc, 15)">{{ t("procKill") }}</button>
@@ -12656,6 +12750,15 @@ onBeforeUnmount(() => {
 .quick-action:hover:not(:disabled) { background: var(--accent); }
 .quick-card-full { flex: 1 1 100%; margin: 2px 4px 4px 27px; color: var(--foreground); font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .quick-command-footer { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; }
+/* 导入按钮与新建按钮同排：新建占主宽，导入窄一档。 */
+.quick-command-footer .quick-import-btn { flex: 0 0 auto; padding: 0 10px; }
+.quick-import-file { display: flex; align-items: center; gap: 6px; height: 26px; border: 1px dashed var(--border); border-radius: var(--radius); padding: 0 8px; font-size: 11px; color: var(--muted-foreground); cursor: pointer; }
+.quick-import-file:hover { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); background: var(--accent); }
+.quick-import-file svg { width: 13px; height: 13px; flex: none; }
+.quick-import-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-import-file input[type="file"] { display: none; }
+.quick-import-summary { margin: 0; font-size: 10px; line-height: 1.5; }
+.quick-import-note { margin: 0; font-size: 10px; line-height: 1.5; }
 .quick-new-btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex: 1; height: 26px; border: 1px dashed var(--border); border-radius: var(--radius); background: transparent; color: var(--foreground); font-size: 11px; cursor: pointer; }
 .quick-new-btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); background: var(--accent); }
 .quick-new-btn:disabled { cursor: default; opacity: .42; }

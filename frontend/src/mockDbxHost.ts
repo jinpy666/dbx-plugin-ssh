@@ -1020,6 +1020,23 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
       },
     };
   }
+  else if (method === "ssh/processes/list") {
+    // 进程管理表 mock（M13-B）：与 ssh/metrics 的 top-8 行同源，补齐管理表
+    // 全字段，并镜像后端 best-effort 的 fdCount / listenPorts 两列——
+    // pid 812 展示双端口（可视觉验证排序/去重），pid 1042 两列留空展示占位符。
+    result = {
+      processes: [
+        { pid: 1, ppid: 0, user: "root", cpuPercent: 0.1, memPercent: 0.4, etime: "30-04:12:33", state: "S", command: "/sbin/init splash", fdCount: 148, listenPorts: [] },
+        { pid: 812, ppid: 811, user: "www-data", cpuPercent: 12.6, memPercent: 3.1, etime: "12-21:05:09", state: "S", command: "nginx: worker process", fdCount: 64, listenPorts: [80, 443] },
+        { pid: 1042, ppid: 1040, user: "demo", cpuPercent: 2.4, memPercent: 1.2, etime: "01:23", state: "R", command: "htop", fdCount: null, listenPorts: [] },
+        { pid: 2211, ppid: 2209, user: "demo", cpuPercent: 1.8, memPercent: 8.6, etime: "3-02:44:51", state: "S", command: "python train_llm.py --epochs 8", fdCount: 32, listenPorts: [6006, 29500, 29501, 29502, 29503] },
+      ],
+    };
+  }
+  else if (method === "ssh/processes/kill") {
+    // 只记录信号目标，模拟成功路径（不真正改表，刷新仍返回同一份 mock）。
+    result = {};
+  }
   else if (method === "sftp/diskUsage") {
     result = { filesystem: "/dev/sda1", mount: "/", totalBytes: 52_723_200_512, usedBytes: 24_023_981_056, availableBytes: 26_005_927_936, percentUsed: 48 };
   }

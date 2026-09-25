@@ -833,10 +833,19 @@ offset 语义不变）。中断来源不限：前端中止、sidecar 重启、�
 
 ### ssh/processes/list、ssh/processes/kill
 
-`ssh/processes/list`：参数 `{ sessionId }`。单条只读命令
+`ssh/processes/list`：参数 `{ sessionId }`。单条只读命令：`ps` 段
 `ps -eo pid=,ppid=,user=,pcpu=,pmem=,etime=,state=,args= | sort -k3,3nr | head -n 500` 采集，
-返回 `{ processes: [{ pid, ppid, user, cpuPercent, memPercent, etime, state, command }] }`
-（CPU 降序、服务端封顶 500 行、`command` 截断 200 字符；前端可本地重排）。不进 MCP 工具面。
+其后追加三段 best-effort 段（同一命令内完成）：`--fds--`（纯 shell 内建遍历
+`/proc/<pid>/fd` 计数，无可读权限的目录跳过）、`--sock--`（`find -lname/-printf` 枚举
+`/proc/<pid>/fd/*` 中指向 socket 的符号链接，单次 spawn，映射全在解析端完成）、
+`--netp--`（`cat /proc/net/tcp /proc/net/tcp6` 原始 dump，解析端只取监听态 `0A`）。
+返回 `{ processes: [{ pid, ppid, user, cpuPercent, memPercent, etime, state, command, fdCount, listenPorts }] }`
+（CPU 降序、服务端封顶 500 行、`command` 截断 200 字符；前端可本地重排）。
+`fdCount`（打开句柄数）与 `listenPorts`（该 pid 拥有的监听 TCP 端口，去重升序、上限 16 个，
+由 fd 符号链接 inode 与 `/proc/net/tcp{,6}` inode 匹配得到）为 best-effort 扩展字段：
+取不到（非 root 下的其他用户进程、macOS/BSD 无 procfs、busybox find 不支持 `-printf`）
+时 `fdCount` 为 `null`、`listenPorts` 为空数组，调用方按占位符展示，不要当 0。
+全程只读、无 sudo 降级；不进 MCP 工具面。
 
 `ssh/processes/kill`：参数 `{ sessionId, pid, signal? }`（默认 15）。后端校验：pid 为正整数且
 `> 1`（init/pid 0 直接拒绝），signal 仅接受 `1/2/9/15`；渲染为 `kill -<NAME> <pid>`（数值全部白名单化，
