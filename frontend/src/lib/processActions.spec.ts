@@ -27,4 +27,17 @@ describe("process management helpers", () => {
     expect(canKillProcess(Number.NaN)).toBe(false);
     expect(canKillProcess(1234)).toBe(true);
   });
+
+  it("sorts by fd count and listening-port count with unknowns last", () => {
+    const extras = [
+      { pid: 30, cpuPercent: 1.0, memPercent: 1.0, fdCount: 64, listenPorts: [80, 443] },
+      { pid: 10, cpuPercent: 1.0, memPercent: 1.0, fdCount: null, listenPorts: [] },
+      { pid: 20, cpuPercent: 1.0, memPercent: 1.0, fdCount: 12, listenPorts: [8080] },
+    ];
+    expect(sortProcessRows(extras, "fd").map((row) => row.pid)).toEqual([30, 20, 10]);
+    expect(sortProcessRows(extras, "ports").map((row) => row.pid)).toEqual([30, 20, 10]);
+    // 行缺字段（旧 sidecar）同样视为未知、垫底；两个未知行按 pid 升序决胜。
+    const legacy = [{ pid: 5, cpuPercent: 1.0, memPercent: 1.0 }];
+    expect(sortProcessRows([...extras, ...legacy], "fd").map((row) => row.pid)).toEqual([30, 20, 5, 10]);
+  });
 });

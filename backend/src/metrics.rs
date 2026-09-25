@@ -476,16 +476,50 @@ fn parse_percent(value: &str) -> Option<f64> {
 pub const PROCESS_LIST_LIMIT: usize = 500;
 /// Max chars kept of one process command line.
 const PROCESS_LIST_COMMAND_MAX_CHARS: usize = 200;
+/// Max listening ports reported per process (payload stays bounded even for
+/// multi-socket daemons); the frontend shows the truncated list as-is.
+pub const PROCESS_PORTS_MAX: usize = 16;
 
 /// Sorted by CPU (busiest first) and capped server-side; the frontend
 /// re-sorts client-side without refetching.
+///
+/// After the `ps` rows the same single read-only command appends three
+/// best-effort sections (iShell-style fd counts and listening ports):
+/// - `--fds--`: open fd count per pid. Pure shell builtins over
+///   `/proc/<pid>/fd` — no extra process is spawned. Unreadable fd
+///   directories (other users' processes without root) are skipped, so the
+///   column is best-effort by design.
+/// - `--sock--`: every `/proc/<pid>/fd/*` symlink pointing at a socket, as
+///   `<path>\tsocket:[<inode>]`. `find -lname/-printf` only enumerates the
+///   procfs symlinks (a single spawn); all mapping (inode -> port -> pid)
+///   happens in the Rust parsers below.
+/// - `--netp--`: raw `/proc/net/tcp` + `/proc/net/tcp6` dumps, parsed for
+///   listening (state `0A`) sockets.
+///
+/// No `sudo`/privileged downgrade is used: `/proc/net/tcp{,6}` is
+/// world-readable and the fd sections simply stay empty where procfs is
+/// unreadable (macOS/BSD), matching the "best effort, blank when unknown"
+/// contract. `ss -tlnp` was deliberately not added as a fallback — it cannot
+/// attribute ports to pids without the same root rights, so it would add an
+/// execution surface without recovering data (see parse functions).
 const PROCESS_LIST_SCRIPT: &str = concat!(
     "(ps -eo pid=,ppid=,user=,pcpu=,pmem=,etime=,state=,args= 2>/dev/null || true) ",
-    "| sort -k3,3nr | head -n 500"
+    "| sort -k3,3nr | head -n 500; ",
+    "echo '--fds--'; ",
+    "if [ -d /proc/1 ]; then for d in /proc/[0-9]*; do set -- \"$d\"/fd/*; ",
+    "{ [ -L \"$1\" ] || [ -e \"$1\" ]; } || continue; c=0; ",
+    "for f in \"$d\"/fd/*; do c=$((c+1)); done; echo \"${d##*/} $c\"; done; fi; ",
+    "echo '--sock--'; ",
+    "find /proc/[0-9]*/fd -lname 'socket:*' -printf '%p\\t%l\\n' 2>/dev/null || true; ",
+    "echo '--netp--'; ",
+    "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null || true"
 );
 
 /// One row of the full process list (same `ps` dialect as the top-process
-/// section, plus ppid/etime/state for the management panel).
+/// section, plus ppid/etime/state for the management panel). `fd_count` and
+/// `listen_ports` are best-effort extras: `None`/empty means the data was not
+/// readable (other user's process, or non-Linux host) and the frontend shows
+/// a placeholder instead of a zero.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessListRow {
@@ -497,6 +531,11 @@ pub struct ProcessListRow {
     pub etime: String,
     pub state: String,
     pub command: String,
+    /// Open file descriptors (`/proc/<pid>/fd` entries); `None` when unknown.
+    pub fd_count: Option<u64>,
+    /// Listening TCP ports owned by this pid (sorted, deduped, capped at
+    /// [`PROCESS_PORTS_MAX`]); empty when unknown.
+    pub listen_ports: Vec<u16>,
 }
 
 /// Collects the full process list over a new exec channel. Read-only.
@@ -508,7 +547,148 @@ pub async fn collect_process_list(handle: &Handle<SshClient>) -> Result<serde_js
         &[],
     )
     .await?;
-    Ok(serde_json::json!({ "processes": parse_process_list(&outcome.output) }))
+    Ok(serde_json::json!({ "processes": parse_full_process_list(&outcome.output) }))
+}
+
+/// Splits the collector output into its sections: the `ps` rows first, then
+/// `--fds--` (pid + fd count), `--sock--` (procfs fd symlink dump) and
+/// `--netp--` (/proc/net/tcp{,6} dump). Anything before the first marker is
+/// the `ps` part.
+fn split_process_sections(text: &str) -> (String, String, String, String) {
+    let mut ps = String::new();
+    let mut fds = String::new();
+    let mut sock = String::new();
+    let mut netp = String::new();
+    let mut target = &mut ps;
+    for line in text.lines() {
+        match line.trim_end() {
+            "--fds--" => {
+                target = &mut fds;
+                continue;
+            }
+            "--sock--" => {
+                target = &mut sock;
+                continue;
+            }
+            "--netp--" => {
+                target = &mut netp;
+                continue;
+            }
+            _ => {}
+        }
+        target.push_str(line);
+        target.push('\n');
+    }
+    (ps, fds, sock, netp)
+}
+
+/// Parses `--fds--` rows (`<pid> <count>`) into a pid -> fd-count map.
+pub fn parse_fd_counts(text: &str) -> BTreeMap<u64, u64> {
+    let mut map = BTreeMap::new();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(count)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let (Ok(pid), Ok(count)) = (pid.parse::<u64>(), count.parse::<u64>()) else {
+            continue;
+        };
+        map.insert(pid, count);
+    }
+    map
+}
+
+/// Parses `--netp--` (/proc/net/tcp + /proc/net/tcp6) rows into an
+/// inode -> local-port map for listening sockets only (state `0A`). Header
+/// rows fail the hex port parse and are skipped; both the IPv4 and IPv6
+/// tables share the column layout.
+pub fn parse_listening_inodes(text: &str) -> BTreeMap<u64, u16> {
+    let mut map = BTreeMap::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // sl local_address rem_address st tx:rx tr:when retrnsmt uid timeout inode ...
+        if fields.len() < 10 || fields[3] != "0A" {
+            continue;
+        }
+        let Some(port) = fields[1]
+            .rsplit(':')
+            .next()
+            .and_then(|port| u16::from_str_radix(port, 16).ok())
+        else {
+            continue;
+        };
+        let Ok(inode) = fields[9].parse::<u64>() else {
+            continue;
+        };
+        map.insert(inode, port);
+    }
+    map
+}
+
+/// Parses the `--sock--` dump (`/proc/<pid>/fd/<n>\tsocket:[<inode>]` rows
+/// emitted by find(1)) into pid -> owned socket inodes.
+pub fn parse_fd_socket_inodes(text: &str) -> BTreeMap<u64, Vec<u64>> {
+    let mut map: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for line in text.lines() {
+        let Some((path, target)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(pid_part) = path.strip_prefix("/proc/") else {
+            continue;
+        };
+        let Some((pid, _)) = pid_part.split_once('/') else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u64>() else {
+            continue;
+        };
+        let Some(inode) = target
+            .strip_prefix("socket:[")
+            .and_then(|value| value.strip_suffix(']'))
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        map.entry(pid).or_default().push(inode);
+    }
+    map
+}
+
+/// Fills `fd_count` / `listen_ports` from the parsed /proc sections.
+fn attach_process_extras(
+    mut rows: Vec<ProcessListRow>,
+    fds: &BTreeMap<u64, u64>,
+    inodes_by_pid: &BTreeMap<u64, Vec<u64>>,
+    inode_ports: &BTreeMap<u64, u16>,
+) -> Vec<ProcessListRow> {
+    for row in &mut rows {
+        row.fd_count = fds.get(&row.pid).copied();
+        if let Some(inodes) = inodes_by_pid.get(&row.pid) {
+            let mut ports: Vec<u16> = inodes
+                .iter()
+                .filter_map(|inode| inode_ports.get(inode).copied())
+                .collect();
+            ports.sort_unstable();
+            ports.dedup();
+            ports.truncate(PROCESS_PORTS_MAX);
+            row.listen_ports = ports;
+        }
+    }
+    rows
+}
+
+/// Parses the whole collector output (ps rows + the /proc sections) into the
+/// final row list. Pure so the Linux/macOS shapes stay unit-testable without
+/// a server.
+pub fn parse_full_process_list(text: &str) -> Vec<ProcessListRow> {
+    let (ps, fds, sock, netp) = split_process_sections(text);
+    let rows = parse_process_list(&ps);
+    attach_process_extras(
+        rows,
+        &parse_fd_counts(&fds),
+        &parse_fd_socket_inodes(&sock),
+        &parse_listening_inodes(&netp),
+    )
 }
 
 /// Parses the process-list `ps` output. Pure so it can be unit-tested
@@ -542,6 +722,9 @@ pub fn parse_process_list(text: &str) -> Vec<ProcessListRow> {
             etime: fields[5].to_string(),
             state: fields[6].to_string(),
             command: truncate_chars(&fields[7..].join(" "), PROCESS_LIST_COMMAND_MAX_CHARS),
+            // Best-effort extras are attached later by parse_full_process_list.
+            fd_count: None,
+            listen_ports: Vec::new(),
         });
         if rows.len() >= PROCESS_LIST_LIMIT {
             break;
@@ -1025,6 +1208,90 @@ bad line here
         assert_eq!(value["cpuPercent"], 12.5);
         assert_eq!(value["memPercent"], 4.2);
         assert_eq!(value["command"], "/usr/sbin/nginx -c /etc/nginx/nginx.conf");
+    }
+
+    /// Collector output with the fd / socket / tcp sections appended in the
+    /// exact shapes the PROCESS_LIST_SCRIPT emits (Linux host, user can read
+    /// fd dirs of pid 1234 but not 567 — the classic non-root case).
+    const PROCESS_EXTRAS_FIXTURE: &str = concat!(
+        "  1234 1200 root        12.5  4.2 10-03:12:05 S /usr/sbin/nginx\n",
+        "   567    1 alice        8.0  1.1 5-01:00:00 R /usr/bin/python3 app\n",
+        "--fds--\n",
+        "1234 12\n",
+        "567 3\n",
+        "--sock--\n",
+        "/proc/1234/fd/3\tsocket:[4026531001]\n",
+        "/proc/1234/fd/4\tsocket:[4026531001]\n",
+        "/proc/1234/fd/5\tsocket:[4026531002]\n",
+        "/proc/567/fd/7\tsocket:[4026532001]\n",
+        "--netp--\n",
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+        "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4026531001 1\n",
+        "   1: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4026531002 1\n",
+        "   2: 0100007F:E1B4 0100007F:1F90 01 00000000:00000000 00:00000000 00000000  1000        0 4026539001 1\n",
+        "   3: 00000000000000000000000000000000:07C7 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4026532001 1\n"
+    );
+
+    #[test]
+    fn fd_counts_are_parsed_and_attached() {
+        let rows = parse_full_process_list(PROCESS_EXTRAS_FIXTURE);
+        assert_eq!(rows[0].fd_count, Some(12));
+        assert_eq!(rows[1].fd_count, Some(3));
+        // Rows without a matching --fds-- entry stay None (macOS / unreadable).
+        let bare = parse_full_process_list(PROCESS_LIST_FIXTURE);
+        assert_eq!(bare[0].fd_count, None);
+        assert!(bare[0].listen_ports.is_empty());
+    }
+
+    #[test]
+    fn listening_ports_are_mapped_to_pids() {
+        let rows = parse_full_process_list(PROCESS_EXTRAS_FIXTURE);
+        // 0x1F90=8080 and 0x0050=80, deduped (two fds shared one socket) and
+        // sorted; 0x07C7=1991 comes from the IPv6 table.
+        assert_eq!(rows[0].listen_ports, vec![80, 8080]);
+        assert_eq!(rows[1].listen_ports, vec![1991]);
+    }
+
+    #[test]
+    fn non_listening_and_malformed_tcp_rows_are_skipped() {
+        let inodes = parse_listening_inodes(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+             \x20  0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4026531001 1\n\
+             \x20  1: 0100007F:E1B4 0100007F:1F90 01 00000000:00000000 00:00000000 00000000  1000        0 4026539001 1\n",
+        );
+        assert_eq!(inodes.len(), 1);
+        assert_eq!(inodes[&4026531001], 8080);
+        assert!(parse_listening_inodes("").is_empty());
+    }
+
+    #[test]
+    fn listening_ports_are_capped_and_fd_socket_lines_tolerate_junk() {
+        // 20 distinct listening sockets on one pid -> capped at 16.
+        let mut netp = String::new();
+        for index in 0..20u16 {
+            netp.push_str(&format!(
+                "   {index}: 00000000:{:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 {} 1\n",
+                10_000 + index,
+                5000 + index
+            ));
+        }
+        let inodes_by_pid = parse_fd_socket_inodes(
+            (0..20u64)
+                .map(|i| format!("/proc/9/fd/{i}\tsocket:[{}]\n", 5000 + i))
+                .collect::<String>()
+                .as_str(),
+        );
+        let rows = attach_process_extras(
+            parse_process_list("  9 1 root 1.0 1.0 0-01 S init\n"),
+            &parse_fd_counts("9 40\n"),
+            &inodes_by_pid,
+            &parse_listening_inodes(&netp),
+        );
+        assert_eq!(rows[0].listen_ports.len(), PROCESS_PORTS_MAX);
+
+        // Junk lines in the find dump are ignored.
+        assert!(parse_fd_socket_inodes("garbage\n/proc/x/fd/1\tsocket:[abc]\n").is_empty());
+        assert!(parse_fd_counts("not-a-pid 3\n").is_empty());
     }
 
     #[test]
