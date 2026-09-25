@@ -4375,10 +4375,7 @@ impl SshRuntime {
     }
 
     /// 打开一条独立 sftp 子系统通道并跑裸包客户端（严格串行请求/响应）。
-    async fn raw_sftp_client(
-        &self,
-        session_id: &str,
-    ) -> Result<sftp_raw::RawSftp<russh::ChannelStream<russh::client::Msg>>, String> {
+    async fn raw_sftp_client(&self, session_id: &str) -> Result<RawSftpClient, String> {
         let session = self.session(session_id).await?;
         let channel = session
             .handle
@@ -4437,15 +4434,33 @@ impl SshRuntime {
         Ok((data, truncated))
     }
 
-    pub async fn sftp_create_directory(&self, session_id: &str, path: &str) -> Result<(), String> {
+    pub async fn sftp_create_directory(
+        &self,
+        session_id: &str,
+        path: &str,
+        encoding: NameEncoding,
+    ) -> Result<(), String> {
         self.ensure_writable(session_id).await?;
+        let path = normalize_remote_path(path)?;
+        if encoding == NameEncoding::Latin1 {
+            // latin-1：目录前缀是列表回传的 wire 形式、最后一段是用户新输入
+            // 的显示文本，write_path_bytes 组装出服务器字节后走裸包 MKDIR。
+            // 客户端建立失败（尚未发出任何请求）回退高层路径；操作本身的
+            // 错误原样上抛——写操作失败后回退可能重复执行，不做。
+            match self.raw_sftp_client(session_id).await {
+                Ok(mut client) => {
+                    let raw_path = sftp_name::write_path_bytes(&path);
+                    return client.mkdir(&raw_path).await;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[ssh-sftp-plugin] raw byte mkdir unavailable, falling back: {error}"
+                    );
+                }
+            }
+        }
         let sftp = self.sftp(session_id).await?;
-        let result = sftp
-            .lock()
-            .await
-            .create_dir(normalize_remote_path(path)?)
-            .await
-            .map_err(sftp_error);
+        let result = sftp.lock().await.create_dir(path).await.map_err(sftp_error);
         result
     }
 
@@ -4498,16 +4513,33 @@ impl SshRuntime {
         session_id: &str,
         source: &str,
         target: &str,
+        encoding: NameEncoding,
     ) -> Result<(), String> {
         self.ensure_writable(session_id).await?;
+        let source = normalize_remote_path(source)?;
+        let target = normalize_remote_path(target)?;
+        if encoding == NameEncoding::Latin1 {
+            // latin-1：源是列表回传的 wire 路径（整条还原为原始字节）；目标
+            // 最后一段是用户新输入的显示文本（write_path_bytes 按 latin-1 编
+            // 码回字节）。裸包 RENAME 保证改名不破坏非 UTF-8 字节。
+            match self.raw_sftp_client(session_id).await {
+                Ok(mut client) => {
+                    let raw_source = sftp_name::unescape_wire(&source);
+                    let raw_target = sftp_name::write_path_bytes(&target);
+                    return client.rename(&raw_source, &raw_target).await;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[ssh-sftp-plugin] raw byte rename unavailable, falling back: {error}"
+                    );
+                }
+            }
+        }
         let sftp = self.sftp(session_id).await?;
         let result = sftp
             .lock()
             .await
-            .rename(
-                normalize_remote_path(source)?,
-                normalize_remote_path(target)?,
-            )
+            .rename(source, target)
             .await
             .map_err(sftp_error);
         result
@@ -4518,10 +4550,27 @@ impl SshRuntime {
         session_id: &str,
         path: &str,
         recursive: bool,
+        encoding: NameEncoding,
     ) -> Result<(), String> {
         self.ensure_writable(session_id).await?;
-        let sftp = self.sftp(session_id).await?;
         let path = normalize_remote_path(path)?;
+        if encoding == NameEncoding::Latin1 {
+            // latin-1：wire 路径整条还原为原始字节后走裸包删除（LSTAT 判型
+            // → REMOVE/RMDIR/递归树删，symlink 绝不跟随）。回退策略与
+            // mkdir/rename 相同：仅客户端建立失败时回退高层路径。
+            match self.raw_sftp_client(session_id).await {
+                Ok(mut client) => {
+                    let raw_path = sftp_name::unescape_wire(&path);
+                    return raw_delete_path(&mut client, &raw_path, recursive).await;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[ssh-sftp-plugin] raw byte delete unavailable, falling back: {error}"
+                    );
+                }
+            }
+        }
+        let sftp = self.sftp(session_id).await?;
         let metadata = sftp
             .lock()
             .await
@@ -5932,6 +5981,7 @@ impl SshRuntime {
         session_id: &str,
         remote_path: &str,
         download_dir: Option<&str>,
+        encoding: NameEncoding,
         emitter: &PluginEmitter,
     ) -> Result<Value, String> {
         if self.active_transfer_count(session_id)? as u64 >= self.transfer_depth_limit() {
@@ -5942,21 +5992,6 @@ impl SshRuntime {
         }
         let root_remote = normalize_remote_path(remote_path)?;
         let sftp = self.sftp(session_id).await?;
-        let metadata = sftp
-            .lock()
-            .await
-            .symlink_metadata(root_remote.clone())
-            .await
-            .map_err(sftp_error)?;
-        if metadata.is_symlink() {
-            return Err(
-                "Refusing to download a symlink as a folder; download its target instead"
-                    .to_string(),
-            );
-        }
-        if !metadata.is_dir() {
-            return Err("Folder download needs a remote directory".to_string());
-        }
         // 本地根目录：与单文件下载共用目录语义（偏好下载目录 / 自定义绝对
         // 目录），根名撞车让位 " (n)"。落点在 start 时定死，任务取消或未完成
         // 时整树删除，所以提前占名不会留下悬空目录。
@@ -5976,19 +6011,48 @@ impl SshRuntime {
                 base_dir.display()
             )
         })?;
-        let root_name = root_remote
-            .rsplit('/')
-            .next()
-            .filter(|value| !value.is_empty())
-            .unwrap_or("download");
-        let root_local = local_downloads::final_download_path(&base_dir, root_name, false);
+        // latin-1：本地根名用原始字节的 latin-1 解码显示名（wire 转义名按
+        // 字面量落盘会变成 "%E9" 这类乱名）；auto 维持 wire 字符串。
+        let root_raw = sftp_name::unescape_wire(&root_remote);
+        let root_name = if encoding == NameEncoding::Latin1 {
+            root_raw
+                .split(|&byte| byte == b'/')
+                .rev()
+                .find(|part| !part.is_empty())
+                .map(|part| sftp_name::decode_display_name(part, encoding).text)
+                .unwrap_or_else(|| "download".to_string())
+        } else {
+            root_remote
+                .rsplit('/')
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or("download")
+                .to_string()
+        };
+        let root_local = local_downloads::final_download_path(&base_dir, &root_name, false);
         std::fs::create_dir_all(&root_local).map_err(|error| {
             format!(
                 "Failed to create download folder '{}': {error}",
                 root_local.display()
             )
         })?;
-        let scan = match scan_remote_tree(&sftp, &root_remote).await {
+        // latin-1：远端遍历走裸包 READDIR（同一通道 LSTAT 预检 + 递归），
+        // 整树路径字节保真；裸包通道建立失败回退高层遍历（只读，安全）。
+        // auto 维持高层客户端（合法 UTF-8 服务器字节往返无损）。
+        let scan = if encoding == NameEncoding::Latin1 {
+            match self.raw_sftp_client(session_id).await {
+                Ok(mut client) => scan_tree_with_raw(&mut client, &root_remote).await,
+                Err(error) => {
+                    eprintln!(
+                        "[ssh-sftp-plugin] raw byte tree scan unavailable, falling back: {error}"
+                    );
+                    scan_remote_tree(&sftp, &root_remote).await
+                }
+            }
+        } else {
+            scan_remote_tree(&sftp, &root_remote).await
+        };
+        let scan = match scan {
             Ok(scan) => scan,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&root_local);
@@ -8055,10 +8119,34 @@ async fn delete_directory_tree(
 /// Recursively walks a remote directory over SFTP and collects the folder
 /// download plan (breadth-first, so parents are read before children):
 /// regular files in download order, the directory layout, symlink/special
-/// skips and per-path failures. Only root-level problems (not a readable
-/// directory) abort; a failing subdirectory is recorded and the walk goes on.
+/// skips and per-path failures. The root itself is pre-checked first
+/// (symlinks are refused, non-directories rejected). Only root-level
+/// problems (not a readable directory) abort; a failing subdirectory is
+/// recorded and the walk goes on.
 /// Symlinks are never followed, so server-side cycles cannot loop the walk.
 async fn scan_remote_tree(
+    sftp: &Arc<AsyncMutex<SftpSession>>,
+    root: &str,
+) -> Result<sftp_tree::TreeScan, String> {
+    let metadata = sftp
+        .lock()
+        .await
+        .symlink_metadata(root.to_string())
+        .await
+        .map_err(sftp_error)?;
+    if metadata.is_symlink() {
+        return Err(
+            "Refusing to download a symlink as a folder; download its target instead".to_string(),
+        );
+    }
+    if !metadata.is_dir() {
+        return Err("Folder download needs a remote directory".to_string());
+    }
+    scan_remote_tree_walk(sftp, root).await
+}
+
+/// 高层客户端的树遍历主体（根预检已由 [`scan_remote_tree`] 完成）。
+async fn scan_remote_tree_walk(
     sftp: &Arc<AsyncMutex<SftpSession>>,
     root: &str,
 ) -> Result<sftp_tree::TreeScan, String> {
@@ -8130,6 +8218,138 @@ async fn scan_remote_tree(
         }
     }
     Ok(scan)
+}
+
+/// 裸包树扫描（latin-1 模式）：同一通道内 LSTAT 根预检 + READDIR 递归，
+/// 整树路径字节保真——远端路径用 wire 转义形式（分块下载按转义自动走
+/// raw READ），本地落盘名用 latin-1 解码的显示名。symlink/特殊条目跳过
+/// 不跟随（与高层路径同语义），根预检失败整个下载拒绝，子目录失败记录
+/// 后继续走。
+async fn scan_tree_with_raw(
+    client: &mut RawSftpClient,
+    root_wire: &str,
+) -> Result<sftp_tree::TreeScan, String> {
+    let root_raw = sftp_name::unescape_wire(root_wire);
+    let attrs = client.lstat(&root_raw).await?;
+    let kind = classify_raw_kind(attrs.permissions);
+    if kind == "symlink" {
+        return Err(
+            "Refusing to download a symlink as a folder; download its target instead".to_string(),
+        );
+    }
+    if kind != "directory" {
+        return Err("Folder download needs a remote directory".to_string());
+    }
+    let mut scan = sftp_tree::TreeScan::new();
+    // 队列元素：(远端目录原始字节, 远端目录 wire 形式, 本地相对显示路径)。
+    let mut pending: VecDeque<(Vec<u8>, String, String)> = VecDeque::new();
+    pending.push_back((root_raw, root_wire.to_string(), String::new()));
+    while let Some((dir_raw, dir_wire, dir_relative)) = pending.pop_front() {
+        let entries = match client.readdir(&dir_raw).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                if dir_relative.is_empty() {
+                    return Err(error);
+                }
+                scan.record_failure(&dir_relative, format!("directory is not readable: {error}"));
+                continue;
+            }
+        };
+        for entry in entries {
+            if entry.name.as_slice() == b"." || entry.name.as_slice() == b".." {
+                continue;
+            }
+            // 显示相对路径（本地落盘布局）与 wire 远端路径严格分离。
+            let display = sftp_name::decode_display_name(&entry.name, NameEncoding::Latin1);
+            let child_relative = if dir_relative.is_empty() {
+                display.text
+            } else {
+                format!("{dir_relative}/{}", display.text)
+            };
+            let child_wire =
+                sftp_name::join_wire_name(&dir_wire, &sftp_name::escape_wire(&entry.name));
+            match classify_raw_kind(entry.attrs.permissions) {
+                "directory" => {
+                    let Some(relative) = sftp_tree::sanitize_relative(&child_relative) else {
+                        scan.record_failure(
+                            &child_relative,
+                            "directory name is not usable on the local filesystem",
+                        );
+                        continue;
+                    };
+                    match scan.push_dir(&relative) {
+                        Ok(true) => pending.push_back((
+                            sftp_name::join_raw_path(&dir_raw, &entry.name),
+                            child_wire,
+                            relative,
+                        )),
+                        Ok(false) => {}
+                        Err(capacity) => return Err(capacity.to_string()),
+                    }
+                }
+                "file" => {
+                    let Some(relative) = sftp_tree::sanitize_relative(&child_relative) else {
+                        scan.record_failure(
+                            &child_relative,
+                            "file name is not usable on the local filesystem",
+                        );
+                        continue;
+                    };
+                    let Some(size) = entry.attrs.size else {
+                        scan.record_failure(
+                            &child_relative,
+                            "directory listing did not report the file size",
+                        );
+                        continue;
+                    };
+                    if let Err(capacity) = scan.push_file(relative, child_wire, size) {
+                        return Err(capacity.to_string());
+                    }
+                }
+                _ => scan.skip(),
+            }
+        }
+    }
+    Ok(scan)
+}
+
+/// 裸包删除单个路径：LSTAT 判型后分派 REMOVE/RMDIR/递归树删（分派语义与
+/// 高层 `sftp_delete` 一致；READDIR attrs 是 lstat 语义，目录里的符号链接
+/// 按 REMOVE 处理，绝不跟随）。
+async fn raw_delete_path(
+    client: &mut RawSftpClient,
+    raw_path: &[u8],
+    recursive: bool,
+) -> Result<(), String> {
+    let attrs = client.lstat(raw_path).await?;
+    match classify_raw_kind(attrs.permissions) {
+        "directory" if recursive => raw_delete_tree(client, raw_path).await,
+        "directory" => client.rmdir(raw_path).await,
+        _ => client.remove(raw_path).await,
+    }
+}
+
+/// 裸包递归删除：后序遍历（先文件后目录），单通道串行，`.`/`..` 跳过。
+async fn raw_delete_tree(client: &mut RawSftpClient, root: &[u8]) -> Result<(), String> {
+    let mut pending = vec![root.to_vec()];
+    let mut directories = Vec::new();
+    while let Some(directory) = pending.pop() {
+        directories.push(directory.clone());
+        for entry in client.readdir(&directory).await? {
+            if entry.name.as_slice() == b"." || entry.name.as_slice() == b".." {
+                continue;
+            }
+            let child = sftp_name::join_raw_path(&directory, &entry.name);
+            match classify_raw_kind(entry.attrs.permissions) {
+                "directory" => pending.push(child),
+                _ => client.remove(&child).await?,
+            }
+        }
+    }
+    for directory in directories.into_iter().rev() {
+        client.rmdir(&directory).await?;
+    }
+    Ok(())
 }
 
 /// Creates the parent directories for one queued tree file and opens its
@@ -8418,6 +8638,9 @@ fn classify_entry_kind(file_type: FileType) -> &'static str {
         FileType::Other => "file",
     }
 }
+
+/// 裸包客户端具体类型：每次操作独占一条 sftp 子系统通道，发一收一。
+type RawSftpClient = sftp_raw::RawSftp<russh::ChannelStream<russh::client::Msg>>;
 
 /// 裸包客户端路径的 kind 判定：按 v3 permissions 的 POSIX 类型位归类；
 /// attrs 缺 permissions（非标准服务器）时退回 file（与高层路径的 Other

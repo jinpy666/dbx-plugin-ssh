@@ -168,6 +168,52 @@ pub fn join_wire_name(dir: &str, name: &str) -> String {
     }
 }
 
+/// 目录 + 原始文件名字节 → 服务器路径字节（wire 树扫描/裸包删除的路径组装）。
+pub fn join_raw_path(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dir.len() + 1 + name.len());
+    out.extend_from_slice(dir);
+    if dir.last() != Some(&b'/') {
+        out.push(b'/');
+    }
+    out.extend_from_slice(name);
+    out
+}
+
+/// latin-1 显示文本 → 原始字节：U+0000..=U+00FF 的字符映射回同值字节
+/// （[`decode_display_name`] latin-1 语义的逆变换），>U+00FF 的字符按 UTF-8
+/// 编码兜底（服务器名带混合编码时尽力而为）。用户新输入的名字（rename
+/// 目标、mkdir 名）在 latin-1 模式下由此还原成服务器字节。
+pub fn latin1_encode_display(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let code = ch as u32;
+        if code <= 0xFF {
+            out.push(code as u8);
+        } else {
+            let mut buffer = [0_u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+        }
+    }
+    out
+}
+
+/// latin-1 模式写操作（rename 目标 / mkdir）的路径字节组装：路径里除最后
+/// 一段外都来自列表回传的 wire 形式（按 [`unescape_wire`] 还原字节），最后
+/// 一段是用户新输入的显示文本（按 [`latin1_encode_display`] 编码）。显示名
+/// 绝不回灌传输路径的契约不受影响——这里只处理用户新输入，不重新编码任何
+/// 服务器回传的名字。
+pub fn write_path_bytes(path: &str) -> Vec<u8> {
+    match path.rsplit_once('/') {
+        Some((dir, name)) => {
+            let mut out = unescape_wire(dir);
+            out.push(b'/');
+            out.extend(latin1_encode_display(name));
+            out
+        }
+        None => latin1_encode_display(path),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +343,51 @@ mod tests {
     fn join_wire_name_handles_root() {
         assert_eq!(join_wire_name("/", "a.txt"), "/a.txt");
         assert_eq!(join_wire_name("/tmp/up", "a.txt"), "/tmp/up/a.txt");
+    }
+
+    #[test]
+    fn join_raw_path_inserts_single_separator() {
+        assert_eq!(join_raw_path(b"/tmp", b"a\xe9"), b"/tmp/a\xe9".to_vec());
+        // 根目录已有 '/'，不重复插分隔符。
+        assert_eq!(join_raw_path(b"/", b"a"), b"/a".to_vec());
+        assert_eq!(join_raw_path(b"", b"a"), b"/a".to_vec());
+    }
+
+    #[test]
+    fn latin1_encode_display_inverts_the_decode() {
+        // latin-1 解码的逆：U+00A0..=U+00FF 回字节。
+        assert_eq!(
+            latin1_encode_display("caf\u{e9}.txt"),
+            b"caf\xe9.txt".to_vec()
+        );
+        assert_eq!(latin1_encode_display("100%.txt"), b"100%.txt".to_vec());
+        assert_eq!(latin1_encode_display(""), Vec::<u8>::new());
+        // >U+00FF 的字符按 UTF-8 兜底。
+        assert_eq!(latin1_encode_display("生"), "生".as_bytes().to_vec());
+        // 解码→编码在 latin-1 域内闭环。
+        for raw in [&b"caf\xe9.txt"[..], b"\xff\xfe\x80"] {
+            let decoded = decode_display_name(raw, NameEncoding::Latin1);
+            assert_eq!(latin1_encode_display(&decoded.text), raw.to_vec());
+        }
+    }
+
+    #[test]
+    fn write_path_bytes_splits_wire_prefix_and_typed_name() {
+        // 目录前缀来自列表回传的 wire 形式（%E9 → 0xE9），最后一段是用户新
+        // 输入的显示文本（é → 0xE9）。
+        assert_eq!(
+            write_path_bytes("/tmp/caf%E9/naïve"),
+            b"/tmp/caf\xe9/na\xefve".to_vec()
+        );
+        // 最后一段是用户新输入的显示文本：字面 `%XX` 序列保持 ASCII 字面量，
+        // 不被转义还原（wire 整条还原走 unescape_wire，是另一条路径）。
+        assert_eq!(
+            write_path_bytes("/tmp/caf%E9.txt"),
+            b"/tmp/caf%E9.txt".to_vec()
+        );
+        // 用户新输入里的字面 %XX 不被再次转义（ASCII 按字面量保留）。
+        assert_eq!(write_path_bytes("/tmp/100%.txt"), b"/tmp/100%.txt".to_vec());
+        // 根目录下的新名字。
+        assert_eq!(write_path_bytes("/caf\u{e9}"), b"/caf\xe9".to_vec());
     }
 }

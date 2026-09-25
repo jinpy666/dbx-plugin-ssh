@@ -3,7 +3,8 @@
 //! 上游 `russh-sftp` 在反序列化层对文件名/handle 做 `from_utf8_lossy`，合法
 //! UTF-8 服务器下字节往返无损，但 latin-1 等旧编码的文件名在列表阶段就丢失
 //! 原始字节。本模块只覆盖字节保真必需的最小操作面（INIT/OPENDIR/READDIR/
-//! CLOSE/STAT/OPEN/READ/CLOSE），全部请求严格串行（发一收一），不与高层
+//! CLOSE/STAT/LSTAT/OPEN/READ/CLOSE + M15-B 的 REMOVE/MKDIR/RMDIR/RENAME），
+//! 全部请求严格串行（发一收一），不与高层
 //! `SftpSession` 共享通道。文件名字节原样返回，编码解释交给 `sftp_name`。
 //!
 //! 已知边界：attrs 只按 v3 布局解析（INIT 显式请求版本 3，RFC 要求服务器
@@ -27,9 +28,14 @@ const FXP_VERSION: u8 = 2;
 const FXP_OPEN: u8 = 3;
 const FXP_CLOSE: u8 = 4;
 const FXP_READ: u8 = 5;
+const FXP_LSTAT: u8 = 7;
 const FXP_OPENDIR: u8 = 11;
+const FXP_REMOVE: u8 = 13;
+const FXP_MKDIR: u8 = 14;
+const FXP_RMDIR: u8 = 15;
 const FXP_READDIR: u8 = 16;
 const FXP_STAT: u8 = 17;
+const FXP_RENAME: u8 = 18;
 const FXP_STATUS: u8 = 101;
 const FXP_HANDLE: u8 = 102;
 const FXP_DATA: u8 = 103;
@@ -110,6 +116,17 @@ pub fn build_read(id: u32, handle: &[u8], offset: u64, len: u32) -> Vec<u8> {
     payload.extend_from_slice(handle);
     payload.extend_from_slice(&offset.to_be_bytes());
     payload.extend_from_slice(&len.to_be_bytes());
+    frame_packet(&payload)
+}
+
+/// 构造 RENAME 请求（v3：oldpath + newpath 两个字符串，无 posix-rename 语义）。
+pub fn build_rename(id: u32, old_path: &[u8], new_path: &[u8]) -> Vec<u8> {
+    let mut payload = vec![FXP_RENAME];
+    payload.extend_from_slice(&id.to_be_bytes());
+    for path in [old_path, new_path] {
+        payload.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        payload.extend_from_slice(path);
+    }
     frame_packet(&payload)
 }
 
@@ -376,6 +393,77 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
         result
     }
 
+    /// LSTAT：单个路径的 attrs（不跟随符号链接，DELETE 预检语义与高层
+    /// `symlink_metadata` 一致）。
+    pub async fn lstat(&mut self, path: &[u8]) -> Result<RawAttrs, String> {
+        let id = self.next_id();
+        let reply = self
+            .request(build_string_request(FXP_LSTAT, id, path), id)
+            .await?;
+        let (kind, _, body) = parse_response_header(&reply)?;
+        match kind {
+            FXP_ATTRS => parse_attrs_packet(body),
+            FXP_STATUS => Err(format!(
+                "SFTP raw lstat failed with status {}",
+                parse_status_code(body)?
+            )),
+            _ => Err("SFTP raw lstat got an unexpected reply".to_string()),
+        }
+    }
+
+    /// REMOVE：删除一个文件（或符号链接）。
+    pub async fn remove(&mut self, path: &[u8]) -> Result<(), String> {
+        self.status_ok_op(FXP_REMOVE, "remove", path).await
+    }
+
+    /// MKDIR：创建目录。
+    pub async fn mkdir(&mut self, path: &[u8]) -> Result<(), String> {
+        self.status_ok_op(FXP_MKDIR, "mkdir", path).await
+    }
+
+    /// RMDIR：删除空目录。
+    pub async fn rmdir(&mut self, path: &[u8]) -> Result<(), String> {
+        self.status_ok_op(FXP_RMDIR, "rmdir", path).await
+    }
+
+    /// RENAME：单个路径重命名/移动（SFTPv3 不覆盖已存在目标）。
+    pub async fn rename(&mut self, old_path: &[u8], new_path: &[u8]) -> Result<(), String> {
+        let id = self.next_id();
+        let reply = self
+            .request(build_rename(id, old_path, new_path), id)
+            .await?;
+        let (kind, _, body) = parse_response_header(&reply)?;
+        match kind {
+            FXP_STATUS => {
+                let code = parse_status_code(body)?;
+                if code == 0 {
+                    return Ok(());
+                }
+                Err(format!("SFTP raw rename failed with status {code}"))
+            }
+            _ => Err("SFTP raw rename got an unexpected reply".to_string()),
+        }
+    }
+
+    /// 「type + id + 单路径 → STATUS 0 即成功」的公共骨架（REMOVE/MKDIR/RMDIR）。
+    async fn status_ok_op(&mut self, kind: u8, op: &str, path: &[u8]) -> Result<(), String> {
+        let id = self.next_id();
+        let reply = self
+            .request(build_string_request(kind, id, path), id)
+            .await?;
+        let (reply_kind, _, body) = parse_response_header(&reply)?;
+        match reply_kind {
+            FXP_STATUS => {
+                let code = parse_status_code(body)?;
+                if code == 0 {
+                    return Ok(());
+                }
+                Err(format!("SFTP raw {op} failed with status {code}"))
+            }
+            _ => Err(format!("SFTP raw {op} got an unexpected reply")),
+        }
+    }
+
     async fn opendir(&mut self, path: &[u8]) -> Result<Vec<u8>, String> {
         let id = self.next_id();
         let reply = self
@@ -580,5 +668,101 @@ mod tests {
         let mut data = 3_u32.to_be_bytes().to_vec();
         data.extend_from_slice(b"abc");
         assert_eq!(parse_data(&data).unwrap(), b"abc".to_vec());
+    }
+
+    #[test]
+    fn rename_requests_carry_both_path_strings() {
+        let frame = build_rename(9, b"/old\xE9", b"/new");
+        // type + id + (len + path) * 2
+        assert_eq!(frame.len(), 4 + 1 + 4 + 4 + 5 + 4 + 4);
+        assert_eq!(frame[4], FXP_RENAME);
+        assert_eq!(&frame[5..9], &9_u32.to_be_bytes());
+        assert_eq!(&frame[9..13], &5_u32.to_be_bytes());
+        assert_eq!(&frame[13..18], b"/old\xE9");
+        assert_eq!(&frame[18..22], &4_u32.to_be_bytes());
+        assert_eq!(&frame[22..], b"/new");
+    }
+
+    /// 内存双工流的桩服务器：INIT 回 VERSION，随后每个请求按脚本回预置
+    /// 包体（自动回填请求帧里的 id）。纯内存往返，不连 SSH。
+    /// 脚本包体格式：`[type, id 占位 4 字节, 剩余包体]`。
+    async fn scripted_server(mut stream: tokio::io::DuplexStream, mut replies: Vec<Vec<u8>>) {
+        let mut header = [0_u8; 4];
+        loop {
+            if stream.read_exact(&mut header).await.is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(header) as usize;
+            let mut payload = vec![0_u8; len];
+            stream.read_exact(&mut payload).await.unwrap();
+            let (kind, body) = if payload[0] == FXP_INIT {
+                (FXP_VERSION, 3_u32.to_be_bytes().to_vec())
+            } else {
+                let id = u32::from_be_bytes(payload[1..5].try_into().unwrap());
+                let mut scripted = replies.remove(0);
+                scripted[1..5].copy_from_slice(&id.to_be_bytes());
+                let kind = scripted.remove(0);
+                (kind, scripted)
+            };
+            let mut packet = vec![kind];
+            packet.extend_from_slice(&body);
+            let mut frame = (packet.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&packet);
+            stream.write_all(&frame).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+    }
+
+    fn status_body(code: u32) -> Vec<u8> {
+        let mut body = vec![FXP_STATUS];
+        body.extend_from_slice(&0_u32.to_be_bytes());
+        body.extend_from_slice(&code.to_be_bytes());
+        body
+    }
+
+    fn attrs_body(size: u64, permissions: u32) -> Vec<u8> {
+        let mut body = vec![FXP_ATTRS];
+        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
+        body.extend_from_slice(&(ATTR_SIZE | ATTR_PERMISSIONS).to_be_bytes());
+        body.extend_from_slice(&size.to_be_bytes());
+        body.extend_from_slice(&permissions.to_be_bytes());
+        body
+    }
+
+    #[tokio::test]
+    async fn write_ops_pair_requests_with_scripted_replies() {
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        tokio::spawn(scripted_server(
+            server_side,
+            vec![
+                status_body(0),          // mkdir ok
+                status_body(11),         // remove failed (SSH_FX_FAILURE-ish)
+                attrs_body(7, 0o040755), // lstat → 目录
+                status_body(0),          // rmdir ok
+                status_body(0),          // rename ok
+            ],
+        ));
+        let mut client = RawSftp::init(client_side).await.unwrap();
+
+        client.mkdir(b"/a/b").await.unwrap();
+        let error = client.remove(b"/a/b/\xE9.txt").await.unwrap_err();
+        assert!(error.contains("status 11"), "{error}");
+        let attrs = client.lstat(b"/a/b").await.unwrap();
+        assert_eq!(attrs.size, Some(7));
+        assert_eq!(attrs.permissions, Some(0o040755));
+        client.rmdir(b"/a/b").await.unwrap();
+        client.rename(b"/old\xE9", b"/new").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unexpected_replies_surface_as_errors() {
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        tokio::spawn(scripted_server(
+            server_side,
+            vec![attrs_body(1, 0o100644)], // remove 收到 ATTRS → 异常回包
+        ));
+        let mut client = RawSftp::init(client_side).await.unwrap();
+        let error = client.remove(b"/a").await.unwrap_err();
+        assert!(error.contains("unexpected reply"), "{error}");
     }
 }
