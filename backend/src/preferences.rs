@@ -175,12 +175,75 @@ pub fn sftp_compat_mode(data_dir: &Path) -> bool {
 }
 
 /// 读取文件名显示编码偏好（auto/latin-1，缺省 auto）。
+/// 签名保持稳定（M15-B raw 路径判定点按现状调用）；连接级覆盖走
+/// [`sftp_name_encoding_for`]，本函数即「无连接上下文」的全局口径。
+/// 本线把判定点迁到 [`sftp_name_encoding_for`] 后暂无二进制内调用者
+/// （集成线融合期保留，防并行改动在判定点冲突）。
+#[allow(dead_code)]
 pub fn sftp_name_encoding(data_dir: &Path) -> crate::sftp_name::NameEncoding {
-    load_preferences(data_dir)
-        .get("sftp_name_encoding")
-        .and_then(Value::as_str)
-        .and_then(crate::sftp_name::NameEncoding::parse)
+    sftp_name_encoding_for(data_dir, None)
+}
+
+/// 连接级文件名编码覆盖（M16）：`{ <connectionId>: "auto"|"latin-1" }`。
+/// 桶上限与 `startup_commands` 的连接数上限同向，防手改文件无限膨胀。
+pub const SFTP_NAME_ENCODING_OVERRIDES_MAX_CONNECTIONS: usize = 512;
+
+/// 覆盖桶清洗：键为 connectionId、值走编码白名单；非法桶/非法值静默丢弃
+/// （手改文件不得卡死工作台，与 `startup_commands::sanitize_store` 同向），
+/// 桶数超限截断。
+pub fn sanitize_sftp_encoding_overrides(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let mut out = Map::new();
+    for (connection_id, entry) in object {
+        if out.len() >= SFTP_NAME_ENCODING_OVERRIDES_MAX_CONNECTIONS {
+            break;
+        }
+        if connection_id.trim().is_empty() {
+            continue;
+        }
+        if let Some(encoding) = entry
+            .as_str()
+            .and_then(crate::sftp_name::NameEncoding::parse)
+        {
+            out.insert(
+                connection_id.clone(),
+                Value::String(encoding.as_str().to_string()),
+            );
+        }
+    }
+    Some(Value::Object(out))
+}
+
+/// 优先级解析（M16 纯函数）：连接覆盖 > 全局偏好 > 缺省 auto。
+/// 白名单回退语义：覆盖值/全局值非法（含非白名单串）一律视为「未设置」，
+/// 由下一级兜底，绝不因手改文件报错。
+pub fn resolve_sftp_name_encoding(
+    override_value: Option<&str>,
+    global_value: Option<&str>,
+) -> crate::sftp_name::NameEncoding {
+    let parse = |raw: Option<&str>| raw.and_then(crate::sftp_name::NameEncoding::parse);
+    parse(override_value)
+        .or_else(|| parse(global_value))
         .unwrap_or(crate::sftp_name::NameEncoding::Auto)
+}
+
+/// 连接级编码判定：`connection_id` 命中覆盖桶（且值合法）时覆盖全局偏好，
+/// 否则跟随全局，再缺省 auto。单次读盘，判定点每次调用现读现用。
+pub fn sftp_name_encoding_for(
+    data_dir: &Path,
+    connection_id: Option<&str>,
+) -> crate::sftp_name::NameEncoding {
+    let prefs = load_preferences(data_dir);
+    let override_value = connection_id.and_then(|id| {
+        prefs
+            .get("sftp_name_encoding_overrides")
+            .and_then(|store| store.get(id))
+            .and_then(Value::as_str)
+    });
+    resolve_sftp_name_encoding(
+        override_value,
+        prefs.get("sftp_name_encoding").and_then(Value::as_str),
+    )
 }
 
 /// 数值偏好钳制：非负整数夹进 [min, max]，超界取边界、非法取 fallback。
@@ -309,6 +372,14 @@ pub fn load_preferences(data_dir: &Path) -> Value {
             "sftp_name_encoding".to_string(),
             Value::String(encoding.as_str().to_string()),
         );
+    }
+    // 连接级文件名编码覆盖（M16）：按 connectionId 分桶，形状清洗在
+    // sanitize_sftp_encoding_overrides（单测覆盖）；键不存在时不出现。
+    if let Some(store) = map
+        .get("sftp_name_encoding_overrides")
+        .and_then(sanitize_sftp_encoding_overrides)
+    {
+        prefs.insert("sftp_name_encoding_overrides".to_string(), store);
     }
     // 命令输入建议（P1-1）：开关（默认开）与查询长度上下限。
     if let Some(enabled) = map
@@ -507,6 +578,14 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
             "sftp_name_encoding".to_string(),
             Value::String(encoding.as_str().to_string()),
         );
+    }
+    // 连接级文件名编码覆盖（M16）：整表替换（对象按 connectionId 分桶，
+    // 前端读改写合并自己的桶）；整体非对象报错，桶内非法值清洗丢弃。
+    if let Some(value) = params.get("sftp_name_encoding_overrides") {
+        let store = sanitize_sftp_encoding_overrides(value).ok_or_else(|| {
+            "sftp_name_encoding_overrides must be an object keyed by connectionId".to_string()
+        })?;
+        map.insert("sftp_name_encoding_overrides".to_string(), store);
     }
     if let Some(value) = params.get("history_suggestions_enabled") {
         let enabled = value
@@ -907,6 +986,123 @@ mod tests {
         assert_eq!(prefs["transfer_max_active"], 8);
         assert_eq!(prefs["sftp_compat_mode"], false);
         assert_eq!(prefs["sftp_name_encoding"], "auto");
+    }
+
+    #[test]
+    fn sftp_encoding_override_resolves_priority_three_states() {
+        // 三态：连接覆盖 > 全局 > 缺省 auto（resolve 纯函数直测）。
+        assert_eq!(
+            resolve_sftp_name_encoding(Some("latin-1"), Some("auto")),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        assert_eq!(
+            resolve_sftp_name_encoding(None, Some("latin-1")),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        assert_eq!(
+            resolve_sftp_name_encoding(None, None),
+            crate::sftp_name::NameEncoding::Auto
+        );
+        // 白名单回退：覆盖值非法（gbk）时回退全局；全局也非法回缺省。
+        assert_eq!(
+            resolve_sftp_name_encoding(Some("gbk"), Some("latin-1")),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        assert_eq!(
+            resolve_sftp_name_encoding(Some("gbk"), None),
+            crate::sftp_name::NameEncoding::Auto
+        );
+        // 大小写/空白容错与全局读取器一致（parse 语义共用）。
+        assert_eq!(
+            resolve_sftp_name_encoding(Some(" LATIN-1 "), None),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+    }
+
+    #[test]
+    fn sftp_encoding_override_pref_roundtrip_and_priority() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // 空偏好：覆盖键不出现；无连接上下文与带连接上下文都回全局缺省 auto。
+        assert!(load_preferences(data_dir.path())
+            .get("sftp_name_encoding_overrides")
+            .is_none());
+        assert_eq!(
+            sftp_name_encoding_for(data_dir.path(), None),
+            crate::sftp_name::NameEncoding::Auto
+        );
+        assert_eq!(
+            sftp_name_encoding_for(data_dir.path(), Some("conn-1")),
+            crate::sftp_name::NameEncoding::Auto
+        );
+        // 全局 latin-1：未覆盖连接跟随全局。
+        save_preferences(data_dir.path(), &json!({ "sftp_name_encoding": "latin-1" }))
+            .expect("save global");
+        assert_eq!(
+            sftp_name_encoding_for(data_dir.path(), Some("conn-1")),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        assert_eq!(
+            sftp_name_encoding(data_dir.path()),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        // 连接覆盖优先于全局；未覆盖连接仍跟随全局。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "sftp_name_encoding_overrides": {
+                "conn-1": "auto",
+                "conn-2": "latin-1",
+                "conn-3": "gbk",
+                "conn-4": 7,
+                "": "auto",
+            } }),
+        )
+        .expect("save overrides");
+        assert_eq!(
+            sftp_name_encoding_for(data_dir.path(), Some("conn-1")),
+            crate::sftp_name::NameEncoding::Auto
+        );
+        assert_eq!(
+            sftp_name_encoding_for(data_dir.path(), Some("conn-2")),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        assert_eq!(
+            sftp_name_encoding_for(data_dir.path(), Some("conn-9")),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        // 非法桶（gbk / 非字符串 / 空 connectionId）清洗丢弃，不报错。
+        let prefs = load_preferences(data_dir.path());
+        let store = prefs
+            .get("sftp_name_encoding_overrides")
+            .and_then(Value::as_object)
+            .expect("store kept");
+        assert_eq!(store.len(), 2);
+        assert!(store.contains_key("conn-1") && store.contains_key("conn-2"));
+        // 整体非对象报错且不落盘污染。
+        let error = save_preferences(
+            data_dir.path(),
+            &json!({ "sftp_name_encoding_overrides": [] }),
+        )
+        .expect_err("must reject non-object store");
+        assert!(error.contains("sftp_name_encoding_overrides"));
+        // 部分更新：只带别的键时覆盖表原样保留。
+        save_preferences(data_dir.path(), &json!({ "sftp_compat_mode": true })).expect("partial");
+        assert!(load_preferences(data_dir.path())
+            .get("sftp_name_encoding_overrides")
+            .is_some());
+        // 「跟随全局」= 删除本连接桶：整表替换后回退全局。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "sftp_name_encoding_overrides": { "conn-2": "latin-1" } }),
+        )
+        .expect("remove conn-1 bucket");
+        assert_eq!(
+            sftp_name_encoding_for(data_dir.path(), Some("conn-1")),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        assert_eq!(
+            sftp_name_encoding_for(data_dir.path(), Some("conn-2")),
+            crate::sftp_name::NameEncoding::Latin1
+        );
     }
 
     #[test]

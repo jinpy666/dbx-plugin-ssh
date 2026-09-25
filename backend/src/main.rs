@@ -106,6 +106,16 @@ impl Plugin {
         })
     }
 
+    /// 连接级 SFTP 文件名编码判定（M16）：sessionId → connectionId →
+    /// 连接覆盖 > 全局偏好 > 缺省 auto。会话未知/已断开按未覆盖处理
+    /// （跟随全局），判定绝不因会话状态失败。
+    fn resolve_sftp_encoding(&self, session_id: &str) -> crate::sftp_name::NameEncoding {
+        let connection_id = self
+            .runtime
+            .block_on(self.ssh.connection_id_for_session(session_id));
+        preferences::sftp_name_encoding_for(&plugin_data_dir(), connection_id.as_deref())
+    }
+
     /// Async liveness probe for the file watchers: an emission only prompts
     /// when the owning SSH session still exists. Built from `list_sessions`
     /// because the session table itself stays inside ssh.rs; a listing
@@ -781,8 +791,8 @@ impl Plugin {
                     .get("includeOwner")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                // 文件名编码偏好（M14-B）：latin-1 时列表走原始字节路径。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                // 文件名编码判定（M16 连接级）：连接覆盖 > 全局偏好（latin-1 时列表走原始字节路径）。
+                let encoding = self.resolve_sftp_encoding(session_id);
                 let entries = self.runtime.block_on(self.ssh.sftp_list_path(
                     session_id,
                     path,
@@ -804,8 +814,8 @@ impl Plugin {
             "sftp/createDirectory" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let path = required_string(&params, "path")?;
-                // 文件名编码偏好（M15-B）：latin-1 时写操作走原始字节路径。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                // 文件名编码判定（M16 连接级）：连接覆盖 > 全局偏好（latin-1 时写操作走原始字节路径）。
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime
                     .block_on(self.ssh.sftp_create_directory(session_id, path, encoding))?;
                 Ok(json!({ "success": true }))
@@ -815,7 +825,8 @@ impl Plugin {
                 let source = required_string(&params, "sourcePath")?;
                 let target = required_string(&params, "targetPath")?;
                 // latin-1：源按 wire 还原、目标按显示文本编码，raw RENAME。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                // 判定走连接级优先级（M16）：连接覆盖 > 全局偏好。
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime
                     .block_on(self.ssh.sftp_rename(session_id, source, target, encoding))?;
                 Ok(json!({ "success": true }))
@@ -1486,7 +1497,8 @@ impl Plugin {
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 // latin-1：wire 路径还原为原始字节，raw REMOVE/RMDIR/树删。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                // 判定走连接级优先级（M16）：连接覆盖 > 全局偏好。
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime
                     .block_on(self.ssh.sftp_delete(session_id, path, recursive, encoding))?;
                 Ok(json!({ "success": true }))
@@ -1550,7 +1562,8 @@ impl Plugin {
                     .get("downloadDir")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                // 判定走连接级优先级（M16）：连接覆盖 > 全局偏好（整树 latin-1 遍历）。
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(self.ssh.start_tree_download(
                     session_id,
                     remote_path,

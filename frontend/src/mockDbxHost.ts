@@ -520,6 +520,8 @@ const localPrefsState = {
   transfer_max_active: 3,
   sftp_compat_mode: false,
   sftp_name_encoding: "auto",
+  // M16 连接级覆盖桶（值域 auto/latin-1，与 sidecar 白名单一致；空=全部跟随全局）。
+  sftp_name_encoding_overrides: {} as Record<string, string>,
 };
 // 镜像并行批次 ssh/audit/list 的真实形状（AuditEntry：tsMs/tool/connectionId/
 // gate/approval/outcome/exitCode/durationMs/mode/command/output/error，
@@ -855,6 +857,15 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     if (input.transfer_max_active !== undefined) localPrefsState.transfer_max_active = Math.min(8, Math.max(1, Math.floor(Number(input.transfer_max_active) || 3)));
     if (typeof input.sftp_compat_mode === "boolean") localPrefsState.sftp_compat_mode = input.sftp_compat_mode;
     if (input.sftp_name_encoding === "auto" || input.sftp_name_encoding === "latin-1") localPrefsState.sftp_name_encoding = input.sftp_name_encoding;
+    // M16 连接级覆盖：整表替换，镜像 sidecar 清洗（非对象忽略、非法值丢弃）。
+    if (input.sftp_name_encoding_overrides && typeof input.sftp_name_encoding_overrides === "object" && !Array.isArray(input.sftp_name_encoding_overrides)) {
+      const store: Record<string, string> = {};
+      for (const [id, value] of Object.entries(input.sftp_name_encoding_overrides as Record<string, unknown>)) {
+        if (id.trim().length === 0) continue;
+        if (value === "auto" || value === "latin-1") store[id] = value;
+      }
+      localPrefsState.sftp_name_encoding_overrides = store;
+    }
     result = { ...localPrefsState };
   }
   else if (method === "sftp/upload/start") result = { taskId: `visual-upload-${++fixtureUploadCount.value}`, chunkSize: 262144 };
