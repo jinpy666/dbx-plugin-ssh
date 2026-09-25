@@ -462,6 +462,7 @@ impl WatchRuntime {
         &self,
         ssh: &crate::ssh::SshRuntime,
         watch_id: &str,
+        encoding: crate::sftp_name::NameEncoding,
     ) -> Result<Value, String> {
         let (session_id, registered_path, remote_path) = {
             let watches = self.watches.read().await;
@@ -505,7 +506,7 @@ impl WatchRuntime {
             return Err(upload_limit_error(&local_path));
         }
         let size = data.len();
-        crate::sftp_ext::write_bytes(ssh, &session_id, &remote_path, &data).await?;
+        crate::sftp_ext::write_bytes(ssh, &session_id, &remote_path, &data, encoding).await?;
         Ok(json!({
             "remotePath": remote_path,
             "size": size,

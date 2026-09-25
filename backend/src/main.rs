@@ -852,23 +852,33 @@ impl Plugin {
             "sftp/exists" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let path = required_string(&params, "path")?;
+                // latin-1（M16）：路径按「wire 前缀 + 显示末段」还原字节，raw
+                // LSTAT 探测（rename 覆盖预检、上传撞名预检共用）。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 let exists = self
                     .runtime
-                    .block_on(sftp_ext::exists(&self.ssh, session_id, path))?;
+                    .block_on(sftp_ext::exists(&self.ssh, session_id, path, encoding))?;
                 Ok(json!({ "exists": exists }))
             }
             "sftp/rename-unique" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let dir = required_string(&params, "dir")?;
                 let name = required_string(&params, "name")?;
-                self.runtime
-                    .block_on(sftp_ext::rename_unique(&self.ssh, session_id, dir, name))
+                // latin-1（M16）：dir 按 wire 还原、name 是新输入显示文本，
+                // raw LSTAT 逐候选探测。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                self.runtime.block_on(sftp_ext::rename_unique(
+                    &self.ssh, session_id, dir, name, encoding,
+                ))
             }
             "sftp/touch" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let path = required_string(&params, "path")?;
+                // latin-1（M16）：新建文件名为用户新输入显示文本，raw
+                // LSTAT/SETSTAT/OPEN。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime
-                    .block_on(sftp_ext::touch(&self.ssh, session_id, path))?;
+                    .block_on(sftp_ext::touch(&self.ssh, session_id, path, encoding))?;
                 Ok(json!({ "success": true }))
             }
             // 符号链接三命令：创建/读取指向/改指向。写操作走 ensure_writable
@@ -877,23 +887,27 @@ impl Plugin {
                 let session_id = required_string(&params, "sessionId")?;
                 let target = required_string(&params, "target")?;
                 let link_path = required_string(&params, "linkPath")?;
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime.block_on(sftp_ext::symlink_create(
-                    &self.ssh, session_id, target, link_path,
+                    &self.ssh, session_id, target, link_path, encoding,
                 ))?;
                 Ok(json!({ "success": true }))
             }
             "sftp/symlink-read" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let link_path = required_string(&params, "linkPath")?;
-                self.runtime
-                    .block_on(sftp_ext::symlink_read(&self.ssh, session_id, link_path))
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                self.runtime.block_on(sftp_ext::symlink_read(
+                    &self.ssh, session_id, link_path, encoding,
+                ))
             }
             "sftp/symlink-update" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let link_path = required_string(&params, "linkPath")?;
                 let target = required_string(&params, "target")?;
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime.block_on(sftp_ext::symlink_update(
-                    &self.ssh, session_id, link_path, target,
+                    &self.ssh, session_id, link_path, target, encoding,
                 ))?;
                 Ok(json!({ "success": true }))
             }
@@ -901,11 +915,15 @@ impl Plugin {
                 let session_id = required_string(&params, "sessionId")?;
                 let remote_path = required_string(&params, "remotePath")?;
                 let data_base64 = required_string(&params, "dataBase64")?;
+                // latin-1（M16）：remotePath 是整条 wire 形式（列表回传），
+                // 整条还原字节后 raw 暂存提交。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime.block_on(sftp_ext::write_file(
                     &self.ssh,
                     session_id,
                     remote_path,
                     data_base64,
+                    encoding,
                 ))?;
                 Ok(json!({ "success": true }))
             }
@@ -955,11 +973,15 @@ impl Plugin {
                 let session_id = required_string(&params, "sessionId")?;
                 let local_path = required_string(&params, "localPath")?;
                 let remote_path = required_string(&params, "remotePath")?;
+                // latin-1（M16）：remotePath 是 watcher 登记的整条 wire 形式，
+                // 整条还原字节后 raw 暂存提交。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime.block_on(sftp_ext::upload_watched_file(
                     &self.ssh,
                     session_id,
                     local_path,
                     remote_path,
+                    encoding,
                 ))
             }
             // 外部编辑器回传（仅桌面端）：前端先用 sftp/download 把文件落到
@@ -989,8 +1011,9 @@ impl Plugin {
             // 同款原子落盘；写门禁 ensure_writable 与其他 SFTP 写完全一致。
             "watch/upload" => {
                 let watch_id = required_string(&params, "watchId")?;
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime
-                    .block_on(self.watcher.upload_back(&self.ssh, watch_id))
+                    .block_on(self.watcher.upload_back(&self.ssh, watch_id, encoding))
             }
             "sftp/copy" => {
                 let session_id = self.filesystem_session(&params)?;
@@ -1513,8 +1536,10 @@ impl Plugin {
             }
             "sftp/upload/finish" => {
                 let task_id = required_string(&params, "taskId")?;
+                // latin-1（M16）：远端落盘路径还原为原始字节后走裸包暂存提交。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime
-                    .block_on(self.ssh.finish_upload(task_id, emitter))
+                    .block_on(self.ssh.finish_upload(task_id, encoding, emitter))
             }
             "sftp/download/start" => {
                 let session_id = required_string(&params, "sessionId")?;
