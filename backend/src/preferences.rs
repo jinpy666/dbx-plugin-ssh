@@ -174,16 +174,6 @@ pub fn sftp_compat_mode(data_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 读取文件名显示编码偏好（auto/latin-1，缺省 auto）。
-/// 签名保持稳定（M15-B raw 路径判定点按现状调用）；连接级覆盖走
-/// [`sftp_name_encoding_for`]，本函数即「无连接上下文」的全局口径。
-/// 本线把判定点迁到 [`sftp_name_encoding_for`] 后暂无二进制内调用者
-/// （集成线融合期保留，防并行改动在判定点冲突）。
-#[allow(dead_code)]
-pub fn sftp_name_encoding(data_dir: &Path) -> crate::sftp_name::NameEncoding {
-    sftp_name_encoding_for(data_dir, None)
-}
-
 /// 连接级文件名编码覆盖（M16）：`{ <connectionId>: "auto"|"latin-1" }`。
 /// 桶上限与 `startup_commands` 的连接数上限同向，防手改文件无限膨胀。
 pub const SFTP_NAME_ENCODING_OVERRIDES_MAX_CONNECTIONS: usize = 512;
@@ -944,7 +934,7 @@ mod tests {
         );
         assert!(!sftp_compat_mode(data_dir.path()));
         assert_eq!(
-            sftp_name_encoding(data_dir.path()),
+            sftp_name_encoding_for(data_dir.path(), None),
             crate::sftp_name::NameEncoding::Auto
         );
         // 写入 + 读回：深度超界钳制、非法编码拒绝（不落盘污染）。
@@ -967,7 +957,7 @@ mod tests {
         );
         assert!(sftp_compat_mode(data_dir.path()));
         assert_eq!(
-            sftp_name_encoding(data_dir.path()),
+            sftp_name_encoding_for(data_dir.path(), None),
             crate::sftp_name::NameEncoding::Latin1
         );
         // 非法形状报错。
@@ -1042,7 +1032,7 @@ mod tests {
             crate::sftp_name::NameEncoding::Latin1
         );
         assert_eq!(
-            sftp_name_encoding(data_dir.path()),
+            sftp_name_encoding_for(data_dir.path(), None),
             crate::sftp_name::NameEncoding::Latin1
         );
         // 连接覆盖优先于全局；未覆盖连接仍跟随全局。

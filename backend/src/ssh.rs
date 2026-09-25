@@ -5462,6 +5462,17 @@ impl SshRuntime {
         Ok((spool, spool_len))
     }
 
+    /// taskId → 所属 sessionId（连接级 SFTP 编码判定用，M16 集成）。
+    /// 任务不存在返回 None，调用方按未覆盖（跟随全局）处理。
+    pub fn upload_session_id(&self, task_id: &str) -> Option<String> {
+        self.uploads
+            .lock()
+            .map_err(|_| "Upload registry is poisoned".to_string())
+            .ok()?
+            .get(task_id)
+            .map(|upload| upload.session_id.clone())
+    }
+
     /// `sftp/transfer/resumable`: interrupted uploads (spool + meta still on
     /// disk, job no longer live) the workbench can offer to resume. Pure
     /// scan over local state, so it answers without any active connection.

@@ -110,9 +110,21 @@ impl Plugin {
     /// 连接覆盖 > 全局偏好 > 缺省 auto。会话未知/已断开按未覆盖处理
     /// （跟随全局），判定绝不因会话状态失败。
     fn resolve_sftp_encoding(&self, session_id: &str) -> crate::sftp_name::NameEncoding {
-        let connection_id = self
-            .runtime
-            .block_on(self.ssh.connection_id_for_session(session_id));
+        self.resolve_sftp_encoding_opt(Some(session_id))
+    }
+
+    /// 同上，供 watchId/taskId 链上查不到所属会话的入口使用：None 时
+    /// 跳过连接覆盖直接回退全局（与"会话未知按未覆盖"语义一致）。
+    fn resolve_sftp_encoding_opt(
+        &self,
+        session_id: Option<&str>,
+    ) -> crate::sftp_name::NameEncoding {
+        let connection_id = match session_id {
+            Some(session_id) => self
+                .runtime
+                .block_on(self.ssh.connection_id_for_session(session_id)),
+            None => None,
+        };
         preferences::sftp_name_encoding_for(&plugin_data_dir(), connection_id.as_deref())
     }
 
@@ -865,7 +877,7 @@ impl Plugin {
                 let path = required_string(&params, "path")?;
                 // latin-1（M16）：路径按「wire 前缀 + 显示末段」还原字节，raw
                 // LSTAT 探测（rename 覆盖预检、上传撞名预检共用）。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let encoding = self.resolve_sftp_encoding(session_id);
                 let exists = self
                     .runtime
                     .block_on(sftp_ext::exists(&self.ssh, session_id, path, encoding))?;
@@ -877,7 +889,7 @@ impl Plugin {
                 let name = required_string(&params, "name")?;
                 // latin-1（M16）：dir 按 wire 还原、name 是新输入显示文本，
                 // raw LSTAT 逐候选探测。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(sftp_ext::rename_unique(
                     &self.ssh, session_id, dir, name, encoding,
                 ))
@@ -887,7 +899,7 @@ impl Plugin {
                 let path = required_string(&params, "path")?;
                 // latin-1（M16）：新建文件名为用户新输入显示文本，raw
                 // LSTAT/SETSTAT/OPEN。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime
                     .block_on(sftp_ext::touch(&self.ssh, session_id, path, encoding))?;
                 Ok(json!({ "success": true }))
@@ -898,7 +910,7 @@ impl Plugin {
                 let session_id = required_string(&params, "sessionId")?;
                 let target = required_string(&params, "target")?;
                 let link_path = required_string(&params, "linkPath")?;
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(sftp_ext::symlink_create(
                     &self.ssh, session_id, target, link_path, encoding,
                 ))?;
@@ -907,7 +919,7 @@ impl Plugin {
             "sftp/symlink-read" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let link_path = required_string(&params, "linkPath")?;
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(sftp_ext::symlink_read(
                     &self.ssh, session_id, link_path, encoding,
                 ))
@@ -916,7 +928,7 @@ impl Plugin {
                 let session_id = required_string(&params, "sessionId")?;
                 let link_path = required_string(&params, "linkPath")?;
                 let target = required_string(&params, "target")?;
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(sftp_ext::symlink_update(
                     &self.ssh, session_id, link_path, target, encoding,
                 ))?;
@@ -928,7 +940,7 @@ impl Plugin {
                 let data_base64 = required_string(&params, "dataBase64")?;
                 // latin-1（M16）：remotePath 是整条 wire 形式（列表回传），
                 // 整条还原字节后 raw 暂存提交。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(sftp_ext::write_file(
                     &self.ssh,
                     session_id,
@@ -986,7 +998,7 @@ impl Plugin {
                 let remote_path = required_string(&params, "remotePath")?;
                 // latin-1（M16）：remotePath 是 watcher 登记的整条 wire 形式，
                 // 整条还原字节后 raw 暂存提交。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(sftp_ext::upload_watched_file(
                     &self.ssh,
                     session_id,
@@ -1022,7 +1034,10 @@ impl Plugin {
             // 同款原子落盘；写门禁 ensure_writable 与其他 SFTP 写完全一致。
             "watch/upload" => {
                 let watch_id = required_string(&params, "watchId")?;
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let session_id = self
+                    .runtime
+                    .block_on(self.watcher.session_for_watch(watch_id));
+                let encoding = self.resolve_sftp_encoding_opt(session_id.as_deref());
                 self.runtime
                     .block_on(self.watcher.upload_back(&self.ssh, watch_id, encoding))
             }
@@ -1549,7 +1564,8 @@ impl Plugin {
             "sftp/upload/finish" => {
                 let task_id = required_string(&params, "taskId")?;
                 // latin-1（M16）：远端落盘路径还原为原始字节后走裸包暂存提交。
-                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
+                let session_id = self.ssh.upload_session_id(task_id);
+                let encoding = self.resolve_sftp_encoding_opt(session_id.as_deref());
                 self.runtime
                     .block_on(self.ssh.finish_upload(task_id, encoding, emitter))
             }

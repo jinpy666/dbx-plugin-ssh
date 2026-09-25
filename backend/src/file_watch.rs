@@ -458,6 +458,16 @@ impl WatchRuntime {
     /// watchId: the id is a bearer token and the watched path may have been
     /// swapped for a symlink after `start`, so `validate_local_origin`
     /// re-canonicalizes and refuses anything outside `remote-edit/`.
+    /// watchId → 所属 sessionId（连接级 SFTP 编码判定用，M16 集成）。
+    /// watch 已消失返回 None，调用方按未覆盖（跟随全局）处理。
+    pub async fn session_for_watch(&self, watch_id: &str) -> Option<String> {
+        self.watches
+            .read()
+            .await
+            .get(watch_id)
+            .map(|entry| entry.session_id.clone())
+    }
+
     pub async fn upload_back(
         &self,
         ssh: &crate::ssh::SshRuntime,
