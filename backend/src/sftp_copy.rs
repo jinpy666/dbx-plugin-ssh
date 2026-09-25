@@ -3,6 +3,13 @@
 //! under their own name via the session's shell (`cp -a --` / `mv -f --`).
 //! Moves inside one directory first try an SFTP rename and fall back to the
 //! shell. No sudo variant (tiny-rdm has none either).
+//!
+//! latin-1 字节保真（M17 增量①）：`from`/`toDir` 是列表回传的 wire 形式。
+//! 覆盖预检（裸包 LSTAT，目标整条 [`sftp_name::unescape_wire`] 还原）与
+//! 同目录 move 的 RENAME 快路径（裸包 RENAME）走原始字节；底层 shell
+//! `cp`/`mv` 的 exec 命令串是 UTF-8 String，服务器原始字节经 shell 参数
+//! 不可控——copy 与跨目录 move 的执行层保持字面量发送（clean 名不受影响，
+//! 转义名由服务器侧报错），边界登记见 PROTOCOL。
 
 use std::sync::Arc;
 
@@ -13,7 +20,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::exec;
 use crate::model::normalize_remote_path;
-use crate::ssh::{SshClient, SshRuntime};
+use crate::sftp_name::{self, NameEncoding};
+use crate::ssh::{RawSftpClient, SshClient, SshRuntime};
 
 /// Remote `cp`/`mv` commands run with this budget; recursive directory
 /// copies can legitimately take a while.
@@ -287,6 +295,18 @@ impl CopyExecutor<'_> {
             CopyExecutor::Headless(_, sftp) => sftp.clone(),
         }
     }
+
+    /// latin-1（M17 增量①）裸包客户端：Session 路径按会话新开一条 sftp 子系统
+    /// 通道；Headless（MCP 工具面）没有会话上下文且工具面无编码偏好，恒为
+    /// None（MCP 面保持字面量发送，见 PROTOCOL 遗留登记）。
+    async fn raw_client(&self) -> Option<RawSftpClient> {
+        match self {
+            CopyExecutor::Session(runtime, session_id) => {
+                runtime.raw_sftp_client(session_id).await.ok()
+            }
+            CopyExecutor::Headless(_, _) => None,
+        }
+    }
 }
 
 /// `sftp/copy` / `sftp/move` entry for the plugin RPC. The session is
@@ -296,28 +316,43 @@ pub async fn run(
     session_id: &str,
     op: CopyOp,
     params: &Value,
+    encoding: NameEncoding,
 ) -> Result<Value, String> {
     runtime.ensure_writable(session_id).await?;
     let request = parse_request(params)?;
-    let outcome = execute_with(CopyExecutor::Session(runtime, session_id), op, &request).await;
+    let outcome = execute_with(
+        CopyExecutor::Session(runtime, session_id),
+        op,
+        &request,
+        encoding,
+    )
+    .await;
     Ok(outcome.into_json())
 }
 
 /// `sftp_copy` / `sftp_move` MCP tool entry over a pooled headless
 /// connection. `sftp` enables the SFTP-rename fast path for moves.
+/// MCP 工具面无编码偏好（PROTOCOL 遗留登记），固定按 auto 语义执行。
 pub async fn execute(
     handle: &Handle<SshClient>,
     sftp: Option<Arc<AsyncMutex<SftpSession>>>,
     op: CopyOp,
     request: &CopyMoveRequest,
 ) -> CopyMoveOutcome {
-    execute_with(CopyExecutor::Headless(handle, sftp), op, request).await
+    execute_with(
+        CopyExecutor::Headless(handle, sftp),
+        op,
+        request,
+        NameEncoding::Auto,
+    )
+    .await
 }
 
 async fn execute_with(
     executor: CopyExecutor<'_>,
     op: CopyOp,
     request: &CopyMoveRequest,
+    encoding: NameEncoding,
 ) -> CopyMoveOutcome {
     let targets: Vec<String> = request
         .from
@@ -325,33 +360,65 @@ async fn execute_with(
         .map(|source| target_path(&request.to_dir, source))
         .collect();
 
+    // latin-1（M17 增量①）：from/toDir 是列表回传的 wire 形式。裸包客户端
+    // 可用时，覆盖预检（逐个裸包 LSTAT，目标整条 unescape_wire 还原字节）与
+    // 同目录 move 的 RENAME 快路径都走字节保真；裸包客户端**建立**失败回退
+    // 既有字面量路径（M15 先例）。
+    //
+    // 设计边界（登记，PROTOCOL 同步）：底层执行仍是远端服务器侧 `cp -a` /
+    // `mv -f` shell 命令——SSH exec 的命令串是 UTF-8 String，含转义（%XX）
+    // 的 wire 名只能按字面量拼接，服务器原始字节经 shell 参数不可控，故
+    // copy 与跨目录 move 的执行层不做字节保真迁移：clean 名（无转义）行为
+    // 不变，转义名由服务器侧报错（`cp: cannot stat '%E9'` 类），预检/改名
+    // 快路径已迁移的部分保证覆盖判定与同目录移动正确。
+    let mut raw = match encoding {
+        NameEncoding::Latin1 => executor.raw_client().await,
+        NameEncoding::Auto => None,
+    };
+
     // With overwrite disabled, block every item whose target already exists
-    // before running anything (one round trip for the whole batch).
+    // before running anything. latin-1 + raw client：逐个裸包 LSTAT；其余走
+    // 一轮 shell 探测（整批一个往返）。
     let mut blocked = vec![false; targets.len()];
     if !request.overwrite {
-        match executor.exec(&build_exists_probe_command(&targets)).await {
-            Ok(outcome) if outcome.exit_code == 0 => {
-                blocked = existing_targets(&outcome.output, targets.len());
+        let mut probed = false;
+        if let Some(client) = raw.as_mut() {
+            for (index, target) in targets.iter().enumerate() {
+                if client
+                    .lstat(&sftp_name::unescape_wire(target))
+                    .await
+                    .is_ok()
+                {
+                    blocked[index] = true;
+                }
             }
-            Ok(outcome) => {
-                eprintln!(
-                    "[ssh] sftp {} existence probe failed (exit {}): {}; continuing with per-item attempts",
-                    op.label(),
-                    outcome.exit_code,
-                    outcome.output.trim()
-                );
-            }
-            Err(error) => {
-                eprintln!(
-                    "[ssh] sftp {} existence probe failed: {error}; continuing with per-item attempts",
-                    op.label()
-                );
+            probed = true;
+        }
+        if !probed {
+            match executor.exec(&build_exists_probe_command(&targets)).await {
+                Ok(outcome) if outcome.exit_code == 0 => {
+                    blocked = existing_targets(&outcome.output, targets.len());
+                }
+                Ok(outcome) => {
+                    eprintln!(
+                        "[ssh] sftp {} existence probe failed (exit {}): {}; continuing with per-item attempts",
+                        op.label(),
+                        outcome.exit_code,
+                        outcome.output.trim()
+                    );
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[ssh] sftp {} existence probe failed: {error}; continuing with per-item attempts",
+                        op.label()
+                    );
+                }
             }
         }
     }
 
-    // Only moves use the SFTP-rename fast path; the channel is opened lazily
-    // and its absence simply disables the optimization.
+    // Only moves use the SFTP-rename fast path; the channels are opened
+    // lazily and their absence simply disables the optimization.
     let sftp = match op {
         CopyOp::Move => executor.sftp().await,
         CopyOp::Copy => None,
@@ -369,25 +436,41 @@ async fn execute_with(
             continue;
         }
 
-        // Fast path: same-directory moves are a plain rename.
+        // Fast path: same-directory moves are a plain rename. latin-1 优先
+        // 走裸包 RENAME（字节保真；SFTPv3 不覆盖已存在目标，撞名/跨设备失败
+        // 与高层快路径同样回落 shell mv）。
         if op == CopyOp::Move && same_directory(source, &request.to_dir) {
-            if let Some(sftp) = &sftp {
-                match sftp
-                    .lock()
-                    .await
-                    .rename(source.clone(), target.clone())
-                    .await
-                {
-                    Ok(()) => {
-                        results.push(ItemOutcome::ok(source, target));
-                        continue;
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "[ssh] sftp rename fast path failed for {source} -> {target}: {error}; falling back to shell mv"
-                        );
-                    }
+            let attempted = match raw.as_mut() {
+                Some(client) => Some(
+                    client
+                        .rename(
+                            &sftp_name::unescape_wire(source),
+                            &sftp_name::unescape_wire(target),
+                        )
+                        .await,
+                ),
+                None => match &sftp {
+                    Some(sftp) => Some(
+                        sftp.lock()
+                            .await
+                            .rename(source.clone(), target.clone())
+                            .await
+                            .map_err(|error| error.to_string()),
+                    ),
+                    None => None,
+                },
+            };
+            match attempted {
+                Some(Ok(())) => {
+                    results.push(ItemOutcome::ok(source, target));
+                    continue;
                 }
+                Some(Err(error)) => {
+                    eprintln!(
+                        "[ssh] sftp rename fast path failed for {source} -> {target}: {error}; falling back to shell mv"
+                    );
+                }
+                None => {}
             }
         }
 
@@ -527,6 +610,23 @@ mod tests {
         assert_eq!(existing_targets("", 2), vec![false, false]);
         // Out-of-range indices are ignored.
         assert_eq!(existing_targets("5", 2), vec![false, false]);
+    }
+
+    #[test]
+    fn wire_targets_unescape_to_server_bytes() {
+        // latin-1（M17 增量①）raw 预检/同名 move 快路径的目标字节：from 与
+        // toDir 都是列表回传的 wire 形式，target_path 拼接后整条还原。
+        let target = target_path("/tmp/caf%E9", "/src/%FFitem.txt");
+        assert_eq!(
+            sftp_name::unescape_wire(&target),
+            b"/tmp/caf\xe9/\xffitem.txt".to_vec()
+        );
+        // clean 名（无转义）按字面量透传，行为与 auto 一致。
+        let target = target_path("/tmp", "/var/log/app.log");
+        assert_eq!(sftp_name::unescape_wire(&target), b"/tmp/app.log".to_vec());
+        // '%' 自转义闭环：真实名字里的字面 %XX 往返不吞。
+        let target = target_path("/tmp", "/src/a%2541b");
+        assert_eq!(sftp_name::unescape_wire(&target), b"/tmp/a%41b".to_vec());
     }
 
     #[test]

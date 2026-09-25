@@ -856,8 +856,10 @@ impl Plugin {
                     })
                     .filter(|value| *value <= 0o7777)
                     .ok_or("Mode must be an octal value up to 7777")?;
+                // latin-1（M17 增量③）：整条 wire 路径还原字节后 raw SETSTAT。
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime
-                    .block_on(self.ssh.sftp_chmod(session_id, path, mode))?;
+                    .block_on(self.ssh.sftp_chmod(session_id, path, mode, encoding))?;
                 Ok(json!({ "success": true }))
             }
             "sftp/diskUsage" => {
@@ -869,18 +871,23 @@ impl Plugin {
             "sftp/stat" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let path = required_string(&params, "path")?;
+                // latin-1（M17 增量③）：整条 wire 路径还原字节后 raw LSTAT。
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime
-                    .block_on(sftp_ext::stat(&self.ssh, session_id, path))
+                    .block_on(sftp_ext::stat(&self.ssh, session_id, path, encoding))
             }
             "sftp/exists" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let path = required_string(&params, "path")?;
-                // latin-1（M16）：路径按「wire 前缀 + 显示末段」还原字节，raw
-                // LSTAT 探测（rename 覆盖预检、上传撞名预检共用）。
+                // 路径形式（M17 增量①）：缺省「wire 目录前缀 + 显示末段」
+                // （rename 覆盖预检、上传撞名预检）；`form: "wire"` 表示整条
+                // 都是列表回传的 wire 形式（粘贴预检）。latin-1（M16）下分别
+                // 按 write_path_bytes / unescape_wire 还原字节，raw LSTAT 探测。
+                let whole_wire = params.get("form").and_then(Value::as_str) == Some("wire");
                 let encoding = self.resolve_sftp_encoding(session_id);
-                let exists = self
-                    .runtime
-                    .block_on(sftp_ext::exists(&self.ssh, session_id, path, encoding))?;
+                let exists = self.runtime.block_on(sftp_ext::exists(
+                    &self.ssh, session_id, path, encoding, whole_wire,
+                ))?;
                 Ok(json!({ "exists": exists }))
             }
             "sftp/rename-unique" => {
@@ -1043,20 +1050,27 @@ impl Plugin {
             }
             "sftp/copy" => {
                 let session_id = self.filesystem_session(&params)?;
+                // latin-1（M17 增量①）：from/toDir 是列表回传的 wire 形式，
+                // 存在性预检与同名目录 move 快路径走裸包字节保真；底层 shell
+                // cp/mv 的 exec 字节参数边界见 sftp_copy。
+                let encoding = self.resolve_sftp_encoding(&session_id);
                 self.runtime.block_on(sftp_copy::run(
                     &self.ssh,
                     &session_id,
                     sftp_copy::CopyOp::Copy,
                     &params,
+                    encoding,
                 ))
             }
             "sftp/move" => {
                 let session_id = self.filesystem_session(&params)?;
+                let encoding = self.resolve_sftp_encoding(&session_id);
                 self.runtime.block_on(sftp_copy::run(
                     &self.ssh,
                     &session_id,
                     sftp_copy::CopyOp::Move,
                     &params,
+                    encoding,
                 ))
             }
             "ssh/metrics" => {

@@ -155,7 +155,7 @@ import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardSta
 // 带描述的命令/flag/值候选；开关读 pluginStore（SettingsDialog 自治写入）。
 import { matchSpecLine, type CompletionLevel, type CompletionRow } from "./lib/completions/spec";
 import { COMPLETION_SPECS } from "./lib/completions/specs";
-import { hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
+import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
 import { mergeQuickCommandImport, parseQuickCommandImport } from "./lib/quickCommandImport";
@@ -1148,6 +1148,24 @@ const dropUploadTarget = ref<"cwd" | "custom">("cwd");
 // 录——终端拖拽只在面板关闭时接收，面板目录此刻不可见，仅作旧 sidecar 兜底。
 // 弹窗展示的就是这里的解析结果。
 const dropCwdTarget = computed(() => resolveDropTargetDir({ terminalCwd: terminalCwd.value || undefined, sftpHome: sftpHomePath.value || undefined, fallback: currentPath.value }));
+// M17 增量②：上传落点的 wire 形式（弹窗仍展示 dropCwdTarget 的显示形式）。
+// shell cwd 回读与 sftp home 探测结果是显示文本，latin-1 下经 displayPathToWire
+// 转成 wire 形式（% 自转义、U+0080..FF → %XX、>U+00FF 按 UTF-8 兜底），与本地
+// 文件名 join 后整条符合 sidecar write_path_bytes 的「wire 目录前缀 + 用户新
+// 输入的显示末段」分工；fallback（面板当前目录）本身来自列表链的 wire 形式，
+// 原样透传。已知边界：shell cwd 回读中非 UTF-8 的服务器字节在终端解码层已
+// 丢失（U+FFFD），无法还原为 latin-1 字节（登记，不做恢复）。
+const dropCwdTargetWire = computed(() => resolveDropTargetDir({
+  terminalCwd: wireDropDir(terminalCwd.value),
+  sftpHome: wireDropDir(sftpHomePath.value),
+  fallback: currentPath.value,
+}));
+
+/** latin-1 显示文本 → wire 形式（拖入上传的手输/shell cwd 目录）；auto 原样。 */
+function wireDropDir(dir: string | undefined): string | undefined {
+  if (!dir) return dir;
+  return sftpNameEncodingState.value === "latin-1" ? displayPathToWire(dir) : dir;
+}
 const dropUploadPathInput = ref("");
 const dropUploadPathInputEl = ref<HTMLInputElement>();
 const terminalFontSize = ref(appearance.value.terminal.fontSize);
@@ -7800,13 +7818,17 @@ async function pasteClipboard() {
     return;
   }
   if (!canWrite.value) return;
-  // 粘贴前逐项检测目标是否已存在；存在则弹覆盖确认。
+  // 粘贴前逐项检测目标是否已存在；存在则弹覆盖确认。剪贴板路径与面板当前
+  // 目录都是列表回传的 wire 形式（latin-1 下 %XX 转义），预检带 form:"wire"
+  // 让 sidecar 整条按 wire 还原字节探测（M17 增量①：此前末段被按显示文本
+  // 编码，非 UTF-8 名探不到）；预检失败不阻断粘贴，交由后端执行时报错。
   const conflicting: string[] = [];
   for (const from of clip.paths) {
     try {
       const result = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", {
         sessionId,
         path: joinRemote(currentPath.value, remoteBasename(from)),
+        form: "wire",
       });
       if (result.exists) conflicting.push(remoteBasename(from));
     } catch {
@@ -7979,7 +8001,8 @@ async function handleHostFileDrop(files: Array<{ handleId: string; name: string;
       const choice = await askDropUploadTarget(files);
       terminal?.focus();
       if (choice === "cancel") return;
-      await uploadHandleFiles(files, choice === "cwd" ? dropCwdTarget.value : choice.dir);
+      // 落点转 wire 形式（M17 增量②，与终端拖拽同款分工）。
+      await uploadHandleFiles(files, choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir));
     } else {
       await uploadHandleFiles(files);
       await loadDirectory();
@@ -8822,7 +8845,9 @@ async function runTerminalDropUpload(files: File[]) {
   terminal?.focus();
   if (choice === "cancel") return;
   try {
-    await uploadLocalFiles(files, choice === "cwd" ? dropCwdTarget.value : choice.dir);
+    // 落点转 wire 形式（M17 增量②）：cwd 选项取 wire 化的解析结果，自定义
+    // 目录是手输显示文本，latin-1 下经 wireDropDir 转换（auto 原样）。
+    await uploadLocalFiles(files, choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir));
   } catch (cause) {
     showError(cause);
   }

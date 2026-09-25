@@ -38,16 +38,16 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `ssh/settings/get`、`ssh/settings/set` | 读取/运行时更新 Quick Sudo 编排设置 |
 | `mcp/tools`、`mcp/call` | MCP 工具发现与执行（供 DBX MCP 桥 `dbx_call_plugin_tool` 调用；连接凭据以标准 lifecycle payload 转发，按 `connectionId` 池化，payload 新增 `name` 字段携带连接名）。连接类工具新增可选 `connectionName`（与 `connectionId` 二选一，注册表按名匹配，重名报错并列出候选）；stdio 独立模式对未注册 `connectionId` 的调用自动经宿主桥 `POST /list-plugin-connections` 转发到运行中的 DBX 应用执行——请求 `{"plugin_id":"io.dbx.ssh"}`、响应 `{"connections":[{id,name,host,port,username,authentication,readOnly}]}`（仅元数据，密钥只出布尔标志位），桥不可用回落内联凭据；新增 `ssh_list_connections` 工具即消费该路由，降级时仅回本会话注册表并附 `note`。`mcp/tools` 与 stdio `tools/list` 返回的每个工具附 `annotations`（`title` + `readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`，与内部门禁分类同源，见 docs/MCP.zh-CN.md「工具 annotations」） |
 | `mcp/settings/get`、`mcp/settings/set` | MCP SFTP 尺寸限制策略（maxRead/maxUpload/maxDownload，持久化，`--mcp` 同源生效）；`localTransferRoot` 配置 `sftp_upload`/`sftp_download` 本地传输根（绝对路径或空串回落默认根=临时目录+插件数据目录；敏感路径黑名单任何模式叠加生效） |
-| `sftp/chmod` | 修改远端路径权限位（八进制） |
+| `sftp/chmod` | 修改远端路径权限位（八进制）；`sftp_name_encoding` 为 `latin-1` 时路径整条按 wire 还原走裸包 SETSTAT（M17） |
 | `sftp/diskUsage` | 路径所在挂载的磁盘用量 |
 | `sftp/home`、`sftp/list`、`sftp/read` | 浏览、预览远端文件（`sftp/list` 支持可选 `includeOwner` 附加属主/属组；`sftp/read` 支持可选 `offset` 分片续读，见下文） |
 | `sftp/createDirectory`、`sftp/rename`、`sftp/delete`、`sftp/exists`、`sftp/rename-unique`、`sftp/touch`、`sftp/write`、`sftp/symlink-create/read/update`、`sftp/upload/start/finish`、`sftp/upload-local`、`watch/upload` | SFTP 写操作/预检（`sftp_name_encoding` 为 `latin-1` 时走裸包客户端字节保真，路径来源分工见 `sftp/list` 节 M15-B/M16 段） |
 | `sftp/upload/start`、`finish` | 上传事务生命周期（`resumeTaskId` 断点续传；`finish` 校验后交后台任务推送并立即返回，见「上传两阶段计数与收尾语义」） |
 | `sftp/download/start`、`next`、`finish` | 下载事务生命周期（`offset` 断点续传，见下文；桌面端可选 `downloadDir` 指定本机绝对保存目录） |
 | `sftp/download/tree/start` | 递归目录下载启动：远端 `read_dir` 走树扫描（有界），本地镜像目录布局后复用 `sftp/download/next`/`finish`/`sftp/transfer/cancel` 分块管线（见「递归目录下载」节） |
-| `sftp/stat`、`sftp/exists`、`sftp/touch`、`sftp/write` | 扩展文件操作：元信息单查、存在性检查、空文件创建、小文件直写 |
+| `sftp/stat`、`sftp/exists`、`sftp/touch`、`sftp/write` | 扩展文件操作：元信息单查、存在性检查、空文件创建、小文件直写；latin-1 下 `sftp/stat`/`sftp/exists` 整条 wire 还原走裸包 LSTAT（M17，见 `sftp/list` 节） |
 | `sftp/archive`、`sftp/extract` | 远端 tar.gz 打包与解压 |
-| `sftp/copy`、`sftp/move` | 服务器内复制 / 剪切（逐项执行，目标存在需 `overwrite`） |
+| `sftp/copy`、`sftp/move` | 服务器内复制 / 剪切（逐项执行，目标存在需 `overwrite`）；latin-1 下覆盖预检与同目录 move rename 快路径走裸包字节保真（M17，shell 执行层边界见 `sftp/list` 节） |
 | `sftp/bookmarks/list`、`sftp/bookmarks/save`、`sftp/bookmarks/delete` | SFTP 路径书签管理（全局命名清单，插件数据目录持久化，见下文） |
 | `sftp/transfer/cancel` | 取消并清理临时状态（可选 `reason` slug 落入账本，见「上传两阶段计数与收尾语义」） |
 | `sftp/transfer/list`、`sftp/transfer/status` | 查询会话传输任务列表 / 单任务状态（含历史，会话维度过滤） |
@@ -406,7 +406,14 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 上传/直写均保持「暂存 ASCII 临时文件 → 权限位保留（SETSTAT `0o7777`）→ 原子 rename 落位 → 失败清理/回滚」的提交语义（权限保留对齐高层 issue #37 行为），上传分块按 ≤32 KiB 切分（SFTPv3 兼容上限）。回退策略同 M15：仅裸包客户端**建立**失败回退高层客户端。
 
-**遗留（登记）**：① 粘贴预检（`sftp/exists` 的 paste 调用方）传来的整条 wire 名末段在 latin-1 下按「新输入显示文本」处理会探不到非 UTF-8 名——其底层 `sftp/copy`/`sftp/move` 本身也未迁移 raw（wire 名按字面量发送，M15 遗留），预检失败不阻断、交由后端执行时报错，语义不变；两者应一并迁移。② 终端拖入上传的自定义目标目录（shell cwd / 手输路径）按 wire 前缀处理，非 ASCII 的手输目录路径无法还原为 latin-1 字节。③ MCP 工具面 `sftp_mkdir`/`sftp_remove`/`sftp_rename` 保持字面量发送：MCP 的 `sftp_list_dir` 走高层客户端（非法字节已 lossy），工具面没有 wire 形式的名字来源，且工具面无编码偏好——字节保真需要 MCP 面自身的编码模式与列表层迁移设计，成本/风险超出本批次，登记后续处理。
+**M17 起 latin-1 字节保真补齐读侧与粘贴/拖入链**（M16 遗留 ①② 收尾）：
+
+- **粘贴预检与底层 copy/move**：`sftp/exists` 新增可选参数 `form: "wire"`——粘贴预检（`pasteClipboard`）传来的整条路径是列表回传的 wire 形式，latin-1 下整条按 `%XX` 还原后 raw LSTAT（此前末段被按「新输入显示文本」编码，非 UTF-8 名探不到）；缺省（rename 覆盖预检、上传撞名预检）仍按「wire 前缀 + 显示末段」分工。`sftp/copy`/`sftp/move` 的 `from`/`toDir` 同为 wire 形式：`overwrite: false` 的覆盖预检在 latin-1 下改为逐个裸包 LSTAT（目标整条还原字节），同目录 move 的 SFTP rename 快路径改走裸包 RENAME（SFTPv3 不覆盖已存在目标，撞名/跨设备失败与原先一致回落 shell `mv`）；裸包客户端**建立**失败回退既有字面量路径。**设计边界（登记）**：底层执行仍是远端服务器侧 `cp -a --` / `mv -f --`，SSH exec 的命令串是 UTF-8 String，服务器原始字节经 shell 参数不可控——copy 与跨目录 move 的执行层不做字节保真迁移：clean 名（无转义）行为不变，转义名由服务器侧报错。
+- **终端拖入上传的目标目录**：拖入落点询问弹窗的「当前目录」选项（shell cwd OSC 7/633 回读 → sftp home 探测 → 面板当前目录兜底）与「指定目录」手输路径都是显示文本，前端在 latin-1 下经 `displayPathToWire`（与 sidecar `latin1_encode_display` + `escape_wire` 组合逐字符等价：ASCII 字面量透传、`%` 自转义为 `%25`、U+0080..=U+00FF 按码位转义 `%XX`、>U+00FF 的字符按 UTF-8 兜底）转成 wire 形式后与本地文件名 join，整条符合 `write_path_bytes` 的「wire 目录前缀 + 显示末段」分工；面板当前目录兜底本就走列表链的 wire 形式，原样透传。**已知边界（登记）**：shell cwd 回读中非 UTF-8 的服务器字节在终端解码层已丢失（U+FFFD），无法还原为 latin-1 字节，该场景不做恢复。
+- **查漏补缺**：`sftp/stat`（属性对话框）与 `sftp/chmod`（权限编辑）在 latin-1 下整条 wire 还原后走裸包 LSTAT/SETSTAT（此前字面量发送，转义名探不到）；裸包 v3 attrs 不携带 uid/gid，`sftp/stat` 的属主/属组仍经 `stat -c` shell 查询尽力而为（转义名下该查询受上述 shell 字节边界限制，失败显示 `-`），元数据主体（kind/size/mtime/mode）不受影响。
+- **仍按字面量发送的残留点（登记，shell 字节参数不可控）**：`sftp/diskUsage`（`df -kP` 按目录路径拼命令）、`sftp/archive`/`sftp/extract`（远端 `tar` 拼命令）、sudo 模式全族（`sudo/*` 走 shell 文本管道 `ls -la`/`stat`，本就没有 wire 形式的名字来源）。这些入口在 latin-1 下对含转义的名字维持字面量发送、由远端报错，语义与迁移前一致。
+
+**遗留（登记）**：① ~~粘贴预检与 `sftp/copy`/`sftp/move` 未迁移 raw~~（M17 已收尾，见上——shell 执行层的字节边界仍登记在案）。② ~~终端拖入上传的自定义目标目录按 wire 前缀处理~~（M17 已收尾，见上；shell cwd 回读的非 UTF-8 字节丢失场景为不可恢复边界）。③ MCP 工具面 `sftp_mkdir`/`sftp_remove`/`sftp_rename` 保持字面量发送：MCP 的 `sftp_list_dir` 走高层客户端（非法字节已 lossy），工具面没有 wire 形式的名字来源，且工具面无编码偏好——字节保真需要 MCP 面自身的编码模式与列表层迁移设计，成本/风险超出本批次，登记后续处理。
 
 `includeOwner: true` 时，每个条目可携带可选 `owner`、`group` 字符串字段（属主用户、属组）：优先服务器直接提供的名字（SFTPv4+ 属主属性），数字 uid/gid 次之，SFTPv3 服务器（如 OpenSSH）再经一次只读 `ls -l` 往返升级为名字——该次往返失败（无 shell、无 `ls`、超时）时静默保留数字或省略字段，不影响列表本身。字段缺失即"未知"，由 UI 显示 `-`。省略 `includeOwner`（或为 `false`）时不输出这两个字段，与历史响应完全一致。`sudo/listDir` 恒定返回 `owner`/`group`（`ls -la` 解析附带，无额外往返）。
 
@@ -416,11 +423,11 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 | --- | --- | --- | --- |
 | `path` | string | 是 | 远端绝对路径 |
 
-返回结构与 `sudo/stat` 完全一致（`{ path, kind, size, modifiedAt, mode, owner, group }`）。错误：路径不存在。
+返回结构与 `sudo/stat` 完全一致（`{ path, kind, size, modifiedAt, mode, owner, group }`）。错误：路径不存在。`sftp_name_encoding` 为 `latin-1` 时路径整条按 wire 还原走裸包 LSTAT（M17）；裸包 v3 attrs 不携带 uid/gid，属主/属组仍经 `stat -c` shell 查询尽力而为（转义名下受 shell 字节边界限制，失败显示 `-`）。
 
 ### sftp/exists
 
-参数同 `sftp/stat`（`sessionId`、`path`）。返回 `{ exists: bool }`，路径不存在不算错误。
+参数同 `sftp/stat`（`sessionId`、`path`），另有可选 `form: "wire"`（M17）：粘贴预检传来的是整条 wire 路径，带该参数时 latin-1 模式整条按 `%XX` 还原字节探测；缺省按「wire 前缀 + 显示末段」分工（见 `sftp/list` 节 M17 段）。返回 `{ exists: bool }`，路径不存在不算错误。
 
 ### sftp/read
 
@@ -482,7 +489,7 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 | `toDir` | string | 是 | 已存在的目标目录 |
 | `overwrite` | bool | 否 | 目标已存在时是否覆盖（默认 `false`，不覆盖时报错） |
 
-会话内 `sessionId` 与连接级 `connectionId` 二选一（`connectionId` 自动解析到该连接的存活会话）。返回 `{ success, results: [{ from, to, ok, error? }] }`：逐项执行、逐项回报，`error` 仅出现在失败项上；任一项失败则 `success` 为 `false`。`overwrite: false` 时先用远端 `test -e` 探测目标，已存在直接按项失败。同一目录内的 move 优先走 SFTP rename。错误（整体）：参数缺失或非法；只读连接。
+会话内 `sessionId` 与连接级 `connectionId` 二选一（`connectionId` 自动解析到该连接的存活会话）。返回 `{ success, results: [{ from, to, ok, error? }] }`：逐项执行、逐项回报，`error` 仅出现在失败项上；任一项失败则 `success` 为 `false`。`overwrite: false` 时先探测目标（latin-1 下逐个裸包 LSTAT，目标整条按 wire 还原字节；其余一轮远端 `test -e`），已存在直接按项失败。同一目录内的 move 优先走 SFTP rename（latin-1 下走裸包 RENAME，失败回落 shell `mv`）。底层 shell `cp`/`mv` 的 exec 命令串是 UTF-8 String，转义名字节的执行层边界见 `sftp/list` 节 M17 段。错误（整体）：参数缺失或非法；只读连接。
 
 ### sftp/move
 
