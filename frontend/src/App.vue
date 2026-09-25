@@ -155,7 +155,8 @@ import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardSta
 // 带描述的命令/flag/值候选；开关读 pluginStore（SettingsDialog 自治写入）。
 import { matchSpecLine, type CompletionLevel, type CompletionRow } from "./lib/completions/spec";
 import { COMPLETION_SPECS } from "./lib/completions/specs";
-import { clampTransferConcurrency, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
+import { hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
+import { clampTransferConcurrency, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
 import { mergeQuickCommandImport, parseQuickCommandImport } from "./lib/quickCommandImport";
 import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, normalizeLocalBatchTargets, quickPickCommandById, selectBatchTargets, summarizeBatchResults, toggleBatchTarget, type BatchSendSummary, type BatchSendTarget } from "./lib/batchSend";
@@ -369,6 +370,8 @@ interface SftpEntry {
   /** 属主用户/属组（includeOwner 时由 sidecar 返回；缺失显示 "-"）。 */
   owner?: string;
   group?: string;
+  /** M14-B：显示名不可忠实还原（wire 名含 U+FFFD）；传输仍走 uri。 */
+  lossy?: boolean;
 }
 
 interface SftpStatInfo {
@@ -562,6 +565,9 @@ const DOWNLOAD_CONFLICT_KEY = "ssh-download-conflict-policy";
 // 上传并发（P1-5，1..10，默认 3）与重复目标策略（rename 默认）：sidecar
 // preferences 权威存储，localStorage 仅作同步缓存（语义同下载偏好）。
 const TRANSFER_CONCURRENCY_KEY = "ssh-transfer-concurrency";
+const TRANSFER_MAX_ACTIVE_KEY = "ssh-transfer-max-active";
+const SFTP_COMPAT_MODE_KEY = "ssh-sftp-compat-mode";
+const SFTP_NAME_ENCODING_KEY = "ssh-sftp-name-encoding";
 const TRANSFER_DUPLICATE_KEY = "ssh-transfer-duplicate-policy";
 // 命令输入建议（P1-1）：开关 + 查询长度上下限；同一偏好链路持久化。
 const SUGGESTIONS_ENABLED_KEY = "ssh-history-suggestions-enabled";
@@ -574,6 +580,11 @@ const downloadUseDefaultState = ref(true);
 const downloadConflictState = ref<DownloadConflictPolicy>("rename");
 // 上传并发/重复策略与命令建议的内存权威态（hydratePrefs 时被 sidecar 值覆盖）。
 const transferConcurrencyState = ref(3);
+// M14-B 三键：会话级并发深度（1-8，默认 3）、老旧服务器兼容模式（默认关）、
+// 文件名显示编码（auto/latin-1，默认 auto）。权威态在此，sidecar preferences 同步。
+const transferMaxActiveState = ref(3);
+const sftpCompatModeState = ref(false);
+const sftpNameEncodingState = ref<SftpNameEncoding>("auto");
 const transferDuplicateState = ref<TransferDuplicatePolicy>("rename");
 const suggestionsEnabledState = ref(true);
 const suggestionMinCharsState = ref(2);
@@ -1168,6 +1179,12 @@ const transferPrefsAdapter = {
   loadDuplicatePolicy: loadTransferDuplicatePolicy,
   persistConcurrency: persistTransferConcurrency,
   persistDuplicatePolicy: persistTransferDuplicatePolicy,
+  loadMaxActive: loadTransferMaxActive,
+  persistMaxActive: persistTransferMaxActive,
+  loadCompatMode: loadSftpCompatMode,
+  persistCompatMode: persistSftpCompatMode,
+  loadNameEncoding: loadSftpNameEncoding,
+  persistNameEncoding: persistSftpNameEncoding,
 };
 const suggestionPrefsAdapter = {
   loadEnabled: loadSuggestionsEnabled,
@@ -6688,6 +6705,34 @@ function persistTransferDuplicatePolicy(value: TransferDuplicatePolicy) {
   void syncPrefs();
 }
 
+// M14-B 三键读写（设置弹窗经适配器调用）。
+function loadTransferMaxActive(): number {
+  return transferMaxActiveState.value;
+}
+
+function persistTransferMaxActive(value: number) {
+  transferMaxActiveState.value = clampTransferMaxActive(value);
+  void syncPrefs();
+}
+
+function loadSftpCompatMode(): boolean {
+  return sftpCompatModeState.value;
+}
+
+function persistSftpCompatMode(value: boolean) {
+  sftpCompatModeState.value = value;
+  void syncPrefs();
+}
+
+function loadSftpNameEncoding(): SftpNameEncoding {
+  return sftpNameEncodingState.value;
+}
+
+function persistSftpNameEncoding(value: SftpNameEncoding) {
+  sftpNameEncodingState.value = sanitizeNameEncoding(value);
+  void syncPrefs();
+}
+
 // 命令输入建议（P1-1）：设置弹窗经适配器读写，权威态在此。
 function loadSuggestionsEnabled(): boolean {
   return suggestionsEnabledState.value;
@@ -6727,6 +6772,12 @@ function cachePrefs() {
     else window.localStorage.removeItem(DOWNLOAD_CONFLICT_KEY);
     if (transferConcurrencyState.value !== 3) window.localStorage.setItem(TRANSFER_CONCURRENCY_KEY, String(transferConcurrencyState.value));
     else window.localStorage.removeItem(TRANSFER_CONCURRENCY_KEY);
+    if (transferMaxActiveState.value !== 3) window.localStorage.setItem(TRANSFER_MAX_ACTIVE_KEY, String(transferMaxActiveState.value));
+    else window.localStorage.removeItem(TRANSFER_MAX_ACTIVE_KEY);
+    if (sftpCompatModeState.value) window.localStorage.setItem(SFTP_COMPAT_MODE_KEY, "1");
+    else window.localStorage.removeItem(SFTP_COMPAT_MODE_KEY);
+    if (sftpNameEncodingState.value !== "auto") window.localStorage.setItem(SFTP_NAME_ENCODING_KEY, sftpNameEncodingState.value);
+    else window.localStorage.removeItem(SFTP_NAME_ENCODING_KEY);
     if (transferDuplicateState.value !== "rename") window.localStorage.setItem(TRANSFER_DUPLICATE_KEY, transferDuplicateState.value);
     else window.localStorage.removeItem(TRANSFER_DUPLICATE_KEY);
     if (!suggestionsEnabledState.value) window.localStorage.setItem(SUGGESTIONS_ENABLED_KEY, "0");
@@ -6749,6 +6800,9 @@ async function syncPrefs() {
       downloadConflictPolicy: downloadConflictState.value,
       transfer_concurrency: transferConcurrencyState.value,
       transfer_duplicate_policy: transferDuplicateState.value,
+      transfer_max_active: transferMaxActiveState.value,
+      sftp_compat_mode: sftpCompatModeState.value,
+      sftp_name_encoding: sftpNameEncodingState.value,
       history_suggestions_enabled: suggestionsEnabledState.value,
       history_suggestion_min_chars: suggestionMinCharsState.value,
       history_suggestion_max_chars: suggestionMaxCharsState.value,
@@ -6772,6 +6826,9 @@ async function hydratePrefsOnce() {
     downloadConflictState.value = sanitizeConflictPolicy(window.localStorage.getItem(DOWNLOAD_CONFLICT_KEY));
     transferConcurrencyState.value = clampTransferConcurrency(window.localStorage.getItem(TRANSFER_CONCURRENCY_KEY) ?? undefined);
     transferDuplicateState.value = sanitizeTransferDuplicatePolicy(window.localStorage.getItem(TRANSFER_DUPLICATE_KEY));
+    transferMaxActiveState.value = clampTransferMaxActive(window.localStorage.getItem(TRANSFER_MAX_ACTIVE_KEY) ?? undefined);
+    sftpCompatModeState.value = window.localStorage.getItem(SFTP_COMPAT_MODE_KEY) === "1";
+    sftpNameEncodingState.value = sanitizeNameEncoding(window.localStorage.getItem(SFTP_NAME_ENCODING_KEY));
     suggestionsEnabledState.value = window.localStorage.getItem(SUGGESTIONS_ENABLED_KEY) !== "0";
     suggestionMinCharsState.value = clampSuggestionMinChars(window.localStorage.getItem(SUGGESTIONS_MIN_CHARS_KEY));
     suggestionMaxCharsState.value = clampSuggestionMaxChars(window.localStorage.getItem(SUGGESTIONS_MAX_CHARS_KEY));
@@ -6792,6 +6849,9 @@ async function hydratePrefsOnce() {
       terminal_timestamp_format?: unknown;
       transfer_concurrency?: unknown;
       transfer_duplicate_policy?: unknown;
+      transfer_max_active?: unknown;
+      sftp_compat_mode?: unknown;
+      sftp_name_encoding?: unknown;
       history_suggestions_enabled?: unknown;
       history_suggestion_min_chars?: unknown;
       history_suggestion_max_chars?: unknown;
@@ -6819,6 +6879,9 @@ async function hydratePrefsOnce() {
     }
     if (prefs.transfer_concurrency !== undefined) transferConcurrencyState.value = clampTransferConcurrency(prefs.transfer_concurrency);
     if (prefs.transfer_duplicate_policy !== undefined) transferDuplicateState.value = sanitizeTransferDuplicatePolicy(prefs.transfer_duplicate_policy);
+    if (prefs.transfer_max_active !== undefined) transferMaxActiveState.value = clampTransferMaxActive(prefs.transfer_max_active);
+    if (prefs.sftp_compat_mode !== undefined) sftpCompatModeState.value = prefs.sftp_compat_mode === true;
+    if (prefs.sftp_name_encoding !== undefined) sftpNameEncodingState.value = sanitizeNameEncoding(prefs.sftp_name_encoding);
     if (prefs.history_suggestions_enabled !== undefined) suggestionsEnabledState.value = prefs.history_suggestions_enabled === true;
     if (prefs.history_suggestion_min_chars !== undefined) suggestionMinCharsState.value = clampSuggestionMinChars(prefs.history_suggestion_min_chars);
     if (prefs.history_suggestion_max_chars !== undefined) suggestionMaxCharsState.value = clampSuggestionMaxChars(prefs.history_suggestion_max_chars);
@@ -8192,9 +8255,12 @@ async function commitSymlink() {
 
 /** symlink 行的 tooltip：`→ target`（target 由列表加载后的只读解析填充）。 */
 function linkTargetTitle(entry: SftpEntry): string | undefined {
-  if (entry.kind !== "symlink") return undefined;
-  const target = linkTargets.value[entry.uri];
-  return target ? `→ ${target}` : undefined;
+  const target = entry.kind === "symlink" ? linkTargets.value[entry.uri] : undefined;
+  const linkTitle = target ? `→ ${target}` : undefined;
+  // M14-B：lossy 行名（wire 含 U+FFFD）在悬停提示里说明字节不可还原，
+  // 并指向设置 → 传输的文件名编码偏好。
+  if (entry.lossy || hasLossyChars(entry.name)) return [linkTitle, t("sftpName.lossyTitle")].filter(Boolean).join(" · ");
+  return linkTitle;
 }
 
 /** 列表加载后解析 symlink 条目的指向（只读 readlink，并发、失败静默——

@@ -21,6 +21,8 @@ export interface SftpSanitizedEntry {
   owner?: string;
   /** 属组；缺省即"未知"（渲染 "-"）。 */
   group?: string;
+  /** M14-B：显示名不可忠实还原（wire 名含 U+FFFD）时由 sidecar 标记。 */
+  lossy?: boolean;
 }
 
 const KNOWN_KINDS: readonly SftpEntryKind[] = ["file", "directory", "symlink", "other"];
@@ -98,6 +100,7 @@ export function sanitizeSftpEntries(value: unknown): SftpSanitizedEntry[] {
       permissions: typeof record.permissions === "string" ? record.permissions : undefined,
       owner: optionalString(record.owner),
       group: optionalString(record.group),
+      lossy: record.lossy === true ? true : undefined,
     });
   }
   return entries;

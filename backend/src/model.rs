@@ -837,6 +837,11 @@ pub struct SftpEntry {
     pub owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// 显示名不可忠实还原（M14-B）：wire 名含 U+FFFD（上游 lossy 解码已把
+    /// 非法字节替换掉）。传输始终走 wire/uri；true 时 UI 提示该名字节级
+    /// 不可还原，可在设置 → 传输切换文件名编码后重列。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lossy: bool,
 }
 
 #[derive(Debug, Deserialize)]

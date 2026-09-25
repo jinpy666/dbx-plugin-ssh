@@ -52,6 +52,17 @@ export function clampTransferConcurrency(value: unknown, fallback = 3): number {
 }
 
 /**
+ * 会话级传输并发深度（M14-B）：1..8，非法值回落 3。与批次队列的
+ * clampTransferConcurrency（1..10）是两个维度：本值约束同一 SSH 会话
+ * 同时活跃的传输任务数（sidecar 权威），批次值约束前端批量派发。
+ */
+export function clampTransferMaxActive(value: unknown, fallback = 3): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(8, Math.max(1, Math.floor(parsed)));
+}
+
+/**
  * 下一个可派发的排队项；没有空槽或没有可跑项时返回 null。
  * 全局槽位用 `runningCount` 传入（running + paused 之和），方向均衡只在
  * 有多个方向可跑时影响取件顺序，不改变全局上限。

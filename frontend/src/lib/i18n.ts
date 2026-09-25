@@ -4956,6 +4956,98 @@ for (const locale of Object.keys(suggestionTransferMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...suggestionTransferMessages[locale] };
 }
 
+// —— SFTP 传输管线（M14-B）：会话级并发深度 / 老旧服务器兼容模式 /
+// 文件名编码。七语齐套，缺一即被 workbenchMessageTable 的键集对比测试拦下。
+const sftpPipelineMessages: Record<string, Record<string, string>> = {
+  en: {
+    "transferCfg.pipelineTitle": "Transfer pipeline",
+    "transferCfg.maxActive": "Active transfers per session",
+    "transferCfg.maxActiveHint": "How many transfers may run at once on one SSH session (1-8, default 3). Changing it applies to new tasks; running ones finish at the previous depth.",
+    "transferCfg.compatMode": "Legacy server compatibility",
+    "transferCfg.compatModeHint": "For old OpenSSH/embedded sftp-servers: disables non-standard extension requests and forces one transfer at a time. Takes effect on new SFTP sessions (reconnect to apply).",
+    "transferCfg.nameEncoding": "File name encoding",
+    "transferCfg.nameEncodingHint": "auto tries UTF-8 first, then latin-1 for non-UTF-8 names; latin-1 always decodes names byte-wise. Transfers always use the server's raw bytes; the choice affects display and listing only.",
+    "transferCfg.encoding.auto": "Auto (UTF-8, then latin-1)",
+    "transferCfg.encoding.latin-1": "Latin-1 (ISO-8859-1)",
+    "sftpName.lossyTitle": "This name could not be decoded faithfully (non-UTF-8 server). Transfers still use the server's raw bytes; try the file name encoding option in Settings → Transfer.",
+  },
+  "zh-CN": {
+    "transferCfg.pipelineTitle": "传输管线",
+    "transferCfg.maxActive": "单会话并发传输数",
+    "transferCfg.maxActiveHint": "同一 SSH 会话同时进行的传输任务上限（1-8，默认 3）。改动即时生效：新任务按新深度启动，进行中的任务按旧深度自然完成。",
+    "transferCfg.compatMode": "老旧服务器兼容模式",
+    "transferCfg.compatModeHint": "面向老旧 OpenSSH/嵌入式 sftp-server：禁用非标准扩展请求并把并发降为 1。对新建的 SFTP 会话生效（重连后应用）。",
+    "transferCfg.nameEncoding": "文件名编码",
+    "transferCfg.nameEncodingHint": "auto 先按 UTF-8 解码，无效字节回退 latin-1；latin-1 始终按字节解码。传输始终使用服务器原始字节，此选项只影响列表显示。",
+    "transferCfg.encoding.auto": "自动（UTF-8 优先，回退 latin-1）",
+    "transferCfg.encoding.latin-1": "Latin-1（ISO-8859-1）",
+    "sftpName.lossyTitle": "该文件名无法忠实解码（非 UTF-8 服务器）。传输仍使用服务器原始字节；可在 设置 → 传输 中尝试文件名编码选项。",
+  },
+  "zh-TW": {
+    "transferCfg.pipelineTitle": "傳輸管線",
+    "transferCfg.maxActive": "單一工作階段並行傳輸數",
+    "transferCfg.maxActiveHint": "同一 SSH 工作階段同時進行的傳輸上限（1-8，預設 3）。變更立即生效：新任務依新深度啟動，進行中的任務依舊深度完成。",
+    "transferCfg.compatMode": "老舊伺服器相容模式",
+    "transferCfg.compatModeHint": "面向老舊 OpenSSH/嵌入式 sftp-server：停用非標準擴充請求並將並行降為 1。對新建的 SFTP 工作階段生效（重新連線後套用）。",
+    "transferCfg.nameEncoding": "檔名編碼",
+    "transferCfg.nameEncodingHint": "auto 先以 UTF-8 解碼，無效位元組回退 latin-1；latin-1 一律逐位元組解碼。傳輸一律使用伺服器原始位元組，此選項僅影響列表顯示。",
+    "transferCfg.encoding.auto": "自動（UTF-8 優先，回退 latin-1）",
+    "transferCfg.encoding.latin-1": "Latin-1（ISO-8859-1）",
+    "sftpName.lossyTitle": "此檔名無法忠實解碼（非 UTF-8 伺服器）。傳輸仍使用伺服器原始位元組；可在 設定 → 傳輸 嘗試檔名編碼選項。",
+  },
+  es: {
+    "transferCfg.pipelineTitle": "Canal de transferencia",
+    "transferCfg.maxActive": "Transferencias activas por sesión",
+    "transferCfg.maxActiveHint": "Cuántas transferencias pueden ejecutarse a la vez en una sesión SSH (1-8, por defecto 3). El cambio afecta a las tareas nuevas; las que ya corren terminan con la profundidad anterior.",
+    "transferCfg.compatMode": "Compatibilidad con servidores antiguos",
+    "transferCfg.compatModeHint": "Para OpenSSH antiguos o sftp-servers integrados: desactiva las peticiones de extensión no estándar y fuerza una transferencia cada vez. Se aplica a las nuevas sesiones SFTP (reconecta para activarlo).",
+    "transferCfg.nameEncoding": "Codificación de nombres de archivo",
+    "transferCfg.nameEncodingHint": "auto prueba primero UTF-8 y recurre a latin-1 para nombres no UTF-8; latin-1 siempre decodifica byte a byte. Las transferencias usan siempre los bytes originales del servidor; la opción afecta solo a la lista.",
+    "transferCfg.encoding.auto": "Automático (UTF-8 y luego latin-1)",
+    "transferCfg.encoding.latin-1": "Latin-1 (ISO-8859-1)",
+    "sftpName.lossyTitle": "Este nombre no pudo decodificarse con fidelidad (servidor no UTF-8). Las transferencias siguen usando los bytes originales; prueba la codificación en Ajustes → Transferencia.",
+  },
+  it: {
+    "transferCfg.pipelineTitle": "Pipeline di trasferimento",
+    "transferCfg.maxActive": "Trasferimenti attivi per sessione",
+    "transferCfg.maxActiveHint": "Quanti trasferimenti possono girare contemporaneamente su una sessione SSH (1-8, predefinito 3). La modifica vale per le nuove attività; quelle in corso terminano alla profondità precedente.",
+    "transferCfg.compatMode": "Compatibilità server legacy",
+    "transferCfg.compatModeHint": "Per vecchi OpenSSH/sftp-server embedded: disattiva le richieste di estensione non standard e forza un trasferimento alla volta. Vale per le nuove sessioni SFTP (riconnetti per applicarlo).",
+    "transferCfg.nameEncoding": "Codifica dei nomi file",
+    "transferCfg.nameEncodingHint": "auto prova prima UTF-8 e ricorre a latin-1 per i nomi non UTF-8; latin-1 decodifica sempre byte per byte. I trasferimenti usano sempre i byte originali del server; l'opzione riguarda solo l'elenco.",
+    "transferCfg.encoding.auto": "Automatico (UTF-8, poi latin-1)",
+    "transferCfg.encoding.latin-1": "Latin-1 (ISO-8859-1)",
+    "sftpName.lossyTitle": "Nome non decodificabile in modo fedele (server non UTF-8). I trasferimenti usano comunque i byte originali; prova la codifica in Impostazioni → Trasferimento.",
+  },
+  ja: {
+    "transferCfg.pipelineTitle": "転送パイプライン",
+    "transferCfg.maxActive": "セッションあたりの同時転送数",
+    "transferCfg.maxActiveHint": "1 つの SSH セッションで同時に実行できる転送数（1-8、既定 3）。変更はすぐに有効：新しいタスクは新しい深度で開始し、実行中のタスクは旧深度のまま完了します。",
+    "transferCfg.compatMode": "レガシーサーバー互換モード",
+    "transferCfg.compatModeHint": "古い OpenSSH や組み込み sftp-server 向け：非標準の拡張要求を無効化し、同時転送を 1 に制限します。新しい SFTP セッションに適用（再接続で反映）。",
+    "transferCfg.nameEncoding": "ファイル名エンコーディング",
+    "transferCfg.nameEncodingHint": "auto は UTF-8 を優先し、無効なバイトは latin-1 にフォールバック。latin-1 は常にバイト単位でデコードします。転送は常にサーバーの生バイトを使用し、この設定は一覧表示にのみ影響します。",
+    "transferCfg.encoding.auto": "自動（UTF-8 優先、latin-1 にフォールバック）",
+    "transferCfg.encoding.latin-1": "Latin-1（ISO-8859-1）",
+    "sftpName.lossyTitle": "このファイル名は忠実にデコードできませんでした（非 UTF-8 サーバー）。転送はサーバーの生バイトを使用します。設定 → 転送 のファイル名エンコーディングを試してください。",
+  },
+  "pt-BR": {
+    "transferCfg.pipelineTitle": "Pipeline de transferência",
+    "transferCfg.maxActive": "Transferências ativas por sessão",
+    "transferCfg.maxActiveHint": "Quantas transferências podem rodar ao mesmo tempo em uma sessão SSH (1-8, padrão 3). A mudança vale para novas tarefas; as em andamento terminam com a profundidade anterior.",
+    "transferCfg.compatMode": "Compatibilidade com servidores legados",
+    "transferCfg.compatModeHint": "Para OpenSSH antigos ou sftp-servers embarcados: desativa solicitações de extensão não padrão e força uma transferência por vez. Vale para novas sessões SFTP (reconecte para aplicar).",
+    "transferCfg.nameEncoding": "Codificação de nomes de arquivo",
+    "transferCfg.nameEncodingHint": "auto tenta primeiro UTF-8 e recorre a latin-1 para nomes não UTF-8; latin-1 sempre decodifica byte a byte. As transferências sempre usam os bytes originais do servidor; a opção afeta apenas a listagem.",
+    "transferCfg.encoding.auto": "Automático (UTF-8, depois latin-1)",
+    "transferCfg.encoding.latin-1": "Latin-1 (ISO-8859-1)",
+    "sftpName.lossyTitle": "Este nome não pôde ser decodificado com fidelidade (servidor não UTF-8). As transferências usam os bytes originais; tente a codificação em Configurações → Transferência.",
+  },
+};
+for (const locale of Object.keys(sftpPipelineMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...sftpPipelineMessages[locale] };
+}
+
 // —— Telnet 会话（P2-3）：明文协议工作台入口。七语齐套，缺一即被
 // workbenchMessageTable 的键集对比测试拦下。安全红线文案（security）必须
 // 出现在连接表单：Telnet 凭据明文传输。

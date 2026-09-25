@@ -140,6 +140,49 @@ fn sanitize_rdp_certificate_policy(value: &Value) -> Option<&'static str> {
     }
 }
 
+/// 会话级传输并发深度（M14-B）：1..=8，缺省 3（与历史硬编码一致）。
+pub const TRANSFER_MAX_ACTIVE_MIN: u64 = 1;
+pub const TRANSFER_MAX_ACTIVE_MAX: u64 = 8;
+pub const TRANSFER_MAX_ACTIVE_DEFAULT: u64 = 3;
+
+/// 传输并发深度：超界钳制、非法回落默认；键不存在返回 None（上层用默认）。
+pub fn sanitize_transfer_max_active(value: &Value) -> u64 {
+    sanitize_u64_clamped(
+        value,
+        TRANSFER_MAX_ACTIVE_MIN,
+        TRANSFER_MAX_ACTIVE_MAX,
+        TRANSFER_MAX_ACTIVE_DEFAULT,
+    )
+}
+
+/// 读取并发深度（缺省回默认值）。sidecar 每次任务启动时现读现用——
+/// 改动即时生效，进行中的任务按原深度自然完成。
+pub fn transfer_max_active(data_dir: &Path) -> u64 {
+    let prefs = load_preferences(data_dir);
+    prefs
+        .get("transfer_max_active")
+        .map(sanitize_transfer_max_active)
+        .unwrap_or(TRANSFER_MAX_ACTIVE_DEFAULT)
+}
+
+/// 老旧服务器兼容模式（M14-B）：缺省关。开启后 SFTP 会话不做流水线并发、
+/// 传输深度强制 1，并避开非标准扩展请求。
+pub fn sftp_compat_mode(data_dir: &Path) -> bool {
+    load_preferences(data_dir)
+        .get("sftp_compat_mode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// 读取文件名显示编码偏好（auto/latin-1，缺省 auto）。
+pub fn sftp_name_encoding(data_dir: &Path) -> crate::sftp_name::NameEncoding {
+    load_preferences(data_dir)
+        .get("sftp_name_encoding")
+        .and_then(Value::as_str)
+        .and_then(crate::sftp_name::NameEncoding::parse)
+        .unwrap_or(crate::sftp_name::NameEncoding::Auto)
+}
+
 /// 数值偏好钳制：非负整数夹进 [min, max]，超界取边界、非法取 fallback。
 fn sanitize_u64_clamped(value: &Value, min: u64, max: u64, fallback: u64) -> u64 {
     let raw = match value {
@@ -245,6 +288,26 @@ pub fn load_preferences(data_dir: &Path) -> Value {
         prefs.insert(
             "transfer_duplicate_policy".to_string(),
             Value::String(policy.to_string()),
+        );
+    }
+    // 会话级传输并发深度（M14-B）与老旧服务器兼容模式、文件名编码偏好。
+    if map.contains_key("transfer_max_active") {
+        prefs.insert(
+            "transfer_max_active".to_string(),
+            Value::from(sanitize_transfer_max_active(&map["transfer_max_active"])),
+        );
+    }
+    if let Some(enabled) = map.get("sftp_compat_mode").and_then(Value::as_bool) {
+        prefs.insert("sftp_compat_mode".to_string(), Value::Bool(enabled));
+    }
+    if let Some(encoding) = map
+        .get("sftp_name_encoding")
+        .and_then(Value::as_str)
+        .and_then(crate::sftp_name::NameEncoding::parse)
+    {
+        prefs.insert(
+            "sftp_name_encoding".to_string(),
+            Value::String(encoding.as_str().to_string()),
         );
     }
     // 命令输入建议（P1-1）：开关（默认开）与查询长度上下限。
@@ -418,6 +481,31 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
         map.insert(
             "transfer_duplicate_policy".to_string(),
             Value::String(policy.to_string()),
+        );
+    }
+    // M14-B 三键：并发深度钳制到 1..=8；兼容模式布尔；编码走白名单。
+    if params.get("transfer_max_active").is_some() {
+        map.insert(
+            "transfer_max_active".to_string(),
+            Value::from(sanitize_transfer_max_active(&params["transfer_max_active"])),
+        );
+    }
+    if let Some(value) = params.get("sftp_compat_mode") {
+        let enabled = value
+            .as_bool()
+            .ok_or_else(|| "sftp_compat_mode must be a boolean".to_string())?;
+        map.insert("sftp_compat_mode".to_string(), Value::Bool(enabled));
+    }
+    if let Some(value) = params.get("sftp_name_encoding") {
+        let encoding = crate::sftp_name::NameEncoding::parse(
+            value
+                .as_str()
+                .ok_or_else(|| "sftp_name_encoding must be auto or latin-1".to_string())?,
+        )
+        .ok_or_else(|| "sftp_name_encoding must be auto or latin-1".to_string())?;
+        map.insert(
+            "sftp_name_encoding".to_string(),
+            Value::String(encoding.as_str().to_string()),
         );
     }
     if let Some(value) = params.get("history_suggestions_enabled") {
@@ -756,6 +844,69 @@ mod tests {
         let prefs = load_preferences(data_dir.path());
         assert_eq!(prefs["rdp_use_nla"], true);
         assert_eq!(prefs["rdp_certificate_policy"], "strict");
+    }
+
+    #[test]
+    fn sftp_pipeline_prefs_clamp_and_roundtrip() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // 空偏好：三键都不出现（前端按缺省处理），读取器回默认值。
+        assert!(load_preferences(data_dir.path())
+            .get("transfer_max_active")
+            .is_none());
+        assert!(load_preferences(data_dir.path())
+            .get("sftp_compat_mode")
+            .is_none());
+        assert!(load_preferences(data_dir.path())
+            .get("sftp_name_encoding")
+            .is_none());
+        assert_eq!(
+            transfer_max_active(data_dir.path()),
+            TRANSFER_MAX_ACTIVE_DEFAULT
+        );
+        assert!(!sftp_compat_mode(data_dir.path()));
+        assert_eq!(
+            sftp_name_encoding(data_dir.path()),
+            crate::sftp_name::NameEncoding::Auto
+        );
+        // 写入 + 读回：深度超界钳制、非法编码拒绝（不落盘污染）。
+        save_preferences(
+            data_dir.path(),
+            &json!({
+                "transfer_max_active": 99,
+                "sftp_compat_mode": true,
+                "sftp_name_encoding": "latin-1",
+            }),
+        )
+        .expect("save");
+        let prefs = load_preferences(data_dir.path());
+        assert_eq!(prefs["transfer_max_active"], 8);
+        assert_eq!(prefs["sftp_compat_mode"], true);
+        assert_eq!(prefs["sftp_name_encoding"], "latin-1");
+        assert_eq!(
+            transfer_max_active(data_dir.path()),
+            TRANSFER_MAX_ACTIVE_MAX
+        );
+        assert!(sftp_compat_mode(data_dir.path()));
+        assert_eq!(
+            sftp_name_encoding(data_dir.path()),
+            crate::sftp_name::NameEncoding::Latin1
+        );
+        // 非法形状报错。
+        assert!(save_preferences(data_dir.path(), &json!({ "sftp_compat_mode": "yes" })).is_err());
+        assert!(
+            save_preferences(data_dir.path(), &json!({ "sftp_name_encoding": "gbk" })).is_err()
+        );
+        assert!(save_preferences(data_dir.path(), &json!({ "sftp_name_encoding": 7 })).is_err());
+        // 部分更新只改出现的键。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "sftp_compat_mode": false, "sftp_name_encoding": "auto" }),
+        )
+        .expect("partial");
+        let prefs = load_preferences(data_dir.path());
+        assert_eq!(prefs["transfer_max_active"], 8);
+        assert_eq!(prefs["sftp_compat_mode"], false);
+        assert_eq!(prefs["sftp_name_encoding"], "auto");
     }
 
     #[test]

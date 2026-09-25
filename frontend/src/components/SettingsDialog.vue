@@ -21,6 +21,7 @@ import { loadTerminalFontOverride } from "../lib/terminalFont";
 import { MIB, mibField, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
 import { DOWNLOAD_CONFLICT_POLICIES, type DownloadConflictPolicy } from "../lib/downloadPrefs";
 import { TRANSFER_DUPLICATE_POLICIES, type TransferDuplicatePolicy } from "../lib/transferQueue";
+import { SFTP_NAME_ENCODINGS, type SftpNameEncoding } from "../lib/sftpName";
 import {
   allAppearanceProfiles,
   applySchemeToTerminalTheme,
@@ -295,6 +296,13 @@ const props = defineProps<{
     loadDuplicatePolicy(): TransferDuplicatePolicy;
     persistConcurrency(value: number): void;
     persistDuplicatePolicy(value: TransferDuplicatePolicy): void;
+    /** M14-B：会话级并发深度 / 兼容模式 / 文件名编码。 */
+    loadMaxActive(): number;
+    loadCompatMode(): boolean;
+    loadNameEncoding(): SftpNameEncoding;
+    persistMaxActive(value: number): void;
+    persistCompatMode(value: boolean): void;
+    persistNameEncoding(value: SftpNameEncoding): void;
   };
   /** 命令输入建议（开关 + 查询长度上下限）的读写适配器，权威态同在 App。 */
   suggestionPrefs: {
@@ -388,6 +396,10 @@ const downloadConflictDraft = ref<DownloadConflictPolicy>("rename");
 // 上传并发（1..10，默认 3）与重复目标策略（P1-5）草稿；建议设置草稿（P1-1）。
 const transferConcurrencyDraft = ref(String(props.transferPrefs.loadConcurrency()));
 const transferDuplicateDraft = ref<TransferDuplicatePolicy>(props.transferPrefs.loadDuplicatePolicy());
+// M14-B：会话并发深度（1-8）/ 兼容模式 / 文件名编码草稿。
+const transferMaxActiveDraft = ref(String(props.transferPrefs.loadMaxActive()));
+const sftpCompatModeDraft = ref(props.transferPrefs.loadCompatMode());
+const sftpNameEncodingDraft = ref<SftpNameEncoding>(props.transferPrefs.loadNameEncoding());
 const suggestionsEnabledDraft = ref(props.suggestionPrefs.loadEnabled());
 const suggestionMinCharsDraft = ref(String(props.suggestionPrefs.loadMinChars()));
 const suggestionMaxCharsDraft = ref(String(props.suggestionPrefs.loadMaxChars()));
@@ -769,6 +781,9 @@ async function reloadSettings() {
   downloadConflictDraft.value = props.downloadPrefs.loadConflict();
   transferConcurrencyDraft.value = String(props.transferPrefs.loadConcurrency());
   transferDuplicateDraft.value = props.transferPrefs.loadDuplicatePolicy();
+  transferMaxActiveDraft.value = String(props.transferPrefs.loadMaxActive());
+  sftpCompatModeDraft.value = props.transferPrefs.loadCompatMode();
+  sftpNameEncodingDraft.value = props.transferPrefs.loadNameEncoding();
   suggestionsEnabledDraft.value = props.suggestionPrefs.loadEnabled();
   suggestionMinCharsDraft.value = String(props.suggestionPrefs.loadMinChars());
   suggestionMaxCharsDraft.value = String(props.suggestionPrefs.loadMaxChars());
@@ -1056,6 +1071,9 @@ async function saveSettings() {
     props.downloadPrefs.persistConflict(downloadConflictDraft.value);
     props.transferPrefs.persistConcurrency(Number.parseInt(transferConcurrencyDraft.value, 10) || 3);
     props.transferPrefs.persistDuplicatePolicy(transferDuplicateDraft.value);
+    props.transferPrefs.persistMaxActive(Number.parseInt(transferMaxActiveDraft.value, 10) || 3);
+    props.transferPrefs.persistCompatMode(sftpCompatModeDraft.value);
+    props.transferPrefs.persistNameEncoding(sftpNameEncodingDraft.value);
     props.suggestionPrefs.persistEnabled(suggestionsEnabledDraft.value);
     props.suggestionPrefs.persistMinChars(Number.parseInt(suggestionMinCharsDraft.value, 10) || 2);
     props.suggestionPrefs.persistMaxChars(Number.parseInt(suggestionMaxCharsDraft.value, 10) || 64);
@@ -1603,6 +1621,27 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               </Select>
             </label>
             <p class="muted settings-note">{{ t("transferCfg.duplicatePolicyHint") }}</p>
+            <h3 class="settings-section-title">{{ t("transferCfg.pipelineTitle") }}</h3>
+            <label class="settings-field">
+              <span>{{ t("transferCfg.maxActive") }}</span>
+              <input v-model="transferMaxActiveDraft" type="number" min="1" max="8" step="1" @change="transferMaxActiveDraft = String(Math.min(8, Math.max(1, Number.parseInt(transferMaxActiveDraft, 10) || 3)))" />
+            </label>
+            <p class="muted settings-note">{{ t("transferCfg.maxActiveHint") }}</p>
+            <label class="settings-field settings-switch-row">
+              <Switch v-model="sftpCompatModeDraft" size="sm" />
+              <span>{{ t("transferCfg.compatMode") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("transferCfg.compatModeHint") }}</p>
+            <label class="settings-field">
+              <span>{{ t("transferCfg.nameEncoding") }}</span>
+              <Select :model-value="sftpNameEncodingDraft" @update:model-value="(v) => (sftpNameEncodingDraft = String(v) as SftpNameEncoding)">
+                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="encoding in SFTP_NAME_ENCODINGS" :key="encoding" :value="encoding">{{ t(`transferCfg.encoding.${encoding}`) }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <p class="muted settings-note">{{ t("transferCfg.nameEncodingHint") }}</p>
             </div>
 
             <!-- 终端（对标 Tabby「Terminal」页）：渲染 / 键盘 / 鼠标 / 剪贴板 / 声音五组。

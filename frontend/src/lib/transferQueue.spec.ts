@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   clampTransferConcurrency,
+  clampTransferMaxActive,
   nextRunnable,
   runTransfers,
   transferSlotsInUse,
@@ -95,6 +96,18 @@ describe("clampTransferConcurrency", () => {
     expect(clampTransferConcurrency(11)).toBe(10);
     expect(clampTransferConcurrency(Number.NaN)).toBe(3);
     expect(clampTransferConcurrency(4.7)).toBe(4);
+  });
+});
+
+describe("clampTransferMaxActive", () => {
+  it("clamps into 1..8 with a default of 3", () => {
+    expect(clampTransferMaxActive(3)).toBe(3);
+    expect(clampTransferMaxActive(0)).toBe(1);
+    expect(clampTransferMaxActive(-5)).toBe(1);
+    expect(clampTransferMaxActive(9)).toBe(8);
+    expect(clampTransferMaxActive(Number.NaN)).toBe(3);
+    expect(clampTransferMaxActive(2.9)).toBe(2);
+    expect(clampTransferMaxActive("4")).toBe(4);
   });
 });
 

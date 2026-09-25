@@ -510,6 +510,17 @@ const highlightRuleViews = () => [...highlightRulesState].sort((a, b) => a.creat
 const mcpSettingsState = { execPermissionMode: "autonomous", connectionScope: [] as string[] };
 // 插件级 UI 偏好（local/preferences/get|set）：镜像 sidecar preferences.json 的合并语义。
 const localPrefsState = { downloadDir: "", downloadUseDefaultDir: true, downloadConflictPolicy: "rename", localShell: "", localShellIntegration: true, auto_record: false };
+// M14-B 三键镜像（缺省与 sidecar 一致：深度 3 / 兼容关 / 编码 auto）。
+const localPrefsState = {
+  downloadDir: "",
+  downloadUseDefaultDir: true,
+  downloadConflictPolicy: "rename",
+  localShell: "",
+  localShellIntegration: true,
+  transfer_max_active: 3,
+  sftp_compat_mode: false,
+  sftp_name_encoding: "auto",
+};
 // 镜像并行批次 ssh/audit/list 的真实形状（AuditEntry：tsMs/tool/connectionId/
 // gate/approval/outcome/exitCode/durationMs/mode/command/output/error，
 // 0.4.77 起带 command/output 尾部）；末条保留计划 §1.1 旧形状（ts 秒 + kind +
@@ -841,6 +852,9 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     if (typeof input.downloadUseDefaultDir === "boolean") localPrefsState.downloadUseDefaultDir = input.downloadUseDefaultDir;
     if (typeof input.downloadConflictPolicy === "string" && ["rename", "ask", "overwrite"].includes(input.downloadConflictPolicy)) localPrefsState.downloadConflictPolicy = input.downloadConflictPolicy;
     if (typeof input.auto_record === "boolean") localPrefsState.auto_record = input.auto_record;
+    if (input.transfer_max_active !== undefined) localPrefsState.transfer_max_active = Math.min(8, Math.max(1, Math.floor(Number(input.transfer_max_active) || 3)));
+    if (typeof input.sftp_compat_mode === "boolean") localPrefsState.sftp_compat_mode = input.sftp_compat_mode;
+    if (input.sftp_name_encoding === "auto" || input.sftp_name_encoding === "latin-1") localPrefsState.sftp_name_encoding = input.sftp_name_encoding;
     result = { ...localPrefsState };
   }
   else if (method === "sftp/upload/start") result = { taskId: `visual-upload-${++fixtureUploadCount.value}`, chunkSize: 262144 };
