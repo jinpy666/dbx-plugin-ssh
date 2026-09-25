@@ -425,6 +425,8 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 - **copy/move**：`sftp_copy`/`sftp_move` 沿工作台 M17-A 同模式接入裸包车道（路径口径为**显示形式**，与 MCP 面 rename 一致）：`overwrite=false` 的覆盖预检逐个裸包 LSTAT，同目录 move 的 RENAME 快路径走裸包 RENAME（SFTPv3 不覆盖已存在目标，失败回落 shell `mv`）。**执行层边界（登记，同工作台）**：远端 `cp -a --`/`mv -f --` 的 exec 命令串是 UTF-8 String，服务器原始字节经 shell 参数不可控——copy 与跨目录 move 的执行层保持字面量发送：clean 名（纯 ASCII）行为不变，非 ASCII 名由服务器侧报错。
 - **回退策略与 auto 不变性**：读操作（read_file/list_dir）裸包路径任何失败回退高层（读安全）；写操作（stat/exists/write_file/chmod/copy/move 的操作阶段）仅裸包客户端**建立**失败回退，操作错误原样上抛不重试；`auto` 模式下全部工具行为不变。每工具均有 latin-1 往返闭环单测（内存双工桩，字节级断言）。
 
+**M19 起 MCP 传输工具 `sftp_upload`/`sftp_download` 完成 latin-1 字节保真迁移（编码保真家族收尾）**：沿用 M17-B/M18 同一模式（显示路径整条 `latin1_encode_display` 还原字节 + 连接级裸包客户端），latin-1 生效时——`sftp_upload` 走裸包 OPEN(CREAT|WRITE|TRUNC) 截断直写 + WRITE 32 KiB 分块（**选型**：沿既有 MCP 传输直写语义，无工作台上传族的 `.dbx-part` 暂存需求；`overwrite=false` 的覆盖预检走裸包 LSTAT，与写入同一字节口径，复用 M18 `sftp_write_file` 直写核心）；`sftp_download` 走裸包 OPEN(READ)+READ 分块（读取量以 `maxDownloadBytes+1` 探测封顶，超限沿既有 post-read 口径报错；目录的 OPEN 被服务器拒绝后落回高层，由高层给出与 auto 分支一致的「is a directory」错误）。**往返闭环**：upload 响应的 `remotePath` 为显示形式，原样回传给 `sftp_download` 即命中同一组服务器字节（单测以内存双工桩断言两侧 OPEN 帧路径字节一致 + 载荷逐字节回收）。回退策略沿先例：download 读侧裸包路径任何失败回退高层重读（读安全），upload 写侧仅裸包客户端**建立**失败回退，操作错误原样上抛；`auto` 模式下两个工具行为完全不变（本地路径校验、传输根约束、敏感路径拒绝、大小上限均先于拨号，不受影响）。
+
 
 `includeOwner: true` 时，每个条目可携带可选 `owner`、`group` 字符串字段（属主用户、属组）：优先服务器直接提供的名字（SFTPv4+ 属主属性），数字 uid/gid 次之，SFTPv3 服务器（如 OpenSSH）再经一次只读 `ls -l` 往返升级为名字——该次往返失败（无 shell、无 `ls`、超时）时静默保留数字或省略字段，不影响列表本身。字段缺失即"未知"，由 UI 显示 `-`。省略 `includeOwner`（或为 `false`）时不输出这两个字段，与历史响应完全一致。`sudo/listDir` 恒定返回 `owner`/`group`（`ls -la` 解析附带，无额外往返）。
 
@@ -449,6 +451,8 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 | `path` | string | 是 | 远端文件路径 |
 | `offset` | number | 否 | 起始字节偏移，默认 `0`；省略或非法值按 `0` 处理 |
 | `maxBytes` | number | 否 | 本次最多返回的字节数，默认 256 KiB，上限 1 MiB（至少为 1） |
+
+**文件名编码（M19 收口）**：生效编码为 `latin-1` 时 `path` 是整条 wire 形式（列表回传的 `%XX` 转义路径），sidecar 整条还原为服务器字节后走裸包 READ（与下载分片同一车道）；`auto` 按 UTF-8 走高层客户端。
 
 返回 `{ dataBase64, truncated }`：内容 base64 编码；返回字节数达到 `maxBytes` 且文件还有剩余时 `truncated` 为 `true`，调用方以 `offset += 返回字节数` 续读。`offset` 在文件末尾或超出文件大小时返回空内容且 `truncated: false`（不报错，与 `sudo/readFile` 的「offset 超界报错」语义不同——SFTP 侧以空读表示 EOF）。错误：路径不存在或不是普通文件；无读取权限。
 

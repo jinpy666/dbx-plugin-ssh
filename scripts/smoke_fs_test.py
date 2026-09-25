@@ -1571,6 +1571,9 @@ def main() -> None:
         # 显示文本（latin-1 域内：U+00E9 按 latin1_encode_display 映回 0xE9 字节）。
         enc_name_display = "caf\u00e9.txt"
         enc_name_renamed = "caf\u00e9-renamed.txt"
+        # M19 增量②：符号链接三命令的 0xE9 字节链接名（显示形式 + wire 形式）。
+        enc_link_display = "caf\u00e9-link"
+        enc_link_wire = "caf%E9-link"
         # 列表回传的 wire 形式（escape_wire 的 %XX 转义）。
         enc_name_wire = "caf%E9.txt"
         enc_name_renamed_wire = "caf%E9-renamed.txt"
@@ -1708,6 +1711,41 @@ def main() -> None:
                 raise AssertionError(f"deleted file still exists: {gone!r}")
             print(f"    renamed to {enc_name_renamed!r}, deleted via wire path")
 
+        def case_latin1_symlink_roundtrip():
+            # M19 增量②：latin-1 组补符号链接三命令。symlink-create 的链接
+            # 名是 0xE9 字节名（wire 目录前缀 + 用户新输入显示末段的落盘分
+            # 工）；symlink-read 传整条 wire 路径，指向文本 latin-1 显示解
+            # 码；symlink-update 用显示形式的新指向再编码回字节——读↔写在
+            # latin-1 域内精确闭环。链接自清理，交还空目录给每连接覆盖组。
+            link_wire = f"{enc_dir}/{enc_link_wire}"
+            anchor = f"{enc_dir}/anchor.txt"
+            repointed = "caf\u00e9-target"
+            try:
+                req("sftp/touch", {"sessionId": session_id, "path": anchor})
+                req("sftp/symlink-create", {"sessionId": session_id, "target": "anchor.txt",
+                                            "linkPath": f"{enc_dir}/{enc_link_display}"})
+                listing = req("sftp/list", {"sessionId": session_id, "path": enc_dir})
+                entry = next((e for e in listing.get("entries", [])
+                              if e.get("name") == enc_link_display), None)
+                if entry is None or entry.get("kind") != "symlink":
+                    raise AssertionError(f"latin-1 named symlink missing from listing: "
+                                         f"{[e.get('name') for e in listing.get('entries', [])]}")
+                read_back = req("sftp/symlink-read", {"sessionId": session_id, "linkPath": link_wire})
+                if read_back.get("target") != "anchor.txt":
+                    raise AssertionError(f"symlink-read target mismatch: {read_back!r}")
+                req("sftp/symlink-update", {"sessionId": session_id, "linkPath": link_wire,
+                                            "target": repointed})
+                read_new = req("sftp/symlink-read", {"sessionId": session_id, "linkPath": link_wire})
+                if read_new.get("target") != repointed:
+                    raise AssertionError(f"symlink-update latin-1 round-trip mismatch: {read_new!r}")
+                print(f"    link {enc_link_display!r} create/read/update -> {repointed!r}")
+            finally:
+                for path in (link_wire, anchor):
+                    try:
+                        req("sftp/delete", {"sessionId": session_id, "path": path})
+                    except SidecarError:
+                        pass
+
         def case_encoding_override_active():
             # M16 连接级覆盖：全局 auto + {connectionId: latin-1} 时本连接列表
             # 仍走原始字节路径（显示名忠实、无 lossy 标记）。
@@ -1795,8 +1833,12 @@ def main() -> None:
         report.run("latin-1 raw rename + wire delete", "sftp/rename",
                    case_latin1_rename_delete,
                    needs="latin-1 tree download keeps byte-faithful names")
+        report.run("latin-1 symlink create/read/update round-trip", "sftp/symlink-create",
+                   case_latin1_symlink_roundtrip,
+                   needs="latin-1 raw rename + wire delete")
         report.run("per-connection encoding override applies", "local/preferences/set",
-                   case_encoding_override_active, needs="latin-1 raw rename + wire delete")
+                   case_encoding_override_active,
+                   needs="latin-1 symlink create/read/update round-trip")
         report.run("per-connection override falls back to global auto", "local/preferences/set",
                    case_encoding_override_fallback, needs="per-connection encoding override applies")
         report.run("MCP tool-face sftp round-trip (autonomous)", "mcp/call",

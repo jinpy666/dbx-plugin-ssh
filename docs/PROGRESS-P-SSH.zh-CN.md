@@ -3852,3 +3852,29 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 2. smoke latin-1 组未覆盖 sftp/symlink-* 的 latin-1 路径（同族可按需补）；smoke_mcp.py stdio 面未新增（embedded 路径已覆盖同一工具实现）。
 3. sftp_upload/sftp_download MCP 工具与 sudo 族维持既有策略（不在本批次范围）。
 4. 工程面 backlog 持续为零；真机人工门沿既有登记。
+
+
+## M19 收口（2026-09-25，编码保真家族收尾批次：MCP 传输工具 latin-1 / smoke symlink 补齐）
+
+- **MCP sftp_upload/sftp_download latin-1 迁移 ✅**（parity-np19-mcp-io，M18 遗留 3 消化）：沿 M17-B/M18 同一模式（显示路径整条 `latin1_encode_display` 还原字节 + 连接级裸包客户端）——`sftp_upload` 走裸包 LSTAT 覆盖预检 + OPEN(CREAT|WRITE|TRUNC) 截断直写 + WRITE 32 KiB 分块（**选型**：沿既有 MCP 传输直写语义，无工作台上传族 `.dbx-part` 暂存需求；复用 M18 `sftp_write_file` 直写核心抽出的 `raw_sftp_write_bytes`，按工具各自响应形状组装）；`sftp_download` 走裸包 OPEN(READ)+READ 分块（`maxDownloadBytes+1` 探测封顶，超限沿 post-read 口径报错；目录 OPEN 被拒后落回高层给 auto 同款「is a directory」错误）。回退沿先例：download 读侧裸包任何失败回退高层重读、upload 写侧仅裸包建立失败回退；auto 模式行为不变（本地校验/传输根/敏感路径/大小上限均先于拨号不受影响）。单测 3 条（duplex 桩字节级）：upload 帧序+路径字节+载荷落帧、upload↔download 同显示路径 OPEN 帧字节一致 + 载荷逐字节回收（往返闭环）。PROTOCOL M19 节 + MCP.zh-CN.md 工具表同步。
+- **smoke latin-1 组补符号链接三命令 ✅**（同线，M18 遗留 2 消化）：smoke_fs_test.py latin-1 组新增 `latin-1 symlink create/read/update round-trip` 用例（needs 链插在 raw rename 与每连接覆盖之间）——`sftp/symlink-create` 0xE9 字节链接名落盘 + 列表 kind=symlink、`sftp/symlink-read` 整条 wire 路径读指向、`sftp/symlink-update` 显示形式新指向再编码回字节后 read 回环验证（latin-1 域内读↔写精确闭环）；链接/锚点 finally 自清理，交还空目录给每连接覆盖组（沿用快照/自清理/needs 门控结构）。
+- **遗留销项**：M18 遗留 2、3 销项；遗留 1（exec 命令串字节参数）维持设计边界登记。sudo 族维持既有策略（非编码家族范围）。
+
+
+## M19 集成收口补记（2026-09-25，raw early-eof 根因修复 + 编码家族收官）
+
+- **raw "early eof" 根因修复 ✅**（parity-fix-raw-eof 1b19a01，merge 本轮）：M18 CI ssh-smoke 真容器首次覆盖裸包客户端即爆雷（71 过/2 挂，`SFTP raw read failed: early eof`）——根因为 **`RawSftp::mkdir` 的 SSH_FXP_MKDIR 帧漏发规范强制的 ATTRS 字段**（draft-ietf-secsh-filexfer-02 §5.2），OpenSSH sftp-server `decode_attrib` 解析失败即 fatal 退出 → 通道 EOF；两失败用例的第一个 raw 操作都是 MKDIR，且 mkdir 回退仅在"裸包客户端建立失败"时触发、INIT 成功后操作错误原样上抛，故直穿到 smoke。修复：`build_mkdir` 携带 flags=0 空 attrs（OpenSSH 按 0777 & umask 建目录，与高层缺省一致）；既有宽松内存桩升级为**严格一致性桩**（draft-02 逐类型精确校验帧布局、违规 hexdump panic）+ `openssh_fatal_server` 负路径桩离线逐字复现 CI 错误串（`attrless_mkdir_reproduces_ci_early_eof_against_openssh_fatal_stub`）。russh 0.62.7 通道层排除（rx EOF 语义/自动扩窗核对）。
+- **MCP 传输工具收官 ✅**（parity-np19-mcp-io 61b6e94，merge 本轮）：sftp_upload（裸包直写车道：LSTAT 预检 + OPEN CREAT|WRITE|TRUNC + WRITE 32KiB 分块）、sftp_download（裸包 OPEN+READ 分块，maxDownloadBytes+1 探测封顶；目录探测由高层给出一致错误）——latin-1 编码保真家族从列表/属性/单文件写/上传族/树到 MCP 工具面全链闭环。smoke latin-1 组补 symlink 三命令 0xE9 字节用例。
+- **过程记录**：M19 线与修复 agent 各遭基础设施中断一次（captcha），分别以"审用半成品重拉"与"保留上下文续跑"恢复，均未触发转人工线。
+- **全量终值（Windows 实测）**：backend cargo **957/957**（940+4 修复 +3 M19）/ clippy 0 / fmt 0；前端零改动沿 ecbc305 口径 vitest 1067 / vue-tsc 0 / build 过；两 merge 零冲突。
+- **CI 复验预期**：ssh-smoke 全组 96 PASS / 0 FAIL 方向（M18 失败的 2 用例 + 连锁 SKIP 5 例恢复）。
+
+## M19.5 真机复验轮（2026-09-25，Mac 容器实测：MKDIR 修复后连剥三层 wire 缺口至全绿）
+
+- **CI 复验揭出修复只到第一层**：run 36155020114（含 1b19a015 MKDIR ATTRS 修复）ssh-smoke 仍红（3m10s），与 Mac 本地容器（同 linuxserver/openssh-server 镜像）复现完全一致（71 过/5 SKIP/2 挂，FAIL 仍报 `SFTP raw read failed: early eof`）——MKDIR ATTRS 是必要非充分。
+- **诊断方法**：独立探针进程（russh 直连容器手搓 wire 帧）与 sidecar 临时 `[raw-trace]` 帧级日志对剖——探针侧 INIT/MKDIR(带 ATTRS)/LSTAT/OPENDIR 全部正常，把挂点逼进 sidecar 独有的帧内容；trace 显示 raw list 的第三笔请求 `type=16`，实锤第四层。连剥三层：
+  1. **`FXP_READDIR` 常量错值 16（=REALPATH，规范值 12）**：raw 列表的 READDIR 实际发出 REALPATH 帧（4 字节 handle 被当路径且含 NUL）→ OpenSSH sftp-server fatal → 通道 EOF。离线桩测不出的根因是**自洽盲区**——`validate_request` 严格校验器用同一错误常量对照。修复：常量 12 + 新增 `request_type_codes_match_draft02_literals` 把全部 23 个类型码对 draft-02 **字面值**逐一对表（读帧字节而非读常量）。
+  2. **`sftp/read` 缺 latin-1 车道**：M16 编码家族唯一漏网（wire 路径直入高层客户端按 UTF-8 open → NO_SUCH_FILE）。修复：分发层按 `resolve_sftp_encoding` 分支，Latin1 走 `raw_read_chunk`（download 分片同款整条 wire 还原 + 裸包 READ；多读 1 字节对齐高层 `truncated` 语义）。
+  3. **树下载逐文件读取无 raw 车道**：扫描是 raw READDIR 字节保真（files 的 remote_path 为 wire 形式），但分块读取高层 open → NO_SUCH_FILE 记 failure 跳过 → 本地缺文件（只剩空目录骨架）。修复：`TreeDownloadState.latin1` 标记，latin-1 下逐文件分块走 `raw_read_chunk`，实现与本节 PROTOCOL「分块下载按转义自动走 raw READ」的既有声明对齐。
+- **Mac 真机终值**：smoke_fs_test **79 PASS / 0 SKIP / 0 FAIL**（71/5/2 → 全组恢复，含 M18 两条失败用例与 np19 symlink 用例）；全量 cargo **963/963**（win 957 + 字面值对表 1，mac 口径 963）/ clippy 0 / fmt 0 / vitest 1067 / vue-tsc 0 / build 过（ui/ 无变化还原）。
+- **过程记录**：接力会话接手时交接的 Windows 修复线（E:\...np19-fix-raw-eof）已在远端完成收口（0c1b3dad docs(m19)）；Mac 侧重建 worktree 后先复验揭出上述三层，全部改动在本轮一并落地（codex/ssh/parity-fix-raw-eof 分支续用）。
