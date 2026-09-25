@@ -3731,3 +3731,11 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **下一棒 RDP-2**：rdp_session.rs MVP（对标 NyaTerm src/core/rdp.rs：NLA/CredSSP 认证、TLS 证书策略 prompt、text-only 剪贴板桥、按错误类型重连门控）+ rdp/* 协议面 + PROTOCOL 文档——基线含本棒 vendor 链。
 
 > CI 观测补记（M10）：UI walkthrough strict 门经三次观测迭代后于 runner 全绿（run 36080783898，十一门全 success）——首轮暴露 pnpm exec 包装吞 stdout（改为直启 vite 二进制），次轮暴露快捷键冲突步骤的平台键位假设（改为按宿主平台录制实际被占有的组合）。两处均为门外脚本盲区，产品代码零回退。
+
+
+## 串口增强实施轮（2026-09-25，按评审定稿蓝图实施）
+
+- **三增量 ✅ 全栈合入**（parity-serial-enh-impl 五 commits）：B1 二进制写通道（Stdin=3 流标签 + 上传互斥门 + sidecar 拒收后盾）、serial/replay 序号制（与 telnet/local 先例逐字段同构、128 KiB 缓冲、前端 drain 复用 + 7 语截断提示）、写序列化与回压（专用写线程 + 256 KiB 有界队列 + 4 KiB 分帧 + 队满报错不阻塞生产者）。能力探测降级（binaryInput 字段）随 start 落地；resize 按文档明确不实现。安全修复（0 字节 final、坏帧预算 32）零改动。
+- **实施定稿参数**：分帧 4 KiB / 队列 256 KiB / 键入单包 16 KiB（文档标注"实施时定稿"项）；写失败镜像 `serial/write/error` 事件（会话保持）已记入 PROTOCOL 契约。
+- **全量**：backend cargo **867**（825+RDP-2 后合入累计）/ clippy 0 / fmt 0；frontend vitest **998**（100 文件）/ vue-tsc 0 / build 过（ui/ 重生成）。
+- 遗留：二进制事件在宿主桥的流量控制行为需实测（文档标注）；真口回环 smoke 与 install 检查按规约归 integrator。
