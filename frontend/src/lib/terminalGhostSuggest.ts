@@ -153,14 +153,20 @@ export function isGhostPrefixMatch(line: string, command: string): boolean {
   return command.toLowerCase().startsWith(line.toLowerCase());
 }
 
+/** 候选命令含任意控制字符（换行/tab/其他 C0/C1）时不可作 ghost：overlay 以
+ * textContent 渲染看不到换行，接受会把多行文本一次性注入终端（fish 对多行
+ * 历史同样不出行内建议）。注入字节仍等于历史原文，这里只挡「不可见注入」。 */
+const GHOST_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
 /**
  * 从 searchCommands 的模糊排序结果中选出 ghost 展示项：取评分最高的「严格前
- * 短扩展」候选。非前缀的模糊命中被跳过（剩余文本无注入语义），全部被跳过或
- * 无候选时返回 null。
+ * 短扩展」候选。非前缀的模糊命中与含控制字符的候选被跳过（剩余文本无注入
+ * 语义），全部被跳过或无候选时返回 null。
  */
 export function pickGhostMatch(line: string, candidates: ReturnType<typeof searchCommands>): GhostMatch | null {
   for (const candidate of candidates) {
     if (!isGhostPrefixMatch(line, candidate.command)) continue;
+    if (GHOST_CONTROL_CHARS.test(candidate.command)) continue;
     return { command: candidate.command, remainder: candidate.command.slice(line.length) };
   }
   return null;

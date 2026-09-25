@@ -140,6 +140,20 @@ describe("isGhostPrefixMatch / pickGhostMatch (ghost prefix-extension semantics)
     ];
     expect(pickGhostMatch("git", candidates)).toBeNull();
   });
+
+  it("skips candidates containing newlines or control characters", () => {
+    // B1 回归：ghost overlay 以 textContent 渲染看不到换行，含控制字符的
+    // 候选一旦被接受会把多行文本一次性注入终端（fish 对多行历史同样不出
+    // 行内建议）。
+    const multiLine = { command: "git add\ngit commit", score: 1, source: "history" as const, indices: [0, 1] };
+    const withTab = { command: "printf\tformat", score: 2, source: "history" as const, indices: [0, 1] };
+    const normal = { command: "git status", score: 9, source: "history" as const, indices: [0, 1] };
+    // 含控制字符的高分候选被跳过，普通前缀扩展候选胜出。
+    expect(pickGhostMatch("git", [multiLine, normal])).toEqual({ command: "git status", remainder: " status" });
+    expect(pickGhostMatch("pri", [withTab, normal])).toBeNull();
+    // 全部候选都含控制字符 → 不出建议。
+    expect(pickGhostMatch("echo", [multiLine])).toBeNull();
+  });
 });
 
 describe("evaluateGhost (gates + search + accept bytes)", () => {
