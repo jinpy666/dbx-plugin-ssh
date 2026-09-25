@@ -59,6 +59,22 @@ jobs:
             echo "ui/ is stale: run 'pnpm --dir frontend build' and commit the output" >&2
             exit 1
           fi
+      # UI e2e 门禁：架构 WATCH —— 环境损坏不得与测试通过共享静默绿路径。
+      # playwright-core 按脚本约定装在仓库外的 runner 路径（/tmp/dbx-ui-mock，
+      # 与本地 SKIP 语义同一定位），项目 package.json 保持依赖冻结；
+      # ubuntu-24.04 runner 自带 google-chrome-stable，脚本经 playwright
+      # channel:"chrome" 命中（Linux Chrome 探测已加入两脚本）。
+      # DBX_SMOKE_STRICT=1 把依赖缺失的 SKIP 变为非零失败。
+      # 首次 CI 观测项：runner Chrome 与最新 playwright-core 的协议匹配、
+      # headless 沙箱内核设置；跑不起来则回退为仅保留退出码分离。
+      - name: Install playwright-core outside the repo
+        run: npm install --prefix /tmp/dbx-ui-mock playwright-core
+      - name: UI smoke walkthroughs (strict gate)
+        env:
+          DBX_SMOKE_STRICT: "1"
+        run: |
+          node scripts/smoke_ui_mock.mjs
+          node scripts/smoke_ui_settings.mjs
 
   backend:
     name: Rust sidecar checks

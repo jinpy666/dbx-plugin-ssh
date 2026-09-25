@@ -24,6 +24,11 @@ validation:
     - pnpm --dir frontend typecheck
     - pnpm --dir frontend test
     - pnpm --dir frontend build
+    # UI walkthrough（本地可选）：缺 playwright-core(/tmp/dbx-ui-mock) 或系统
+    # Chrome 时 SKIP exit 0；DBX_SMOKE_STRICT=1 时缺失即失败。CI 在 frontend
+    # job 以 strict 模式强制执行（见 ci.yml）。
+    - node scripts/smoke_ui_mock.mjs
+    - node scripts/smoke_ui_settings.mjs
     - cargo fmt --manifest-path backend/Cargo.toml --check
     - cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings
     - cargo test --locked --manifest-path backend/Cargo.toml
