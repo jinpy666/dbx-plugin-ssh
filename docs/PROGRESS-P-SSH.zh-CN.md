@@ -3773,3 +3773,19 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 2. `ssh/auth/auto` 事件无 sessionId 过滤（连接期无 session，与 host-key/notice 同策略）；connection/test 也触发该事件。
 3. mockDbxHost 未模拟 Auto 场景（纯展示层 spec 已覆盖）；COMPARISON.en.md 未同步（需双语一致可另开小轮）。
 4. 候选缺口表消化后剩余：录制增强（transcript/自动录制/搜索）、SFTP 管线（深度/兼容模式/文件名编码）、DownloadSudo、多文件 watcher、BiDi（观察）、云同步降维（待安全评审）。
+
+
+## M14 收口（2026-09-25，对标差距批次二：录制/SFTP 管线/DownloadSudo 三线并发）
+
+- **录制增强 ✅**（parity-np14-record-enh 754589e7，merge 92d1f7bd）：Transcript 导出（**前端纯函数选型**——回放链已分页拉到前端，零新协议面；ANSI/OSC 剥离+CR 丢弃+可选时间戳，保留终端换行布局）；auto_record 自动录制（严格镜像 x11_forwarding 先例：偏好白名单+进程内快速标志+open_session 挂钩，与手动录制互斥，ssh/recording/auto 事件一次性提示）；录制搜索（后端即时扫描 ≤200 会话、每录制 5 条命中摘录，不建持久索引）。
+- **SFTP 传输管线 ✅**（parity-np14-sftp-pipeline 12e729cb，merge b676a8c9）：并发深度可配 transfer_max_active 1-8（sidecar 权威，进行中任务按旧深度完成）；sftp_compat_mode 兼容模式（new_with_config 1/1 禁流水线+深度强制 1；本插件从不发起 extended 请求已核实）；非 UTF-8 文件名——**agent 发现 russh-sftp 反序列化层 from_utf8_lossy 拿不到原始字节，新增 584 行裸包 SFTPv3 客户端**（INIT/OPENDIR/READDIR/STAT/OPEN/READ），latin-1 模式显示=latin1 解码、传输=%XX 转义 wire 形式、下载自动还原原始字节；硬分离（显示解码绝不回灌传输）纯函数+往返单测落地。
+- **DownloadSudo ✅**（parity-np14-download-sudo c4390870，merge 本轮）：`sudo/download/start|cancel`——远端临时文件方案（同目录 mktemp → **chown 登录uid + chmod 600**（修正任务卡 0600 设计错误：root 属主下登录用户读不了）→ 复用既有 sftp/download/next/finish/progress 与传输面板全链 → finally sudo rm 清理含会话关闭/取消/出错）；sudo dd 流式否决（无二进制边界/无续传/需另建管线）；路径校验复用 sudo 族先例；右键"以 root 下载"（只读门禁一致）；smoke_fs_test.py 增 sudo/download 用例。**P0 核心清单 Sudo 文件操作族至此全量补齐。**
+- **集成修复**：B 合入时 localPrefsState 两声明重复（拼接缺陷）合并为单一 8 键声明；C 合入零冲突。
+- **全量终值**：backend cargo **925**（894+31）/ clippy 0 / fmt 0；frontend vitest **1047**（104 文件，1031+16）/ vue-tsc 0 / build 过（ui/ 重生成）。
+
+### M14 遗留
+
+1. 非 UTF-8 名字的 rename/delete/树下载仍走高层客户端（按字面量发送）；完整字节保真需全路径操作迁 raw 层（超范围登记）。
+2. 兼容模式"禁用扩展"落地为"不发起 extended + 禁流水线"；crate 内 fsync-on-flush 仅服务器自报扩展时触发，无法外部关闭。
+3. DownloadSudo 暂存 cat 为阻塞 exec（5-300s 超时夹取，约 16GiB 需 >55MB/s 磁盘）；远端需与源等量临时空间；sudo/download 与无残留清理的真机 smoke 待集成线跑 smoke_fs_test.py。
+4. raw SFTPv3 客户端 async 通道交互需真机回环（沿 smoke 惯例）。

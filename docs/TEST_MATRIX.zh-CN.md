@@ -133,3 +133,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：Auto 编排顺序不变式与逐方式汇总；quickCommandImport 双格式解析/去重/上限；/proc fd 计数与监听端口解析（容错）；进程表 fd/ports 排序。
 
 仍保持未验收（依赖真机/人工）：Auto 真机多方式回退联调（含 agent 转发环境）、导入文件对话框真机、句柄数/端口在真实服务器的覆盖度、既有真机门（RDP/X server/串口/GPU-NPU/ConPTY/DBX 桌面）不变。
+
+
+## M14（对标差距批次二，2026-09-25）
+
+单测：cargo **925/925**（894+31：transcript/搜索/auto_record 5 + sftpName/raw SFTPv3 解析/深度 clamp 20 + sudo_download staging/清理/命令构造 6）、vitest **1047/1047**（104 文件，1031+16：transcript 10 + sftpName/transferQueue/mock sudo-download 6）、vue-tsc 0、build 过、clippy 0、fmt 0。
+
+新增可测面：transcript ANSI/OSC/CR 剥离与时间戳；录制搜索命中摘录；transfer_max_active clamp 1-8；sftpName latin-1 解码与 %XX 转义往返；sudo_download staging/清理命令构造与 0600+chown 语义。
+
+仍保持未验收（依赖真机/人工）：raw SFTPv3 async 回环、非 UTF-8 真实服务器联调、sudo/download 真容器 smoke（smoke_fs_test.py 新用例）、兼容模式老服务器实测、既有真机门不变。
