@@ -114,6 +114,17 @@ export async function streamSerialUploadFile(
     totalSize: file.size,
   });
   try {
+    if (file.size === 0) {
+      // 0 字节文件：循环体不会执行，sidecar 的 X/Y 引擎将停在握手挂起态且
+      // 时钟被抑制（永不超时、上传槽被占住）。显式补一条空的 final 分块让
+      // 数据源收尾（ZMODEM 侧该分块幂等，ZEOF 语义不变）。
+      await bridge.invoke("serial/upload/data", {
+        sessionId,
+        dataBase64: "",
+        final: true,
+      });
+      return;
+    }
     for (let offset = 0; offset < file.size; offset += chunkBytes) {
       if (options.shouldAbort?.()) return;
       const end = Math.min(offset + chunkBytes, file.size);

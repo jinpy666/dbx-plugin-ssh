@@ -112,6 +112,24 @@ describe("streamSerialUploadFile", () => {
     expect(dataCalls[0]?.params).toMatchObject({ dataBase64: "b64(3)", final: true });
   });
 
+  it("sends an empty final chunk for zero-byte files", async () => {
+    // D1 回归：0 字节文件循环体不执行，sidecar 的 X/Y 引擎会停在挂起态且
+    // 时钟被抑制（永不超时）；必须显式补一条空的 final 分块让源收尾。
+    const { bridge, calls } = makeBridge();
+    await streamSerialUploadFile({ size: 0 }, {
+      sessionId: "s",
+      protocol: "xmodem",
+      fileName: "empty.bin",
+      bridge,
+      readChunk: async () => new Uint8Array(0),
+    });
+    expect(calls[0]).toMatchObject({ method: "serial/upload/start", params: { totalSize: 0 } });
+    const dataCalls = calls.filter((call) => call.method === "serial/upload/data");
+    expect(dataCalls).toHaveLength(1);
+    expect(dataCalls[0]?.params).toMatchObject({ dataBase64: "", final: true });
+    expect(calls.some((call) => call.method === "serial/upload/cancel")).toBe(false);
+  });
+
   it("honors a smaller chunkBytes override", async () => {
     const { bridge, calls } = makeBridge();
     await streamSerialUploadFile({ size: 5 }, {

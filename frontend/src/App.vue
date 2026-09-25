@@ -2231,11 +2231,14 @@ function handleTerminalKey(event: KeyboardEvent) {
   if (event.isComposing || event.keyCode === 229) hideGhostSuggestion();
   // ghost 接受（→）：仅在无菜单态（浮层建议未开）时消费一次，避免与
   // handleSuggestionKey 的菜单按键语义冲突；无 ghost 的 → 原样放行给 shell。
+  // 复查 commandRunning/传输占用（与 evaluateGhost 同门）：update 与 accept
+  // 之间远端可能已开跑（回车竞态），不能把剩余字节打进运行中的命令。
   if (
     ghostMatch.value &&
     !suggestionOpen.value &&
     event.key === "ArrowRight" &&
-    !(event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
+    !(event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) &&
+    !(commandRunning.value || terminalTransferBusy.value)
   ) {
     acceptGhostSuggestion();
     return consume();
