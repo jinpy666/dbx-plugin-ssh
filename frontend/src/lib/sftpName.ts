@@ -23,3 +23,25 @@ export function hasLossyChars(wire: string): boolean {
 export function hasWireEscapes(wire: string): boolean {
   return /%[0-9a-fA-F]{2}/.test(wire);
 }
+
+/**
+ * latin-1 显示路径 → wire 形式（M17 拖入上传目标目录专用）：与 sidecar 的
+ * `latin1_encode_display` + `escape_wire` 组合逐字符等价——U+0000..=U+007F
+ * 按字面量透传（`%` 自转义为 `%25`，保证字面 `%XX` 输入经 sidecar 的
+ * `unescape_wire` 还原不吞）、U+0080..=U+00FF 按码位转义为 `%XX`（latin-1
+ * 字节，恰好是 UTF-8 非法序列，与 escape_wire 输出一致）、>U+00FF 的字符
+ * （如中文）按 UTF-8 透传兜底。转换后与本地文件名 join 的整条上传路径符合
+ * sidecar `write_path_bytes` 的「wire 目录前缀 + 用户新输入的显示末段」分工。
+ * 仅 latin-1 模式调用；auto 模式下显示文本与传输形式本就一致。
+ */
+export function displayPathToWire(text: string): string {
+  let out = "";
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (ch === "%") out += "%25";
+    else if (code <= 0x7f) out += ch;
+    else if (code <= 0xff) out += `%${code.toString(16).toUpperCase().padStart(2, "0")}`;
+    else out += ch;
+  }
+  return out;
+}

@@ -4610,18 +4610,47 @@ impl SshRuntime {
     }
 
     /// Changes the permission bits of a remote path (`sftp/chmod`).
-    pub async fn sftp_chmod(&self, session_id: &str, path: &str, mode: u32) -> Result<(), String> {
+    ///
+    /// 路径来源（M17 增量③迁移）：前端传来的整条 wire 路径（`pathFromUri`），
+    /// latin-1 模式整条按 [`sftp_name::unescape_wire`] 还原后走裸包 SETSTAT
+    /// （此前高层客户端按字面量发送，转义名探不到）；裸包客户端**建立**失败
+    /// 回退高层路径（M15 先例），SETSTAT 已发出后的失败原样上抛，不回退
+    /// （写操作不重复执行）。
+    pub async fn sftp_chmod(
+        &self,
+        session_id: &str,
+        path: &str,
+        mode: u32,
+        encoding: NameEncoding,
+    ) -> Result<(), String> {
         self.ensure_writable(session_id).await?;
+        let path = normalize_remote_path(path)?;
+        if encoding == NameEncoding::Latin1 {
+            match self.raw_sftp_client(session_id).await {
+                Ok(mut client) => {
+                    return client
+                        .setstat(
+                            &sftp_name::unescape_wire(&path),
+                            &sftp_raw::RawAttrs {
+                                permissions: Some(mode),
+                                ..sftp_raw::RawAttrs::default()
+                            },
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[ssh-sftp-plugin] raw byte chmod unavailable, falling back: {error}"
+                    );
+                }
+            }
+        }
         let sftp = self.sftp(session_id).await?;
         let metadata = russh_sftp::protocol::FileAttributes {
             permissions: Some(mode),
             ..Default::default()
         };
-        let result = sftp
-            .lock()
-            .await
-            .set_metadata(normalize_remote_path(path)?, metadata)
-            .await;
+        let result = sftp.lock().await.set_metadata(path, metadata).await;
         result.map_err(sftp_error)
     }
 
@@ -8714,7 +8743,7 @@ pub(crate) type RawSftpClient = sftp_raw::RawSftp<russh::ChannelStream<russh::cl
 /// 裸包客户端路径的 kind 判定：按 v3 permissions 的 POSIX 类型位归类；
 /// attrs 缺 permissions（非标准服务器）时退回 file（与高层路径的 Other
 /// 语义一致），避免把普通文件误渲染成目录。
-fn classify_raw_kind(permissions: Option<u32>) -> &'static str {
+pub(crate) fn classify_raw_kind(permissions: Option<u32>) -> &'static str {
     let Some(mode) = permissions else {
         return "file";
     };

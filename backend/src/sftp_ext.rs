@@ -32,9 +32,51 @@ const REMOTE_TAR_TIMEOUT_SECS: u64 = 120;
 
 /// `sftp/stat` — metadata for one remote path. Uses lstat semantics so
 /// symlinks are reported as `symlink`, matching the `sftp/list` entries.
-pub async fn stat(runtime: &SshRuntime, session_id: &str, path: &str) -> Result<Value, String> {
-    let sftp = runtime.sftp(session_id).await?;
+///
+/// 路径来源分工（M17 增量③迁移）：前端传来的整条 wire 路径（`pathFromUri`）。
+/// latin-1 模式整条按 [`sftp_name::unescape_wire`] 还原后走裸包 LSTAT
+/// （此前高层客户端按字面量发送，转义名探不到）。裸包 attrs 没有 uid/gid，
+/// 属主/属组仍走 `stat -c` shell 查询尽力而为——转义名下 shell 字节参数
+/// 不可控（登记边界），查询失败回退 numeric/`-`，元数据主体不受影响。
+/// 裸包客户端**建立**失败回退高层路径（M15 先例）。
+pub async fn stat(
+    runtime: &SshRuntime,
+    session_id: &str,
+    path: &str,
+    encoding: NameEncoding,
+) -> Result<Value, String> {
     let path = normalize_remote_path(path)?;
+    if encoding == NameEncoding::Latin1 {
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                let attrs = client
+                    .lstat(&sftp_name::unescape_wire(&path))
+                    .await
+                    .map_err(|error| format!("SFTP stat failed: {error}"))?;
+                let (owner_name, group_name) =
+                    lookup_owner_group_names(runtime, session_id, &path).await;
+                return Ok(json!({
+                    "path": path,
+                    "kind": crate::ssh::classify_raw_kind(attrs.permissions),
+                    "size": attrs.size,
+                    "modifiedAt": attrs.mtime.map(u64::from),
+                    "mode": attrs.permissions.map(format_permissions),
+                    // 裸包 v3 attrs 不携带 uid/gid：numeric 兜底缺位，属主列
+                    // 以 shell 查询名为准（查不到显示 "-"，见上边界说明）。
+                    "owner": owner_name.clone(),
+                    "group": group_name.clone(),
+                    "ownerName": owner_name,
+                    "ownerUid": Option::<u32>::None,
+                    "groupName": group_name,
+                    "groupGid": Option::<u32>::None,
+                }));
+            }
+            Err(error) => {
+                eprintln!("[ssh-sftp-plugin] raw byte stat unavailable, falling back: {error}");
+            }
+        }
+    }
+    let sftp = runtime.sftp(session_id).await?;
     let metadata = sftp
         .lock()
         .await
@@ -76,24 +118,33 @@ pub async fn stat(runtime: &SshRuntime, session_id: &str, path: &str) -> Result<
 
 /// `sftp/exists` — `true` when the path is statable (dangling symlinks count).
 ///
-/// 路径来源分工（M16）：调用方（rename 覆盖预检、上传撞名预检、粘贴预检）
-/// 传来的都是「wire 目录前缀 + 最后一段」。latin-1 模式按 [`sftp_name::
-/// write_path_bytes`] 的分工还原服务器字节（前缀 `%XX` 还原、末段按显示
-/// 文本 latin-1 编码）后走裸包 LSTAT；裸包客户端**建立**失败回退高层路径
-/// （M15 先例）。粘贴预检传来的整条 wire 名（末段已是 wire 形式）在 latin-1
-/// 下按显示文本处理会探不到——其底层 `sftp/copy`/`sftp/move` 同样未迁移
-/// raw（见 PROTOCOL 遗留），预检失败不阻断、交由后端执行时报错，语义不变。
+/// 路径来源分工（M16，M17 补全）：调用方分两类——
+/// - rename 覆盖预检、上传撞名预检：`whole_wire = false`，路径是「wire 目录
+///   前缀 + 用户新输入的显示末段」，latin-1 模式按 [`sftp_name::
+///   write_path_bytes`] 还原服务器字节（前缀 `%XX` 还原、末段按显示文本
+///   latin-1 编码）；
+/// - 粘贴预检（M17 起）：`whole_wire = true`，整条路径都是列表回传的 wire
+///   形式，latin-1 模式整条按 [`sftp_name::unescape_wire`] 还原（M16 遗留①：
+///   此前整条 wire 名末段被按显示文本编码，非 UTF-8 名探不到）。
+///
+/// 两种形式 latin-1 下都走裸包 LSTAT；裸包客户端**建立**失败回退高层路径
+/// （M15 先例）。
 pub async fn exists(
     runtime: &SshRuntime,
     session_id: &str,
     path: &str,
     encoding: NameEncoding,
+    whole_wire: bool,
 ) -> Result<bool, String> {
     let path = normalize_remote_path(path)?;
     if encoding == NameEncoding::Latin1 {
         match runtime.raw_sftp_client(session_id).await {
             Ok(mut client) => {
-                let raw_path = sftp_name::write_path_bytes(&path);
+                let raw_path = if whole_wire {
+                    sftp_name::unescape_wire(&path)
+                } else {
+                    sftp_name::write_path_bytes(&path)
+                };
                 return Ok(client.lstat(&raw_path).await.is_ok());
             }
             Err(error) => {
