@@ -3720,3 +3720,12 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 1. CI 的 UI walkthrough job 首次运行需观测（runner Chrome 与 playwright-core 协议匹配无法本地验证，回退方案已写入 ci.yml 注释）。
 2. X11 guard 页面缺位：setup 校验在 accept 后（协议约束），畸形流量最坏影响为上限 8 的悬挂通道——已记录，不阻塞。
 3. 评审其余 MEDIUM/LOW（串口上传内存上限/写线程化、gutter 满容量平移、协议表单端口联动、modalOpenStates 注册器化等）留下一轮按优先级消化。
+
+
+## RDP 实施轮 RDP-1（2026-09-25，vendored fork 链）
+
+- **vendored 链 ✅ 合入**（parity-rdp-vendor 7de0ef1/a23abcd）：六 crate 锁步入 vend——ironrdp umbrella 0.17.0（crates.io tarball sha256 与 NyaTerm lock 逐字节一致，额外纳入 patch 堵漂移入口）+ ironrdp-client 0.1.0（3 处注入补丁）/ connector 0.10.0 / tls 0.2.2 / picky 7.0.0-rc.25 / sspi 0.21.0（NyaTerm 副本原样）。Cargo.lock +2025 行完整提交；`backend/vendor/` 3.5MB/260 文件。
+- **锁步 CI 断言**：`scripts/check_vendor_lockstep.py`（lockfile patched 段 ↔ vendor/ 目录一致性，漂移非零退出；三种负路径验证），接入 ci.yml backend job。
+- **全量**：backend cargo **823**（vendored 生效后全绿）/ clippy 0 / fmt 0 / lockstep PASS；frontend vitest **990**（99 文件，含并行 M10 波次增量）/ vue-tsc 0 / build 过。
+- 遗留：ironrdp-client 发布包无 LICENSE（已从 upstream monorepo 补 APACHE/MIT 并登记 vendor/README）；ironrdp-tls 补丁状态缺口（计划 §5-1）按"原样搬运"登记，升级轮对照原包核实；Windows native-tls/Schannel 路径依赖 CI windows-regression 兜底。
+- **下一棒 RDP-2**：rdp_session.rs MVP（对标 NyaTerm src/core/rdp.rs：NLA/CredSSP 认证、TLS 证书策略 prompt、text-only 剪贴板桥、按错误类型重连门控）+ rdp/* 协议面 + PROTOCOL 文档——基线含本棒 vendor 链。
