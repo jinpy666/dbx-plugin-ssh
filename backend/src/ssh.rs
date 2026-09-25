@@ -47,6 +47,7 @@ use crate::otp;
 use crate::otp_store;
 use crate::quick_commands;
 use crate::session_recording;
+use crate::sftp_ext;
 use crate::sftp_name::{self, NameEncoding};
 use crate::sftp_raw;
 use crate::sftp_tree;
@@ -1553,7 +1554,7 @@ fn upload_progress_payload(
 /// Error text for a cancelled upload. The optional reason slug comes from the
 /// workbench so "Upload cancelled by user" reads differently from an
 /// error-triggered cleanup ("Upload cancelled (ack-timeout)").
-fn upload_cancel_error(reason: Option<&str>) -> String {
+pub(crate) fn upload_cancel_error(reason: Option<&str>) -> String {
     match reason.map(str::trim).filter(|value| !value.is_empty()) {
         Some("user") => "Upload cancelled by user".to_string(),
         Some(reason) => format!("Upload cancelled ({reason})"),
@@ -4375,7 +4376,7 @@ impl SshRuntime {
     }
 
     /// 打开一条独立 sftp 子系统通道并跑裸包客户端（严格串行请求/响应）。
-    async fn raw_sftp_client(&self, session_id: &str) -> Result<RawSftpClient, String> {
+    pub(crate) async fn raw_sftp_client(&self, session_id: &str) -> Result<RawSftpClient, String> {
         let session = self.session(session_id).await?;
         let channel = session
             .handle
@@ -5537,6 +5538,7 @@ impl SshRuntime {
     pub async fn finish_upload(
         self: &Arc<Self>,
         task_id: &str,
+        encoding: NameEncoding,
         emitter: &PluginEmitter,
     ) -> Result<Value, String> {
         let upload = self
@@ -5590,6 +5592,51 @@ impl SshRuntime {
         let response_task_id = task_id.clone();
         tokio::spawn(async move {
             let result: Result<(), String> = async {
+                // latin-1（M16）：上传族的远端路径是「wire 目录前缀 + 用户新
+                // 输入的显示末段」，write_path_bytes 还原为服务器字节后走裸包
+                // 暂存 + 原子提交。裸包客户端**建立**失败回退高层路径（此时
+                // 远端尚无任何动作）；操作发出后的失败原样上抛，不回退。
+                if encoding == NameEncoding::Latin1 {
+                    match this.raw_sftp_client(&session_id).await {
+                        Ok(mut client) => {
+                            let progress = |bytes: u64| {
+                                transferred_bytes.store(bytes, Ordering::Release);
+                                emitter
+                                    .event(
+                                        "sftp/transfer/progress",
+                                        upload_progress_payload(
+                                            &task_id,
+                                            &session_id,
+                                            None,
+                                            bytes,
+                                            expected_size,
+                                            UploadPhase::Uploading,
+                                            "running",
+                                        ),
+                                    )
+                                    .map_err(plugin_error)
+                            };
+                            return sftp_ext::raw_push_upload_file(
+                                &mut client,
+                                &local_path,
+                                &remote_path,
+                                &task_id,
+                                TRANSFER_CHUNK_SIZE,
+                                sftp_ext::RawUploadContext {
+                                    cancelled: &cancelled,
+                                    cancel_reason: &cancel_reason,
+                                    progress: Box::new(progress),
+                                },
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[ssh-sftp-plugin] raw byte upload unavailable, falling back: {error}"
+                            );
+                        }
+                    }
+                }
                 let sftp = this.sftp(&session_id).await?;
                 let (temporary, backup) = remote_transfer_paths(&remote_path, &task_id)?;
                 let mut source = tokio::fs::File::open(&local_path)
@@ -8640,7 +8687,7 @@ fn classify_entry_kind(file_type: FileType) -> &'static str {
 }
 
 /// 裸包客户端具体类型：每次操作独占一条 sftp 子系统通道，发一收一。
-type RawSftpClient = sftp_raw::RawSftp<russh::ChannelStream<russh::client::Msg>>;
+pub(crate) type RawSftpClient = sftp_raw::RawSftp<russh::ChannelStream<russh::client::Msg>>;
 
 /// 裸包客户端路径的 kind 判定：按 v3 permissions 的 POSIX 类型位归类；
 /// attrs 缺 permissions（非标准服务器）时退回 file（与高层路径的 Other
@@ -8671,7 +8718,7 @@ fn content_type_for_path(path: &str) -> Option<String> {
     Some(content_type.to_string())
 }
 
-fn format_permissions(value: u32) -> String {
+pub(crate) fn format_permissions(value: u32) -> String {
     format!("{:04o}", value & 0o7777)
 }
 

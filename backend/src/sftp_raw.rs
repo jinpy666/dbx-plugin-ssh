@@ -3,8 +3,9 @@
 //! 上游 `russh-sftp` 在反序列化层对文件名/handle 做 `from_utf8_lossy`，合法
 //! UTF-8 服务器下字节往返无损，但 latin-1 等旧编码的文件名在列表阶段就丢失
 //! 原始字节。本模块只覆盖字节保真必需的最小操作面（INIT/OPENDIR/READDIR/
-//! CLOSE/STAT/LSTAT/OPEN/READ/CLOSE + M15-B 的 REMOVE/MKDIR/RMDIR/RENAME），
-//! 全部请求严格串行（发一收一），不与高层
+//! CLOSE/STAT/LSTAT/OPEN/READ/CLOSE + M15-B 的 REMOVE/MKDIR/RMDIR/RENAME +
+//! M16 的 OPEN 写/WRITE/SETSTAT/READLINK/SYMLINK，覆盖上传族/直写/touch/
+//! symlink 的写路径），全部请求严格串行（发一收一），不与高层
 //! `SftpSession` 共享通道。文件名字节原样返回，编码解释交给 `sftp_name`。
 //!
 //! 已知边界：attrs 只按 v3 布局解析（INIT 显式请求版本 3，RFC 要求服务器
@@ -28,7 +29,9 @@ const FXP_VERSION: u8 = 2;
 const FXP_OPEN: u8 = 3;
 const FXP_CLOSE: u8 = 4;
 const FXP_READ: u8 = 5;
+const FXP_WRITE: u8 = 6;
 const FXP_LSTAT: u8 = 7;
+const FXP_SETSTAT: u8 = 9;
 const FXP_OPENDIR: u8 = 11;
 const FXP_REMOVE: u8 = 13;
 const FXP_MKDIR: u8 = 14;
@@ -36,6 +39,8 @@ const FXP_RMDIR: u8 = 15;
 const FXP_READDIR: u8 = 16;
 const FXP_STAT: u8 = 17;
 const FXP_RENAME: u8 = 18;
+const FXP_READLINK: u8 = 19;
+const FXP_SYMLINK: u8 = 20;
 const FXP_STATUS: u8 = 101;
 const FXP_HANDLE: u8 = 102;
 const FXP_DATA: u8 = 103;
@@ -54,12 +59,20 @@ const ATTR_EXTENDED: u32 = 0x10;
 
 // OPEN pflags。
 const PFLAGS_READ: u32 = 0x1;
+const PFLAGS_WRITE: u32 = 0x2;
+const PFLAGS_CREAT: u32 = 0x8;
+const PFLAGS_TRUNC: u32 = 0x10;
 
-/// v3 attrs 的传输子集（列表/下载所需）。
+/// WRITE 单包数据上限：SFTPv3 规范建议 ≤32768 以保证最大兼容（OpenSSH 的
+/// 包上限是 256 KiB，但旧服务器可能更小），调用方按此切分数据。
+pub const MAX_WRITE_CHUNK: usize = 32 * 1024;
+
+/// v3 attrs 的传输子集（列表/下载/写侧 SETSTAT 所需）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RawAttrs {
     pub size: Option<u64>,
     pub permissions: Option<u32>,
+    pub atime: Option<u32>,
     pub mtime: Option<u32>,
 }
 
@@ -130,6 +143,59 @@ pub fn build_rename(id: u32, old_path: &[u8], new_path: &[u8]) -> Vec<u8> {
     frame_packet(&payload)
 }
 
+/// 构造 OPEN 请求（写侧用：pflags + attrs 全量字段，attrs 为空即 flags=0）。
+pub fn build_open(id: u32, path: &[u8], pflags: u32, attrs: &RawAttrs) -> Vec<u8> {
+    let mut payload = vec![FXP_OPEN];
+    payload.extend_from_slice(&id.to_be_bytes());
+    payload.extend_from_slice(&(path.len() as u32).to_be_bytes());
+    payload.extend_from_slice(path);
+    payload.extend_from_slice(&pflags.to_be_bytes());
+    payload.extend_from_slice(&encode_attrs(attrs));
+    frame_packet(&payload)
+}
+
+/// 构造 WRITE 请求：`handle + offset + data`（data 长度上限见
+/// [`MAX_WRITE_CHUNK`]，由调用方切分）。
+pub fn build_write(id: u32, handle: &[u8], offset: u64, data: &[u8]) -> Vec<u8> {
+    let mut payload = vec![FXP_WRITE];
+    payload.extend_from_slice(&id.to_be_bytes());
+    payload.extend_from_slice(&(handle.len() as u32).to_be_bytes());
+    payload.extend_from_slice(handle);
+    payload.extend_from_slice(&offset.to_be_bytes());
+    payload.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    payload.extend_from_slice(data);
+    frame_packet(&payload)
+}
+
+/// 构造 SETSTAT 请求：路径 + attrs（touch 的时间刷新、上传暂存的权限保留）。
+pub fn build_setstat(id: u32, path: &[u8], attrs: &RawAttrs) -> Vec<u8> {
+    let mut payload = vec![FXP_SETSTAT];
+    payload.extend_from_slice(&id.to_be_bytes());
+    payload.extend_from_slice(&(path.len() as u32).to_be_bytes());
+    payload.extend_from_slice(path);
+    payload.extend_from_slice(&encode_attrs(attrs));
+    frame_packet(&payload)
+}
+
+/// 构造 READLINK 请求。
+pub fn build_readlink(id: u32, path: &[u8]) -> Vec<u8> {
+    build_string_request(FXP_READLINK, id, path)
+}
+
+/// 构造 SYMLINK 请求。v3 wire 上两个字符串的次序在 draft 与 OpenSSH 之间
+/// 历史性颠倒：OpenSSH 服务器按 `target, linkpath` 读取（russh-sftp 高层
+/// 靠调用方交换参数对齐，见 `sftp_ext::symlink_create` 的考证注释）。裸包
+/// 直接按 OpenSSH 次序装包：第一个字符串是链接指向，第二个是链接路径。
+pub fn build_symlink(id: u32, target: &[u8], link_path: &[u8]) -> Vec<u8> {
+    let mut payload = vec![FXP_SYMLINK];
+    payload.extend_from_slice(&id.to_be_bytes());
+    for path in [target, link_path] {
+        payload.extend_from_slice(&(path.len() as u32).to_be_bytes());
+        payload.extend_from_slice(path);
+    }
+    frame_packet(&payload)
+}
+
 /// v3 attrs 解析；返回 (attrs, 消费字节数)。EXTENDED 扩展按长度跳过。
 pub fn parse_attrs(buf: &[u8]) -> Result<(RawAttrs, usize), String> {
     let mut cursor = 0;
@@ -147,7 +213,7 @@ pub fn parse_attrs(buf: &[u8]) -> Result<(RawAttrs, usize), String> {
         attrs.permissions = Some(read_u32(buf, &mut cursor)?);
     }
     if flags & ATTR_ACMODTIME != 0 {
-        read_u32(buf, &mut cursor)?;
+        attrs.atime = Some(read_u32(buf, &mut cursor)?);
         attrs.mtime = Some(read_u32(buf, &mut cursor)?);
     }
     if flags & ATTR_EXTENDED != 0 {
@@ -158,6 +224,34 @@ pub fn parse_attrs(buf: &[u8]) -> Result<(RawAttrs, usize), String> {
         }
     }
     Ok((attrs, cursor))
+}
+
+/// v3 attrs 编码（[`parse_attrs`] 的逆）：只编码 Some 的字段；时间字段按
+/// v3 固定为 atime+mtime 成对出现（缺省一侧按 0 补位）。
+pub fn encode_attrs(attrs: &RawAttrs) -> Vec<u8> {
+    let mut flags = 0_u32;
+    if attrs.size.is_some() {
+        flags |= ATTR_SIZE;
+    }
+    if attrs.permissions.is_some() {
+        flags |= ATTR_PERMISSIONS;
+    }
+    if attrs.atime.is_some() || attrs.mtime.is_some() {
+        flags |= ATTR_ACMODTIME;
+    }
+    let mut out = Vec::with_capacity(32);
+    out.extend_from_slice(&flags.to_be_bytes());
+    if let Some(size) = attrs.size {
+        out.extend_from_slice(&size.to_be_bytes());
+    }
+    if let Some(permissions) = attrs.permissions {
+        out.extend_from_slice(&permissions.to_be_bytes());
+    }
+    if flags & ATTR_ACMODTIME != 0 {
+        out.extend_from_slice(&attrs.atime.unwrap_or(0).to_be_bytes());
+        out.extend_from_slice(&attrs.mtime.unwrap_or(0).to_be_bytes());
+    }
+    out
 }
 
 /// 解包一个已去帧的响应：返回 (type, id_or_none, body)。
@@ -349,26 +443,12 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
         offset: u64,
         len: u32,
     ) -> Result<Vec<u8>, String> {
-        let id = self.next_id();
-        // OPEN pflags = READ；attrs 字段全空（flags=0）。
-        let mut payload = vec![FXP_OPEN];
-        payload.extend_from_slice(&id.to_be_bytes());
-        payload.extend_from_slice(&(path.len() as u32).to_be_bytes());
-        payload.extend_from_slice(path);
-        payload.extend_from_slice(&PFLAGS_READ.to_be_bytes());
-        payload.extend_from_slice(&0_u32.to_be_bytes());
-        let reply = self.request(frame_packet(&payload), id).await?;
-        let (kind, _, body) = parse_response_header(&reply)?;
-        let handle = match kind {
-            FXP_HANDLE => parse_handle(body)?,
-            FXP_STATUS => {
-                return Err(format!(
-                    "SFTP raw open failed with status {}",
-                    parse_status_code(body)?
-                ));
-            }
-            _ => return Err("SFTP raw open got an unexpected reply".to_string()),
-        };
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let handle = self
+            .open_handle(path, PFLAGS_READ, &RawAttrs::default())
+            .await?;
         let result = async {
             let id = self.next_id();
             let reply = self
@@ -414,6 +494,106 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
     /// REMOVE：删除一个文件（或符号链接）。
     pub async fn remove(&mut self, path: &[u8]) -> Result<(), String> {
         self.status_ok_op(FXP_REMOVE, "remove", path).await
+    }
+
+    /// 打开一个可写句柄：OPEN(CREAT|WRITE|TRUNC) → HANDLE。上传族/直写的
+    /// 暂存文件与 touch 的新建分支都走这里；数据用 [`Self::write_chunk`]
+    /// 写入，最后必须 [`Self::close`]。
+    pub async fn open_write(&mut self, path: &[u8]) -> Result<Vec<u8>, String> {
+        let pflags = PFLAGS_WRITE | PFLAGS_CREAT | PFLAGS_TRUNC;
+        self.open_handle(path, pflags, &RawAttrs::default()).await
+    }
+
+    /// 写一段数据到句柄：WRITE(handle, offset, data) → STATUS 0。单段长度
+    /// 不得超过 [`MAX_WRITE_CHUNK`]（由调用方切分）。
+    pub async fn write_chunk(
+        &mut self,
+        handle: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), String> {
+        if data.len() > MAX_WRITE_CHUNK {
+            return Err(format!(
+                "SFTP raw write chunk too large: {} > {MAX_WRITE_CHUNK}",
+                data.len()
+            ));
+        }
+        let id = self.next_id();
+        let reply = self
+            .request(build_write(id, handle, offset, data), id)
+            .await?;
+        let (kind, _, body) = parse_response_header(&reply)?;
+        match kind {
+            FXP_STATUS => {
+                let code = parse_status_code(body)?;
+                if code == 0 {
+                    return Ok(());
+                }
+                Err(format!("SFTP raw write failed with status {code}"))
+            }
+            _ => Err("SFTP raw write got an unexpected reply".to_string()),
+        }
+    }
+
+    /// SETSTAT：按 attrs 子集改写路径属性（touch 的 utime 语义、上传提交的
+    /// 权限保留）。服务器拒绝/不支持时返回 Err，由调用方决定是否容忍。
+    pub async fn setstat(&mut self, path: &[u8], attrs: &RawAttrs) -> Result<(), String> {
+        let id = self.next_id();
+        let reply = self.request(build_setstat(id, path, attrs), id).await?;
+        let (kind, _, body) = parse_response_header(&reply)?;
+        match kind {
+            FXP_STATUS => {
+                let code = parse_status_code(body)?;
+                if code == 0 {
+                    return Ok(());
+                }
+                Err(format!("SFTP raw setstat failed with status {code}"))
+            }
+            _ => Err("SFTP raw setstat got an unexpected reply".to_string()),
+        }
+    }
+
+    /// READLINK：返回链接指向的原始字节（NAME 包第一条目的文件名字段）。
+    pub async fn readlink(&mut self, path: &[u8]) -> Result<Vec<u8>, String> {
+        let id = self.next_id();
+        let reply = self.request(build_readlink(id, path), id).await?;
+        let (kind, _, body) = parse_response_header(&reply)?;
+        match kind {
+            FXP_NAME => {
+                let entries = parse_name_entries(body)?;
+                entries
+                    .into_iter()
+                    .next()
+                    .map(|entry| entry.name)
+                    .ok_or_else(|| "SFTP raw readlink got an empty NAME reply".to_string())
+            }
+            FXP_STATUS => Err(format!(
+                "SFTP raw readlink failed with status {}",
+                parse_status_code(body)?
+            )),
+            _ => Err("SFTP raw readlink got an unexpected reply".to_string()),
+        }
+    }
+
+    /// SYMLINK：创建 `link_path` → `target`。字符串按 OpenSSH 次序装包
+    /// （见 [`build_symlink`]），与高层 `symlink(target, link_path)` 的
+    /// 生产行为一致。
+    pub async fn symlink(&mut self, target: &[u8], link_path: &[u8]) -> Result<(), String> {
+        let id = self.next_id();
+        let reply = self
+            .request(build_symlink(id, target, link_path), id)
+            .await?;
+        let (kind, _, body) = parse_response_header(&reply)?;
+        match kind {
+            FXP_STATUS => {
+                let code = parse_status_code(body)?;
+                if code == 0 {
+                    return Ok(());
+                }
+                Err(format!("SFTP raw symlink failed with status {code}"))
+            }
+            _ => Err("SFTP raw symlink got an unexpected reply".to_string()),
+        }
     }
 
     /// MKDIR：创建目录。
@@ -480,7 +660,8 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
         }
     }
 
-    async fn close(&mut self, handle: &[u8]) -> Result<(), String> {
+    /// CLOSE：释放句柄（open_write/open 的收尾；STATUS 0 或 EOF 均视为成功）。
+    pub async fn close(&mut self, handle: &[u8]) -> Result<(), String> {
         let id = self.next_id();
         let reply = self.request(build_close(id, handle), id).await?;
         let (kind, _, body) = parse_response_header(&reply)?;
@@ -492,6 +673,28 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
             return Err(format!("SFTP raw close failed with status {code}"));
         }
         Err("SFTP raw close got an unexpected reply".to_string())
+    }
+
+    /// OPEN 的公共骨架：任意 pflags + attrs → HANDLE。
+    async fn open_handle(
+        &mut self,
+        path: &[u8],
+        pflags: u32,
+        attrs: &RawAttrs,
+    ) -> Result<Vec<u8>, String> {
+        let id = self.next_id();
+        let reply = self
+            .request(build_open(id, path, pflags, attrs), id)
+            .await?;
+        let (kind, _, body) = parse_response_header(&reply)?;
+        match kind {
+            FXP_HANDLE => parse_handle(body),
+            FXP_STATUS => Err(format!(
+                "SFTP raw open failed with status {}",
+                parse_status_code(body)?
+            )),
+            _ => Err("SFTP raw open got an unexpected reply".to_string()),
+        }
     }
 
     /// 发一收一：发送帧后读取响应帧，校验回包 id 匹配。
@@ -683,6 +886,94 @@ mod tests {
         assert_eq!(&frame[22..], b"/new");
     }
 
+    #[test]
+    fn encode_attrs_round_trips_the_parsed_subset() {
+        // 空 attrs。
+        assert_eq!(encode_attrs(&RawAttrs::default()), 0_u32.to_be_bytes());
+        // 权限保留（上传提交）：只编码 permissions。
+        let attrs = RawAttrs {
+            permissions: Some(0o644 & 0o7777),
+            ..RawAttrs::default()
+        };
+        let mut expected = (ATTR_PERMISSIONS).to_be_bytes().to_vec();
+        expected.extend_from_slice(&0o644_u32.to_be_bytes());
+        assert_eq!(encode_attrs(&attrs), expected);
+        // touch 的 utimes 语义：atime/mtime 成对编码。
+        let attrs = RawAttrs {
+            atime: Some(100),
+            mtime: Some(200),
+            ..RawAttrs::default()
+        };
+        let mut expected = ATTR_ACMODTIME.to_be_bytes().to_vec();
+        expected.extend_from_slice(&100_u32.to_be_bytes());
+        expected.extend_from_slice(&200_u32.to_be_bytes());
+        assert_eq!(encode_attrs(&attrs), expected);
+        // 解析↔编码在全部字段上闭环。
+        let mut buf = Vec::new();
+        let flags = ATTR_SIZE | ATTR_PERMISSIONS | ATTR_ACMODTIME;
+        buf.extend_from_slice(&flags.to_be_bytes());
+        buf.extend_from_slice(&9_u64.to_be_bytes());
+        buf.extend_from_slice(&0o100755_u32.to_be_bytes());
+        buf.extend_from_slice(&11_u32.to_be_bytes());
+        buf.extend_from_slice(&22_u32.to_be_bytes());
+        let (attrs, _) = parse_attrs(&buf).unwrap();
+        assert_eq!(attrs.size, Some(9));
+        assert_eq!(attrs.permissions, Some(0o100755));
+        assert_eq!(attrs.atime, Some(11));
+        assert_eq!(attrs.mtime, Some(22));
+        assert_eq!(encode_attrs(&attrs), buf);
+    }
+
+    #[test]
+    fn write_side_packet_builders_carry_expected_layouts() {
+        // OPEN：type + id + len+path + pflags + attrs(flags=0)。
+        let frame = build_open(
+            5,
+            b"/up/a\xE9.bin",
+            PFLAGS_WRITE | PFLAGS_CREAT | PFLAGS_TRUNC,
+            &RawAttrs::default(),
+        );
+        assert_eq!(frame[4], FXP_OPEN);
+        assert_eq!(&frame[5..9], &5_u32.to_be_bytes());
+        let path_len = 10_u32.to_be_bytes();
+        assert_eq!(&frame[9..13], &path_len);
+        assert_eq!(&frame[13..23], b"/up/a\xE9.bin");
+        let pflags = (PFLAGS_WRITE | PFLAGS_CREAT | PFLAGS_TRUNC).to_be_bytes();
+        assert_eq!(&frame[23..27], &pflags);
+        assert_eq!(&frame[27..], &0_u32.to_be_bytes()); // 空 attrs
+                                                        // WRITE：type + id + len+handle + offset + len+data。
+        let frame = build_write(6, b"h1", 4096, b"abc");
+        assert_eq!(frame[4], FXP_WRITE);
+        assert_eq!(&frame[9..13], &2_u32.to_be_bytes());
+        assert_eq!(&frame[13..15], b"h1");
+        assert_eq!(&frame[15..23], &4096_u64.to_be_bytes());
+        assert_eq!(&frame[23..27], &3_u32.to_be_bytes());
+        assert_eq!(&frame[27..], b"abc");
+        // SETSTAT：type + id + len+path + attrs。
+        let frame = build_setstat(
+            7,
+            b"/tmp/f",
+            &RawAttrs {
+                permissions: Some(0o600),
+                ..RawAttrs::default()
+            },
+        );
+        assert_eq!(frame[4], FXP_SETSTAT);
+        assert_eq!(&frame[9..13], &6_u32.to_be_bytes());
+        assert_eq!(&frame[19..23], &ATTR_PERMISSIONS.to_be_bytes());
+        assert_eq!(&frame[23..], &0o600_u32.to_be_bytes());
+        // READLINK 复用字符串请求骨架。
+        let frame = build_readlink(8, b"/lnk");
+        assert_eq!(frame[4], FXP_READLINK);
+        // SYMLINK：OpenSSH 次序，第一个字符串是 target。
+        let frame = build_symlink(9, b"tgt\xE9", b"/lnk");
+        assert_eq!(frame[4], FXP_SYMLINK);
+        assert_eq!(&frame[9..13], &4_u32.to_be_bytes());
+        assert_eq!(&frame[13..17], b"tgt\xE9");
+        assert_eq!(&frame[17..21], &4_u32.to_be_bytes());
+        assert_eq!(&frame[21..], b"/lnk");
+    }
+
     /// 内存双工流的桩服务器：INIT 回 VERSION，随后每个请求按脚本回预置
     /// 包体（自动回填请求帧里的 id）。纯内存往返，不连 SSH。
     /// 脚本包体格式：`[type, id 占位 4 字节, 剩余包体]`。
@@ -727,6 +1018,63 @@ mod tests {
         body.extend_from_slice(&size.to_be_bytes());
         body.extend_from_slice(&permissions.to_be_bytes());
         body
+    }
+
+    fn handle_body(value: &[u8]) -> Vec<u8> {
+        let mut body = vec![FXP_HANDLE];
+        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
+        body.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        body.extend_from_slice(value);
+        body
+    }
+
+    /// NAME 单条目回包（READLINK 用）：name + 空 longname + 空 attrs。
+    fn name_body_one(name: &[u8]) -> Vec<u8> {
+        let mut body = vec![FXP_NAME];
+        body.extend_from_slice(&0_u32.to_be_bytes()); // id 占位
+        body.extend_from_slice(&1_u32.to_be_bytes());
+        body.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        body.extend_from_slice(name);
+        body.extend_from_slice(&0_u32.to_be_bytes()); // longname 空
+        body.extend_from_slice(&0_u32.to_be_bytes()); // attrs flags=0
+        body
+    }
+
+    #[tokio::test]
+    async fn write_ops_round_trip_through_scripted_replies() {
+        let (client_side, server_side) = tokio::io::duplex(4096);
+        tokio::spawn(scripted_server(
+            server_side,
+            vec![
+                handle_body(b"h1"),        // open_write → HANDLE
+                status_body(0),            // write → ok
+                status_body(0),            // close → ok
+                status_body(0),            // setstat → ok
+                name_body_one(b"tgt\xE9"), // readlink → NAME
+                status_body(2),            // symlink → 失败
+            ],
+        ));
+        let mut client = RawSftp::init(client_side).await.unwrap();
+        let handle = client.open_write(b"/up/a\xE9.bin").await.unwrap();
+        assert_eq!(handle, b"h1".to_vec());
+        client.write_chunk(&handle, 0, b"data").await.unwrap();
+        client.close(&handle).await.unwrap();
+        client
+            .setstat(
+                b"/up/a\xE9.bin",
+                &RawAttrs {
+                    permissions: Some(0o600),
+                    ..RawAttrs::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(client.readlink(b"/lnk").await.unwrap(), b"tgt\xE9".to_vec());
+        let error = client.symlink(b"tgt", b"/lnk2").await.unwrap_err();
+        assert!(error.contains("status 2"), "{error}");
+        // WRITE 单包超限在客户端侧直接拒绝（不发出请求）。
+        let oversized = vec![0_u8; MAX_WRITE_CHUNK + 1];
+        assert!(client.write_chunk(b"h", 0, &oversized).await.is_err());
     }
 
     #[tokio::test]

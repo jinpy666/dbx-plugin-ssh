@@ -41,7 +41,7 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `sftp/chmod` | 修改远端路径权限位（八进制） |
 | `sftp/diskUsage` | 路径所在挂载的磁盘用量 |
 | `sftp/home`、`sftp/list`、`sftp/read` | 浏览、预览远端文件（`sftp/list` 支持可选 `includeOwner` 附加属主/属组；`sftp/read` 支持可选 `offset` 分片续读，见下文） |
-| `sftp/createDirectory`、`sftp/rename`、`sftp/delete` | SFTP 写操作（`sftp_name_encoding` 为 `latin-1` 时走裸包客户端字节保真，语义见 `sftp/list` 节 M15-B 段） |
+| `sftp/createDirectory`、`sftp/rename`、`sftp/delete`、`sftp/exists`、`sftp/rename-unique`、`sftp/touch`、`sftp/write`、`sftp/symlink-create/read/update`、`sftp/upload/start/finish`、`sftp/upload-local`、`watch/upload` | SFTP 写操作/预检（`sftp_name_encoding` 为 `latin-1` 时走裸包客户端字节保真，路径来源分工见 `sftp/list` 节 M15-B/M16 段） |
 | `sftp/upload/start`、`finish` | 上传事务生命周期（`resumeTaskId` 断点续传；`finish` 校验后交后台任务推送并立即返回，见「上传两阶段计数与收尾语义」） |
 | `sftp/download/start`、`next`、`finish` | 下载事务生命周期（`offset` 断点续传，见下文；桌面端可选 `downloadDir` 指定本机绝对保存目录） |
 | `sftp/download/tree/start` | 递归目录下载启动：远端 `read_dir` 走树扫描（有界），本地镜像目录布局后复用 `sftp/download/next`/`finish`/`sftp/transfer/cancel` 分块管线（见「递归目录下载」节） |
@@ -397,7 +397,16 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 **文件名编码（M14-B / M15-B）**：偏好 `sftp_name_encoding`（`auto`/`latin-1`，默认 `auto`）控制列表文件名的显示解码。`auto` 走高层客户端（合法 UTF-8 服务器字节往返无损），wire 名含 U+FFFD（上游 lossy 解码已替换非法字节）时条目附带 `lossy: true`（false 时字段省略）。`latin-1` 改走独立裸包客户端（SFTPv3，严格串行）拿原始文件名字节：`name` 为 latin-1 解码的显示文本，`uri` 中的文件名为 `%XX` 转义的 wire 形式——**传输路径始终用服务器原始字节/转义形式，显示层解码绝不回灌**；下载这类条目时 sidecar 自动把转义还原为原始字节走 raw OPEN/READ（每 chunk 独立 open/close）。raw 路径失败（服务器版本协商/异常包）自动回退高层客户端。
 
-**M15-B 起 latin-1 模式下路径写操作同样走裸包客户端字节保真**：`sftp/rename`、`sftp/delete`（含 `recursive: true` 的递归树删）、`sftp/createDirectory` 对路径参数先还原为服务器原始字节再发送 raw RENAME/REMOVE/RMDIR/MKDIR（判型用 raw LSTAT，symlink 绝不跟随，与 auto 语义一致）。路径处理规则：目录前缀（列表回传的 wire 形式）按 `%XX` 转义还原；rename 目标 / mkdir 名这类**用户新输入的最后一段**按 latin-1 显示编码回字节（>U+00FF 的字符按 UTF-8 兜底；输入中的字面 `%XX` 序列保持字面量，不再转义）。裸包客户端**建立**失败时自动回退高层客户端（此时尚未发出任何请求，回退安全）；操作已发出后的失败原样报错，不回退（避免重复执行写操作）。`auto` 模式下所有操作行为完全不变（继续走高层客户端）。已知边界：`sftp/exists` 预检、`sftp/rename-unique`、上传/直写等其余带新输入名字的操作仍按字面量发送；MCP 工具面的 `sftp_mkdir`/`sftp_remove`/`sftp_rename` 亦然。
+**M15-B 起 latin-1 模式下路径写操作同样走裸包客户端字节保真**：`sftp/rename`、`sftp/delete`（含 `recursive: true` 的递归树删）、`sftp/createDirectory` 对路径参数先还原为服务器原始字节再发送 raw RENAME/REMOVE/RMDIR/MKDIR（判型用 raw LSTAT，symlink 绝不跟随，与 auto 语义一致）。路径处理规则：目录前缀（列表回传的 wire 形式）按 `%XX` 转义还原；rename 目标 / mkdir 名这类**用户新输入的最后一段**按 latin-1 显示编码回字节（>U+00FF 的字符按 UTF-8 兜底；输入中的字面 `%XX` 序列保持字面量，不再转义）。裸包客户端**建立**失败时自动回退高层客户端（此时尚未发出任何请求，回退安全）；操作已发出后的失败原样报错，不回退（避免重复执行写操作）。`auto` 模式下所有操作行为完全不变（继续走高层客户端）。
+
+**M16 起 latin-1 裸包字节保真覆盖全部前端 SFTP 写路径**。裸包客户端补齐写侧操作（OPEN(creat|write|trunc)/WRITE/SETSTAT/READLINK/SYMLINK，SYMLINK 按 OpenSSH wire 次序装包，与高层 `symlink(target, linkPath)` 的生产行为一致）。路径来源分两类，还原分工固定：
+
+- **「wire 目录前缀 + 用户新输入的显示末段」**——`sftp/touch`（新建文件）、`sftp/symlink-create`（新链接名）、`sftp/exists`（rename 覆盖/上传撞名预检的目标路径）、`sftp/rename-unique`（上传撞名探测，候选名连 `(n)` 增量一起按显示编码；返回的 `name` 保持显示形式，回传给上传后按同一分工编码出同一组字节）、`sftp/upload/start|finish`（远端落盘名 = 前端 `joinRemote(当前目录, 本地文件名)`）：目录前缀按 `%XX` 还原、末段按 latin-1 显示编码回字节（即 M15 的 `write_path_bytes` 分工）。
+- **「整条 wire 路径」**——`sftp/write`（前端回传 `pathFromUri(entry.uri)` 与 watcher 的 remote-edit 目标）、`sftp/upload-local`（watcher 登记的 wire 路径）、`sftp/symlink-update`（链接路径）、`sftp/rename` 源路径、`sftp/delete`：整条按 `%XX` 还原为服务器字节（wire 的 `%` 自转义保证字面 `%XX` 名往返不吞）。`symlink-read` 的指向文本按 latin-1 显示解码返回，`symlink-update` 再按显示编码回字节，读↔写在 latin-1 域内闭环。
+
+上传/直写均保持「暂存 ASCII 临时文件 → 权限位保留（SETSTAT `0o7777`）→ 原子 rename 落位 → 失败清理/回滚」的提交语义（权限保留对齐高层 issue #37 行为），上传分块按 ≤32 KiB 切分（SFTPv3 兼容上限）。回退策略同 M15：仅裸包客户端**建立**失败回退高层客户端。
+
+**遗留（登记）**：① 粘贴预检（`sftp/exists` 的 paste 调用方）传来的整条 wire 名末段在 latin-1 下按「新输入显示文本」处理会探不到非 UTF-8 名——其底层 `sftp/copy`/`sftp/move` 本身也未迁移 raw（wire 名按字面量发送，M15 遗留），预检失败不阻断、交由后端执行时报错，语义不变；两者应一并迁移。② 终端拖入上传的自定义目标目录（shell cwd / 手输路径）按 wire 前缀处理，非 ASCII 的手输目录路径无法还原为 latin-1 字节。③ MCP 工具面 `sftp_mkdir`/`sftp_remove`/`sftp_rename` 保持字面量发送：MCP 的 `sftp_list_dir` 走高层客户端（非法字节已 lossy），工具面没有 wire 形式的名字来源，且工具面无编码偏好——字节保真需要 MCP 面自身的编码模式与列表层迁移设计，成本/风险超出本批次，登记后续处理。
 
 `includeOwner: true` 时，每个条目可携带可选 `owner`、`group` 字符串字段（属主用户、属组）：优先服务器直接提供的名字（SFTPv4+ 属主属性），数字 uid/gid 次之，SFTPv3 服务器（如 OpenSSH）再经一次只读 `ls -l` 往返升级为名字——该次往返失败（无 shell、无 `ls`、超时）时静默保留数字或省略字段，不影响列表本身。字段缺失即"未知"，由 UI 显示 `-`。省略 `includeOwner`（或为 `false`）时不输出这两个字段，与历史响应完全一致。`sudo/listDir` 恒定返回 `owner`/`group`（`ls -la` 解析附带，无额外往返）。
 

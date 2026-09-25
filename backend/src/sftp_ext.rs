@@ -2,6 +2,7 @@
 #![allow(dead_code)] // entry points are wired in main.rs; see the snippet at the bottom
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -15,7 +16,12 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::model::normalize_remote_path;
-use crate::ssh::{apply_preserved_permissions, lookup_owner_group_names, SshRuntime};
+use crate::sftp_name::{self, NameEncoding};
+use crate::sftp_raw::{self, RawAttrs};
+use crate::ssh::{
+    apply_preserved_permissions, format_permissions, lookup_owner_group_names, RawSftpClient,
+    SshRuntime,
+};
 
 /// Largest payload [`write_file`] accepts in one call; bigger files must go
 /// through the streaming upload slot (`sftp/upload/start`).
@@ -69,9 +75,33 @@ pub async fn stat(runtime: &SshRuntime, session_id: &str, path: &str) -> Result<
 }
 
 /// `sftp/exists` — `true` when the path is statable (dangling symlinks count).
-pub async fn exists(runtime: &SshRuntime, session_id: &str, path: &str) -> Result<bool, String> {
-    let sftp = runtime.sftp(session_id).await?;
+///
+/// 路径来源分工（M16）：调用方（rename 覆盖预检、上传撞名预检、粘贴预检）
+/// 传来的都是「wire 目录前缀 + 最后一段」。latin-1 模式按 [`sftp_name::
+/// write_path_bytes`] 的分工还原服务器字节（前缀 `%XX` 还原、末段按显示
+/// 文本 latin-1 编码）后走裸包 LSTAT；裸包客户端**建立**失败回退高层路径
+/// （M15 先例）。粘贴预检传来的整条 wire 名（末段已是 wire 形式）在 latin-1
+/// 下按显示文本处理会探不到——其底层 `sftp/copy`/`sftp/move` 同样未迁移
+/// raw（见 PROTOCOL 遗留），预检失败不阻断、交由后端执行时报错，语义不变。
+pub async fn exists(
+    runtime: &SshRuntime,
+    session_id: &str,
+    path: &str,
+    encoding: NameEncoding,
+) -> Result<bool, String> {
     let path = normalize_remote_path(path)?;
+    if encoding == NameEncoding::Latin1 {
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                let raw_path = sftp_name::write_path_bytes(&path);
+                return Ok(client.lstat(&raw_path).await.is_ok());
+            }
+            Err(error) => {
+                eprintln!("[ssh-sftp-plugin] raw byte exists unavailable, falling back: {error}");
+            }
+        }
+    }
+    let sftp = runtime.sftp(session_id).await?;
     let exists = sftp.lock().await.symlink_metadata(path).await.is_ok();
     Ok(exists)
 }
@@ -87,15 +117,45 @@ const MAX_UNIQUE_NAME_CHARS: usize = 255;
 /// for an upload about to land there. `name` itself wins when free, otherwise
 /// `name(1)` .. `name(999)` are probed (the `(n)` is inserted before the last
 /// extension: `report.pdf` -> `report(1).pdf`). Returns `{name, conflict}`.
+///
+/// 路径来源分工（M16）：`dir` 是列表回传的 wire 形式（latin-1 下整条按
+/// `%XX` 还原），`name` 是上传文件的新输入显示文本（latin-1 下连同 `(n)`
+/// 候选一起按 [`sftp_name::latin1_encode_display`] 编码回字节）。候选探测
+/// 走裸包 LSTAT；裸包客户端**建立**失败回退高层探测路径（M15 先例）。返回
+/// 的 `name` 保持显示形式——前端把它拼回上传路径后，落盘侧 [`write_path_bytes`]
+/// 的分工（wire 前缀 + 显示末段）会编码出同一组服务器字节。
 pub async fn rename_unique(
     runtime: &SshRuntime,
     session_id: &str,
     dir: &str,
     name: &str,
+    encoding: NameEncoding,
 ) -> Result<Value, String> {
-    let sftp = runtime.sftp(session_id).await?;
     let dir = normalize_remote_path(dir)?;
     let clean = clean_unique_name(name)?;
+    if encoding == NameEncoding::Latin1 {
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                for (index, (candidate, raw)) in unique_name_raw_candidates(&dir, name)?
+                    .into_iter()
+                    .enumerate()
+                {
+                    if client.lstat(&raw).await.is_err() {
+                        return Ok(json!({ "name": candidate, "conflict": index > 0 }));
+                    }
+                }
+                return Err(format!(
+                    "No unique name derived from '{clean}' within {UNIQUE_NAME_PROBE_LIMIT} attempts"
+                ));
+            }
+            Err(error) => {
+                eprintln!(
+                    "[ssh-sftp-plugin] raw byte rename-unique unavailable, falling back: {error}"
+                );
+            }
+        }
+    }
+    let sftp = runtime.sftp(session_id).await?;
     let session = sftp.lock().await;
     let probe = |candidate: &str| {
         let full = join_remote_name(&dir, candidate);
@@ -114,10 +174,47 @@ pub async fn rename_unique(
 /// `sftp/touch` — creates an empty file when missing, otherwise refreshes
 /// mtime/atime. Servers that reject SETSTAT times make the refresh a no-op,
 /// mirroring tiny-rdm's create-only `Touch`.
-pub async fn touch(runtime: &SshRuntime, session_id: &str, path: &str) -> Result<(), String> {
+///
+/// 路径来源分工（M16）：`path` 是「wire 目录前缀 + 用户新输入的显示文件名」
+/// （前端 `joinRemote(currentPath, name)`）。latin-1 模式按
+/// [`sftp_name::write_path_bytes`] 还原服务器字节后走裸包 LSTAT/SETSTAT/
+/// OPEN(creat|write|trunc)；裸包客户端**建立**失败回退高层路径。
+pub async fn touch(
+    runtime: &SshRuntime,
+    session_id: &str,
+    path: &str,
+    encoding: NameEncoding,
+) -> Result<(), String> {
     runtime.ensure_writable(session_id).await?;
-    let sftp = runtime.sftp(session_id).await?;
     let path = normalize_remote_path(path)?;
+    if encoding == NameEncoding::Latin1 {
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                let raw_path = sftp_name::write_path_bytes(&path);
+                if client.lstat(&raw_path).await.is_ok() {
+                    // 时间刷新是尽力而为：SETSTAT 被拒与高层语义一致地容忍。
+                    let now = current_unix_secs();
+                    let _ = client
+                        .setstat(
+                            &raw_path,
+                            &RawAttrs {
+                                atime: Some(now),
+                                mtime: Some(now),
+                                ..RawAttrs::default()
+                            },
+                        )
+                        .await;
+                    return Ok(());
+                }
+                let handle = client.open_write(&raw_path).await?;
+                return client.close(&handle).await;
+            }
+            Err(error) => {
+                eprintln!("[ssh-sftp-plugin] raw byte touch unavailable, falling back: {error}");
+            }
+        }
+    }
+    let sftp = runtime.sftp(session_id).await?;
     let session = sftp.lock().await;
     if session.symlink_metadata(path.clone()).await.is_ok() {
         let now = current_unix_secs();
@@ -140,15 +237,21 @@ pub async fn touch(runtime: &SshRuntime, session_id: &str, path: &str) -> Result
 
 /// `sftp/write` — direct write for small files: base64 payload in, temporary
 /// `.dbx-part-<uuid>` file out, atomic rename onto the target.
+///
+/// 路径来源分工（M16）：`sftp/write` 的 `remotePath` 来自前端对列表条目 uri
+/// 的整条回传（`pathFromUri(entry.uri)`）与 watcher 的 remote-edit 目标——
+/// 都是 wire 形式。latin-1 模式整条 [`sftp_name::unescape_wire`] 还原服务器
+/// 字节（wire 的 `%` 自转义保证字面 `%XX` 名往返不变），不走末段显示编码。
 pub async fn write_file(
     runtime: &SshRuntime,
     session_id: &str,
     path: &str,
     data_base64: &str,
+    encoding: NameEncoding,
 ) -> Result<(), String> {
     let data = decode_direct_write_payload(data_base64)?;
     // write_bytes runs the write gate (ensure_writable) — no second check here.
-    write_bytes(runtime, session_id, path, &data).await
+    write_bytes(runtime, session_id, path, &data, encoding).await
 }
 
 /// In-memory variant of [`write_file`] shared with the watcher round-trip
@@ -161,10 +264,41 @@ pub async fn write_bytes(
     session_id: &str,
     path: &str,
     data: &[u8],
+    encoding: NameEncoding,
 ) -> Result<(), String> {
     runtime.ensure_writable(session_id).await?;
-    let sftp = runtime.sftp(session_id).await?;
     let path = normalize_remote_path(path)?;
+    if encoding == NameEncoding::Latin1 {
+        // 整条 wire 路径还原为服务器字节后走裸包暂存 + 原子提交；裸包客户端
+        // 建立失败回退高层路径，操作发出后的失败原样上抛（M15 先例）。
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                let raw_target = sftp_name::unescape_wire(&path);
+                let task_id = Uuid::new_v4().to_string();
+                let (raw_temporary, raw_backup) = raw_paths_next_to(
+                    &raw_target,
+                    &format!(".dbx-part-{task_id}"),
+                    &format!(".dbx-part-{task_id}.backup"),
+                );
+                let handle = client.open_write(&raw_temporary).await?;
+                if let Err(error) = raw_write_all(&mut client, &handle, data).await {
+                    drop(handle);
+                    let _ = client.remove(&raw_temporary).await;
+                    return Err(format!("SFTP write failed: {error}"));
+                }
+                if let Err(error) = client.close(&handle).await {
+                    let _ = client.remove(&raw_temporary).await;
+                    return Err(format!("SFTP write flush failed: {error}"));
+                }
+                return raw_commit_file(&mut client, &raw_temporary, &raw_target, &raw_backup)
+                    .await;
+            }
+            Err(error) => {
+                eprintln!("[ssh-sftp-plugin] raw byte write unavailable, falling back: {error}");
+            }
+        }
+    }
+    let sftp = runtime.sftp(session_id).await?;
     let task_id = Uuid::new_v4().to_string();
     let (temporary, backup) = direct_write_paths(&path, &task_id);
     {
@@ -308,15 +442,35 @@ pub async fn extract(
 /// `target` keeps its original form (absolute or relative): relative targets
 /// are the normal way to build relocatable links, so normalizing it would
 /// silently change what the link resolves to.
+///
+/// 路径来源分工（M16）：`link_path` 是「wire 目录前缀 + 用户新输入的显示
+/// 链接名」（前端 `joinRemote(currentPath, name)`）——latin-1 模式按
+/// [`sftp_name::write_path_bytes`] 还原字节；`target` 保持原文（相对链接
+/// 语义），按其字符串字节发送。裸包 SYMLINK 按 OpenSSH wire 次序装包。
 pub async fn symlink_create(
     runtime: &SshRuntime,
     session_id: &str,
     target: &str,
     link_path: &str,
+    encoding: NameEncoding,
 ) -> Result<(), String> {
     runtime.ensure_writable(session_id).await?;
     let target = clean_link_target(target)?;
     let link_path = normalize_remote_path(link_path)?;
+    if encoding == NameEncoding::Latin1 {
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                return client
+                    .symlink(target.as_bytes(), &sftp_name::write_path_bytes(&link_path))
+                    .await;
+            }
+            Err(error) => {
+                eprintln!(
+                    "[ssh-sftp-plugin] raw byte symlink-create unavailable, falling back: {error}"
+                );
+            }
+        }
+    }
     let sftp = runtime.sftp(session_id).await?;
     // Spike result (russh-sftp 3.0.0, src/client/rawsession.rs:709 +
     // protocol/symlink.rs): the wire order is (linkpath, targetpath), which is
@@ -334,12 +488,36 @@ pub async fn symlink_create(
 }
 
 /// `sftp/symlink-read` — resolves `link_path` to its target string.
+///
+/// 路径来源分工（M16）：`link_path` 是列表回传的整条 wire 形式，latin-1
+/// 模式整条 [`sftp_name::unescape_wire`] 还原后走裸包 READLINK，指向文本按
+/// latin-1 显示解码（与列表名同一套解码语义）。前端把读到的指向回传给
+/// [`symlink_update`] 时按显示文本编码回字节，读↔写在 latin-1 域内闭环。
 pub async fn symlink_read(
     runtime: &SshRuntime,
     session_id: &str,
     link_path: &str,
+    encoding: NameEncoding,
 ) -> Result<Value, String> {
     let link_path = normalize_remote_path(link_path)?;
+    if encoding == NameEncoding::Latin1 {
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                let raw_link = sftp_name::unescape_wire(&link_path);
+                let raw_target = client
+                    .readlink(&raw_link)
+                    .await
+                    .map_err(|error| format!("SFTP symlink-read failed: {error}"))?;
+                let target = sftp_name::decode_display_name(&raw_target, NameEncoding::Latin1).text;
+                return Ok(json!({ "linkPath": link_path, "target": target }));
+            }
+            Err(error) => {
+                eprintln!(
+                    "[ssh-sftp-plugin] raw byte symlink-read unavailable, falling back: {error}"
+                );
+            }
+        }
+    }
     let sftp = runtime.sftp(session_id).await?;
     let target = sftp
         .lock()
@@ -353,15 +531,49 @@ pub async fn symlink_read(
 /// `sftp/symlink-update` — repoints an existing symlink. SFTP v3 has no
 /// re-link primitive, so the update is read-compare, then remove + recreate;
 /// when the requested target already matches the call is a no-op.
+///
+/// 路径来源分工（M16）：`link_path` 是列表回传的整条 wire 形式（latin-1 下
+/// 整条还原字节）；`target` 是 [`symlink_read`] 解出的显示文本或用户新输入，
+/// latin-1 下按 [`sftp_name::latin1_encode_display`] 编码回字节——与
+/// [`symlink_read`] 构成闭环。
 pub async fn symlink_update(
     runtime: &SshRuntime,
     session_id: &str,
     link_path: &str,
     target: &str,
+    encoding: NameEncoding,
 ) -> Result<(), String> {
     runtime.ensure_writable(session_id).await?;
     let target = clean_link_target(target)?;
     let link_path = normalize_remote_path(link_path)?;
+    if encoding == NameEncoding::Latin1 {
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                let raw_link = sftp_name::unescape_wire(&link_path);
+                let raw_target = sftp_name::latin1_encode_display(&target);
+                if client
+                    .readlink(&raw_link)
+                    .await
+                    .map(|current| current == raw_target)
+                    .unwrap_or(false)
+                {
+                    return Ok(());
+                }
+                client.remove(&raw_link).await.map_err(|error| {
+                    format!("SFTP symlink-update could not remove the old link: {error}")
+                })?;
+                return client
+                    .symlink(&raw_target, &raw_link)
+                    .await
+                    .map_err(|error| format!("SFTP symlink-update failed: {error}"));
+            }
+            Err(error) => {
+                eprintln!(
+                    "[ssh-sftp-plugin] raw byte symlink-update unavailable, falling back: {error}"
+                );
+            }
+        }
+    }
     let sftp = runtime.sftp(session_id).await?;
     let session = sftp.lock().await;
     if session
@@ -489,6 +701,161 @@ async fn commit_temporary_file(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// latin-1 裸包写路径（M16）：暂存命名 / 分块写 / 原子提交
+// ---------------------------------------------------------------------------
+
+/// 裸包 WRITE 单段上限（与 raw 客户端一致；服务器兼容性最稳的切分尺寸）。
+const RAW_WRITE_CHUNK: usize = sftp_raw::MAX_WRITE_CHUNK;
+
+/// 在 `target`（服务器原始字节）旁边取一对暂存路径字节：ASCII 暂存名由
+/// 调用方给定（write 族 `.dbx-part-<uuid>` / 上传族 `.dbx-upload-<task>.part`，
+/// 与高层 [`direct_write_paths`] / ssh.rs `remote_transfer_paths` 命名对齐）。
+/// 目录前缀直接复用目标字节——目录段已在调用方按 wire 还原，这里只做拼接。
+fn raw_paths_next_to(target: &[u8], temp_name: &str, backup_name: &str) -> (Vec<u8>, Vec<u8>) {
+    let parent: &[u8] = match target.iter().rposition(|&byte| byte == b'/') {
+        Some(0) => b"/",
+        Some(position) => &target[..position],
+        None => b"/",
+    };
+    (
+        sftp_name::join_raw_path(parent, temp_name.as_bytes()),
+        sftp_name::join_raw_path(parent, backup_name.as_bytes()),
+    )
+}
+
+/// 裸包分块写：按 [`RAW_WRITE_CHUNK`] 切分，offset 随写推进。
+async fn raw_write_all(
+    client: &mut RawSftpClient,
+    handle: &[u8],
+    mut data: &[u8],
+) -> Result<(), String> {
+    let mut offset = 0_u64;
+    while !data.is_empty() {
+        let chunk = &data[..data.len().min(RAW_WRITE_CHUNK)];
+        client.write_chunk(handle, offset, chunk).await?;
+        offset += chunk.len() as u64;
+        data = &data[chunk.len()..];
+    }
+    Ok(())
+}
+
+/// 裸包原子提交（[`commit_temporary_file`] / ssh.rs `commit_remote_file` 的
+/// 字节保真版）：STAT 目标取权限位 → SETSTAT 到暂存文件（保留 +x，issue #37）
+/// → 目标已存在则先改名让位（失败回滚还原）→ 暂存改名落位 → 清理备份。
+async fn raw_commit_file(
+    client: &mut RawSftpClient,
+    temporary: &[u8],
+    target: &[u8],
+    backup: &[u8],
+) -> Result<(), String> {
+    let target_attributes = client.stat(target).await.ok();
+    if let Some(permissions) = target_attributes
+        .as_ref()
+        .and_then(|attrs| attrs.permissions)
+    {
+        if let Err(error) = client
+            .setstat(
+                temporary,
+                &RawAttrs {
+                    permissions: Some(permissions & 0o7777),
+                    ..RawAttrs::default()
+                },
+            )
+            .await
+        {
+            let _ = client.remove(temporary).await;
+            return Err(format!(
+                "SFTP save failed while preserving permissions {}: {error}; original file left unchanged",
+                format_permissions(permissions),
+            ));
+        }
+    }
+    let target_exists = target_attributes.is_some();
+    if target_exists {
+        client
+            .rename(target, backup)
+            .await
+            .map_err(|error| format!("SFTP operation failed: {error}"))?;
+    }
+    if let Err(error) = client.rename(temporary, target).await {
+        if target_exists {
+            let _ = client.rename(backup, target).await;
+        }
+        let _ = client.remove(temporary).await;
+        return Err(format!("SFTP operation failed: {error}"));
+    }
+    if target_exists {
+        let _ = client.remove(backup).await;
+    }
+    Ok(())
+}
+
+/// 裸包上传的取消/进度注入点（与高层 finish_upload 管线共享同一份状态）。
+pub(crate) struct RawUploadContext<'a> {
+    pub cancelled: &'a AtomicBool,
+    pub cancel_reason: &'a std::sync::Mutex<Option<String>>,
+    pub progress: Box<dyn FnMut(u64) -> Result<(), String> + Send + 'a>,
+}
+
+/// latin-1 裸包上传提交（`sftp/upload/finish` 专用）：本地 spool 文件 → raw
+/// 临时文件（CREATE|WRITE|TRUNC，分块 WRITE）→ 原子 rename 落位。取消检查、
+/// 进度回调与高层管线逐块对齐；取消/写失败时清理远端暂存文件。
+/// `remote_path` 是上传族路径来源「wire 目录前缀 + 显示末段」，经
+/// [`sftp_name::write_path_bytes`] 还原为服务器字节。
+pub(crate) async fn raw_push_upload_file(
+    client: &mut RawSftpClient,
+    local_path: &Path,
+    remote_path: &str,
+    task_id: &str,
+    read_chunk_size: usize,
+    mut context: RawUploadContext<'_>,
+) -> Result<(), String> {
+    let raw_target = sftp_name::write_path_bytes(remote_path);
+    let (raw_temporary, raw_backup) = raw_paths_next_to(
+        &raw_target,
+        &format!(".dbx-upload-{task_id}.part"),
+        &format!(".dbx-upload-{task_id}.backup"),
+    );
+    let mut source = tokio::fs::File::open(local_path)
+        .await
+        .map_err(|error| format!("Failed to open upload spool file: {error}"))?;
+    let handle = client.open_write(&raw_temporary).await?;
+    let mut buffer = vec![0_u8; read_chunk_size];
+    let mut transferred = 0_u64;
+    let result: Result<(), String> = async {
+        loop {
+            if context.cancelled.load(Ordering::Acquire) {
+                let reason = context
+                    .cancel_reason
+                    .lock()
+                    .map(|reason| reason.clone())
+                    .unwrap_or_default();
+                return Err(crate::ssh::upload_cancel_error(reason.as_deref()));
+            }
+            let read = source
+                .read(&mut buffer)
+                .await
+                .map_err(|error| format!("Failed to read upload spool file: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            raw_write_all(client, &handle, &buffer[..read]).await?;
+            transferred = transferred.saturating_add(read as u64);
+            (context.progress)(transferred)?;
+        }
+        client.close(&handle).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = client.close(&handle).await;
+        let _ = client.remove(&raw_temporary).await;
+        return Err(error);
+    }
+    raw_commit_file(client, &raw_temporary, &raw_target, &raw_backup).await
+}
+
 /// Validates and bounds a caller-provided file name for the unique-name
 /// probe: no path separators, no `.`/`..`, capped length.
 fn clean_unique_name(name: &str) -> Result<String, String> {
@@ -524,6 +891,22 @@ fn unique_name_candidates(name: &str) -> Vec<String> {
         candidates.push(unique_name_candidate(name, n));
     }
     candidates
+}
+
+/// latin-1 裸包探测用的候选序列：目录前缀按 wire 还原为字节，候选名（显示
+/// 文本——`(n)` 是 ASCII 增量，编码次序无关）按 [`sftp_name::
+/// latin1_encode_display`] 编码回字节。纯函数，供 [`rename_unique`] 与单测。
+fn unique_name_raw_candidates(dir: &str, name: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let clean = clean_unique_name(name)?;
+    let raw_dir = sftp_name::unescape_wire(dir);
+    Ok(unique_name_candidates(&clean)
+        .into_iter()
+        .map(|candidate| {
+            let raw =
+                sftp_name::join_raw_path(&raw_dir, &sftp_name::latin1_encode_display(&candidate));
+            (candidate, raw)
+        })
+        .collect())
 }
 
 /// Pure decision core of [`rename_unique`]: the first candidate the `exists`
@@ -750,6 +1133,7 @@ pub async fn upload_watched_file(
     session_id: &str,
     local_path: &str,
     remote_path: &str,
+    encoding: NameEncoding,
 ) -> Result<Value, String> {
     runtime.ensure_writable(session_id).await?;
     let local =
@@ -766,6 +1150,30 @@ pub async fn upload_watched_file(
         ));
     }
     let remote_path = normalize_remote_path(remote_path)?;
+    // 路径来源分工（M16）：remotePath 是 watcher 登记的整条 wire 形式（列表
+    // 回传），latin-1 模式整条还原字节后走裸包暂存 + 原子提交。
+    if encoding == NameEncoding::Latin1 {
+        match runtime.raw_sftp_client(session_id).await {
+            Ok(mut client) => {
+                let raw_target = sftp_name::unescape_wire(&remote_path);
+                let task_id = Uuid::new_v4().to_string();
+                let (raw_temporary, raw_backup) = raw_paths_next_to(
+                    &raw_target,
+                    &format!(".dbx-part-{task_id}"),
+                    &format!(".dbx-part-{task_id}.backup"),
+                );
+                push_local_file_raw(&mut client, &local, &raw_temporary, UPLOAD_LOCAL_CHUNK)
+                    .await?;
+                raw_commit_file(&mut client, &raw_temporary, &raw_target, &raw_backup).await?;
+                return Ok(json!({ "path": remote_path, "size": size }));
+            }
+            Err(error) => {
+                eprintln!(
+                    "[ssh-sftp-plugin] raw byte upload-local unavailable, falling back: {error}"
+                );
+            }
+        }
+    }
     let sftp = runtime.sftp(session_id).await?;
     let task_id = Uuid::new_v4().to_string();
     let (temporary, backup) = direct_write_paths(&remote_path, &task_id);
@@ -785,7 +1193,7 @@ pub async fn upload_watched_file(
                 ));
             }
         };
-        let mut buffer = vec![0u8; UPLOAD_LOCAL_CHUNK];
+        let mut buffer = vec![0_u8; UPLOAD_LOCAL_CHUNK];
         loop {
             let read = match reader.read(&mut buffer).await {
                 Ok(0) => break,
@@ -813,6 +1221,45 @@ pub async fn upload_watched_file(
     }
     commit_temporary_file(&sftp, &temporary, &remote_path, &backup).await?;
     Ok(json!({ "path": remote_path, "size": size }))
+}
+
+/// 裸包流式推一个本地文件到远端暂存路径：CREATE|WRITE|TRUNC 打开 → 按
+/// `read_chunk_size` 读本地 → 按 [`RAW_WRITE_CHUNK`] 分块 WRITE → CLOSE。
+/// 任何失败都会清理远端暂存文件。
+async fn push_local_file_raw(
+    client: &mut RawSftpClient,
+    local_path: &Path,
+    raw_temporary: &[u8],
+    read_chunk_size: usize,
+) -> Result<(), String> {
+    let mut reader = tokio::fs::File::open(local_path).await.map_err(|error| {
+        format!(
+            "Local file '{}' is unreadable: {error}",
+            local_path.display()
+        )
+    })?;
+    let handle = client.open_write(raw_temporary).await?;
+    let mut buffer = vec![0_u8; read_chunk_size];
+    let result: Result<(), String> = async {
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .await
+                .map_err(|error| format!("Local file read failed: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            raw_write_all(client, &handle, &buffer[..read]).await?;
+        }
+        client.close(&handle).await
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = client.close(&handle).await;
+        let _ = client.remove(raw_temporary).await;
+        return Err(error);
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -1071,6 +1518,76 @@ mod tests {
         // emptiness and NUL are protocol-level junk.
         assert!(clean_link_target("").is_err());
         assert!(clean_link_target("a\0b").is_err());
+    }
+
+    // —— M16 latin-1 裸包写路径的纯逻辑 —— //
+
+    #[test]
+    fn raw_paths_next_to_reuses_the_target_directory_bytes() {
+        // 目标字节里可以有任何非 UTF-8 序列：目录段原样复用，ASCII 暂存名拼接。
+        let target = b"/tmp/caf\xe9/upload/report.pdf".to_vec();
+        let (temporary, backup) =
+            raw_paths_next_to(&target, ".dbx-part-abc", ".dbx-part-abc.backup");
+        assert_eq!(temporary, b"/tmp/caf\xe9/upload/.dbx-part-abc".to_vec());
+        assert_eq!(backup, b"/tmp/caf\xe9/upload/.dbx-part-abc.backup".to_vec());
+        // 根目录目标：暂存名落在 / 下。
+        let (root_temp, root_backup) = raw_paths_next_to(b"/a.txt", ".dbx-part-abc", ".b");
+        assert_eq!(root_temp, b"/.dbx-part-abc".to_vec());
+        assert_eq!(root_backup, b"/.b".to_vec());
+    }
+
+    #[test]
+    fn unique_name_raw_candidates_encode_wire_prefix_and_display_names() {
+        let candidates = unique_name_raw_candidates("/tmp/caf%E9", "naïve.txt").unwrap();
+        // 目录前缀来自列表回传的 wire 形式（%E9 → 0xE9），候选名是用户新输入
+        // 的显示文本按 latin-1 编码（ï → 0xEF）；(n) 是 ASCII 增量。
+        assert_eq!(candidates[0].1, b"/tmp/caf\xe9/na\xefve.txt".to_vec());
+        assert_eq!(candidates[1].1, b"/tmp/caf\xe9/na\xefve(1).txt".to_vec());
+        assert_eq!(candidates[0].0, "naïve.txt");
+        assert_eq!(candidates[1].0, "naïve(1).txt");
+        assert_eq!(candidates.len(), (UNIQUE_NAME_PROBE_LIMIT + 1) as usize);
+        // 字面 %XX 的新输入名保持字面量（不二次转义）。
+        let literal = unique_name_raw_candidates("/tmp", "100%.pdf").unwrap();
+        assert_eq!(literal[0].1, b"/tmp/100%.pdf".to_vec());
+        // 非法输入仍然被拒绝。
+        assert!(unique_name_raw_candidates("/tmp", "a/b").is_err());
+    }
+
+    /// 两条 latin-1 路径还原分工的对照证明：touch/symlink-create/exists/
+    /// rename-unique/上传 start 的「wire 前缀 + 新输入末段」走
+    /// `write_path_bytes`；sftp/write、upload-local、symlink-update 的
+    /// 「整条 wire 路径」走 `unescape_wire`。同一服务器名字节在两种来源下
+    /// 还原结果一致；wire 里字面 %XX 已被 escape_wire 自转义为 %25，还原不吞。
+    #[test]
+    fn latin1_path_resolution_splits_by_path_origin() {
+        // 服务器字节 b"caf\xe9.txt" 的两种来源：
+        // (1) 列表 wire 路径（整条还原）——sftp/write 的 previewPath。
+        assert_eq!(
+            sftp_name::unescape_wire("/tmp/caf%E9.txt"),
+            b"/tmp/caf\xe9.txt".to_vec()
+        );
+        // (2) wire 前缀 + 显示末段——touch 的 joinRemote(currentPath, name)。
+        // 末段 "caf%E9.txt" 是显示文本：字面 %XX 保持 ASCII 字面量（用户输入
+        // 未转义；真服务器的 é 名此时会以显示文本 é 传来，见下一条断言）。
+        assert_eq!(
+            sftp_name::write_path_bytes("/tmp/caf%E9.txt"),
+            b"/tmp/caf%E9.txt".to_vec()
+        );
+        // 同一场景换成显示文本输入 é：末段编码回 0xE9。
+        assert_eq!(
+            sftp_name::write_path_bytes("/tmp/caf%E9/caf\u{e9}.txt"),
+            b"/tmp/caf\xe9/caf\xe9.txt".to_vec()
+        );
+        // wire 自转义闭环：字面 "100%.txt" 在 wire 里是 "100%25.txt"，整条
+        // 还原不吞 %；显示输入 "100%.txt" 直接字面量。
+        assert_eq!(
+            sftp_name::unescape_wire("/tmp/100%25.txt"),
+            b"/tmp/100%.txt".to_vec()
+        );
+        assert_eq!(
+            sftp_name::write_path_bytes("/tmp/100%.txt"),
+            b"/tmp/100%.txt".to_vec()
+        );
     }
 }
 
