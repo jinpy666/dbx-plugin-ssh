@@ -9093,8 +9093,11 @@ function networkRateShare(net: { rxRate: number; txRate: number }) {
   return Math.min(100, Math.round((Math.max(net.rxRate, net.txRate) / metricsRatePeak.value) * 100));
 }
 
-const metricsProcGridStyle = { gridTemplateColumns: "48px 64px 48px 52px minmax(0, 1fr)" };
-const procGridStyle = { gridTemplateColumns: "48px 60px 48px 52px 76px minmax(0, 1fr) 132px" };
+// 列宽要放得下 7 位 PID、常见用户名与带天数的 etime（单元格 ellipsis 会截断关键值）；
+// 浮层同步放宽到 448px，满宽时命令列不窄于加宽前；终端面板窄于约 464px 时浮层被
+// calc 钳制、命令列会被压缩，属已接受行为。管理表总宽仍超浮层，横向滚动是既有状态。
+const metricsProcGridStyle = { gridTemplateColumns: "64px 80px 56px 56px minmax(0, 1fr)" };
+const procGridStyle = { gridTemplateColumns: "64px 80px 56px 56px 96px minmax(0, 1fr) 132px" };
 
 // —— F2：指标历史回填 + 进程管理 ———
 
@@ -10806,10 +10809,14 @@ onBeforeUnmount(() => {
           <span class="record-countdown-number" :key="recordCountdown">{{ recordCountdown }}</span>
           <span class="record-countdown-hint">{{ t("recordingCountdownHint") }}</span>
         </div>
-        <!-- SSH 连接卡片：本地/串口/Telnet 会话占用的终端视图不再叠 SSH-only
-             卡片（互斥展示；Telnet 原实现漏了该分支，一并补上）。Dock panel
-             surface 不再有 loading 遮罩（面板直出终端区域）。 -->
-        <div v-if="!panelSurface && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && terminalState !== 'connected' && !reconnectPending" class="terminal-overlay">
+        <!-- SSH 连接卡片：本地/串口/Telnet/VNC 会话占用的终端视图不再叠 SSH-only
+             卡片（互斥展示）。Dock panel surface 不再显示瞬态连接遮罩（宿主
+             预拨号、面板直出终端区域），但 FAILED/disconnected 是死路态——
+             连接卡（错误文案 + 重连出口）在面板内同样要呈现，否则面板读作空白。 -->
+        <div
+          v-if="(!panelSurface || terminalState === 'error' || terminalState === 'disconnected') && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && terminalState !== 'connected' && !reconnectPending"
+          class="terminal-overlay"
+        >
           <ConnectingCard
             :locale="locale"
             :name="connection.name || connectionIdentity"

@@ -645,7 +645,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 
 /* Server metrics floating card and permissions */
 /* 悬浮卡挂在终端面板内部右上角：只遮挡终端一角，永不遮挡 SFTP 面板。 */
-.metrics-float { position: absolute; z-index: 6; top: 8px; right: 8px; display: flex; width: min(400px, calc(100% - 16px)); max-height: calc(100% - 16px); flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--popover); box-shadow: var(--shadow-popover); }
+.metrics-float { position: absolute; z-index: 6; top: 8px; right: 8px; display: flex; width: min(448px, calc(100% - 16px)); max-height: calc(100% - 16px); flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--popover); box-shadow: var(--shadow-popover); }
 /* 高占用进程行（CPU≥50% / 内存≥30%）警示色强调，扫一眼就能定位大户。 */
 .proc-hot { color: var(--warning); font-weight: 600; }
 .metrics-float > header { display: flex; min-height: 34px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 3px 4px 3px 12px; }
