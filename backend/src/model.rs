@@ -383,6 +383,14 @@ impl StoredConnection {
             .and_then(|config| config.get("advanced_options"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // 表单协议选择器（ssh/telnet/vnc）：非 SSH 连接由工作台在 openSession
+        // 里路由到各自的会话（telnet/start、vnc/start），不会走本 SSH 解析面。
+        // 这里沿用 _advanced_options 的声明式消费确认字段存在；缺省/未知值
+        // 一律按 ssh 处理（与前端归一化规则一致），不引入新的校验面。
+        let _protocol = external_config
+            .and_then(|config| config.get("protocol"))
+            .and_then(Value::as_str)
+            .unwrap_or("ssh");
         // sudo_password 是凭据：原样读取（首尾空格合法），空白语义由
         // SudoAuth::new 的「空白即回退登录密码」兜底，不在解析层改写。
         let sudo_password = connection_secrets
@@ -989,6 +997,7 @@ mod tests {
             .collect();
         let expected = [
             "display_name",
+            "protocol",
             "host",
             "port",
             "username",
@@ -1129,58 +1138,59 @@ mod tests {
         // 出现本连接密码/PTY；global 模式出现全局配置引用；2FA 编排字段
         // （totp_secret/auth_flow_mode/hints）服务登录期 keyboard-interactive，
         // global 模式下整体由全局配置接管故隐藏，off/custom 模式仍常显。
-        let visible_when = |key: &str| -> Option<(String, Vec<String>)> {
-            fields
-                .iter()
-                .find(|field| field["key"] == key)
-                .unwrap()
-                .get("visible_when")
-                // 复合条件（all_of/any_of/not）没有单字段形态，返回 None，由
-                // 调用点按各自结构单独断言。
-                .filter(|gate| !gate["field"].is_null())
-                .map(|gate| {
-                    (
-                        gate["field"].as_str().unwrap().to_string(),
-                        gate["one_of"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|value| value.as_str().unwrap().to_string())
-                            .collect(),
-                    )
-                })
+        // 整簇先包一层 protocol=ssh（工作台把 telnet/vnc 连接路由到各自的
+        // 会话，SSH 凭据面随协议选择器整体折叠）。
+        let visible_when_json = |key: &str| -> Value {
+            fields.iter().find(|field| field["key"] == key).unwrap()["visible_when"].clone()
         };
         assert_eq!(
-            visible_when("sudo_password"),
-            Some(("sudo_source".to_string(), vec!["custom".to_string()])),
-            "sudo_password must stay gated on sudo_source=custom"
+            visible_when_json("sudo_password"),
+            serde_json::json!({
+                "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
+                    { "field": "sudo_source", "one_of": ["custom"] },
+                ]
+            }),
+            "sudo_password must stay gated on protocol=ssh + sudo_source=custom"
         );
         assert_eq!(
-            visible_when("sudo_use_pty"),
-            Some(("sudo_source".to_string(), vec!["custom".to_string()])),
-            "sudo_use_pty must stay gated on sudo_source=custom"
+            visible_when_json("sudo_use_pty"),
+            serde_json::json!({
+                "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
+                    { "field": "sudo_source", "one_of": ["custom"] },
+                ]
+            }),
+            "sudo_use_pty must stay gated on protocol=ssh + sudo_source=custom"
         );
         assert_eq!(
-            visible_when("sudo_profile"),
-            Some(("sudo_source".to_string(), vec!["global".to_string()])),
-            "sudo_profile must show only for sudo_source=global"
+            visible_when_json("sudo_profile"),
+            serde_json::json!({
+                "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
+                    { "field": "sudo_source", "one_of": ["global"] },
+                ]
+            }),
+            "sudo_profile must show only for protocol=ssh + sudo_source=global"
         );
-        let key = "auth_flow_mode";
         assert_eq!(
-            visible_when(key),
-            Some(("sudo_source".to_string(), vec!["custom".to_string(), "off".to_string()])),
-            "{key} must hide under sudo_source=global (the bound profile owns the whole credential source) and stay visible otherwise"
+            visible_when_json("auth_flow_mode"),
+            serde_json::json!({
+                "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
+                    { "field": "sudo_source", "one_of": ["custom", "off"] },
+                ]
+            }),
+            "auth_flow_mode must hide under sudo_source=global (the bound profile owns the whole credential source) and stay visible otherwise"
         );
         // password_prompt_hint 属于 2FA 三件套（TOTP 密钥 / OTP 提示词 / 密码
         // 提示词）：跟随 sudo 来源，且只在自动回码的两种 OTP 模式下出现——
         // 2FA 关闭时整组折叠，不再残留一行孤零零的密码提示词。
         assert_eq!(
-            fields
-                .iter()
-                .find(|field| field["key"] == "password_prompt_hint")
-                .unwrap()["visible_when"],
+            visible_when_json("password_prompt_hint"),
             serde_json::json!({
                 "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
                     { "field": "sudo_source", "one_of": ["custom", "off"] },
                     { "field": "auth_flow_mode", "one_of": ["password_then_otp", "password_plus_otp"] },
                 ]
@@ -1188,30 +1198,28 @@ mod tests {
             "password_prompt_hint must follow the sudo source and fold with the 2FA trio when OTP auto-answer is off"
         );
         // passphrase_command 只服务密钥解密：密码 / agent 认证下是死 UI，
-        // 需要同时满足高级区与密钥类认证。
+        // 需要同时满足协议面、高级区与密钥类认证。
         assert_eq!(
-            fields
-                .iter()
-                .find(|field| field["key"] == "passphrase_command")
-                .unwrap()["visible_when"],
+            visible_when_json("passphrase_command"),
             serde_json::json!({
                 "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
                     { "field": "advanced_options", "one_of": ["true"] },
                     { "field": "authentication", "one_of": ["private-key", "private-key-password"] },
                 ]
             }),
-            "passphrase_command must combine the advanced switch with key-based auth"
+            "passphrase_command must combine protocol=ssh, the advanced switch and key-based auth"
         );
         for key in ["totp_secret", "totp_prompt_hint"] {
             assert_eq!(
-                visible_when(key),
-                Some((
-                    "auth_flow_mode".to_string(),
-                    vec![
-                        "password_then_otp".to_string(),
-                        "password_plus_otp".to_string()
+                visible_when_json(key),
+                serde_json::json!({
+                    "all_of": [
+                        { "field": "protocol", "one_of": ["ssh"] },
+                        { "field": "auth_flow_mode", "one_of": ["password_then_otp", "password_plus_otp"] },
                     ]
-                ))
+                }),
+                "{key} must fold with the SSH protocol and the OTP auto-answer modes"
             );
         }
 
@@ -2754,6 +2762,7 @@ mod manifest_contract_tests {
             "trigger_answer_2",
         ];
         let config_keys = [
+            "protocol",
             "authentication",
             "private_key_path",
             "agent_socket",
@@ -2814,47 +2823,47 @@ mod manifest_contract_tests {
         );
     }
 
-    /// Visible-when pairing: pure Quick Sudo knobs follow the form's sudo
-    /// source selection; the 2FA quartet hides under `global` (the bound
-    /// profile owns the whole credential source, login-time
+    /// Visible-when pairing: every SSH-only knob is wrapped in a
+    /// `protocol=ssh` clause first (the workbench routes telnet/vnc
+    /// connections to their own sessions, so the SSH credential surface folds
+    /// away with the protocol selector). Within SSH: pure Quick Sudo knobs
+    /// follow the form's sudo source selection; the 2FA quartet hides under
+    /// `global` (the bound profile owns the whole credential source, login-time
     /// keyboard-interactive included) and stays visible for custom/off where
     /// the connection's own values still serve login-time 2FA.
     #[test]
     fn quick_sudo_visibility_pairing() {
         for key in ["sudo_password", "sudo_use_pty"] {
-            let entry = field(key);
             assert_eq!(
-                condition_field(&entry, "visible_when"),
-                Some("sudo_source"),
-                "{key} must be gated on sudo_source"
-            );
-            assert_eq!(
-                condition_one_of(&entry, "visible_when"),
-                Some(vec!["custom".to_string()]),
-                "{key} must be visible only while sudo_source is custom"
+                field(key)["visible_when"],
+                serde_json::json!({
+                    "all_of": [
+                        { "field": "protocol", "one_of": ["ssh"] },
+                        { "field": "sudo_source", "one_of": ["custom"] },
+                    ]
+                }),
+                "{key} must fold with the SSH protocol and stay visible only while sudo_source is custom"
             );
         }
-        let profile = field("sudo_profile");
         assert_eq!(
-            condition_field(&profile, "visible_when"),
-            Some("sudo_source"),
-            "sudo_profile must be gated on sudo_source"
+            field("sudo_profile")["visible_when"],
+            serde_json::json!({
+                "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
+                    { "field": "sudo_source", "one_of": ["global"] },
+                ]
+            }),
+            "sudo_profile must fold with the SSH protocol and stay visible only while sudo_source is global"
         );
         assert_eq!(
-            condition_one_of(&profile, "visible_when"),
-            Some(vec!["global".to_string()]),
-            "sudo_profile must be visible only while sudo_source is global"
-        );
-        let key = "auth_flow_mode";
-        assert_eq!(
-            condition_field(&field(key), "visible_when"),
-            Some("sudo_source"),
-            "{key} must be gated on sudo_source"
-        );
-        assert_eq!(
-            condition_one_of(&field(key), "visible_when"),
-            Some(vec!["custom".to_string(), "off".to_string()]),
-            "{key} must hide under global (profile owns the source) and stay visible for custom/off"
+            field("auth_flow_mode")["visible_when"],
+            serde_json::json!({
+                "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
+                    { "field": "sudo_source", "one_of": ["custom", "off"] },
+                ]
+            }),
+            "auth_flow_mode must hide under global (profile owns the source) and stay visible for custom/off"
         );
         // password_prompt_hint 是 2FA 三件套之一（TOTP 密钥 / OTP 提示词 /
         // 密码提示词）：跟随 sudo 来源，且只在自动回码的两种 OTP 模式下出现
@@ -2863,6 +2872,7 @@ mod manifest_contract_tests {
             field("password_prompt_hint")["visible_when"],
             serde_json::json!({
                 "all_of": [
+                    { "field": "protocol", "one_of": ["ssh"] },
                     { "field": "sudo_source", "one_of": ["custom", "off"] },
                     { "field": "auth_flow_mode", "one_of": ["password_then_otp", "password_plus_otp"] },
                 ]
@@ -2871,15 +2881,14 @@ mod manifest_contract_tests {
         );
         for key in ["totp_secret", "totp_prompt_hint"] {
             assert_eq!(
-                condition_field(&field(key), "visible_when"),
-                Some("auth_flow_mode")
-            );
-            assert_eq!(
-                condition_one_of(&field(key), "visible_when"),
-                Some(vec![
-                    "password_then_otp".to_string(),
-                    "password_plus_otp".to_string()
-                ])
+                field(key)["visible_when"],
+                serde_json::json!({
+                    "all_of": [
+                        { "field": "protocol", "one_of": ["ssh"] },
+                        { "field": "auth_flow_mode", "one_of": ["password_then_otp", "password_plus_otp"] },
+                    ]
+                }),
+                "{key} must fold with the SSH protocol and the OTP auto-answer modes"
             );
         }
     }
