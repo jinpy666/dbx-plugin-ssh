@@ -2083,6 +2083,11 @@ impl SshRuntime {
         let task_id = session_id.clone();
         let directory_marker_id = session_id.clone();
         let sessions = self.sessions.clone();
+        // Auto-record 提示事件在 spawn 之后仍要用 emitter（主闭包已 move 走
+        // 原值），提前留一个克隆；录制器槽同理（entry 已 move 进读循环任务）。
+        let auto_record_emitter = emitter.clone();
+        let auto_record_slot = Arc::clone(&entry.session_recorder);
+        let auto_record_connection_id = entry.connection_id.clone();
         tokio::spawn(async move {
             let mut directory_filter = DirectoryHandshakeFilter::default();
             let mut directory_tracking_enabled = false;
@@ -2327,6 +2332,50 @@ impl SshRuntime {
                 removed.transport_lease.release().await;
             }
         });
+
+        // Auto-record（M14）：偏好开启时对每个新会话自动挂录制器。只读连接
+        // 不禁用（录制是被动输出捕获）；已有录制进行中则跳过——两种情形都
+        // 经 `ssh/recording/auto` 事件提示一次，负载只带 id 不带内容。
+        let emitter = auto_record_emitter;
+        if session_recording::auto_record_enabled() {
+            let mut slot = auto_record_slot
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if slot.is_some() {
+                let _ = emitter.event(
+                    "ssh/recording/auto",
+                    json!({
+                        "sessionId": session_id,
+                        "skipped": true,
+                    }),
+                );
+            } else {
+                let recording_id = Uuid::new_v4().to_string();
+                match session_recording::SessionRecorder::start(
+                    &self.data_dir,
+                    &recording_id,
+                    &auto_record_connection_id,
+                    &connection.host,
+                    &session_id,
+                    80,
+                    24,
+                ) {
+                    Ok(recorder) => {
+                        *slot = Some(recorder);
+                        let _ = emitter.event(
+                            "ssh/recording/auto",
+                            json!({
+                                "sessionId": session_id,
+                                "recordingId": recording_id,
+                            }),
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("[ssh-trace] auto-record start failed: {error}");
+                    }
+                }
+            }
+        }
 
         Ok(json!({
             "sessionId": session_id,

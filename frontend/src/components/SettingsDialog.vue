@@ -164,6 +164,30 @@ async function setX11Enabled(next: boolean) {
   }
 }
 
+/** 会话自动录制偏好（M14，对标 iShell）：与 X11 同款「组件内自治读写
+ * sidecar 偏好」模式，即时生效语义（之后 open 的会话才自动录制）。 */
+const autoRecordEnabled = ref(false);
+
+async function loadAutoRecordPreference() {
+  try {
+    const prefs = await window.dbxPlugin?.invoke<{ auto_record?: unknown }>("local/preferences/get", {});
+    autoRecordEnabled.value = prefs?.auto_record === true;
+  } catch {
+    autoRecordEnabled.value = false;
+  }
+}
+
+async function setAutoRecordEnabled(next: boolean) {
+  autoRecordEnabled.value = next;
+  try {
+    await window.dbxPlugin?.invoke("local/preferences/set", { auto_record: next });
+  } catch {
+    autoRecordEnabled.value = !next;
+  }
+}
+
+void loadAutoRecordPreference();
+
 void loadX11Preference();
 
 // 结构化补全开关（对标 Warp/fig，线 2）：组件内自治读写 pluginStore
@@ -1715,6 +1739,14 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("x11.enabledHint") }}</p>
             <p v-if="x11ReadOnlyNote" class="muted settings-note">{{ t("x11.readOnlyNote") }}</p>
+
+            <!-- 会话自动录制（M14）：新会话自动挂录制器，标 iShell 录制增强。 -->
+            <h3 class="settings-section-title">{{ t("autoRecord.sectionTitle") }}</h3>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="autoRecordEnabled" size="sm" @update:model-value="setAutoRecordEnabled(Boolean($event))" />
+              <span>{{ t("autoRecord.enabled") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("autoRecord.enabledHint") }}</p>
 
             <!-- 启动命令（对标 Tabby「Login scripts」）：连接建立进入 shell 后按序
                  自动键入；仅 SSH 交互 shell 会话生效（RemoteCommand exec 会话跳过）。 -->

@@ -25,6 +25,26 @@ pub const RECORDINGS_DIR: &str = "recordings";
 const MAX_EVENT_BYTES: usize = 256 * 1024;
 /// Max events served by one `ssh/recording/get` page.
 pub const PAGE_LIMIT: usize = 500;
+/// Max recordings a single `ssh/recording/search` scan walks — the RPC is an
+/// instant on-demand scan over existing files, not a persistent index, so the
+/// budget is bounded (task spec: ≤200 recordings).
+pub const SEARCH_MAX_RECORDINGS: usize = 200;
+/// Max text hits returned per recording (excerpts are small, but the payload
+/// must stay bounded).
+pub const SEARCH_MAX_HITS: usize = 5;
+
+/// Fast-path `auto_record` flag (mirrors the `x11_forwarding` pattern: an
+/// in-process atomic kept in lockstep with the allowlisted preferences.json
+/// key; read per `open_session` without re-parsing the file).
+static AUTO_RECORD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_auto_record(enabled: bool) {
+    AUTO_RECORD.store(enabled, std::sync::atomic::Ordering::Release);
+}
+
+pub fn auto_record_enabled() -> bool {
+    AUTO_RECORD.load(std::sync::atomic::Ordering::Acquire)
+}
 
 pub fn recordings_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(RECORDINGS_DIR)
@@ -294,6 +314,198 @@ pub fn read_events(
     }))
 }
 
+/// Case-insensitive `contains` over lossy UTF-8 — recordings are terminal
+/// output, so matching is byte-folded text, no locale collation.
+fn contains_fold(haystack: &str, needle_lower: &str) -> bool {
+    haystack.to_lowercase().contains(needle_lower)
+}
+
+/// Extracts a display excerpt anchored at the first match in `text`: the
+/// matched word always shows in full, up to `max_chars` visible characters
+/// follow it, and cut sides get an ellipsis. Pure so tests can pin the output.
+fn excerpt_around(text: &str, needle_lower: &str, max_chars: usize) -> String {
+    let Some(relative) = text.to_lowercase().find(needle_lower) else {
+        return String::new();
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut byte_index = 0;
+    let mut char_index = 0;
+    for (index, ch) in chars.iter().enumerate() {
+        if byte_index + ch.len_utf8() > relative {
+            char_index = index;
+            break;
+        }
+        byte_index += ch.len_utf8();
+        char_index = index + 1;
+    }
+    const ELLIPSIS: &str = "…";
+    let lead = usize::from(char_index > 0);
+    let window = max_chars
+        .saturating_sub(lead)
+        .saturating_sub(1)
+        .max(needle_lower.chars().count());
+    let start = char_index;
+    let end = (char_index + window).min(chars.len());
+    let mut out = String::new();
+    if lead == 1 {
+        out.push_str(ELLIPSIS);
+    }
+    out.extend(chars[start..end].iter());
+    if end < chars.len() {
+        out.push_str(ELLIPSIS);
+    }
+    out
+}
+
+/// Builds a single-line flattened text of one event's `eventdata`: ANSI/OSC
+/// control sequences are stripped (searching must not miss "ERROR" hidden
+/// behind a color escape) and line breaks become spaces so each hit renders
+/// as one excerpt line.
+fn flatten_event_text(event: &Value) -> String {
+    let raw = event.get("eventdata").and_then(Value::as_str).unwrap_or("");
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\x1b' => {
+                // CSI: swallow through the final byte (@-~); OSC: through BEL
+                // or ST. Anything else: one following byte max.
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                } else if chars.peek() == Some(&']') {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        match next {
+                            '\x07' => break,
+                            '\x1b' => {
+                                // ST 终止符（ESC \）：连反斜杠一起吞掉。
+                                if chars.peek() == Some(&'\\') {
+                                    chars.next();
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    chars.next();
+                }
+            }
+            '\r' => {}
+            '\n' | '\t' => out.push(' '),
+            other => out.push(other),
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Content-only full-text scan of one recording: returns up to
+/// `max_hits` `{ time, excerpt }` rows. Excerpt window is the flattened
+/// single-line text so hits stay readable in a compact list.
+fn search_recording_content(
+    path: &Path,
+    needle_lower: &str,
+    max_hits: usize,
+) -> Option<Vec<Value>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut hits: Vec<Value> = Vec::new();
+    let mut truncated = false;
+    for line in text.lines().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let flat = flatten_event_text(&event);
+        if flat.is_empty() || !contains_fold(&flat, needle_lower) {
+            continue;
+        }
+        if hits.len() >= max_hits {
+            truncated = true;
+            break;
+        }
+        hits.push(json!({
+            "time": event.get("time").cloned().unwrap_or(json!(0)),
+            "excerpt": excerpt_around(&flat, needle_lower, 120),
+        }));
+    }
+    if truncated || !hits.is_empty() {
+        Some(hits)
+    } else {
+        None
+    }
+}
+
+/// `ssh/recording/search`: instant full-text scan over existing `.cast`
+/// recordings (no persistent index; bounded by SEARCH_MAX_RECORDINGS). A hit
+/// is a name match (host / recordingId contains `query`, case-insensitive —
+/// listed with zero content hits) or a content match (flattened stdout text
+/// contains `query`). Newest first, mirroring `list_recordings`. Empty query
+/// yields an empty result set — the workbench shows the unfiltered list.
+pub fn search_recordings(data_dir: &Path, query: &str) -> Vec<Value> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let dir = recordings_dir(data_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut items: Vec<(std::time::SystemTime, Value)> = Vec::new();
+    for entry in entries.flatten().take(SEARCH_MAX_RECORDINGS * 4) {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("cast") {
+            continue;
+        }
+        let Some(recording_id) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if items.len() >= SEARCH_MAX_RECORDINGS {
+            break;
+        }
+        let Some(row) = describe_recording(&path, &recording_id) else {
+            continue;
+        };
+        let host = row.get("host").and_then(Value::as_str).unwrap_or("");
+        let name_match = contains_fold(host, &needle) || contains_fold(&recording_id, &needle);
+        let hits = search_recording_content(&path, &needle, SEARCH_MAX_HITS);
+        if !name_match && hits.is_none() {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        items.push((
+            modified,
+            json!({
+                "recordingId": recording_id,
+                "sessionId": row.get("sessionId").cloned().unwrap_or(json!("")),
+                "connectionId": row.get("connectionId").cloned().unwrap_or(json!("")),
+                "host": row.get("host").cloned().unwrap_or(json!("")),
+                "startedAt": row.get("startedAt").cloned().unwrap_or(json!(0)),
+                "durationSecs": row.get("durationSecs").cloned().unwrap_or(json!(0)),
+                "bytes": row.get("bytes").cloned().unwrap_or(json!(0)),
+                "nameMatch": name_match,
+                "hits": hits.unwrap_or_default(),
+            }),
+        ));
+    }
+    items.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    items.into_iter().map(|(_, item)| item).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +658,102 @@ mod tests {
         assert!(cast_path(&dir, "").is_err());
         assert!(cast_path(&dir, "ok-uuid").is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flatten_event_text_strips_control_sequences() {
+        // 颜色/OSC 控制序列剥掉后命中词才不会被转义符藏起来；换行/制表压成
+        // 空格（摘录保持单行），CR 直接丢弃。
+        let event =
+            json!({ "eventdata": "\x1b[31mER\x1b[0mROR\x1b]0;title\x07: boom\r\nnext\tline" });
+        let flat = flatten_event_text(&event);
+        assert_eq!(flat, "ERROR: boom next line");
+        assert_eq!(flatten_event_text(&json!({ "eventdata": "" })), "");
+        // 非法/悬空转义序列也被吞掉，不会把 ESC 泄进摘录。
+        assert_eq!(flatten_event_text(&json!({ "eventdata": "a\x1bZb" })), "ab");
+    }
+
+    #[test]
+    fn excerpt_around_windows_on_match() {
+        let text = "aaaaaaaaaa NEEDLE bbbbbbbbbb";
+        // 窗口锚定在命中处：命中词完整显示，前面截断带前导省略号。
+        assert_eq!(excerpt_around(text, "needle", 12), "…NEEDLE bbb…");
+        // 预算足够时命中之后到结尾全部保留，只有前导省略号（窗口锚定命中处）。
+        assert_eq!(excerpt_around(text, "needle", 40), "…NEEDLE bbbbbbbbbb");
+        assert_eq!(excerpt_around("no match here", "zzz", 10), "");
+        // 多字节字符按字符窗口截取，不切半个 code point；命中词保持完整。
+        assert_eq!(excerpt_around("你好needle世界", "needle", 9), "…needle世…");
+    }
+
+    #[test]
+    fn search_matches_name_and_content_newest_first() {
+        let dir = temp_dir();
+        let mut older = SessionRecorder::start(&dir, "rec-a", "c", "web-01", "s1", 80, 24).unwrap();
+        older.observe(b"health check passed\n");
+        older.observe(b"failed to start service\n");
+        older.observe(b"second health mention\n");
+        older.finish().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut newer = SessionRecorder::start(&dir, "rec-b", "c", "db-02", "s2", 80, 24).unwrap();
+        newer.observe(b"\x1b[32mHealth Check OK\x1b[0m\n");
+        newer.finish().unwrap();
+        std::fs::write(recordings_dir(&dir).join("not-a-cast.txt"), "health").unwrap();
+
+        // 内容命中（大小写不敏感 + 转义符后面的词也算）。
+        let hits = search_recordings(&dir, "HEALTH");
+        assert_eq!(
+            hits.len(),
+            2,
+            "both recordings mention health; newest first"
+        );
+        assert_eq!(hits[0]["recordingId"], "rec-b");
+        assert_eq!(hits[0]["nameMatch"], false);
+        let rec_b_hits = hits[0]["hits"].as_array().unwrap();
+        assert_eq!(rec_b_hits.len(), 1);
+        assert_eq!(rec_b_hits[0]["excerpt"], "Health Check OK");
+        let rec_a_hits = hits[1]["hits"].as_array().unwrap();
+        assert_eq!(rec_a_hits.len(), 2, "both matching events listed");
+        assert_eq!(rec_a_hits[0]["excerpt"], "health check passed");
+        assert!(rec_a_hits[0]["time"].as_f64().unwrap() <= rec_a_hits[1]["time"].as_f64().unwrap());
+
+        // 名称命中：host 包含查询词即可，即使内容不匹配也列出（hits 空）。
+        let by_host = search_recordings(&dir, "db-0");
+        assert_eq!(by_host.len(), 1);
+        assert_eq!(by_host[0]["recordingId"], "rec-b");
+        assert_eq!(by_host[0]["nameMatch"], true);
+
+        let by_id = search_recordings(&dir, "REC-A");
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0]["nameMatch"], true);
+
+        // 空查询/无命中：空集。
+        assert!(search_recordings(&dir, "").is_empty());
+        assert!(search_recordings(&dir, "zzz-not-present").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_caps_hits_and_respects_missing_dir() {
+        let dir = temp_dir();
+        let mut recorder = SessionRecorder::start(&dir, "rec-cap", "c", "h", "s", 80, 24).unwrap();
+        for index in 0..(SEARCH_MAX_HITS + 3) {
+            recorder.observe(format!("oops {index}\n").as_bytes());
+        }
+        recorder.finish().unwrap();
+        let hits = search_recordings(&dir, "oops");
+        assert_eq!(hits.len(), 1);
+        let rows = hits[0]["hits"].as_array().unwrap();
+        assert_eq!(rows.len(), SEARCH_MAX_HITS);
+        // 不存在的目录安全返回空。
+        assert!(search_recordings(&temp_dir(), "oops").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_record_flag_round_trips() {
+        set_auto_record(true);
+        assert!(auto_record_enabled());
+        set_auto_record(false);
+        assert!(!auto_record_enabled());
     }
 }

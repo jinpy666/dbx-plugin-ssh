@@ -84,6 +84,11 @@ impl Plugin {
         // Sidecar 启动即同步 X11 快速标志（重启会丢进程内状态）。
         let prefs = preferences::load_preferences(&data_dir);
         x11::set_enabled(prefs.get("x11_forwarding").and_then(Value::as_bool) == Some(true));
+        // 会话自动录制（M14）沿用 X11 快速标志模式：open_session 读进程内
+        // 原子量，不重复解析 preferences.json。
+        session_recording::set_auto_record(
+            prefs.get("auto_record").and_then(Value::as_bool) == Some(true),
+        );
         let ssh = Arc::new(SshRuntime::new(data_dir));
         Ok(Self {
             runtime,
@@ -1173,6 +1178,19 @@ impl Plugin {
                 let deleted = session_recording::clear_recordings(&self.ssh.data_dir());
                 Ok(json!({ "success": true, "deleted": deleted }))
             }
+            // 录制搜索（M14）：无持久索引，对现存 .cast 即时扫描——名称命中
+            // （host/recordingId 包含查询词，大小写不敏感）或内容命中（展平
+            // stdout 文本包含查询词）。空查询返回空集（前端显示未过滤列表）。
+            "ssh/recording/search" => {
+                let query = params
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                Ok(json!({
+                    "recordings": session_recording::search_recordings(&self.ssh.data_dir(), &query),
+                }))
+            }
             // 在文件管理器中定位录制文件：按 recordingId 解析路径（校验过
             // 遍历），不暴露任意路径打开原语。
             "ssh/recording/reveal" => {
@@ -1554,6 +1572,10 @@ impl Plugin {
                 let prefs = preferences::load_preferences(&plugin_data_dir());
                 x11::set_enabled(
                     prefs.get("x11_forwarding").and_then(Value::as_bool) == Some(true),
+                );
+                // 自动录制快速标志同样与文件保持同步（对之后 open 的会话生效）。
+                session_recording::set_auto_record(
+                    prefs.get("auto_record").and_then(Value::as_bool) == Some(true),
                 );
                 result
             }
