@@ -509,14 +509,14 @@ const highlightRuleViews = () => [...highlightRulesState].sort((a, b) => a.creat
 // 权限档与连接作用域，镜像持久化 + 校验语义。
 const mcpSettingsState = { execPermissionMode: "autonomous", connectionScope: [] as string[] };
 // 插件级 UI 偏好（local/preferences/get|set）：镜像 sidecar preferences.json 的合并语义。
-const localPrefsState = { downloadDir: "", downloadUseDefaultDir: true, downloadConflictPolicy: "rename", localShell: "", localShellIntegration: true, auto_record: false };
-// M14-B 三键镜像（缺省与 sidecar 一致：深度 3 / 兼容关 / 编码 auto）。
 const localPrefsState = {
   downloadDir: "",
   downloadUseDefaultDir: true,
   downloadConflictPolicy: "rename",
   localShell: "",
   localShellIntegration: true,
+  auto_record: false,
+  // M14-B 三键镜像（缺省与 sidecar 一致：深度 3 / 兼容关 / 编码 auto）。
   transfer_max_active: 3,
   sftp_compat_mode: false,
   sftp_name_encoding: "auto",
