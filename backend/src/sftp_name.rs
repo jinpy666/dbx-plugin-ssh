@@ -79,15 +79,23 @@ pub fn is_lossy_wire(wire: &str) -> bool {
     wire.contains('\u{FFFD}')
 }
 
-/// 原始路径字节 → wire 字符串（传输形式）：合法 UTF-8 序列按字符透传，
-/// 非法字节逐字节转义为 `%XX`（大写十六进制）。
+/// 原始路径字节 → wire 字符串（传输形式）：合法 UTF-8 序列按字符透传（`%`
+/// 自转义为 `%25`，保证含字面 `%XX` 的名字往返不变），非法字节逐字节转义为
+/// `%XX`（大写十六进制）。与 [`unescape_wire`] 构成闭环。
 pub fn escape_wire(raw: &[u8]) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     loop {
         match std::str::from_utf8(rest) {
             Ok(text) => {
-                out.push_str(text);
+                // '%' 自转义：unescape 端把 %XX 解回字节，字面 % 不转义会被吞。
+                for ch in text.chars() {
+                    if ch == '%' {
+                        out.push_str("%25");
+                    } else {
+                        out.push(ch);
+                    }
+                }
                 break;
             }
             Err(error) => {
@@ -233,6 +241,10 @@ mod tests {
     fn escape_wire_percent_escapes_invalid_bytes() {
         // 单个非法字节。
         assert_eq!(escape_wire(b"caf\xe9.txt"), "caf%E9.txt");
+        // '%' 自转义：字面 %XX 不被 unescape 吞掉，往返闭环。
+        assert_eq!(escape_wire(b"a%41b"), "a%2541b");
+        assert_eq!(unescape_wire(&escape_wire(b"a%41b")), b"a%41b");
+        assert_eq!(unescape_wire(&escape_wire(b"caf\xe9.txt")), b"caf\xe9.txt");
         // 连续非法字节逐字节转义。
         assert_eq!(escape_wire(b"\xff\xfe"), "%FF%FE");
         // 混合合法与非法字节。
