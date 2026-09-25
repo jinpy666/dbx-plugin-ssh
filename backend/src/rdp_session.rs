@@ -52,7 +52,7 @@
 //! `rdp/frame/{sessionId}` binary channel (same 44-byte patch header as
 //! `vnc/frame`, see docs/PROTOCOL.zh-CN.md § VNC 帧补丁) — no pending queue.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -1232,7 +1232,117 @@ enum RdpCommand {
     Close,
 }
 
-const RDP_REPLAY_FRAME_LIMIT: usize = 8;
+/// One retained 4K RGBA desktop is 31,850,496 bytes. Keeping one composite
+/// frame guarantees a remount paints the whole desktop while staying far below
+/// the former eight-patch worst case (>250 MiB).
+const RDP_REPLAY_FRAMEBUFFER_MAX_BYTES: usize =
+    MAX_DESKTOP_WIDTH as usize * MAX_DESKTOP_HEIGHT as usize * BYTES_PER_PIXEL;
+
+/// Bounded composite desktop used only for webview reattachment. It keeps the
+/// most recent pixel at every coordinate, rather than retaining arbitrary
+/// incremental wire patches that cannot reconstruct a complete scene.
+struct RdpReplayFramebuffer {
+    width: u16,
+    height: u16,
+    rgba: Vec<u8>,
+}
+
+impl RdpReplayFramebuffer {
+    fn new(width: u16, height: u16) -> Result<Self, String> {
+        if width == 0 || height == 0 || width > MAX_DESKTOP_WIDTH || height > MAX_DESKTOP_HEIGHT {
+            return Err(format!(
+                "RDP replay framebuffer {width}x{height} is outside the supported range"
+            ));
+        }
+        let bytes = usize::from(width)
+            .checked_mul(usize::from(height))
+            .and_then(|pixels| pixels.checked_mul(BYTES_PER_PIXEL))
+            .ok_or_else(|| "RDP replay framebuffer size overflows".to_string())?;
+        if bytes > RDP_REPLAY_FRAMEBUFFER_MAX_BYTES {
+            return Err("RDP replay framebuffer exceeds the byte budget".to_string());
+        }
+        Ok(Self {
+            width,
+            height,
+            rgba: vec![0; bytes],
+        })
+    }
+
+    #[cfg(test)]
+    fn byte_len(&self) -> usize {
+        self.rgba.len()
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.rgba.clear();
+        self.rgba.shrink_to_fit();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_patch(
+        &mut self,
+        pixels: &[u32],
+        desktop_width: u16,
+        desktop_height: u16,
+        patch_x: u16,
+        patch_y: u16,
+        patch_width: u16,
+        patch_height: u16,
+    ) -> Result<(), String> {
+        if self.rgba.is_empty() {
+            return Err("RDP replay framebuffer has been released".to_string());
+        }
+        if (self.width, self.height) != (desktop_width, desktop_height) {
+            return Err("RDP replay framebuffer dimensions changed".to_string());
+        }
+        let patch_pixels = usize::from(patch_width)
+            .checked_mul(usize::from(patch_height))
+            .ok_or_else(|| "RDP replay patch size overflows".to_string())?;
+        if pixels.len() < patch_pixels {
+            return Err("RDP replay patch buffer is smaller than the patch".to_string());
+        }
+        let right = u32::from(patch_x) + u32::from(patch_width);
+        let bottom = u32::from(patch_y) + u32::from(patch_height);
+        if patch_width == 0
+            || patch_height == 0
+            || right > u32::from(self.width)
+            || bottom > u32::from(self.height)
+        {
+            return Err("RDP replay patch exceeds framebuffer bounds".to_string());
+        }
+        let stride = usize::from(self.width) * BYTES_PER_PIXEL;
+        for row in 0..usize::from(patch_height) {
+            for column in 0..usize::from(patch_width) {
+                let pixel = pixels[row * usize::from(patch_width) + column];
+                let [_, red, green, blue] = pixel.to_be_bytes();
+                let offset = (usize::from(patch_y) + row) * stride
+                    + (usize::from(patch_x) + column) * BYTES_PER_PIXEL;
+                self.rgba[offset..offset + BYTES_PER_PIXEL]
+                    .copy_from_slice(&[red, green, blue, 255]);
+            }
+        }
+        Ok(())
+    }
+
+    fn full_frame(&self, sequence: u64) -> Result<Vec<u8>, String> {
+        if self.rgba.is_empty() {
+            return Err("RDP replay framebuffer has been released".to_string());
+        }
+        crate::vnc_session::encode_frame_patch(&crate::vnc_session::FramePatch {
+            sequence,
+            desktop_width: u32::from(self.width),
+            desktop_height: u32::from(self.height),
+            x: 0,
+            y: 0,
+            width: u32::from(self.width),
+            height: u32::from(self.height),
+            stride: u32::from(self.width) * BYTES_PER_PIXEL as u32,
+            payload: &self.rgba,
+        })
+        .map_err(|error| error.replace("VNC", "RDP"))
+    }
+}
 
 struct RdpSessionEntry {
     workbench_id: String,
@@ -1256,9 +1366,8 @@ struct RdpSessionEntry {
     /// Monotonic across generations so the frontend can drop out-of-order
     /// patches after a reconnect.
     frame_sequence: AtomicU64,
-    /// Recent patches are enough to repaint a remounted webview until the
-    /// server emits its next damage; bounded to avoid retaining desktop video.
-    replay_frames: tokio::sync::Mutex<VecDeque<Vec<u8>>>,
+    /// One bounded, composite RGBA desktop for an exact full-frame remount.
+    replay_framebuffer: tokio::sync::Mutex<Option<RdpReplayFramebuffer>>,
     close_requested: AtomicBool,
     /// Sender of the *current* generation's command channel; `None` while
     /// dialling/reconnecting (input fails fast instead of queueing).
@@ -1358,7 +1467,7 @@ impl RdpSessionRuntime {
             created_at_secs: unix_now_secs(),
             generation: Arc::new(AtomicU64::new(0)),
             frame_sequence: AtomicU64::new(0),
-            replay_frames: tokio::sync::Mutex::new(VecDeque::new()),
+            replay_framebuffer: tokio::sync::Mutex::new(None),
             close_requested: AtomicBool::new(false),
             command_sender: tokio::sync::Mutex::new(None),
             clipboard_stage: Arc::new(ClipboardStage::default()),
@@ -1454,6 +1563,7 @@ impl RdpSessionRuntime {
         let entry = self.session(session_id).await?;
         entry.close_requested.store(false, Ordering::Release);
         entry.generation.fetch_add(1, Ordering::AcqRel);
+        *entry.replay_framebuffer.lock().await = None;
         self.broker.cancel_session(session_id);
         if let Some(sender) = entry.command_sender.lock().await.take() {
             let _ = sender.send(RdpCommand::Close).await;
@@ -1476,6 +1586,7 @@ impl RdpSessionRuntime {
             .ok_or("RDP session was not found")?;
         entry.close_requested.store(true, Ordering::Release);
         entry.generation.fetch_add(1, Ordering::AcqRel);
+        *entry.replay_framebuffer.lock().await = None;
         // Any pending certificate prompt of this session must reject now,
         // and the staged clipboard text is dropped with the entry.
         self.broker.cancel_session(session_id);
@@ -1532,14 +1643,19 @@ impl RdpSessionRuntime {
         json!({ "sessions": list })
     }
 
-    /// Re-emits the bounded recent patch sequence after a webview remount.
+    /// Re-emits one composite full desktop after a webview remount. Incremental
+    /// RDP patches cannot restore a renderer independently, so this never
+    /// replays partial patches as if they were a complete scene.
     pub async fn replay(&self, session_id: &str, emitter: &PluginEmitter) -> Result<Value, String> {
         let entry = self.session(session_id).await?;
-        let frames = entry.replay_frames.lock().await;
-        for frame in frames.iter() {
-            publish_frame(session_id, frame, emitter);
-        }
-        Ok(json!({ "frameCount": frames.len(), "complete": true }))
+        let framebuffer = entry.replay_framebuffer.lock().await;
+        let Some(framebuffer) = framebuffer.as_ref() else {
+            return Ok(json!({ "frameCount": 0, "complete": false }));
+        };
+        let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
+        let frame = framebuffer.full_frame(sequence)?;
+        publish_frame(session_id, &frame, emitter);
+        Ok(json!({ "frameCount": 1, "complete": true }))
     }
 
     /// Certificate-prompt resolution (`rdp/certificate/resolve`).
@@ -1614,6 +1730,7 @@ fn spawn_worker(
                         && !entry.close_requested.load(Ordering::Acquire)
                     {
                         let _ = emit_state("closed", None, None);
+                        *entry.replay_framebuffer.lock().await = None;
                         sessions.write().await.remove(&session_id);
                     }
                     return;
@@ -1625,6 +1742,10 @@ fn spawn_worker(
                     was_active,
                 } => {
                     let _ = emit_state("error", Some((error_kind.as_str(), error.as_str())), None);
+                    // An error invalidates the retained scene. Release the
+                    // bounded buffer before retry backoff so a dead/retrying
+                    // session never holds a stale 4K desktop in memory.
+                    *entry.replay_framebuffer.lock().await = None;
                     if was_active {
                         // The session had been fully active in this
                         // generation: a fresh backoff ladder (NyaTerm resets
@@ -1637,6 +1758,7 @@ fn spawn_worker(
                         || entry.generation.load(Ordering::Acquire) != generation
                     {
                         let _ = emit_state("closed", None, None);
+                        *entry.replay_framebuffer.lock().await = None;
                         sessions.write().await.remove(&session_id);
                         return;
                     }
@@ -1841,12 +1963,44 @@ async fn handle_output_event(
                 sequence,
             ) {
                 Ok(frame) => {
-                    let mut replay = entry.replay_frames.lock().await;
-                    replay.push_back(frame.clone());
-                    if replay.len() > RDP_REPLAY_FRAME_LIMIT {
-                        replay.pop_front();
+                    let mut framebuffer = entry.replay_framebuffer.lock().await;
+                    let dimensions = (desktop_width, desktop_height);
+                    let needs_reset = framebuffer
+                        .as_ref()
+                        .is_none_or(|current| (current.width, current.height) != dimensions);
+                    if needs_reset {
+                        *framebuffer =
+                            match RdpReplayFramebuffer::new(desktop_width, desktop_height) {
+                                Ok(next) => Some(next),
+                                Err(error) => {
+                                    return Some(GenerationEnd::Failed {
+                                        error,
+                                        error_kind: RdpErrorKind::Session,
+                                        retryable: false,
+                                        was_active: false,
+                                    });
+                                }
+                            };
                     }
-                    drop(replay);
+                    if let Some(current) = framebuffer.as_mut() {
+                        if let Err(error) = current.apply_patch(
+                            &buffer,
+                            desktop_width,
+                            desktop_height,
+                            x,
+                            y,
+                            width,
+                            height,
+                        ) {
+                            return Some(GenerationEnd::Failed {
+                                error,
+                                error_kind: RdpErrorKind::Session,
+                                retryable: false,
+                                was_active: false,
+                            });
+                        }
+                    }
+                    drop(framebuffer);
                     publish_frame(session_id, &frame, emitter);
                 }
                 Err(error) => {
@@ -2676,6 +2830,46 @@ mod tests {
         // 补丁几何由 vnc 的 encode_frame_patch 复核（出界/零尺寸拒绝）。
         assert!(image_patch_to_frame(&[0; 4], 10, 10, 9, 0, 2, 2, 1).is_err());
         assert!(image_patch_to_frame(&[0; 16], 10, 10, 0, 0, 0, 2, 1).is_err());
+    }
+
+    #[test]
+    fn replay_framebuffer_composites_incremental_patches_into_one_full_desktop() {
+        let mut framebuffer = RdpReplayFramebuffer::new(4, 2).expect("framebuffer");
+        framebuffer
+            .apply_patch(&[0x00ff_0000, 0x0000_ff00], 4, 2, 0, 0, 2, 1)
+            .expect("first patch");
+        framebuffer
+            .apply_patch(&[0x0000_00ff, 0x00ff_ffff], 4, 2, 2, 1, 2, 1)
+            .expect("second patch");
+
+        let frame = framebuffer.full_frame(42).expect("full replay frame");
+        assert_eq!(&frame[0..8], &42_u64.to_le_bytes());
+        assert_eq!(
+            &frame[16..32],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 2, 0, 0, 0]
+        );
+        assert_eq!(&frame[44..52], &[0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff]);
+        assert_eq!(
+            &frame[44 + 24..44 + 32],
+            &[0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        );
+    }
+
+    #[test]
+    fn replay_framebuffer_accepts_4k_within_the_explicit_byte_budget() {
+        let framebuffer = RdpReplayFramebuffer::new(MAX_DESKTOP_WIDTH, MAX_DESKTOP_HEIGHT)
+            .expect("4K framebuffer stays within the replay budget");
+        assert_eq!(framebuffer.byte_len(), RDP_REPLAY_FRAMEBUFFER_MAX_BYTES);
+        assert!(framebuffer.byte_len() <= RDP_REPLAY_FRAMEBUFFER_MAX_BYTES);
+    }
+
+    #[test]
+    fn replay_framebuffer_rejects_invalid_patches_and_can_be_cleared() {
+        let mut framebuffer = RdpReplayFramebuffer::new(2, 2).expect("framebuffer");
+        assert!(framebuffer.apply_patch(&[0], 2, 2, 1, 1, 2, 1).is_err());
+        framebuffer.clear();
+        assert_eq!(framebuffer.byte_len(), 0);
+        assert!(framebuffer.full_frame(1).is_err());
     }
 
     // —— 输入映射（NyaTerm 对齐）———————————————————————————
