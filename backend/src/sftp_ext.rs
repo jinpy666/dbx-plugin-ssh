@@ -705,10 +705,26 @@ pub const MAX_UPLOAD_LOCAL_SIZE: u64 = 256 * 1024 * 1024;
 const UPLOAD_LOCAL_CHUNK: usize = 128 * 1024;
 
 // `sftp/upload-local {sessionId, localPath, remotePath} -> {path, size}` —
-fn validate_remote_edit_path(
+/// Path-origin gate for the external-editor round-trip: only files this
+/// plugin downloaded into `<downloads>/remote-edit/` may cross the bridge.
+/// `pub(crate)` because `file_watch` reuses it for `watch/start` and
+/// `watch/upload` — the watchId is a bearer token, the real boundary is the
+/// path origin.
+pub(crate) fn validate_remote_edit_path(
     local_path: &Path,
     data_dir: &Path,
     lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    let downloads = crate::local_downloads::downloads_base_dir(lookup, data_dir);
+    validate_remote_edit_root(local_path, &downloads)
+}
+
+/// The prefix check with a pinned downloads base — the seam `file_watch`
+/// tests use so validation does not depend on the runner's real Downloads
+/// directory. Production callers go through [`validate_remote_edit_path`].
+pub(crate) fn validate_remote_edit_root(
+    local_path: &Path,
+    downloads: &Path,
 ) -> Result<PathBuf, String> {
     if !local_path.is_absolute() {
         return Err("localPath must be an absolute path".to_string());
@@ -719,7 +735,6 @@ fn validate_remote_edit_path(
             local_path.display()
         )
     })?;
-    let downloads = crate::local_downloads::downloads_base_dir(lookup, data_dir);
     let root = downloads.join("remote-edit");
     let root = root
         .canonicalize()

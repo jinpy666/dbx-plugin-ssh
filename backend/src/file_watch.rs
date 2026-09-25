@@ -13,6 +13,13 @@
 //! watch re-baselines the fingerprint), torn down by `watch/stop`,
 //! `watch/stop-all` and the `ssh/session/close` hook in main.rs, and self-heal
 //! when the watched file disappears or the owning session dies.
+//!
+//! Security: a watchId is a bearer token, so the real boundary is the path
+//! origin, not "whoever holds the id". Both `watch/start` and `watch/upload`
+//! re-check via `sftp_ext::validate_remote_edit_path` that the local file is
+//! canonicalized inside the plugin's own `remote-edit/` download directory —
+//! otherwise any locally readable file could be watched and pushed to a
+//! remote host through `upload_back`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -166,7 +173,7 @@ impl Clock for SystemClock {
 }
 
 /// Tunables for [`WatchRuntime`]; production uses [`Tunables::production`].
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Tunables {
     pub debounce: Duration,
     pub suppress: Duration,
@@ -174,6 +181,11 @@ pub struct Tunables {
     /// so the watcher suite runs on CI runners without desktop download dirs;
     /// `None` keeps the production env probe.
     pub desktop_gate_override: Option<bool>,
+    /// Pins the downloads base for the remote-edit origin check. `None` keeps
+    /// the production resolution (`local_downloads::downloads_base_dir`); the
+    /// watcher suite sets it so validation never depends on the runner's real
+    /// Downloads layout.
+    pub remote_edit_downloads_override: Option<PathBuf>,
 }
 
 impl Tunables {
@@ -182,6 +194,7 @@ impl Tunables {
             debounce: DEBOUNCE,
             suppress: SUPPRESS_WINDOW,
             desktop_gate_override: None,
+            remote_edit_downloads_override: None,
         }
     }
 }
@@ -233,12 +246,15 @@ impl WatchRuntime {
 
     /// `watch/start` — registers a non-recursive watcher on `local_path`.
     /// Desktop-only (see [`crate::local_downloads::can_save_local`]); refuses
-    /// anything that is not an existing regular file.
+    /// anything that is not an existing regular file inside the plugin's own
+    /// `remote-edit/` download directory (path-origin gate — a watchId is a
+    /// bearer token, so an arbitrary local path must never be watchable).
     pub async fn start(
         &self,
         request: WatchStartRequest,
         publisher: Arc<dyn EventPublisher>,
         probe: SessionProbe,
+        data_dir: &Path,
     ) -> Result<Value, String> {
         let desktop_ok = self
             .tunables
@@ -255,10 +271,11 @@ impl WatchRuntime {
         if session_id.is_empty() || remote_path.is_empty() {
             return Err("sessionId and remotePath are required".to_string());
         }
-        let local_path = PathBuf::from(request.local_path.trim());
-        if !local_path.is_absolute() {
-            return Err("localPath must be an absolute path".to_string());
-        }
+        // Canonicalizes and refuses anything outside `remote-edit/` (also the
+        // "does not exist" rejection for missing paths). Downstream code only
+        // ever sees the canonical path.
+        let local_path =
+            self.validate_local_origin(Path::new(request.local_path.trim()), data_dir)?;
         let baseline = file_fingerprint(&local_path).ok_or_else(|| {
             format!(
                 "Watched file '{}' does not exist or is not a regular file",
@@ -312,7 +329,7 @@ impl WatchRuntime {
         let runtime_self = Self {
             watches: self.watches.clone(),
             dedup: self.dedup.clone(),
-            tunables: self.tunables,
+            tunables: self.tunables.clone(),
             clock: self.clock.clone(),
         };
         tokio::spawn(Self::pump(
@@ -327,6 +344,19 @@ impl WatchRuntime {
             probe,
         ));
         Ok(json!({ "watchId": watch_id }))
+    }
+
+    /// Shared path-origin gate for `watch/start` and `watch/upload`: reuses
+    /// `sftp_ext::validate_remote_edit_path` (same check as `sftp/upload-local`)
+    /// so only files under the plugin's own `remote-edit/` download directory
+    /// pass. Returns the canonicalized path on success.
+    fn validate_local_origin(&self, local_path: &Path, data_dir: &Path) -> Result<PathBuf, String> {
+        match &self.tunables.remote_edit_downloads_override {
+            Some(base) => crate::sftp_ext::validate_remote_edit_root(local_path, base),
+            None => crate::sftp_ext::validate_remote_edit_path(local_path, data_dir, |key| {
+                std::env::var_os(key)
+            }),
+        }
     }
 
     /// Event pump for one watcher: debounces notify bursts, confirms content
@@ -370,7 +400,7 @@ impl WatchRuntime {
                     let verdict = {
                         let mut state = pump.write().await;
                         state.pending_at = None;
-                        let current = file_fingerprint(&local_path);
+                        let current = spawn_fingerprint(local_path.clone()).await;
                         classify_change(&state.baseline, &current)
                     };
                     match verdict {
@@ -396,7 +426,7 @@ impl WatchRuntime {
                             }));
                             // The emitted state becomes the new baseline so a
                             // repeated identical save does not re-fire.
-                            if let Some(current) = file_fingerprint(&local_path) {
+                            if let Some(current) = spawn_fingerprint(local_path.clone()).await {
                                 pump.write().await.baseline = Some(current);
                             }
                         }
@@ -422,16 +452,18 @@ impl WatchRuntime {
     /// (the host file-transfer bridge only exposes user-picked handles), so
     /// the sidecar — which downloaded the file into `remote-edit/` in the
     /// first place — reads the bytes and streams them through the same atomic
-    /// temporary-file commit as `sftp/write` (permissions preserved). The
-    /// write gate (`ensure_writable`) applies exactly as for any other SFTP
-    /// write; the watchId proves the file came from this plugin's own
-    /// download, so no arbitrary local path ever crosses the bridge.
+    /// temporary-file commit as `sftp/write` (permissions preserved).
+    /// The write gate (`ensure_writable`) applies exactly as for any other
+    /// SFTP write. Origin is re-validated here instead of trusting the
+    /// watchId: the id is a bearer token and the watched path may have been
+    /// swapped for a symlink after `start`, so `validate_local_origin`
+    /// re-canonicalizes and refuses anything outside `remote-edit/`.
     pub async fn upload_back(
         &self,
         ssh: &crate::ssh::SshRuntime,
         watch_id: &str,
     ) -> Result<Value, String> {
-        let (session_id, local_path, remote_path) = {
+        let (session_id, registered_path, remote_path) = {
             let watches = self.watches.read().await;
             let entry = watches
                 .get(watch_id)
@@ -442,23 +474,41 @@ impl WatchRuntime {
                 entry.remote_path.clone(),
             )
         };
-        let data = std::fs::read(&local_path).map_err(|error| {
+        let local_path = self.validate_local_origin(&registered_path, &ssh.data_dir())?;
+        // Size gate before reading: the round-trip buffers the whole file in
+        // memory on purpose (single atomic commit), so refuse oversize
+        // without ever loading it.
+        let metadata = tokio::fs::metadata(&local_path).await.map_err(|error| {
             format!(
                 "Could not read watched file '{}': {error}",
                 local_path.display()
             )
         })?;
-        if data.len() as u64 > MAX_UPLOAD_BYTES {
-            return Err(format!(
-                "Watched file '{}' is larger than the {} MiB watch-upload limit; upload it manually instead",
-                local_path.display(),
-                MAX_UPLOAD_BYTES / (1024 * 1024)
-            ));
+        if metadata.len() > MAX_UPLOAD_BYTES {
+            return Err(upload_limit_error(&local_path));
         }
+        // File IO stays off the async worker; the re-check after the read
+        // closes the metadata→read race (file grew past the limit meanwhile).
+        let data = {
+            let read_path = local_path.clone();
+            tokio::task::spawn_blocking(move || std::fs::read(read_path))
+                .await
+                .map_err(|error| format!("Watched file read failed: {error}"))?
+                .map_err(|error| {
+                    format!(
+                        "Could not read watched file '{}': {error}",
+                        local_path.display()
+                    )
+                })?
+        };
+        if data.len() as u64 > MAX_UPLOAD_BYTES {
+            return Err(upload_limit_error(&local_path));
+        }
+        let size = data.len();
         crate::sftp_ext::write_bytes(ssh, &session_id, &remote_path, &data).await?;
         Ok(json!({
             "remotePath": remote_path,
-            "size": data.len(),
+            "size": size,
         }))
     }
 
@@ -489,11 +539,33 @@ impl WatchRuntime {
     }
 }
 
+/// Uniform "too big for the watch-upload round-trip" rejection (used by both
+/// the metadata pre-check and the post-read re-check in `upload_back`).
+fn upload_limit_error(local_path: &Path) -> String {
+    format!(
+        "Watched file '{}' is larger than the {} MiB watch-upload limit; upload it manually instead",
+        local_path.display(),
+        MAX_UPLOAD_BYTES / (1024 * 1024)
+    )
+}
+
 /// Dedup identity: session plus the canonicalized local path so `a/b` and
 /// `a/./b` map to the same watcher.
 fn dedup_key(session_id: &str, local_path: &Path) -> String {
     let canonical = std::fs::canonicalize(local_path).unwrap_or_else(|_| local_path.to_path_buf());
     format!("{session_id}:{}", canonical.to_string_lossy())
+}
+
+/// Runs [`file_fingerprint`] on the blocking pool: hashing up to 64 MiB with
+/// SHA-256 must not stall the async worker between editor saves. Dedup
+/// semantics are unchanged — only the execution site moves; a failed join is
+/// collapsed into `None`, which means "cannot confirm a change" exactly like
+/// an unreadable file.
+async fn spawn_fingerprint(path: PathBuf) -> Option<FileFingerprint> {
+    tokio::task::spawn_blocking(move || file_fingerprint(&path))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Sleeps until `deadline`, finishing immediately (without error) when the
@@ -632,12 +704,23 @@ mod tests {
 
     // ---- dedup table (registry, no real filesystem events) ----
 
-    fn tunables() -> Tunables {
+    fn tunables(base: &Path) -> Tunables {
         Tunables {
             debounce: Duration::from_millis(20),
             suppress: Duration::from_millis(10),
             desktop_gate_override: Some(true),
+            // Pin the remote-edit origin root to the test tempdir: files
+            // under `<base>/remote-edit/` pass, everything else is refused —
+            // CI runners have no desktop Downloads layout to lean on.
+            remote_edit_downloads_override: Some(base.to_path_buf()),
         }
+    }
+
+    /// Fixture stand-in for the plugin's `remote-edit/` download directory.
+    fn remote_edit_file(dir: &tempfile::TempDir, file_name: &str) -> PathBuf {
+        let subdir = dir.path().join("remote-edit");
+        std::fs::create_dir_all(&subdir).expect("create remote-edit dir");
+        subdir.join(file_name)
     }
 
     async fn start_watch(
@@ -648,7 +731,7 @@ mod tests {
         remote_path: &str,
         publisher: &Arc<CollectingPublisher>,
     ) -> String {
-        let path = dir.path().join(file_name);
+        let path = remote_edit_file(dir, file_name);
         write_file(&path, b"start");
         let response = runtime
             .start(
@@ -659,6 +742,7 @@ mod tests {
                 },
                 publisher.clone() as Arc<dyn EventPublisher>,
                 always_alive(),
+                dir.path(),
             )
             .await
             .expect("watch start");
@@ -667,8 +751,8 @@ mod tests {
 
     #[tokio::test]
     async fn start_replaces_dedup_watch_for_the_same_file() {
-        let runtime = WatchRuntime::with_tunables(tunables());
         let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
         let publisher = Arc::new(CollectingPublisher::default());
         let first = start_watch(
             &runtime,
@@ -705,8 +789,8 @@ mod tests {
 
     #[tokio::test]
     async fn stop_and_stop_session_clear_the_registry() {
-        let runtime = WatchRuntime::with_tunables(tunables());
         let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
         let publisher = Arc::new(CollectingPublisher::default());
         let watch_id = start_watch(
             &runtime,
@@ -755,7 +839,8 @@ mod tests {
 
     #[tokio::test]
     async fn start_validates_desktop_and_paths() {
-        let runtime = WatchRuntime::with_tunables(tunables());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
         let publisher = Arc::new(CollectingPublisher::default());
         // Missing file is refused before any watcher is created.
         let missing = runtime
@@ -767,11 +852,12 @@ mod tests {
                 },
                 publisher.clone() as Arc<dyn EventPublisher>,
                 always_alive(),
+                dir.path(),
             )
             .await;
-        // On Windows a leading `/` is not absolute (no drive prefix), so the
-        // absolute-path rejection may win over the fingerprint one — accept
-        // either rejection text.
+        // The origin check canonicalizes, so a missing path surfaces as
+        // "does not exist" (or the absolute-path rejection on Windows where
+        // a leading `/` is not absolute) — accept either rejection text.
         let missing_error = missing.unwrap_err();
         assert!(
             missing_error.contains("does not exist") || missing_error.contains("absolute"),
@@ -780,7 +866,6 @@ mod tests {
         // Relative local paths are refused (desktop detection happens first;
         // when the desktop gate is off, that error wins — both are valid on
         // CI, so accept either rejection text).
-        let dir = tempfile::tempdir().expect("tempdir");
         let relative = runtime
             .start(
                 WatchStartRequest {
@@ -790,6 +875,7 @@ mod tests {
                 },
                 publisher.clone() as Arc<dyn EventPublisher>,
                 always_alive(),
+                dir.path(),
             )
             .await;
         let error = relative.unwrap_err();
@@ -797,7 +883,125 @@ mod tests {
             error.contains("absolute path") || error.contains("desktop"),
             "unexpected error: {error}"
         );
-        let _ = dir;
+        assert_eq!(runtime.live_count().await, 0, "no watcher leaked");
+    }
+
+    // ---- path-origin gate (a watchId is a bearer token; the real boundary
+    // is the path origin, the same check as sftp/upload-local) ----
+
+    #[tokio::test]
+    async fn start_accepts_files_inside_remote_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
+        let publisher = Arc::new(CollectingPublisher::default());
+        let inside = remote_edit_file(&dir, "watched.txt");
+        write_file(&inside, b"start");
+        runtime
+            .start(
+                WatchStartRequest {
+                    session_id: "sess-origin".to_string(),
+                    remote_path: "/remote/a.txt".to_string(),
+                    local_path: inside.to_string_lossy().into_owned(),
+                },
+                publisher.clone() as Arc<dyn EventPublisher>,
+                always_alive(),
+                dir.path(),
+            )
+            .await
+            .expect("remote-edit file must be watchable");
+        assert_eq!(runtime.live_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn start_rejects_files_outside_remote_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
+        let publisher = Arc::new(CollectingPublisher::default());
+        // Plain sibling, plus the `remote-edit-evil` prefix-confusion name
+        // (starts_with is component-wise, so it must not pass).
+        for name in ["outside.txt", "remote-edit-evil.txt"] {
+            let path = dir.path().join(name);
+            write_file(&path, b"secret");
+            let error = runtime
+                .start(
+                    WatchStartRequest {
+                        session_id: "sess-origin".to_string(),
+                        remote_path: "/remote/a.txt".to_string(),
+                        local_path: path.to_string_lossy().into_owned(),
+                    },
+                    publisher.clone() as Arc<dyn EventPublisher>,
+                    always_alive(),
+                    dir.path(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("remote-edit"),
+                "'{name}' must be refused, got: {error}"
+            );
+        }
+        assert_eq!(runtime.live_count().await, 0, "no watcher leaked");
+    }
+
+    #[tokio::test]
+    async fn start_rejects_remote_edit_traversal_escape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
+        let publisher = Arc::new(CollectingPublisher::default());
+        let secret = dir.path().join("secret.txt");
+        write_file(&secret, b"secret");
+        // `..` inside the request leaves remote-edit once canonicalized.
+        let traversal = dir.path().join("remote-edit").join("..").join("secret.txt");
+        let error = runtime
+            .start(
+                WatchStartRequest {
+                    session_id: "sess-origin".to_string(),
+                    remote_path: "/remote/a.txt".to_string(),
+                    local_path: traversal.to_string_lossy().into_owned(),
+                },
+                publisher.clone() as Arc<dyn EventPublisher>,
+                always_alive(),
+                dir.path(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("remote-edit"),
+            "traversal escape must be refused, got: {error}"
+        );
+        assert_eq!(runtime.live_count().await, 0, "no watcher leaked");
+    }
+
+    /// A symlink inside remote-edit pointing outside resolves (canonicalize)
+    /// to a path outside the root and must be refused.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_rejects_symlink_escaping_remote_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
+        let publisher = Arc::new(CollectingPublisher::default());
+        let secret = dir.path().join("secret.txt");
+        write_file(&secret, b"secret");
+        let link = remote_edit_file(&dir, "link.txt");
+        std::os::unix::fs::symlink(&secret, &link).expect("symlink");
+        let error = runtime
+            .start(
+                WatchStartRequest {
+                    session_id: "sess-origin".to_string(),
+                    remote_path: "/remote/a.txt".to_string(),
+                    local_path: link.to_string_lossy().into_owned(),
+                },
+                publisher.clone() as Arc<dyn EventPublisher>,
+                always_alive(),
+                dir.path(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("remote-edit"),
+            "symlink escape must be refused, got: {error}"
+        );
+        assert_eq!(runtime.live_count().await, 0, "no watcher leaked");
     }
 
     /// End-to-end: a real editor-style rewrite past the suppression window
@@ -805,8 +1009,8 @@ mod tests {
     /// rewrite of identical bytes never fires.
     #[tokio::test]
     async fn pump_emits_once_per_confirmed_change() {
-        let runtime = WatchRuntime::with_tunables(tunables());
         let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
         let publisher = Arc::new(CollectingPublisher::default());
         let _watch_id = start_watch(
             &runtime,
@@ -820,7 +1024,7 @@ mod tests {
 
         // Past the 10ms suppression window: rewrite with new content.
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let path = dir.path().join("watched.txt");
+        let path = remote_edit_file(&dir, "watched.txt");
         write_file(&path, b"edited-by-external-editor");
 
         let wait_for = |count: usize| {
@@ -861,8 +1065,8 @@ mod tests {
     /// into a dead workbench.
     #[tokio::test]
     async fn dead_session_stops_the_watch_without_emitting() {
-        let runtime = WatchRuntime::with_tunables(tunables());
         let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
         let publisher = Arc::new(CollectingPublisher::default());
         let _watch_id = start_watch_with_probe(
             &runtime,
@@ -875,7 +1079,7 @@ mod tests {
         )
         .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let path = dir.path().join("watched.txt");
+        let path = remote_edit_file(&dir, "watched.txt");
         write_file(&path, b"change-into-the-void");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline && runtime.live_count().await > 0 {
@@ -894,7 +1098,7 @@ mod tests {
         publisher: &Arc<CollectingPublisher>,
         probe: SessionProbe,
     ) -> String {
-        let path = dir.path().join(file_name);
+        let path = remote_edit_file(dir, file_name);
         write_file(&path, b"start");
         let response = runtime
             .start(
@@ -905,6 +1109,7 @@ mod tests {
                 },
                 publisher.clone() as Arc<dyn EventPublisher>,
                 probe,
+                dir.path(),
             )
             .await
             .expect("watch start");
@@ -914,8 +1119,8 @@ mod tests {
     /// Deleting the watched file self-cleans the registry.
     #[tokio::test]
     async fn deleting_the_file_stops_the_watch() {
-        let runtime = WatchRuntime::with_tunables(tunables());
         let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
         let publisher = Arc::new(CollectingPublisher::default());
         let _watch_id = start_watch(
             &runtime,
@@ -927,11 +1132,12 @@ mod tests {
         )
         .await;
         tokio::time::sleep(Duration::from_millis(150)).await;
-        std::fs::remove_file(dir.path().join("watched.txt")).expect("remove");
+        let watched = remote_edit_file(&dir, "watched.txt");
+        std::fs::remove_file(&watched).expect("remove");
         // Touch the parent so watchers that only see directory-level events
         // (FSEvents) wake up and notice the removal.
-        write_file(&dir.path().join("watched.txt"), b"resurrect");
-        std::fs::remove_file(dir.path().join("watched.txt")).expect("remove again");
+        write_file(&watched, b"resurrect");
+        std::fs::remove_file(&watched).expect("remove again");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline && runtime.live_count().await > 0 {
             tokio::time::sleep(Duration::from_millis(25)).await;

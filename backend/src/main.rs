@@ -859,6 +859,7 @@ impl Plugin {
                     request,
                     Arc::new(WatchEventPublisher(emitter.clone())),
                     self.session_probe(),
+                    &self.ssh.data_dir(),
                 ))
             }
             "watch/stop" => {
