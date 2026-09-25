@@ -168,7 +168,15 @@ pub(crate) fn active_commands(store: Option<&Value>, connection_id: &str) -> Vec
     entry
         .get("commands")
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(parse_entry).collect())
+        // Re-state the cap on the read path: the write path sanitizes, but a
+        // hand-crafted preferences.json must not inject an unbounded sequence.
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(parse_entry)
+                .take(MAX_COMMANDS)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -389,6 +397,24 @@ mod tests {
         assert!(active_commands(Some(&store), "other").is_empty());
         assert!(active_commands(None, "on").is_empty());
         assert!(active_commands(Some(&json!({})), "on").is_empty());
+    }
+
+    #[test]
+    fn active_commands_caps_read_path_at_max_commands() {
+        // C1 回归：直读盘路径必须重申每连接 20 行上限——直接构造
+        // preferences.json 不得注入任意行数（写路径本就 sanitize）。
+        let many: Vec<Value> = (0..MAX_COMMANDS + 10)
+            .map(|index| json!({ "command": format!("echo {index}") }))
+            .collect();
+        let store = json!({ "conn": { "enabled": true, "commands": many } });
+        let plan = active_commands(Some(&store), "conn");
+        assert_eq!(plan.len(), MAX_COMMANDS);
+        // 截断保序：保留前 20 条，而不是后 20 条。
+        assert_eq!(plan[0].command, "echo 0");
+        assert_eq!(
+            plan[MAX_COMMANDS - 1].command,
+            format!("echo {}", MAX_COMMANDS - 1)
+        );
     }
 
     #[test]
