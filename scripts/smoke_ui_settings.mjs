@@ -295,7 +295,12 @@ try {
   check("still recording after rejection", (await page.locator(".settings-pane:visible .hotkey-chip.recording, .settings-pane:visible .hotkey-add.recording").count()) >= 1);
 
   // Now claim the combo the "Find in terminal" action owns → conflict marking.
-  await page.keyboard.press("Meta+f");
+  // The default binding is platform-dependent (Meta+F on Apple, Ctrl+Shift+F
+  // elsewhere) and keyComboFromEvent derives the token from event.code
+  // (shift/case-independent), so pressing the platform default reproduces the
+  // owned combo exactly — a hardcoded Meta+f finds no owner on Linux runners.
+  const searchCombo = APPLE ? "Meta+f" : "Control+Shift+f"; // = DEFAULT_SEARCH_CHORD (declared below in the dispatch section)
+  await page.keyboard.press(searchCombo);
   await sleep(250);
   const conflicting = page.locator(".settings-pane:visible .hotkey-chip.conflict");
   check("duplicate combo flagged as a conflict", (await conflicting.count()) >= 2, String(await conflicting.count()));
