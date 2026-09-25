@@ -1388,6 +1388,22 @@ const rdpState = ref<RdpSessionStateView>(initialRdpSessionState());
 const rdpScaleMode = ref<RdpConnectOptions["scaleMode"]>("fit");
 const rdpSurface = ref<InstanceType<typeof RdpSurface> | null>(null);
 let rdpClipboardNoticeAt = 0;
+// 超大剪贴板的分片拼接缓冲（sidecar C2 修复：>8 MiB 的 JSON 事件会被 SDK
+// 上限静默丢弃，后端按 chunkIndex/chunkTotal 分片发送；sessionId 隔离防串话）。
+const rdpClipboardChunks = new Map<string, { parts: string[]; received: number }>();
+// 完整文本（含分片拼接结果）回写本地剪贴板 + 节流提示（与 VNC 同款）。
+function writeRdpClipboard(text: string): void {
+  if (!text) return;
+  void navigator.clipboard
+    ?.writeText(text)
+    .then(() => {
+      if (Date.now() - rdpClipboardNoticeAt > 8000) {
+        rdpClipboardNoticeAt = Date.now();
+        showNotice(t("rdp.clipboardReceived"));
+      }
+    })
+    .catch(() => undefined);
+}
 const isRdpMode = computed(() => rdpSession.value !== null);
 const rdpTarget = computed(() => (rdpSession.value ? `${rdpSession.value.host}:${rdpSession.value.port}` : ""));
 const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value || isVncMode.value || isRdpMode.value);
@@ -3769,19 +3785,29 @@ function handleEvent(event: DbxPluginEvent) {
     return;
   }
   // 远端 → 本地剪贴板（text-only，CF_UNICODETEXT）：回写本地 + 节流提示，与 VNC 同款。
+  // 超大文本按后端分片（chunkIndex/chunkTotal）拼接完整后再回写（C2）。
   if (event.method === "rdp/clipboard" && event.params.sessionId === rdpSession.value?.sessionId) {
-    const text = typeof event.params.text === "string" ? event.params.text : "";
-    if (text) {
-      void navigator.clipboard
-        ?.writeText(text)
-        .then(() => {
-          if (Date.now() - rdpClipboardNoticeAt > 8000) {
-            rdpClipboardNoticeAt = Date.now();
-            showNotice(t("rdp.clipboardReceived"));
-          }
-        })
-        .catch(() => undefined);
+    const params = event.params as Record<string, unknown>;
+    const sessionId = String(params.sessionId ?? "");
+    const text = typeof params.text === "string" ? params.text : "";
+    const total = typeof params.chunkTotal === "number" && params.chunkTotal > 1 ? params.chunkTotal : 1;
+    const index = typeof params.chunkIndex === "number" ? params.chunkIndex : 0;
+    if (total > 1) {
+      let buffer = rdpClipboardChunks.get(sessionId);
+      if (!buffer || buffer.parts.length !== total) {
+        buffer = { parts: new Array<string>(total).fill(""), received: 0 };
+        rdpClipboardChunks.set(sessionId, buffer);
+      }
+      if (buffer.parts[index] === "") {
+        buffer.parts[index] = text;
+        buffer.received += 1;
+      }
+      if (buffer.received < total) return;
+      rdpClipboardChunks.delete(sessionId);
+      writeRdpClipboard(buffer.parts.join(""));
+      return;
     }
+    writeRdpClipboard(text);
     return;
   }
   // 服务端光标形状（default/hidden/position/bitmap）：落到画布 CSS cursor。
@@ -4544,6 +4570,7 @@ async function closeRdpSession() {
   rdpState.value = initialRdpSessionState();
   rdpConfirmOpen.value = false;
   dismissRdpCertPrompt();
+  rdpClipboardChunks.delete(sessionId ?? "");
   if (!sessionId) return;
   await window.dbxPlugin.invoke("rdp/close", { sessionId }).catch(() => undefined);
   terminal?.focus();
@@ -4824,6 +4851,7 @@ if (window.dbxPlugin.workbench?.onClose) {
     serialSession.value = null;
     vncSession.value = null;
     rdpSession.value = null;
+    rdpClipboardChunks.clear();
   });
 }
 

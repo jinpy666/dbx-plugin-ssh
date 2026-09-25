@@ -36,7 +36,13 @@
 //!   "standard RDP security" path is never advertised).
 //! - Clipboard is text-only enforced by the backend format filter (only
 //!   CF_UNICODETEXT is ever offered or accepted), bounded at 16 MiB per
-//!   package (rejected whole, never truncated), and never logged.
+//!   package (rejected whole, never truncated), and never logged. Inbound
+//!   text is forwarded in budget-sized `rdp/clipboard` chunk events (C2);
+//!   the raw inbound payload is length-gated at the backend entry before
+//!   any decode (C1 plugin-level mitigation — the vendored cliprdr layer
+//!   materializes the whole package first, see rdp-security-review).
+//!   Residual (protocol-inherent, recorded): a server can pull the staged
+//!   text in several ≤16 MiB format-data batches.
 //!
 //! Bounds (explicit): desktop 640x480..3840x2160 (NyaTerm's lower bound, the
 //! VNC-parity upper bound so a full-frame patch stays < 64 MiB by
@@ -100,16 +106,43 @@ pub(crate) const MAX_DESKTOP_HEIGHT: u16 = 2160;
 /// Clipboard package bound (checklist §3-E: NyaTerm's 16 MiB, whole-package
 /// rejection, never truncation).
 pub(crate) const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024 * 1024;
+/// Per-event JSON budget for `rdp/clipboard` chunk events (C2,
+/// rdp-security-review): the SDK transport silently drops JSON events over
+/// 8 MiB (`MAX_JSON_BYTES`), so oversized text is split into chunks whose
+/// JSON-escaped size stays under this bound.
+const CLIPBOARD_CHUNK_JSON_BUDGET: usize = 7 * 1024 * 1024;
+/// Unicode text input bound per `rdp/input` command (E5a,
+/// rdp-security-review): each character expands into a press+release
+/// operation pair, so unbounded text would materialize an unbounded
+/// operation list. Rejected whole, never truncated.
+pub(crate) const MAX_UNICODE_TEXT_CHARS: usize = 4096;
+/// Wire identity bounds (B6/F6, rdp-security-review): DNS hostname cap plus
+/// reasonable identity caps. Rejected at start, never truncated.
+const MAX_HOST_LEN: usize = 255;
+const MAX_USERNAME_LEN: usize = 128;
+const MAX_DOMAIN_LEN: usize = 128;
+/// Known-certificate store bound (B4); eviction drops the genuinely oldest
+/// entries by insertion time.
+const KNOWN_CERTS_MAX_ENTRIES: usize = 1024;
 /// Bounded backpressure for input/clipboard/advertise commands.
 const COMMAND_CHANNEL_CAPACITY: usize = 256;
 /// Automatic reconnects after a transport failure (NyaTerm default 5).
 const DEFAULT_RECONNECT_ATTEMPTS: u32 = 5;
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+/// Cumulative automatic-reconnect budget per session worker (D3,
+/// rdp-security-review): an active generation resets the backoff ladder
+/// step only — never this total — so a hostile server cannot keep the
+/// client dialling forever by alternating one active frame with
+/// transport-class failures. Manual `rdp/reconnect` spawns a fresh worker
+/// (user-driven gate, NyaTerm's explicit-reconnect semantics).
+const MAX_TOTAL_RECONNECTS: u32 = 50;
 /// The decoded engine pixel buffer is one u32 per pixel (0x00RRGGBB).
 const BYTES_PER_PIXEL: usize = 4;
 /// Right-shift scancode gets a direct fast-path event (NyaTerm bug fix: the
 /// input database treats it as the extended left-shift on some layouts).
-const RDP_RIGHT_SHIFT_SCAN_CODE: u16 = 0x36;
+/// The protocol scancode space is u8; larger wire values are rejected, not
+/// truncated (E5b, rdp-security-review).
+const RDP_RIGHT_SHIFT_SCAN_CODE: u8 = 0x36;
 
 // —— configuration (wire → session) ——
 
@@ -199,7 +232,41 @@ pub(crate) fn resolve_security(
     })
 }
 
-#[derive(Debug, Deserialize)]
+/// `Debug` is manual and redacts the password (`<set>`/`None`, the
+/// `ImportedAuth` precedent): sessions can legitimately end up in derived
+/// `Debug` output, and a future log or panic message must never be able to
+/// carry a credential (B6, rdp-security-review).
+impl std::fmt::Debug for RdpStartRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RdpStartRequest")
+            .field("workbench_id", &self.workbench_id)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &redacted_secret_flag(&self.password))
+            .field("domain", &self.domain)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("use_nla", &self.use_nla)
+            .field("certificate_policy", &self.certificate_policy)
+            .field("clipboard", &self.clipboard)
+            .field("reconnect_attempts", &self.reconnect_attempts)
+            .finish()
+    }
+}
+
+/// `<set>`/`None` instead of the secret itself (mirrors the redaction style
+/// of `connection_import::redacted_secret_flag`).
+fn redacted_secret_flag(value: &Option<String>) -> &'static str {
+    if value.is_some() {
+        "<set>"
+    } else {
+        "None"
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdpStartRequest {
     pub workbench_id: String,
@@ -208,7 +275,9 @@ pub struct RdpStartRequest {
     pub port: Option<u16>,
     pub username: String,
     /// Password for NLA/CredSSP (or the legacy TLS logon screen). Held in
-    /// `Zeroizing`, never logged, never echoed into errors or events.
+    /// `Zeroizing`, never logged, never echoed into errors or events. The
+    /// plaintext window is one request-handling cycle only (wire parse →
+    /// `Zeroizing`), see rdp-security-review B6.
     pub password: Option<String>,
     /// Optional Windows domain (empty = local account).
     pub domain: Option<String>,
@@ -236,15 +305,18 @@ pub struct RdpStartRequest {
 pub enum RdpWireInput {
     #[serde(rename = "key-down")]
     KeyDown {
+        /// The protocol scancode space is u8: serde rejects values > 0xFF
+        /// outright instead of silently truncating them (E5b,
+        /// rdp-security-review).
         #[serde(alias = "scanCode")]
-        scan_code: u16,
+        scan_code: u8,
         #[serde(default)]
         extended: bool,
     },
     #[serde(rename = "key-up")]
     KeyUp {
         #[serde(alias = "scanCode")]
-        scan_code: u16,
+        scan_code: u8,
         #[serde(default)]
         extended: bool,
     },
@@ -302,15 +374,110 @@ pub(crate) fn validate_desktop_size(width: u16, height: u16) -> Result<(), Strin
     Ok(())
 }
 
-/// Clipboard text guard: bounded whole-package (never truncated).
-pub(crate) fn validate_clipboard_text(text: &str) -> Result<(), String> {
-    if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+/// Clipboard raw-payload gate applied at the backend entry (C1,
+/// rdp-security-review): oversized raw payloads are rejected BEFORE any
+/// decode/materialization. Vendored mitigation note: the vendored cliprdr
+/// PDU layer materializes the whole format-data package before our backend
+/// ever sees it (ironrdp-cliprdr 0.7.0 exposes no streaming API), so an
+/// entry-point streaming gate is impossible at plugin level — we gate as
+/// early as the plugin can: raw length first, then the UTF-16 → String
+/// decode, then the text bound. 缓解：vendored 层整包物化不可避免，见
+/// rdp-security-review C1.
+pub(crate) fn validate_clipboard_payload_len(raw_len: usize) -> Result<(), String> {
+    if raw_len > MAX_CLIPBOARD_TEXT_BYTES {
         return Err(format!(
-            "rdp clipboard: text exceeds the {} MiB limit",
+            "rdp clipboard: payload exceeds the {} MiB limit",
             MAX_CLIPBOARD_TEXT_BYTES / 1024 / 1024
         ));
     }
     Ok(())
+}
+
+/// Clipboard text guard: bounded whole-package (never truncated).
+pub(crate) fn validate_clipboard_text(text: &str) -> Result<(), String> {
+    validate_clipboard_payload_len(text.len())
+}
+
+/// JSON-escaped byte length of one char under serde_json (control chars,
+/// quote and backslash inflate to `\uXXXX`; non-ASCII passes through as raw
+/// UTF-8).
+fn json_escaped_char_len(character: char) -> usize {
+    if character.is_ascii() {
+        if character < ' ' || character == '"' || character == '\\' {
+            6
+        } else {
+            1
+        }
+    } else {
+        character.len_utf8()
+    }
+}
+
+fn json_escaped_len(text: &str) -> usize {
+    text.chars().map(json_escaped_char_len).sum()
+}
+
+/// Splits clipboard text into chunks whose JSON-escaped size stays under
+/// `CLIPBOARD_CHUNK_JSON_BUDGET` (C2, rdp-security-review: a single >8 MiB
+/// `rdp/clipboard` event is silently dropped by the SDK transport). Splits
+/// on char boundaries only; a text that already fits comes back as one
+/// chunk. Pure — unit-tested.
+pub(crate) fn clipboard_chunks(text: &str) -> Vec<&str> {
+    if json_escaped_len(text) <= CLIPBOARD_CHUNK_JSON_BUDGET {
+        return vec![text];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut escaped = 0usize;
+    for (offset, character) in text.char_indices() {
+        let character_len = json_escaped_char_len(character);
+        if escaped > 0 && escaped + character_len > CLIPBOARD_CHUNK_JSON_BUDGET {
+            chunks.push(&text[start..offset]);
+            start = offset;
+            escaped = 0;
+        }
+        escaped += character_len;
+    }
+    if start < text.len() {
+        chunks.push(&text[start..]);
+    }
+    chunks
+}
+
+/// Reconnect gating state for one worker loop (D3, rdp-security-review;
+/// pure — unit-tested). The ladder step resets when a generation reached an
+/// active frame, but the cumulative total never does: a hostile server
+/// cannot loop the client forever by alternating one active frame with
+/// transport-class failures.
+struct ReconnectBudget {
+    attempt: u32,
+    total: u32,
+}
+
+impl ReconnectBudget {
+    fn new() -> Self {
+        Self {
+            attempt: 0,
+            total: 0,
+        }
+    }
+
+    /// The generation had been fully active: fresh backoff ladder (NyaTerm
+    /// resets the attempt counter on the first active frame), budget kept.
+    fn on_active_generation(&mut self) {
+        self.attempt = 0;
+    }
+
+    /// Charge one automatic reconnect against both the ladder and the total.
+    fn charge(&mut self) {
+        self.attempt += 1;
+        self.total += 1;
+    }
+
+    /// May another automatic reconnect start?
+    fn allows(&self, max_attempts: u32, retryable: bool) -> bool {
+        retryable && self.attempt < max_attempts && self.total < MAX_TOTAL_RECONNECTS
+    }
 }
 
 /// Backoff between reconnect attempts (NyaTerm's ladder without the random
@@ -485,7 +652,10 @@ pub(crate) fn certificate_fingerprint(der: &[u8]) -> String {
 }
 
 fn cert_key(host: &str, port: u16) -> String {
-    format!("{host}:{port}")
+    // Hostnames are case-insensitive: normalize so `RDP.local` and
+    // `rdp.local` share one entry (rdp-security-review B4 次要 — otherwise
+    // a case flip silently re-prompts, fail-closed but lossy).
+    format!("{}:{port}", host.to_ascii_lowercase())
 }
 
 /// Status of `fingerprint` against the remembered store for host:port.
@@ -503,12 +673,61 @@ pub(crate) fn known_cert_status(
 }
 
 /// Disk-backed known-certificate store (`rdp-known-certs.json`), shaped like
-/// the SSH known-hosts precedent: `{"host:port": "SHA256:hex"}`, bounded at
-/// 1024 entries, atomic tmp+rename writes. Fingerprint persistence only —
-/// never certificate contents, never credentials.
+/// the SSH known-hosts precedent, bounded at 1024 entries, atomic tmp+rename
+/// writes with a per-call unique tmp name (B4, rdp-security-review: a fixed
+/// tmp name let concurrent remember() calls clobber each other's
+/// intermediate file). Fingerprint persistence only — never certificate
+/// contents, never credentials.
 #[derive(Clone)]
 struct KnownCertStore {
     path: PathBuf,
+}
+
+/// One disk entry: fingerprint plus insertion timestamp, so eviction can
+/// drop the genuinely oldest keys (B4: the previous implementation took the
+/// lexicographically smallest key, which could evict a hot host at random).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KnownCertEntry {
+    fingerprint: String,
+    inserted_at: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KnownCertFile {
+    entries: HashMap<String, KnownCertEntry>,
+}
+
+/// Backward-compatible disk shape: the pre-B4 flat map
+/// `{"host:port": "SHA256:hex"}` and the current `{"entries": …}` envelope.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum KnownCertFileShape {
+    V2(KnownCertFile),
+    /// Legacy flat shape; entries are treated as inserted at 0, i.e. evicted
+    /// first (safe direction).
+    V1(HashMap<String, String>),
+}
+
+/// Drop the oldest entries (by `inserted_at`, ties broken by key for
+/// determinism) until the store fits the cap. Pure — unit-tested.
+fn prune_oldest_entries(store: &mut HashMap<String, KnownCertEntry>, cap: usize) {
+    while store.len() > cap {
+        let oldest = store
+            .iter()
+            .min_by(|(key_a, entry_a), (key_b, entry_b)| {
+                entry_a
+                    .inserted_at
+                    .cmp(&entry_b.inserted_at)
+                    .then_with(|| key_a.cmp(key_b))
+            })
+            .map(|(key, _)| key.clone());
+        match oldest {
+            Some(key) => {
+                store.remove(&key);
+            }
+            None => break,
+        }
+    }
 }
 
 impl KnownCertStore {
@@ -518,36 +737,76 @@ impl KnownCertStore {
         }
     }
 
-    fn load(&self) -> HashMap<String, String> {
+    fn load_entries(&self) -> HashMap<String, KnownCertEntry> {
         let text = std::fs::read_to_string(&self.path).unwrap_or_default();
-        serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| serde_json::from_value::<HashMap<String, String>>(value).ok())
-            .unwrap_or_default()
+        match serde_json::from_str::<KnownCertFileShape>(&text) {
+            Ok(KnownCertFileShape::V2(file)) => file.entries,
+            // Corrupt file → empty store (fail-closed: the next connect
+            // re-prompts). Same for the legacy flat shape with per-entry
+            // inserted_at = 0.
+            Ok(KnownCertFileShape::V1(flat)) => flat
+                .into_iter()
+                .map(|(key, fingerprint)| {
+                    (
+                        key,
+                        KnownCertEntry {
+                            fingerprint,
+                            inserted_at: 0,
+                        },
+                    )
+                })
+                .collect(),
+            Err(_) => HashMap::new(),
+        }
     }
 
     fn check(&self, host: &str, port: u16, fingerprint: &str) -> KnownCertStatus {
-        known_cert_status(&self.load(), host, port, fingerprint)
+        let store: HashMap<String, String> = self
+            .load_entries()
+            .into_iter()
+            .map(|(key, entry)| (key, entry.fingerprint))
+            .collect();
+        known_cert_status(&store, host, port, fingerprint)
     }
 
     fn remember(&self, host: &str, port: u16, fingerprint: &str) -> Result<(), String> {
-        let mut store = self.load();
-        store.insert(cert_key(host, port), fingerprint.to_string());
-        // Bound the file: drop the oldest keys when it outgrows the cap.
-        while store.len() > 1024 {
-            let oldest = store
-                .keys()
-                .min()
-                .cloned()
-                .ok_or_else(|| "known-certificate store shrank unexpectedly".to_string())?;
-            store.remove(&oldest);
-        }
-        let text = serde_json::to_string(&store)
+        self.remember_at(host, port, fingerprint, unix_now_secs())
+    }
+
+    fn remember_at(
+        &self,
+        host: &str,
+        port: u16,
+        fingerprint: &str,
+        inserted_at: u64,
+    ) -> Result<(), String> {
+        let mut store = self.load_entries();
+        store.insert(
+            cert_key(host, port),
+            KnownCertEntry {
+                fingerprint: fingerprint.to_string(),
+                inserted_at,
+            },
+        );
+        prune_oldest_entries(&mut store, KNOWN_CERTS_MAX_ENTRIES);
+        let text = serde_json::to_string(&KnownCertFile { entries: store })
             .map_err(|error| format!("failed to encode known certificates: {error}"))?;
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let tmp = self.path.with_extension("json.tmp");
+        // Unique tmp name per call (B4): concurrent remember() calls must
+        // not share one intermediate file. Residual window: two concurrent
+        // remembers can still race the final rename (last writer wins
+        // wholesale); the worst case is a forgotten entry → re-prompt,
+        // fail-closed.
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "known-certificate store path is invalid".to_string())?;
+        let tmp = self
+            .path
+            .with_file_name(format!("{file_name}.{}.tmp", uuid::Uuid::new_v4()));
         std::fs::write(&tmp, text)
             .map_err(|error| format!("failed to write known certificates: {error}"))?;
         std::fs::rename(&tmp, &self.path)
@@ -883,6 +1142,16 @@ impl CliprdrBackend for TextClipboardBackend {
         if response.is_error() {
             return;
         }
+        // C1 entry gate (rdp-security-review): length-check the raw payload
+        // BEFORE the UTF-16 → String materialization. 缓解：vendored 层整包
+        // 物化不可避免（ironrdp-cliprdr 0.7.0 无流式 API），见
+        // rdp-security-review C1 —— 本插件层只能在进入后端回调后尽早拒绝。
+        if let Err(error) = validate_clipboard_payload_len(response.data().len()) {
+            // Whole-package rejection; the oversized payload is never kept
+            // or logged.
+            eprintln!("[ssh-sftp-plugin] rdp clipboard inbound rejected: {error}");
+            return;
+        }
         let Ok(text) = response.to_unicode_string() else {
             return;
         };
@@ -893,11 +1162,26 @@ impl CliprdrBackend for TextClipboardBackend {
             return;
         }
         // Forward to the workbench (the frontend bridges to the OS
-        // clipboard); the text only ever rides the local IPC event.
-        let _ = self.emitter.event(
-            "rdp/clipboard",
-            json!({ "sessionId": self.session_id, "text": text }),
-        );
+        // clipboard); the text only ever rides the local IPC event. Oversized
+        // text is split into budget-sized chunks (C2): a single >8 MiB JSON
+        // event is silently dropped by the SDK transport.
+        let chunks = clipboard_chunks(&text);
+        let total = chunks.len();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let mut payload = json!({ "sessionId": self.session_id, "text": chunk });
+            if total > 1 {
+                payload["chunkIndex"] = Value::from(index);
+                payload["chunkTotal"] = Value::from(total);
+            }
+            if let Err(error) = self.emitter.event("rdp/clipboard", payload) {
+                // Never silent (C2): a dropped clipboard event is at least
+                // logged. No clipboard text in the log line.
+                eprintln!(
+                    "[ssh-sftp-plugin] rdp clipboard event dropped: {}",
+                    error.message
+                );
+            }
+        }
     }
 
     fn on_file_contents_request(&mut self, request: FileContentsRequest) {
@@ -1006,8 +1290,27 @@ impl RdpSessionRuntime {
         if host.is_empty() {
             return Err("rdp/start: host is required".to_string());
         }
+        // Identity bounds (B6/F6, rdp-security-review): reject oversized
+        // wire identities instead of passing unbounded strings through to
+        // the vendored CredSSP/Destination layer.
+        if host.len() > MAX_HOST_LEN {
+            return Err(format!(
+                "rdp/start: host exceeds the {MAX_HOST_LEN} character limit"
+            ));
+        }
         if request.username.trim().is_empty() {
             return Err("rdp/start: username is required".to_string());
+        }
+        if request.username.trim().len() > MAX_USERNAME_LEN {
+            return Err(format!(
+                "rdp/start: username exceeds the {MAX_USERNAME_LEN} character limit"
+            ));
+        }
+        let domain = request.domain.unwrap_or_default();
+        if domain.len() > MAX_DOMAIN_LEN {
+            return Err(format!(
+                "rdp/start: domain exceeds the {MAX_DOMAIN_LEN} character limit"
+            ));
         }
         let port = request.port.unwrap_or(3389);
         if port == 0 {
@@ -1039,7 +1342,7 @@ impl RdpSessionRuntime {
             host: host.clone(),
             port,
             username: request.username,
-            domain: request.domain.unwrap_or_default(),
+            domain,
             password,
             width,
             height,
@@ -1071,7 +1374,6 @@ impl RdpSessionRuntime {
             "reconnectAttempts": reconnect_attempts,
         }))
     }
-
     async fn session(&self, session_id: &str) -> Result<Arc<RdpSessionEntry>, String> {
         self.sessions
             .read()
@@ -1089,6 +1391,17 @@ impl RdpSessionRuntime {
 
     /// Keyboard/pointer forwarding (`rdp/input`, alias `rdp/write`).
     pub async fn input(&self, session_id: &str, input: RdpWireInput) -> Result<(), String> {
+        // Unicode text bound (E5a, rdp-security-review): each character
+        // expands into a press+release operation pair, so unbounded text
+        // would materialize an unbounded operation list. Rejected whole.
+        if let RdpWireInput::Unicode { text } = &input {
+            let characters = text.chars().count();
+            if characters > MAX_UNICODE_TEXT_CHARS {
+                return Err(format!(
+                    "rdp/input: unicode text exceeds the {MAX_UNICODE_TEXT_CHARS} character limit"
+                ));
+            }
+        }
         self.session(session_id).await?;
         let sender = self.command_sender(session_id).await?;
         sender
@@ -1266,7 +1579,10 @@ fn spawn_worker(
             }
             emitter.event("rdp/session/state", payload)
         };
-        let mut attempt: u32 = 0;
+        // D3 (rdp-security-review): ladder step + cumulative total budget.
+        // An active generation resets the step only, so a hostile server
+        // cannot keep the client dialling forever.
+        let mut budget = ReconnectBudget::new();
         loop {
             if entry.close_requested.load(Ordering::Acquire) {
                 return;
@@ -1295,12 +1611,12 @@ fn spawn_worker(
                     let _ = emit_state("error", Some((error_kind.as_str(), error.as_str())), None);
                     if was_active {
                         // The session had been fully active in this
-                        // generation: a fresh failure budget (NyaTerm resets
+                        // generation: a fresh backoff ladder (NyaTerm resets
                         // the attempt counter on the first active frame).
-                        attempt = 0;
+                        // The cumulative budget is NOT reset (D3).
+                        budget.on_active_generation();
                     }
-                    if !retryable
-                        || attempt >= entry.reconnect_attempts
+                    if !budget.allows(entry.reconnect_attempts, retryable)
                         || entry.close_requested.load(Ordering::Acquire)
                         || entry.generation.load(Ordering::Acquire) != generation
                     {
@@ -1308,13 +1624,13 @@ fn spawn_worker(
                         sessions.write().await.remove(&session_id);
                         return;
                     }
-                    attempt += 1;
+                    budget.charge();
                     let _ = emit_state(
                         "reconnecting",
                         Some((error_kind.as_str(), error.as_str())),
-                        Some((attempt, entry.reconnect_attempts)),
+                        Some((budget.attempt, entry.reconnect_attempts)),
                     );
-                    tokio::time::sleep(reconnect_delay(attempt)).await;
+                    tokio::time::sleep(reconnect_delay(budget.attempt)).await;
                 }
             }
         }
@@ -1671,14 +1987,14 @@ fn wire_input_to_action(input: RdpWireInput) -> Option<InputAction> {
         } if is_right_shift_scan_code(scan_code, extended) => Some(InputAction::FastPath(
             IronRdpFastPathInputEvent::KeyboardEvent(
                 IronRdpKeyboardFlags::empty(),
-                RDP_RIGHT_SHIFT_SCAN_CODE as u8,
+                RDP_RIGHT_SHIFT_SCAN_CODE,
             ),
         )),
         RdpWireInput::KeyDown {
             scan_code,
             extended,
         } => Some(InputAction::Operations(vec![
-            IronRdpInputOperation::KeyPressed(IronRdpScancode::from_u8(extended, scan_code as u8)),
+            IronRdpInputOperation::KeyPressed(IronRdpScancode::from_u8(extended, scan_code)),
         ])),
         RdpWireInput::KeyUp {
             scan_code,
@@ -1686,14 +2002,14 @@ fn wire_input_to_action(input: RdpWireInput) -> Option<InputAction> {
         } if is_right_shift_scan_code(scan_code, extended) => Some(InputAction::FastPath(
             IronRdpFastPathInputEvent::KeyboardEvent(
                 IronRdpKeyboardFlags::RELEASE,
-                RDP_RIGHT_SHIFT_SCAN_CODE as u8,
+                RDP_RIGHT_SHIFT_SCAN_CODE,
             ),
         )),
         RdpWireInput::KeyUp {
             scan_code,
             extended,
         } => Some(InputAction::Operations(vec![
-            IronRdpInputOperation::KeyReleased(IronRdpScancode::from_u8(extended, scan_code as u8)),
+            IronRdpInputOperation::KeyReleased(IronRdpScancode::from_u8(extended, scan_code)),
         ])),
         RdpWireInput::MouseMove { x, y } => Some(InputAction::Operations(vec![
             IronRdpInputOperation::MouseMove(IronRdpMousePosition {
@@ -1761,7 +2077,7 @@ fn wire_input_to_action(input: RdpWireInput) -> Option<InputAction> {
     }
 }
 
-fn is_right_shift_scan_code(scan_code: u16, extended: bool) -> bool {
+fn is_right_shift_scan_code(scan_code: u8, extended: bool) -> bool {
     !extended && scan_code == RDP_RIGHT_SHIFT_SCAN_CODE
 }
 
@@ -2383,7 +2699,7 @@ mod tests {
         assert!(matches!(
             action,
             InputAction::FastPath(IronRdpFastPathInputEvent::KeyboardEvent(flags, code))
-                if flags == IronRdpKeyboardFlags::empty() && code == RDP_RIGHT_SHIFT_SCAN_CODE as u8
+                if flags == IronRdpKeyboardFlags::empty() && code == RDP_RIGHT_SHIFT_SCAN_CODE
         ));
         let action = wire_input_to_action(RdpWireInput::KeyUp {
             scan_code: RDP_RIGHT_SHIFT_SCAN_CODE,
@@ -2393,7 +2709,7 @@ mod tests {
         assert!(matches!(
             action,
             InputAction::FastPath(IronRdpFastPathInputEvent::KeyboardEvent(flags, code))
-                if flags == IronRdpKeyboardFlags::RELEASE && code == RDP_RIGHT_SHIFT_SCAN_CODE as u8
+                if flags == IronRdpKeyboardFlags::RELEASE && code == RDP_RIGHT_SHIFT_SCAN_CODE
         ));
         // 扩展位上的 0x36 不是右 Shift（照走数据库路径）。
         let action = wire_input_to_action(RdpWireInput::KeyDown {
@@ -2532,12 +2848,372 @@ mod tests {
     #[test]
     fn bounds_are_pinned() {
         assert_eq!(MAX_CLIPBOARD_TEXT_BYTES, 16 * 1024 * 1024);
+        assert_eq!(CLIPBOARD_CHUNK_JSON_BUDGET, 7 * 1024 * 1024);
+        assert_eq!(MAX_UNICODE_TEXT_CHARS, 4096);
+        assert_eq!(MAX_HOST_LEN, 255);
+        assert_eq!(MAX_USERNAME_LEN, 128);
+        assert_eq!(MAX_DOMAIN_LEN, 128);
+        assert_eq!(KNOWN_CERTS_MAX_ENTRIES, 1024);
+        assert_eq!(MAX_TOTAL_RECONNECTS, 50);
         assert_eq!(DEFAULT_RECONNECT_ATTEMPTS, 5);
         assert_eq!(MAX_RECONNECT_ATTEMPTS, 10);
         assert_eq!(CERTIFICATE_PROMPT_TIMEOUT, Duration::from_secs(120));
         assert_eq!(COMMAND_CHANNEL_CAPACITY, 256);
         assert_eq!(MAX_DESKTOP_WIDTH, 3840);
         assert_eq!(MAX_DESKTOP_HEIGHT, 2160);
+    }
+
+    // —— C1：入站剪贴板入口长度门（vendored 层缓解）————————————————
+
+    #[test]
+    fn clipboard_payload_gate_rejects_before_decode() {
+        // 入口门：原始载荷超限在 UTF-16 → String 物化之前拒绝。
+        assert!(validate_clipboard_payload_len(0).is_ok());
+        assert!(validate_clipboard_payload_len(MAX_CLIPBOARD_TEXT_BYTES).is_ok());
+        let error = validate_clipboard_payload_len(MAX_CLIPBOARD_TEXT_BYTES + 1)
+            .expect_err("must reject oversized raw payload");
+        assert!(error.contains("16 MiB"), "{error}");
+    }
+
+    // —— C2：剪贴板事件分片 ————————————————————————————————————————
+
+    #[test]
+    fn clipboard_chunks_keeps_fitting_text_whole() {
+        let text = "hello".to_string();
+        assert_eq!(clipboard_chunks(&text), vec!["hello"]);
+        // 恰好压线：7 MiB 纯 ASCII 单事件。
+        let text = "x".repeat(CLIPBOARD_CHUNK_JSON_BUDGET);
+        assert_eq!(clipboard_chunks(&text).len(), 1);
+    }
+
+    #[test]
+    fn clipboard_chunks_splits_oversized_text_and_reassembles() {
+        // 10 MiB 纯 ASCII：JSON 事件必然超 SDK 8 MiB，必须分片。
+        let text = "x".repeat(10 * 1024 * 1024);
+        let chunks = clipboard_chunks(&text);
+        assert!(chunks.len() > 1, "expected multiple chunks");
+        for chunk in &chunks {
+            assert!(
+                json_escaped_len(chunk) <= CLIPBOARD_CHUNK_JSON_BUDGET,
+                "chunk exceeds the event budget"
+            );
+        }
+        let reassembled: String = chunks.concat();
+        assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn clipboard_chunks_accounts_for_json_escape_inflation() {
+        // 2 MiB 制表符：原始字节 < 7 MiB，但 JSON 转义后 12 MiB > 8 MiB ——
+        // 同样必须分片（否则仍被 SDK 静默丢弃）。
+        let text = "\t".repeat(2 * 1024 * 1024);
+        let chunks = clipboard_chunks(&text);
+        assert!(chunks.len() > 1, "control chars inflate 6x and must split");
+        for chunk in &chunks {
+            assert!(
+                json_escaped_len(chunk) <= CLIPBOARD_CHUNK_JSON_BUDGET,
+                "chunk exceeds the event budget"
+            );
+        }
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn clipboard_chunks_never_splits_a_multibyte_char() {
+        // 多字节字符只能整体进某一分片（char boundary 切分）。
+        let text = "é".repeat(4 * 1024 * 1024); // 2 bytes each → 8 MiB
+        let chunks = clipboard_chunks(&text);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.chars().all(|c| c == 'é'));
+        }
+        assert_eq!(chunks.concat(), text);
+    }
+
+    // —— D3：重连累计总预算状态机 ————————————————————————————————————
+
+    #[test]
+    fn reconnect_budget_resets_ladder_but_never_total_on_active() {
+        let mut budget = ReconnectBudget::new();
+        // 非活动失败：梯子 5 步耗尽（NyaTerm 默认）。
+        for _ in 0..5 {
+            assert!(budget.allows(5, true));
+            budget.charge();
+        }
+        assert!(!budget.allows(5, true), "ladder must exhaust at 5");
+        // 活动成功重置梯子步长——但总预算不重置（D3：恶意服务器不能靠
+        // active-后-传输错误循环把客户端变成无限重拨机）。
+        budget.on_active_generation();
+        assert!(budget.allows(5, true), "ladder step reset on active");
+        // 继续循环：total 只增不减，第 50 次重连后总预算耗尽。
+        for _ in 0..(MAX_TOTAL_RECONNECTS - 5 - 1) {
+            budget.charge();
+            budget.on_active_generation();
+            assert!(budget.allows(5, true));
+        }
+        budget.charge();
+        budget.on_active_generation();
+        assert!(
+            !budget.allows(5, true),
+            "cumulative budget must close the gate at {MAX_TOTAL_RECONNECTS}"
+        );
+    }
+
+    #[test]
+    fn reconnect_budget_gate_closes_on_non_retryable_failures() {
+        let mut budget = ReconnectBudget::new();
+        assert!(!budget.allows(5, false), "non-retryable never reconnects");
+        budget.charge();
+        assert!(!budget.allows(5, false));
+    }
+
+    // —— E5：输入面上界 ————————————————————————————————————————————
+
+    #[test]
+    fn scan_code_above_u8_is_rejected_not_truncated() {
+        // 0x136 是报告点名的截断码点（截断后恰为 0x36 右 Shift）：必须整体
+        // 拒绝而不是静默截断。
+        assert!(serde_json::from_value::<RdpWireInput>(serde_json::json!({
+            "kind": "key-down", "scanCode": 0x136
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<RdpWireInput>(serde_json::json!({
+            "kind": "key-up", "scanCode": 256
+        }))
+        .is_err());
+        // u8 范围内的合法值照常。
+        assert!(serde_json::from_value::<RdpWireInput>(serde_json::json!({
+            "kind": "key-down", "scanCode": 255
+        }))
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn unicode_input_over_the_char_limit_is_rejected() {
+        let runtime = RdpSessionRuntime::new();
+        let oversized = "a".repeat(MAX_UNICODE_TEXT_CHARS + 1);
+        let error = runtime
+            .input("s1", RdpWireInput::Unicode { text: oversized })
+            .await
+            .expect_err("must reject oversized unicode text");
+        assert!(error.contains("character limit"), "{error}");
+        // 恰好 4096 字符：上限校验通过（错误变为“会话不存在”）。
+        let at_limit = "a".repeat(MAX_UNICODE_TEXT_CHARS);
+        let error = runtime
+            .input("s1", RdpWireInput::Unicode { text: at_limit })
+            .await
+            .expect_err("session lookup still fails");
+        assert!(error.contains("not found"), "{error}");
+    }
+
+    // —— B4：known-certs 写盘并发安全 + 插入序淘汰 ——————————————————
+
+    #[test]
+    fn prune_oldest_entries_drops_the_genuinely_oldest() {
+        let mut store = HashMap::new();
+        for (key, inserted_at) in [("a", 30_u64), ("b", 10), ("c", 20), ("d", 10)] {
+            store.insert(
+                key.to_string(),
+                KnownCertEntry {
+                    fingerprint: format!("SHA256:{key}"),
+                    inserted_at,
+                },
+            );
+        }
+        prune_oldest_entries(&mut store, 2);
+        assert_eq!(store.len(), 2);
+        // 最旧的 2 条按 inserted_at 淘汰：b/d 同秒并列（10），按 key 字典序
+        // b 先走，随后 d；a(30)/c(20) 保留。
+        assert!(!store.contains_key("b"), "oldest tie (b) must go first");
+        assert!(!store.contains_key("d"));
+        assert!(store.contains_key("a"));
+        assert!(store.contains_key("c"));
+    }
+
+    #[test]
+    fn known_cert_store_loads_legacy_flat_shape() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let store = KnownCertStore::new(data_dir.path());
+        std::fs::write(&store.path, r#"{"rdp.local:3389":"SHA256:legacy"}"#)
+            .expect("write v1 shape");
+        assert_eq!(
+            store.check("rdp.local", 3389, "SHA256:legacy"),
+            KnownCertStatus::Match
+        );
+        // 迁移写盘后再读仍是 V2 信封。
+        store
+            .remember_at("other.local", 3389, "SHA256:new", 42)
+            .expect("remember");
+        let text = std::fs::read_to_string(&store.path).expect("read");
+        assert!(text.contains("\"entries\""), "{text}");
+        assert_eq!(
+            store.check("rdp.local", 3389, "SHA256:legacy"),
+            KnownCertStatus::Match
+        );
+    }
+
+    #[test]
+    fn known_cert_store_evicts_by_insertion_order() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let store = KnownCertStore::new(data_dir.path());
+        store.remember_at("old.local", 3389, "SHA256:old", 1).ok();
+        store
+            .remember_at("new.local", 3389, "SHA256:new", 2)
+            .expect("remember");
+        // 压到淘汰线上：最旧（inserted_at=1）必须先走，与 key 字典序无关
+        //（"old.local" 的字典序反而最小——旧实现会先淘汰它）。
+        for index in 0..KNOWN_CERTS_MAX_ENTRIES {
+            store
+                .remember_at(
+                    &format!("host{index}.local"),
+                    3389,
+                    &format!("SHA256:{index:04}"),
+                    100 + index as u64,
+                )
+                .expect("remember");
+        }
+        assert_eq!(
+            store.check("old.local", 3389, "SHA256:old"),
+            KnownCertStatus::Unknown,
+            "the genuinely oldest entry must be evicted first"
+        );
+        assert_eq!(
+            store.check("new.local", 3389, "SHA256:new"),
+            KnownCertStatus::Unknown,
+            "second-oldest goes next — by insertion time, not key order"
+        );
+        let entries = store.load_entries();
+        assert_eq!(entries.len(), KNOWN_CERTS_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn known_cert_store_concurrent_remembers_leave_valid_file() {
+        // B4 TOCTOU：每个 remember 用唯一 tmp 名，并发写不再互相覆盖中间态
+        //（残留窗口：最后 rename 者整体胜出，最坏丢一条 → 重新 prompt，
+        // fail-closed）。
+        let data_dir = std::sync::Arc::new(tempfile::tempdir().expect("tempdir"));
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let store = KnownCertStore::new(data_dir.path());
+                std::thread::spawn(move || {
+                    store.remember_at(
+                        &format!("host{index}.local"),
+                        3389,
+                        &format!("SHA256:{index:02}"),
+                        index as u64,
+                    )
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread").expect("remember");
+        }
+        // 产物必须是合法 JSON（坏中间态会让整个 store 变空 → 全部遗忘）。
+        let store = KnownCertStore::new(data_dir.path());
+        let entries = store.load_entries();
+        assert!(
+            !entries.is_empty(),
+            "concurrent writes must not corrupt the store"
+        );
+        // 无残留 tmp 文件（全部被 rename 掉）。
+        let leftovers: Vec<_> = std::fs::read_dir(data_dir.path())
+            .expect("dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.ends_with(".tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn cert_key_is_case_insensitive() {
+        // B4 次要：`RDP.local` 与 `rdp.local` 必须是同一条目，否则大小写
+        // 翻转导致重复 prompt（fail-closed 但烦人）。
+        assert_eq!(cert_key("RDP.local", 3389), cert_key("rdp.local", 3389));
+        let mut store = HashMap::new();
+        store.insert(cert_key("RDP.local", 3389), "SHA256:aa".to_string());
+        assert_eq!(
+            known_cert_status(&store, "rdp.local", 3389, "SHA256:aa"),
+            KnownCertStatus::Match
+        );
+    }
+
+    // —— B6：start 请求脱敏 + wire 身份上界 ————————————————————————
+
+    #[test]
+    fn start_request_debug_redacts_the_password() {
+        let request: RdpStartRequest = serde_json::from_value(serde_json::json!({
+            "workbenchId": "w1", "host": "rdp.local", "username": "admin",
+            "password": "hunter2"
+        }))
+        .expect("parse");
+        let rendered = format!("{request:?}");
+        assert!(rendered.contains("<set>"), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        let request: RdpStartRequest = serde_json::from_value(serde_json::json!({
+            "workbenchId": "w1", "host": "rdp.local", "username": "admin"
+        }))
+        .expect("parse");
+        assert!(format!("{request:?}").contains("None"));
+    }
+
+    #[tokio::test]
+    async fn start_rejects_oversized_wire_identities() {
+        let runtime = RdpSessionRuntime::new();
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let build = |host: String, username: String, domain: Option<String>| RdpStartRequest {
+            workbench_id: "w1".to_string(),
+            host,
+            port: Some(3389),
+            username,
+            password: None,
+            domain,
+            width: None,
+            height: None,
+            use_nla: None,
+            certificate_policy: None,
+            clipboard: None,
+            reconnect_attempts: None,
+        };
+        // host 256 字节（含 1 字节 trim 后仍超）。
+        let error = runtime
+            .start(
+                build("a".repeat(MAX_HOST_LEN + 1), "user".into(), None),
+                test_emitter(),
+                data_dir.path(),
+            )
+            .await
+            .expect_err("oversized host");
+        assert!(error.contains("host exceeds"), "{error}");
+        // username 129 字符。
+        let error = runtime
+            .start(
+                build("rdp.local".into(), "u".repeat(MAX_USERNAME_LEN + 1), None),
+                test_emitter(),
+                data_dir.path(),
+            )
+            .await
+            .expect_err("oversized username");
+        assert!(error.contains("username exceeds"), "{error}");
+        // domain 129 字符。
+        let error = runtime
+            .start(
+                build(
+                    "rdp.local".into(),
+                    "user".into(),
+                    Some("d".repeat(MAX_DOMAIN_LEN + 1)),
+                ),
+                test_emitter(),
+                data_dir.path(),
+            )
+            .await
+            .expect_err("oversized domain");
+        assert!(error.contains("domain exceeds"), "{error}");
     }
 
     // —— vendored 链红线（NTLMv1/LM 不可用、连接器默认 NTLM）———————

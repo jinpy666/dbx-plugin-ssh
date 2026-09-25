@@ -45,7 +45,9 @@ const form = reactive({
   scaleMode: "fit" as RdpConnectOptions["scaleMode"],
 });
 
-// 上次连接参数记忆（pluginStore，跨会话保留；凭据类字段一律不落盘）。
+// 上次连接参数记忆（pluginStore，跨会话保留；凭据类字段（username/password）
+// 一律不落盘。domain 是 Windows 域名，非机密，按连接参数一起记忆——与
+// sidecar rdp/list 明文回显 domain 的语义一致）。
 const RDP_LAST_KEY = "rdp-connect-last";
 for (const [key, value] of Object.entries(loadLastConnectParams<RdpConnectOptions>(RDP_LAST_KEY))) {
   if (typeof value === "string" && key in form) (form as unknown as Record<string, unknown>)[key] = value;

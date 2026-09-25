@@ -141,15 +141,32 @@ function localDoneMarks(code: number) {
 // 帧补丁与 vnc/frame 同一 44 字节头（LE）+ RGBA；start 后推 connected →
 // 桌面帧序列 → rdp/pointer 光标形状；?rdpCert=1 先走证书挑战、
 // ?rdpErr=authfail|transport 走失败分支（见顶部参数说明）。
+//
+// 已知偏差（mock vs 真实 sidecar，rdp-security-review【mock 偏差】清单）：
+// 已对齐 1（rdp/start 参数校验）、2/3（证书 resolve 校验 challengeId +
+// 一次性 + 120s fail-closed 超时）、7（帧序号跨重连单调）。仍保留的偏差：
+// - 偏差 4：mock 永不发 graceful closed 终态；transport 夹具以 error 收尾
+//   后不再补发 closed（真实 rdp_session.rs 终态 error 后会补 closed）。
+// - 偏差 5：rdp/list 固定 username "demo"/hasPassword true，不反映实际输入。
+// - 偏差 6：rdp/clipboard 无 CF_UNICODETEXT/16 MiB/分片语义，固定 900ms 推
+//   一条小文本。
+// - 偏差 8：rdp/reconnect 无 generation/重新 prompt 语义（直接重拨）。
 const RDP_DESKTOP_W = 320;
 const RDP_DESKTOP_H = 200;
 
 let rdpSessionId = "";
+// 帧序号全局单调（mock 偏差 7）：真实 sidecar 的 frame_sequence 跨代单调，
+// 前端按 `sequence <= lastSequence` 丢弃乱序补丁——mock 重连后归零会让画面
+// 假死并污染走查结论。新会话有新 sessionId，单调计数跨会话无副作用。
 let rdpSequence = 0;
 let rdpFrameTimer = 0;
 let rdpFrameCount = 0;
 // 证书挑战闸门：resolve(accept=true) 后放行桌面帧（fail-closed：不 accept 不放行）。
 let rdpCertGate: (() => void) | null = null;
+// 一次性 challengeId（mock 偏差 2/3）：resolve 必须携带当前 id，已决/未知 id
+// 报错；120s 未决 fail-closed 超时。
+let rdpCertChallengeId = "";
+let rdpCertTimeoutTimer = 0;
 
 function emitRdpState(state: string, extra: Record<string, unknown> = {}) {
   if (!rdpSessionId) return;
@@ -240,7 +257,7 @@ function stopRdpFrames() {
 /** 拨号成功后的桌面流：connected → 底帧+补丁 → 指针/位图光标。 */
 function rdpStartDesktop(sessionId: string) {
   if (rdpSessionId !== sessionId) return;
-  rdpSequence = 0;
+  // rdpSequence 不归零（mock 偏差 7）：跨重连单调，对齐真实 frame_sequence。
   rdpFrameCount = 0;
   emitRdpState("connected");
   setTimeout(() => {
@@ -272,12 +289,23 @@ function rdpDial(sessionId: string) {
       rdpCertGate = null;
       rdpStartDesktop(sessionId);
     };
+    // 一次性 challengeId + 120s fail-closed 超时（mock 偏差 2/3）：与真实
+    // 一次性注册表 + CERTIFICATE_PROMPT_TIMEOUT 对齐，超时未决 = 拒绝。
+    rdpCertChallengeId = `rdp-cert-visual-${Math.random().toString(36).slice(2, 8)}`;
+    if (rdpCertTimeoutTimer) window.clearTimeout(rdpCertTimeoutTimer);
+    rdpCertTimeoutTimer = window.setTimeout(() => {
+      rdpCertTimeoutTimer = 0;
+      if (rdpSessionId !== sessionId || !rdpCertGate) return;
+      rdpCertGate = null;
+      rdpCertChallengeId = "";
+      emitRdpState("error", { errorKind: "certificate", error: "certificate rejected" });
+    }, 120000);
     setTimeout(() => {
       if (rdpSessionId !== sessionId) return;
       for (const listener of eventListeners) listener({
         method: "connection/challenge",
         params: {
-          challengeId: `rdp-cert-visual-${Math.random().toString(36).slice(2, 8)}`,
+          challengeId: rdpCertChallengeId,
           kind: "rdp-certificate",
           sessionId,
           host: "rdp.demo.internal",
@@ -318,6 +346,11 @@ function rdpDial(sessionId: string) {
 
 function closeRdpFixture() {
   stopRdpFrames();
+  if (rdpCertTimeoutTimer) {
+    window.clearTimeout(rdpCertTimeoutTimer);
+    rdpCertTimeoutTimer = 0;
+  }
+  rdpCertChallengeId = "";
   rdpCertGate = null;
   rdpSessionId = "";
 }
@@ -1169,16 +1202,32 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   }
   else if (method === "rdp/start") {
     const input = params as Record<string, unknown>;
+    // mock 偏差 1 对齐：与真实 sidecar 同款参数校验（rdp_session.rs
+    // validate：host/username 非空、port 1..65535、桌面尺寸门限、policy 白名单）。
+    const host = String(input.host ?? "").trim();
+    if (!host) throw new Error("rdp/start: host is required");
+    if (!String(input.username ?? "").trim()) throw new Error("rdp/start: username is required");
+    const port = Number(input.port) || 3389;
+    if (port <= 0 || port > 65535) throw new Error("rdp/start: port must be between 1 and 65535");
+    const width = Number(input.width) || 1280;
+    const height = Number(input.height) || 800;
+    if (width < 640 || width > 3840 || height < 480 || height > 2160) {
+      throw new Error("RDP desktop size must be within 640x480 .. 3840x2160");
+    }
+    const certificatePolicy = String(input.certificatePolicy || "prompt");
+    if (!["prompt", "strict", "accept-temporarily"].includes(certificatePolicy)) {
+      throw new Error("rdp/start: certificatePolicy must be prompt, strict or accept-temporarily");
+    }
     closeRdpFixture();
     rdpSessionId = `visual-rdp-${Math.random().toString(36).slice(2, 8)}`;
     const sessionId = rdpSessionId;
     rdpDial(sessionId);
     result = {
       sessionId,
-      host: String(input.host || "rdp.demo.internal"),
-      port: Number(input.port) || 3389,
+      host,
+      port,
       useNla: input.useNla !== false,
-      certificatePolicy: String(input.certificatePolicy || "prompt"),
+      certificatePolicy,
       clipboard: input.clipboard !== false,
       reconnectAttempts: Number(input.reconnectAttempts) || 5,
     };
@@ -1204,10 +1253,26 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   }
   else if (method === "rdp/certificate/resolve") {
     const input = params as Record<string, unknown>;
+    // mock 偏差 2/3 对齐：一次性注册表语义——resolve 必须携带当前签发的
+    // challengeId；未知/已决 id 报错（走查前端 showError 分支可达）。
+    const challengeId = String(input.challengeId ?? "");
+    if (!rdpCertChallengeId || challengeId !== rdpCertChallengeId) {
+      throw new Error("RDP certificate challenge was not found or already resolved");
+    }
+    rdpCertChallengeId = "";
+    if (rdpCertTimeoutTimer) {
+      window.clearTimeout(rdpCertTimeoutTimer);
+      rdpCertTimeoutTimer = 0;
+    }
     const accepted = input.accept === true;
-    // fail-closed：超时/取消/未知 id 一律拒绝——mock 同语义，accept 且闸门
-    // 存在时才放行桌面流。
-    if (accepted && rdpCertGate) rdpCertGate();
+    if (accepted && rdpCertGate) {
+      const gate = rdpCertGate;
+      rdpCertGate = null;
+      gate();
+    } else if (!accepted) {
+      // 拒绝 = fail-closed 终态（对齐真实 verify 失败路径）。
+      emitRdpState("error", { errorKind: "certificate", error: "certificate rejected" });
+    }
     result = { success: true };
   }
   else result = { success: true };
