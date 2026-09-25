@@ -183,9 +183,18 @@ jobs:
       - name: Sidecar smoke against the live container
         env:
           DBX_PLUGIN_SIDECAR: ${{ github.workspace }}/backend/target/release/dbx-plugin-ssh
+          # One-shot test-container credential (also visible in the docker
+          # run step above); via env so it never shows up on a command line.
+          DBX_SSH_SMOKE_PASSWORD: DbxTest2026
         run: |
           python3 scripts/smoke_test.py
           python3 scripts/smoke_fs_test.py
+          # MCP stdio live section: real tools/call round-trips over the
+          # container endpoint (test/browse/exec/sftp family/run_bg/metrics/
+          # transfer + live enum/pipelining tail).
+          python3 scripts/smoke_mcp.py \
+            --binary backend/target/release/dbx-plugin-ssh \
+            --host 127.0.0.1 --port 2222 --username sshuser
 
   candidate:
     name: Package candidate (${{ matrix.target }})
