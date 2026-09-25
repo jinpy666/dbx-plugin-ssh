@@ -644,7 +644,7 @@ RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRD
 - `rdp/set-clipboard {sessionId, text}`：本地文本 → 远端（暂存 + 以 CF_UNICODETEXT 广告）。**仅文本**；上限 16 MiB，超限整包拒绝（不截断）。返回 `{success}`。
 - `rdp/reconnect {sessionId}`：手动重连（generation 计数防串话）。返回 `{sessionId, success}`。
 - `rdp/close {sessionId}`：关闭会话（凭据随会话丢弃、待定证书确认全部拒绝、剪贴板暂存清空）。返回 `{success}`。
-- `rdp/replay {sessionId}`：Webview 重建后在原 `rdp/frame/{sessionId}` 通道重发**一张完整合成 framebuffer**，返回 `{frameCount: 1, complete:true}`；在首个图像补丁到来前，或 framebuffer 已因 close、终局 error 或 reconnect 释放时返回 `{frameCount: 0, complete:false}`，前端必须等待后续图像而不得把增量 patch 误当完整桌面。合成图严格限制为一张 RGBA 画面，尺寸上限 3840×2160，最大 **31,850,496 bytes（约 30.4 MiB）**；不保留多张 patch（旧方案在 4K 下可能累积数百 MiB）。
+- `rdp/replay {sessionId}`：Webview 重建后在原 `rdp/frame/{sessionId}` 通道重发**一张完整合成 framebuffer**，返回 `{frameCount: 1, complete:true}`。只有一张覆盖整个当前桌面的全屏 patch（`x=0,y=0,width=desktopWidth,height=desktopHeight`）才能建立 replay 基线；首帧为局部 patch、尺寸改变、close/error/reconnect 清理后均返回 `{frameCount: 0, complete:false}`，前端必须等待新的全屏基线，绝不得把增量 patch 误当完整桌面。实时 patch 合成、sequence 分配、replay 帧构造与发布由同一个会话锁串行，重挂帧不能插队到已分配但尚未发布的实时 sequence 之前。合成图严格限制为一张 RGBA 画面，尺寸上限 3840×2160，最大 **31,850,496 bytes（约 30.4 MiB）**；不保留多张 patch（旧方案在 4K 下可能累积数百 MiB）。
 - `rdp/list` → `{sessions: [{sessionId, workbenchId, host, port, username, hasPassword, useNla, certificatePolicy, clipboard, createdAt}]}`（按创建时间排序；不含密码与实时状态）。
 - `rdp/certificate/resolve {challengeId, accept?, remember?}`：证书确认应答。`accept` 缺省 false——超时/取消/未知 id 一律拒绝（fail-closed）。`remember=true` 时把指纹记入 `<plugin-data>/rdp-known-certs.json`（`{"host:port": "SHA256:hex"}`，上限 1024 条，与 SSH known_hosts 先例同作用域语义）。共享入口 `connection/challenge/resolve` 亦按 challengeId 路由到 RDP 注册表。
 

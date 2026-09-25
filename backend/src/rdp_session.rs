@@ -1245,6 +1245,86 @@ struct RdpReplayFramebuffer {
     width: u16,
     height: u16,
     rgba: Vec<u8>,
+    /// A local patch cannot reconstruct unknown pixels. Only a full-screen
+    /// patch makes this desktop safe to replay after webview reconstruction.
+    complete: bool,
+}
+
+/// The only owner of RDP frame sequence allocation and the replayable desktop.
+/// Both the realtime frame publisher and `rdp/replay` hold this state lock
+/// through frame construction and emission, so a replay frame can never be
+/// published between an already-allocated realtime sequence and its emit.
+#[derive(Default)]
+struct RdpFrameState {
+    next_sequence: u64,
+    framebuffer: Option<RdpReplayFramebuffer>,
+}
+
+impl RdpFrameState {
+    fn clear(&mut self) {
+        self.framebuffer = None;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_and_encode(
+        &mut self,
+        pixels: &[u32],
+        desktop_width: u16,
+        desktop_height: u16,
+        patch_x: u16,
+        patch_y: u16,
+        patch_width: u16,
+        patch_height: u16,
+    ) -> Result<Vec<u8>, String> {
+        let dimensions_changed = self.framebuffer.as_ref().is_some_and(|framebuffer| {
+            (framebuffer.width, framebuffer.height) != (desktop_width, desktop_height)
+        });
+        if dimensions_changed || self.framebuffer.is_none() {
+            self.framebuffer = Some(RdpReplayFramebuffer::new(desktop_width, desktop_height)?);
+        }
+        let framebuffer = self
+            .framebuffer
+            .as_mut()
+            .ok_or_else(|| "RDP replay framebuffer is unavailable".to_string())?;
+        framebuffer.apply_patch(
+            pixels,
+            desktop_width,
+            desktop_height,
+            patch_x,
+            patch_y,
+            patch_width,
+            patch_height,
+        )?;
+        let sequence = self.next_sequence;
+        let frame = image_patch_to_frame(
+            pixels,
+            desktop_width,
+            desktop_height,
+            patch_x,
+            patch_y,
+            patch_width,
+            patch_height,
+            sequence,
+        )?;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        Ok(frame)
+    }
+
+    fn replay(&mut self) -> Result<Vec<u8>, String> {
+        let framebuffer = self
+            .framebuffer
+            .as_ref()
+            .ok_or_else(|| "RDP replay framebuffer is unavailable".to_string())?;
+        let sequence = self.next_sequence;
+        let frame = framebuffer.full_frame(sequence)?;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        Ok(frame)
+    }
+}
+
+#[cfg(test)]
+fn frame_sequence(frame: &[u8]) -> u64 {
+    u64::from_le_bytes(frame[0..8].try_into().expect("frame sequence"))
 }
 
 impl RdpReplayFramebuffer {
@@ -1265,6 +1345,7 @@ impl RdpReplayFramebuffer {
             width,
             height,
             rgba: vec![0; bytes],
+            complete: false,
         })
     }
 
@@ -1294,6 +1375,7 @@ impl RdpReplayFramebuffer {
             return Err("RDP replay framebuffer has been released".to_string());
         }
         if (self.width, self.height) != (desktop_width, desktop_height) {
+            self.complete = false;
             return Err("RDP replay framebuffer dimensions changed".to_string());
         }
         let patch_pixels = usize::from(patch_width)
@@ -1311,6 +1393,10 @@ impl RdpReplayFramebuffer {
         {
             return Err("RDP replay patch exceeds framebuffer bounds".to_string());
         }
+        let is_fullscreen = patch_x == 0
+            && patch_y == 0
+            && patch_width == self.width
+            && patch_height == self.height;
         let stride = usize::from(self.width) * BYTES_PER_PIXEL;
         for row in 0..usize::from(patch_height) {
             for column in 0..usize::from(patch_width) {
@@ -1322,11 +1408,14 @@ impl RdpReplayFramebuffer {
                     .copy_from_slice(&[red, green, blue, 255]);
             }
         }
+        if is_fullscreen {
+            self.complete = true;
+        }
         Ok(())
     }
 
     fn full_frame(&self, sequence: u64) -> Result<Vec<u8>, String> {
-        if self.rgba.is_empty() {
+        if self.rgba.is_empty() || !self.complete {
             return Err("RDP replay framebuffer has been released".to_string());
         }
         crate::vnc_session::encode_frame_patch(&crate::vnc_session::FramePatch {
@@ -1363,11 +1452,9 @@ struct RdpSessionEntry {
     /// Bumped before every (re)connect; superseded workers exit without
     /// emitting and every prompt decision across generations is rejected.
     generation: Arc<AtomicU64>,
-    /// Monotonic across generations so the frontend can drop out-of-order
-    /// patches after a reconnect.
-    frame_sequence: AtomicU64,
-    /// One bounded, composite RGBA desktop for an exact full-frame remount.
-    replay_framebuffer: tokio::sync::Mutex<Option<RdpReplayFramebuffer>>,
+    /// Serializes realtime mutation, sequence allocation and replay into one
+    /// ordered stream while retaining at most one bounded complete desktop.
+    frame_state: tokio::sync::Mutex<RdpFrameState>,
     close_requested: AtomicBool,
     /// Sender of the *current* generation's command channel; `None` while
     /// dialling/reconnecting (input fails fast instead of queueing).
@@ -1466,8 +1553,7 @@ impl RdpSessionRuntime {
             reconnect_attempts,
             created_at_secs: unix_now_secs(),
             generation: Arc::new(AtomicU64::new(0)),
-            frame_sequence: AtomicU64::new(0),
-            replay_framebuffer: tokio::sync::Mutex::new(None),
+            frame_state: tokio::sync::Mutex::new(RdpFrameState::default()),
             close_requested: AtomicBool::new(false),
             command_sender: tokio::sync::Mutex::new(None),
             clipboard_stage: Arc::new(ClipboardStage::default()),
@@ -1563,7 +1649,7 @@ impl RdpSessionRuntime {
         let entry = self.session(session_id).await?;
         entry.close_requested.store(false, Ordering::Release);
         entry.generation.fetch_add(1, Ordering::AcqRel);
-        *entry.replay_framebuffer.lock().await = None;
+        entry.frame_state.lock().await.clear();
         self.broker.cancel_session(session_id);
         if let Some(sender) = entry.command_sender.lock().await.take() {
             let _ = sender.send(RdpCommand::Close).await;
@@ -1586,7 +1672,7 @@ impl RdpSessionRuntime {
             .ok_or("RDP session was not found")?;
         entry.close_requested.store(true, Ordering::Release);
         entry.generation.fetch_add(1, Ordering::AcqRel);
-        *entry.replay_framebuffer.lock().await = None;
+        entry.frame_state.lock().await.clear();
         // Any pending certificate prompt of this session must reject now,
         // and the staged clipboard text is dropped with the entry.
         self.broker.cancel_session(session_id);
@@ -1648,12 +1734,13 @@ impl RdpSessionRuntime {
     /// replays partial patches as if they were a complete scene.
     pub async fn replay(&self, session_id: &str, emitter: &PluginEmitter) -> Result<Value, String> {
         let entry = self.session(session_id).await?;
-        let framebuffer = entry.replay_framebuffer.lock().await;
-        let Some(framebuffer) = framebuffer.as_ref() else {
+        let mut frame_state = entry.frame_state.lock().await;
+        let Ok(frame) = frame_state.replay() else {
             return Ok(json!({ "frameCount": 0, "complete": false }));
         };
-        let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
-        let frame = framebuffer.full_frame(sequence)?;
+        // Keep the state lock through publication. Realtime patch mutation and
+        // replay now share one ordering boundary, so sequence N cannot be
+        // allocated then overtaken by replay sequence N+1.
         publish_frame(session_id, &frame, emitter);
         Ok(json!({ "frameCount": 1, "complete": true }))
     }
@@ -1730,7 +1817,7 @@ fn spawn_worker(
                         && !entry.close_requested.load(Ordering::Acquire)
                     {
                         let _ = emit_state("closed", None, None);
-                        *entry.replay_framebuffer.lock().await = None;
+                        entry.frame_state.lock().await.clear();
                         sessions.write().await.remove(&session_id);
                     }
                     return;
@@ -1745,7 +1832,7 @@ fn spawn_worker(
                     // An error invalidates the retained scene. Release the
                     // bounded buffer before retry backoff so a dead/retrying
                     // session never holds a stale 4K desktop in memory.
-                    *entry.replay_framebuffer.lock().await = None;
+                    entry.frame_state.lock().await.clear();
                     if was_active {
                         // The session had been fully active in this
                         // generation: a fresh backoff ladder (NyaTerm resets
@@ -1758,7 +1845,7 @@ fn spawn_worker(
                         || entry.generation.load(Ordering::Acquire) != generation
                     {
                         let _ = emit_state("closed", None, None);
-                        *entry.replay_framebuffer.lock().await = None;
+                        entry.frame_state.lock().await.clear();
                         sessions.write().await.remove(&session_id);
                         return;
                     }
@@ -1951,8 +2038,8 @@ async fn handle_output_event(
                     was_active: false,
                 });
             }
-            let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
-            match image_patch_to_frame(
+            let mut frame_state = entry.frame_state.lock().await;
+            match frame_state.apply_and_encode(
                 &buffer,
                 desktop_width,
                 desktop_height,
@@ -1960,54 +2047,20 @@ async fn handle_output_event(
                 y,
                 width,
                 height,
-                sequence,
             ) {
                 Ok(frame) => {
-                    let mut framebuffer = entry.replay_framebuffer.lock().await;
-                    let dimensions = (desktop_width, desktop_height);
-                    let needs_reset = framebuffer
-                        .as_ref()
-                        .is_none_or(|current| (current.width, current.height) != dimensions);
-                    if needs_reset {
-                        *framebuffer =
-                            match RdpReplayFramebuffer::new(desktop_width, desktop_height) {
-                                Ok(next) => Some(next),
-                                Err(error) => {
-                                    return Some(GenerationEnd::Failed {
-                                        error,
-                                        error_kind: RdpErrorKind::Session,
-                                        retryable: false,
-                                        was_active: false,
-                                    });
-                                }
-                            };
-                    }
-                    if let Some(current) = framebuffer.as_mut() {
-                        if let Err(error) = current.apply_patch(
-                            &buffer,
-                            desktop_width,
-                            desktop_height,
-                            x,
-                            y,
-                            width,
-                            height,
-                        ) {
-                            return Some(GenerationEnd::Failed {
-                                error,
-                                error_kind: RdpErrorKind::Session,
-                                retryable: false,
-                                was_active: false,
-                            });
-                        }
-                    }
-                    drop(framebuffer);
+                    // Keep the shared frame-state lock through emission. This
+                    // makes mutation, sequence allocation, replay construction
+                    // and output publication one total order.
                     publish_frame(session_id, &frame, emitter);
                 }
                 Err(error) => {
-                    // A malformed patch is visual-only damage (the frame is
-                    // dropped); the engine keeps running. NyaTerm logs and
-                    // discards too.
-                    eprintln!("[ssh-sftp-plugin] rdp frame dropped: {error}");
+                    return Some(GenerationEnd::Failed {
+                        error,
+                        error_kind: RdpErrorKind::Session,
+                        retryable: false,
+                        was_active: false,
+                    });
                 }
             }
             None
@@ -2836,11 +2889,14 @@ mod tests {
     fn replay_framebuffer_composites_incremental_patches_into_one_full_desktop() {
         let mut framebuffer = RdpReplayFramebuffer::new(4, 2).expect("framebuffer");
         framebuffer
+            .apply_patch(&[0; 8], 4, 2, 0, 0, 4, 2)
+            .expect("full baseline");
+        framebuffer
             .apply_patch(&[0x00ff_0000, 0x0000_ff00], 4, 2, 0, 0, 2, 1)
-            .expect("first patch");
+            .expect("first incremental patch");
         framebuffer
             .apply_patch(&[0x0000_00ff, 0x00ff_ffff], 4, 2, 2, 1, 2, 1)
-            .expect("second patch");
+            .expect("second incremental patch");
 
         let frame = framebuffer.full_frame(42).expect("full replay frame");
         assert_eq!(&frame[0..8], &42_u64.to_le_bytes());
@@ -2853,6 +2909,44 @@ mod tests {
             &frame[44 + 24..44 + 32],
             &[0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
         );
+    }
+
+    #[test]
+    fn replay_framebuffer_requires_a_fullscreen_baseline_before_marking_complete() {
+        let mut framebuffer = RdpReplayFramebuffer::new(4, 2).expect("framebuffer");
+        framebuffer
+            .apply_patch(&[0x00ff_0000], 4, 2, 1, 1, 1, 1)
+            .expect("local patch");
+        assert!(
+            framebuffer.full_frame(1).is_err(),
+            "a first local patch does not establish a replayable desktop"
+        );
+
+        framebuffer
+            .apply_patch(&[0x0000_0000; 8], 4, 2, 0, 0, 4, 2)
+            .expect("full baseline");
+        assert!(framebuffer.full_frame(2).is_ok());
+
+        framebuffer
+            .apply_patch(&[0x0000_00ff], 5, 2, 0, 0, 1, 1)
+            .expect_err("dimension change must clear the complete baseline");
+        assert!(framebuffer.full_frame(3).is_err());
+    }
+
+    #[test]
+    fn replay_framebuffer_serializes_patch_and_replay_sequences() {
+        let mut state = RdpFrameState::default();
+        let realtime = state
+            .apply_and_encode(&[0x00ff_0000, 0x0000_ff00], 2, 1, 0, 0, 2, 1)
+            .expect("full realtime patch");
+        let replay = state.replay().expect("complete replay");
+        let next = state
+            .apply_and_encode(&[0x0000_00ff], 2, 1, 1, 0, 1, 1)
+            .expect("incremental realtime patch");
+
+        assert_eq!(frame_sequence(&realtime), 0);
+        assert_eq!(frame_sequence(&replay), 1);
+        assert_eq!(frame_sequence(&next), 2);
     }
 
     #[test]
