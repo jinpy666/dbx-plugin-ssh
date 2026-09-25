@@ -70,9 +70,26 @@ serialport = "4"
 # Plugin-side bounds stay tighter (3840x2160 framebuffer, <=8-byte classic
 # VNC password) — due diligence in docs/SPIKE_VNC_SESSION.zh-CN.md.
 vnc-rs = "0.6"
+# RDP sessions (nyaterm-parity P3-4). Umbrella re-export only for now: the
+# session/protocol implementation lands in the follow-up branch. The five
+# crates it pulls in (ironrdp-client / -connector / -tls, picky, sspi) are
+# vendored under vendor/ and pinned through [patch.crates-io] below — see
+# docs/RDP_VENDOR_FORK_PLAN.zh-CN.md (Route B) and vendor/README.md for the
+# per-crate registration. Feature set mirrors NyaTerm src-tauri/Cargo.toml:
+# password/NLA auth + TLS + text clipboard + reconnect; no audio, drive
+# redirection or keyboard capture. TLS backend follows NyaTerm's platform
+# split (rustls elsewhere, native-tls/Schannel on Windows).
+ironrdp = { version = "0.17", default-features = false, features = ["client", "client-clipboard", "cliprdr", "connector", "core", "input", "pdu"] }
 
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2"
+# RDP TLS backend: Schannel via native-tls on Windows (NyaTerm's split, see
+# the ironrdp comment above and docs/RDP_VENDOR_FORK_PLAN.zh-CN.md §8-7).
+ironrdp = { version = "0.17", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(not(windows))'.dependencies]
+# RDP TLS backend: rustls everywhere else (macOS/Linux/musl CI targets).
+ironrdp = { version = "0.17", default-features = false, features = ["rustls"] }
 
 # The OS keychain tier only ships where a native keychain exists; the Linux
 # secret-service backend pulls libdbus (absent in store build containers and
@@ -85,8 +102,21 @@ keyring = "4"
 # The DBX sidecar SDK is vendored under shared/ so a standalone checkout does
 # not depend on the source monorepo or a sibling host checkout. See
 # docs/REPOSITORY_SPLIT.zh-CN.md for the future public-package migration plan.
+#
+# The RDP fork chain (vendor/) is patched the same way. ALL SIX entries below
+# form one lockstep set — ironrdp (umbrella 0.17) must move in the same round
+# as client 0.1.0 / connector 0.10.0, and picky/sspi/ironrdp-tls ride along.
+# Never bump a single entry; scripts/check_vendor_lockstep.py fails CI on
+# drift between this list and the vendored manifests. Registration table:
+# backend/vendor/README.md.
 [patch.crates-io]
 dbx-plugin-sdk = { path = "../shared/sdk/rust/dbx-plugin-sdk" }
+ironrdp = { path = "vendor/ironrdp" }
+ironrdp-connector = { path = "vendor/ironrdp-connector" }
+ironrdp-client = { path = "vendor/ironrdp-client" }
+ironrdp-tls = { path = "vendor/ironrdp-tls" }
+picky = { path = "vendor/picky" }
+sspi = { path = "vendor/sspi" }
 
 [dev-dependencies]
 tempfile = "3"
