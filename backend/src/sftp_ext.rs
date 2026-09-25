@@ -955,6 +955,44 @@ mod tests {
         assert_eq!(root_temp, "/.dbx-part-abc");
     }
 
+    /// M15 watch/upload 并发回传隔离证明：`write_bytes`（`watch/upload` 的
+    /// 提交路径）在每次调用里生成一个新的 `Uuid::new_v4()` 作为 task_id，
+    /// 因此并发回传——无论是同一个远端文件还是不同文件——各自的
+    /// `.dbx-part-<uuid>` 临时文件与 backup 都互不重名，最后一步的原子
+    /// rename 各自落到各自目标上，互不干扰。
+    #[test]
+    fn concurrent_write_bytes_calls_never_share_a_staging_file() {
+        // Simulate N concurrent round-trips exactly as write_bytes names
+        // them: one fresh uuid per in-flight call.
+        let mut task_ids: Vec<String> = Vec::new();
+        for _ in 0..64 {
+            task_ids.push(uuid::Uuid::new_v4().to_string());
+        }
+        assert_eq!(
+            task_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            64,
+            "uuid task ids are unique per call"
+        );
+        // Same target: every concurrent commit stages under its own name.
+        let mut staging: std::collections::BTreeSet<String> = Default::default();
+        for task_id in &task_ids {
+            let (temporary, backup) = direct_write_paths("/srv/notes.md", task_id);
+            assert!(staging.insert(temporary));
+            assert!(staging.insert(backup));
+        }
+        // Different targets: parents differ, so names can never cross either.
+        let (temp_a, backup_a) = direct_write_paths("/srv/a.md", &task_ids[0]);
+        let (temp_b, backup_b) = direct_write_paths("/etc/b.conf", &task_ids[1]);
+        assert_ne!(temp_a, temp_b);
+        assert_ne!(backup_a, backup_b);
+        // Every staging name lives next to its own target, never elsewhere.
+        assert!(temp_a.starts_with("/srv/") && backup_a.starts_with("/srv/"));
+        assert!(temp_b.starts_with("/etc/") && backup_b.starts_with("/etc/"));
+    }
+
     #[test]
     fn exec_failures_report_status_and_output() {
         assert!(check_exec_success(&json!({ "exitCode": 0 }), "extract").is_ok());

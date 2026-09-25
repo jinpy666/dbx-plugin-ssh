@@ -749,6 +749,120 @@ mod tests {
         response["watchId"].as_str().expect("watchId").to_string()
     }
 
+    /// M15 多文件并行：同一会话同时挂两个远端文件的 watcher，互不顶替，
+    /// 各自保存各自触发（事件按 watchId/路径逐文件区分，无串扰）。
+    #[tokio::test]
+    async fn two_files_same_session_watch_in_parallel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
+        let publisher = Arc::new(CollectingPublisher::default());
+        let _a = start_watch(
+            &runtime,
+            &dir,
+            "watched.txt",
+            "sess-multi",
+            "/remote/a.txt",
+            &publisher,
+        )
+        .await;
+        let _b = start_watch(
+            &runtime,
+            &dir,
+            "other.txt",
+            "sess-multi",
+            "/remote/b.txt",
+            &publisher,
+        )
+        .await;
+        assert_eq!(
+            runtime.live_count().await,
+            2,
+            "same session keeps one watcher per file"
+        );
+
+        // Past the suppression window: edit both files; each watcher emits
+        // its own event with its own identity.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        write_file(&remote_edit_file(&dir, "watched.txt"), b"first-file-edit");
+        write_file(&remote_edit_file(&dir, "other.txt"), b"second-file-edit");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && publisher.count.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            publisher.count.load(Ordering::SeqCst),
+            2,
+            "both watchers fire independently"
+        );
+        let payloads = publisher
+            .payloads
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut remotes: Vec<String> = payloads
+            .iter()
+            .map(|payload| {
+                payload["remotePath"]
+                    .as_str()
+                    .expect("remotePath")
+                    .to_string()
+            })
+            .collect();
+        remotes.sort();
+        assert_eq!(remotes, ["/remote/a.txt", "/remote/b.txt"]);
+        let mut ids: Vec<String> = payloads
+            .iter()
+            .map(|payload| payload["watchId"].as_str().expect("watchId").to_string())
+            .collect();
+        ids.sort();
+        assert_ne!(ids[0], ids[1], "each file carries its own watchId");
+        // 同一会话两个 watcher 都还活着（一个文件触发不影响另一个）。
+        assert_eq!(runtime.live_count().await, 2);
+    }
+
+    /// 编辑其中一个文件不会顶替同会话另一个文件的监听（per-path 粒度去重，
+    /// 而非 per-session）。
+    #[tokio::test]
+    async fn editing_one_file_keeps_the_others_watch_alive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = WatchRuntime::with_tunables(tunables(dir.path()));
+        let publisher = Arc::new(CollectingPublisher::default());
+        let _watch_a = start_watch(
+            &runtime,
+            &dir,
+            "watched.txt",
+            "sess-keep",
+            "/remote/a.txt",
+            &publisher,
+        )
+        .await;
+        let watch_b = start_watch(
+            &runtime,
+            &dir,
+            "other.txt",
+            "sess-keep",
+            "/remote/b.txt",
+            &publisher,
+        )
+        .await;
+        // 重新打开文件 a：dedup 只替换 a 的 watcher（返回新 watchId），b 原样保留。
+        let watch_a2 = start_watch(
+            &runtime,
+            &dir,
+            "watched.txt",
+            "sess-keep",
+            "/remote/a.txt",
+            &publisher,
+        )
+        .await;
+        assert_eq!(runtime.live_count().await, 2, "b survives a's re-open");
+        runtime.stop(&watch_a2).await.expect("stop a replacement");
+        assert_eq!(runtime.live_count().await, 1, "only b remains");
+        runtime.stop(&watch_b).await.expect("stop b");
+        assert_eq!(runtime.live_count().await, 0);
+    }
+
     #[tokio::test]
     async fn start_replaces_dedup_watch_for_the_same_file() {
         let dir = tempfile::tempdir().expect("tempdir");
