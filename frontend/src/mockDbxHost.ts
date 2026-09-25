@@ -50,6 +50,15 @@ const localOnlyContext = fixtureParams.get("local") === "1";
 // requires restore-without-replay — no automatic shell, just the exit shell until the user explicitly starts one.
 const restoredFixture = fixtureParams.get("restored") === "1";
 
+// ?rdpCert=1 让 rdp/start 在拨号早期发出 connection/challenge（kind=
+// rdp-certificate），供证书确认弹窗（指纹/knownHostStatus/120s 倒计时）的
+// 浏览器走查；rdp/certificate/resolve(accept) 后才继续推桌面帧。
+const rdpCertChallenge = fixtureParams.get("rdpCert") === "1";
+// ?rdpErr=authfail 模拟 NLA 认证失败（errorKind=authentication，永不自动重试，
+// 直接终态）；?rdpErr=transport 模拟传输类失败的重连退避梯子（reconnecting
+// attempt 1..2 → 终态 error），供退出覆盖层与重连状态条的走查。
+const rdpErrKind = fixtureParams.get("rdpErr");
+
 const context = localOnlyContext
   ? {
       plugin: { mode: "local-terminal" },
@@ -126,6 +135,191 @@ function localCommandMarks(command: string) {
 }
 function localDoneMarks(code: number) {
   return `\u001b]633;D;${code}\u0007\u001b]133;D;${code}\u0007`;
+}
+
+// ---- RDP 远程桌面夹具（nyaterm-parity P3-4）：rdp/* 全链路 ----------------
+// 帧补丁与 vnc/frame 同一 44 字节头（LE）+ RGBA；start 后推 connected →
+// 桌面帧序列 → rdp/pointer 光标形状；?rdpCert=1 先走证书挑战、
+// ?rdpErr=authfail|transport 走失败分支（见顶部参数说明）。
+const RDP_DESKTOP_W = 320;
+const RDP_DESKTOP_H = 200;
+
+let rdpSessionId = "";
+let rdpSequence = 0;
+let rdpFrameTimer = 0;
+let rdpFrameCount = 0;
+// 证书挑战闸门：resolve(accept=true) 后放行桌面帧（fail-closed：不 accept 不放行）。
+let rdpCertGate: (() => void) | null = null;
+
+function emitRdpState(state: string, extra: Record<string, unknown> = {}) {
+  if (!rdpSessionId) return;
+  for (const listener of eventListeners) listener({ method: "rdp/session/state", params: { sessionId: rdpSessionId, workbenchId: context.workbenchId, state, ...extra } });
+}
+
+/** 编码一个 44 字节 patch 头（LE）+ RGBA 负载的帧补丁（与 sidecar vnc 同构封装）。 */
+function rdpFramePatch(sequence: number, x: number, y: number, width: number, height: number, payload: Uint8Array): Uint8Array {
+  const frame = new Uint8Array(44 + payload.length);
+  const view = new DataView(frame.buffer);
+  view.setBigUint64(0, BigInt(sequence), true);
+  view.setUint32(8, RDP_DESKTOP_W, true);
+  view.setUint32(12, RDP_DESKTOP_H, true);
+  view.setUint32(16, x, true);
+  view.setUint32(20, y, true);
+  view.setUint32(24, width, true);
+  view.setUint32(28, height, true);
+  view.setUint32(32, width * 4, true);
+  view.setUint32(36, 2, true); // RGBA8888
+  view.setUint32(40, payload.length, true);
+  frame.set(payload, 44);
+  return frame;
+}
+
+function emitRdpFrame() {
+  if (!rdpSessionId) return;
+  rdpSequence += 1;
+  rdpFrameCount += 1;
+  // 桌面底色一次整帧 + 之后一个移动色块补丁（验证增量 patch 绘制路径）。
+  const tick = rdpFrameCount;
+  if (tick === 1) {
+    const payload = new Uint8Array(RDP_DESKTOP_W * RDP_DESKTOP_H * 4);
+    for (let row = 0; row < RDP_DESKTOP_H; row += 1) {
+      for (let col = 0; col < RDP_DESKTOP_W; col += 1) {
+        const offset = (row * RDP_DESKTOP_W + col) * 4;
+        payload[offset] = (col * 3) % 256;
+        payload[offset + 1] = (row * 3) % 256;
+        payload[offset + 2] = 96;
+        payload[offset + 3] = 255;
+      }
+    }
+    for (const listener of binaryListeners) listener({ channel: `rdp/frame/${rdpSessionId}`, data: rdpFramePatch(rdpSequence, 0, 0, RDP_DESKTOP_W, RDP_DESKTOP_H, payload) });
+    return;
+  }
+  const patchW = 48;
+  const patchH = 32;
+  const payload = new Uint8Array(patchW * patchH * 4);
+  for (let row = 0; row < patchH; row += 1) {
+    for (let col = 0; col < patchW; col += 1) {
+      const offset = (row * patchW + col) * 4;
+      payload[offset] = 250;
+      payload[offset + 1] = (col * 5) % 256;
+      payload[offset + 2] = (row * 7 + tick * 5) % 256;
+      payload[offset + 3] = 255;
+    }
+  }
+  const x = 24 + ((tick * 13) % (RDP_DESKTOP_W - patchW - 48));
+  const y = 24 + ((tick * 29) % (RDP_DESKTOP_H - patchH - 48));
+  for (const listener of binaryListeners) listener({ channel: `rdp/frame/${rdpSessionId}`, data: rdpFramePatch(rdpSequence, x, y, patchW, patchH, payload) });
+}
+
+/** 16x16 白色箭头位图光标（RGBA + base64）：演示 rdp/pointer bitmap → CSS cursor。 */
+function rdpBitmapCursor(): string {
+  const size = 16;
+  const rgba = new Uint8Array(size * size * 4);
+  const inside = (x: number, y: number) => x <= y && y - x <= 11 && x <= 11;
+  const outline = (x: number, y: number) => inside(x, y) && (!inside(x - 1, y) || !inside(x, y - 1) || !inside(x + 1, y) || !inside(x, y + 1));
+  for (let row = 0; row < size; row += 1) {
+    for (let col = 0; col < size; col += 1) {
+      const offset = (row * size + col) * 4;
+      if (outline(col, row)) {
+        rgba[offset] = 16; rgba[offset + 1] = 16; rgba[offset + 2] = 18; rgba[offset + 3] = 255;
+      } else if (inside(col, row)) {
+        rgba[offset] = 255; rgba[offset + 1] = 255; rgba[offset + 2] = 255; rgba[offset + 3] = 255;
+      }
+    }
+  }
+  return base64(rgba);
+}
+
+function stopRdpFrames() {
+  if (rdpFrameTimer) {
+    window.clearInterval(rdpFrameTimer);
+    rdpFrameTimer = 0;
+  }
+}
+
+/** 拨号成功后的桌面流：connected → 底帧+补丁 → 指针/位图光标。 */
+function rdpStartDesktop(sessionId: string) {
+  if (rdpSessionId !== sessionId) return;
+  rdpSequence = 0;
+  rdpFrameCount = 0;
+  emitRdpState("connected");
+  setTimeout(() => {
+    if (rdpSessionId !== sessionId) return;
+    emitRdpFrame();
+    rdpFrameTimer = window.setInterval(() => {
+      if (rdpFrameCount >= 12) {
+        stopRdpFrames();
+        return;
+      }
+      emitRdpFrame();
+    }, 120);
+    for (const listener of eventListeners) listener({ method: "rdp/pointer", params: { sessionId, type: "position", x: 160, y: 100 } });
+    setTimeout(() => {
+      if (rdpSessionId !== sessionId) return;
+      for (const listener of eventListeners) listener({ method: "rdp/pointer", params: { sessionId, type: "bitmap", width: 16, height: 16, hotspotX: 0, hotspotY: 0, rgbaBase64: rdpBitmapCursor() } });
+    }, 1600);
+    setTimeout(() => {
+      if (rdpSessionId !== sessionId) return;
+      for (const listener of eventListeners) listener({ method: "rdp/clipboard", params: { sessionId, text: "hello from rdp fixture" } });
+    }, 900);
+  }, 120);
+}
+
+function rdpDial(sessionId: string) {
+  emitRdpState("connecting");
+  if (rdpCertChallenge) {
+    rdpCertGate = () => {
+      rdpCertGate = null;
+      rdpStartDesktop(sessionId);
+    };
+    setTimeout(() => {
+      if (rdpSessionId !== sessionId) return;
+      for (const listener of eventListeners) listener({
+        method: "connection/challenge",
+        params: {
+          challengeId: `rdp-cert-visual-${Math.random().toString(36).slice(2, 8)}`,
+          kind: "rdp-certificate",
+          sessionId,
+          host: "rdp.demo.internal",
+          port: 3389,
+          fingerprint: "SHA256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+          knownHostStatus: "unknown",
+        },
+      });
+    }, 80);
+    return;
+  }
+  if (rdpErrKind === "authfail") {
+    // 认证失败：永不自动重试，直接终态（文案统一 "RDP authentication failed"）。
+    setTimeout(() => {
+      if (rdpSessionId !== sessionId) return;
+      emitRdpState("error", { errorKind: "authentication", error: "RDP authentication failed" });
+    }, 400);
+    return;
+  }
+  rdpStartDesktop(sessionId);
+  if (rdpErrKind === "transport") {
+    // 传输类失败：先跑一段桌面流，再走 reconnecting 退避梯子（1/2）→ 终态。
+    setTimeout(() => {
+      if (rdpSessionId !== sessionId) return;
+      stopRdpFrames();
+      emitRdpState("reconnecting", { attempt: 1, maxAttempts: 2 });
+      setTimeout(() => {
+        if (rdpSessionId !== sessionId) return;
+        emitRdpState("reconnecting", { attempt: 2, maxAttempts: 2 });
+        setTimeout(() => {
+          if (rdpSessionId !== sessionId) return;
+          emitRdpState("error", { errorKind: "transport", error: "connection reset by peer" });
+        }, 1500);
+      }, 1500);
+    }, 2200);
+  }
+}
+
+function closeRdpFixture() {
+  stopRdpFrames();
+  rdpCertGate = null;
+  rdpSessionId = "";
 }
 
 // ---- 内存 fixture 树：路径感知的 sftp/list 与写操作（无条件生效，无开关参数）----
@@ -972,6 +1166,49 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
         .slice(0, 20);
     }
     result = { maxReadBytes: 8 * 1024 * 1024, maxUploadBytes: 64 * 1024 * 1024, maxDownloadBytes: 256 * 1024 * 1024, execPermissionMode: mcpSettingsState.execPermissionMode, connectionScope: [...mcpSettingsState.connectionScope] };
+  }
+  else if (method === "rdp/start") {
+    const input = params as Record<string, unknown>;
+    closeRdpFixture();
+    rdpSessionId = `visual-rdp-${Math.random().toString(36).slice(2, 8)}`;
+    const sessionId = rdpSessionId;
+    rdpDial(sessionId);
+    result = {
+      sessionId,
+      host: String(input.host || "rdp.demo.internal"),
+      port: Number(input.port) || 3389,
+      useNla: input.useNla !== false,
+      certificatePolicy: String(input.certificatePolicy || "prompt"),
+      clipboard: input.clipboard !== false,
+      reconnectAttempts: Number(input.reconnectAttempts) || 5,
+    };
+  }
+  else if (method === "rdp/input" || method === "rdp/resize" || method === "rdp/set-clipboard") result = { success: true };
+  else if (method === "rdp/reconnect") {
+    const sessionId = String((params as Record<string, unknown>)?.sessionId || "");
+    if (!sessionId || sessionId !== rdpSessionId) throw new Error("RDP session was not found");
+    stopRdpFrames();
+    rdpDial(sessionId);
+    result = { sessionId, success: true };
+  }
+  else if (method === "rdp/close") {
+    closeRdpFixture();
+    result = { success: true };
+  }
+  else if (method === "rdp/list") {
+    result = {
+      sessions: rdpSessionId
+        ? [{ sessionId: rdpSessionId, workbenchId: context.workbenchId, host: "rdp.demo.internal", port: 3389, username: "demo", hasPassword: true, useNla: true, certificatePolicy: "prompt", clipboard: true, createdAt: Math.floor(Date.now() / 1000) }]
+        : [],
+    };
+  }
+  else if (method === "rdp/certificate/resolve") {
+    const input = params as Record<string, unknown>;
+    const accepted = input.accept === true;
+    // fail-closed：超时/取消/未知 id 一律拒绝——mock 同语义，accept 且闸门
+    // 存在时才放行桌面流。
+    if (accepted && rdpCertGate) rdpCertGate();
+    result = { success: true };
   }
   else result = { success: true };
   return result as T;

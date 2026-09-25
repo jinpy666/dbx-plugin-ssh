@@ -49,6 +49,7 @@ import {
   Loader2,
   Lock,
   MonitorPlay,
+  MonitorUp,
   Network,
   PackageOpen,
   Palette,
@@ -319,6 +320,22 @@ import {
 import VncConnectDialog, { type VncConnectOptions } from "./components/VncConnectDialog.vue";
 import VncSurface from "./components/VncSurface.vue";
 import type { VncInputEvent } from "./lib/vncFrame";
+// RDP 会话（nyaterm-parity P3-4）：画布与 VNC 同构（同一 44 字节 patch 头，
+// 解码复用 vncFrame），输入走扫描码/unicode 双通道，证书确认走
+// connection/challenge kind=rdp-certificate 分支。
+import RdpConnectDialog, { type RdpConnectOptions } from "./components/RdpConnectDialog.vue";
+import RdpSurface from "./components/RdpSurface.vue";
+import {
+  initialRdpSessionState,
+  isRdpCertificateChallenge,
+  rdpCertRemainingSecs,
+  rdpCertStatusKey,
+  rdpErrorKindKey,
+  reduceRdpSessionState,
+  type RdpInputEvent,
+  type RdpPointerEvent,
+  type RdpSessionStateView,
+} from "./lib/rdpFrame";
 import { ToastAction, ToastClose, ToastProvider, ToastRoot, ToastViewport } from "./components/ui/toast";
 
 interface SessionInfo {
@@ -619,6 +636,22 @@ const entries = ref<SftpEntry[]>([]);
 const selectedPath = ref("");
 const loadingFiles = ref(false);
 const hostKeyPrompt = ref<HostKeyPrompt>();
+// RDP 证书确认（connection/challenge kind=rdp-certificate，RDP-3 前端）：
+// 复用 host-key 挑战的 kind 分支入口，展示 SHA256 指纹 + 120s 倒计时 +
+// remember 勾选；应答走 rdp/certificate/resolve（fail-closed，超时即拒绝）。
+interface RdpCertPrompt {
+  challengeId: string;
+  sessionId: string;
+  host: string;
+  port: number;
+  fingerprint: string;
+  knownHostStatus: string;
+  receivedAt: number;
+}
+const rdpCertPrompt = ref<RdpCertPrompt | null>(null);
+const rdpCertRemember = ref(false);
+const rdpCertRemaining = ref(0);
+let rdpCertTimer = 0;
 const rememberHostKey = ref(true);
 // AI 终端同步执行：审批挑战队列 / 执行横幅状态（ssh/agent/* 事件仅当前会话生效）。
 // 跨会话并发审批按 challengeId 排队，弹窗一次只渲染队首（后端同会话已串行化）。
@@ -1344,7 +1377,20 @@ const vncSurface = ref<InstanceType<typeof VncSurface> | null>(null);
 let vncClipboardNoticeAt = 0;
 const isVncMode = computed(() => vncSession.value !== null);
 const vncTarget = computed(() => (vncSession.value ? `${vncSession.value.host}:${vncSession.value.port}` : ""));
-const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value || isVncMode.value);
+// RDP 会话（nyaterm-parity P3-4）：与 SSH/本地/Telnet/串口/VNC 同款互斥展示，
+// 并入 localUiMode。画面走 RdpSurface 画布（帧从 rdp/frame/{id} 解码），状态
+// 经 lib/rdpFrame 的纯 reducer 折叠（connecting/connected/reconnecting/closed
+// + errorKind），断线重连展示手动 rdp/reconnect 出口。
+const rdpSession = ref<{ sessionId: string; host: string; port: number } | null>(null);
+const rdpDialogOpen = ref(false);
+const rdpConfirmOpen = ref(false);
+const rdpState = ref<RdpSessionStateView>(initialRdpSessionState());
+const rdpScaleMode = ref<RdpConnectOptions["scaleMode"]>("fit");
+const rdpSurface = ref<InstanceType<typeof RdpSurface> | null>(null);
+let rdpClipboardNoticeAt = 0;
+const isRdpMode = computed(() => rdpSession.value !== null);
+const rdpTarget = computed(() => (rdpSession.value ? `${rdpSession.value.host}:${rdpSession.value.port}` : ""));
+const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value || isVncMode.value || isRdpMode.value);
 // —— 本地终端偏好（sidecar preferences.json 持久化；iframe 沙箱无 localStorage）——
 // shell 空串 = 跟随自动探测；integration 缺省开。
 const localShellPref = ref("");
@@ -1502,6 +1548,16 @@ const sessionPillText = computed(() => {
   if (isTelnetMode.value) return telnetState.value === "connecting" ? t("telnet.connecting") : `${t("telnet.pillPrefix")} · ${telnetTarget.value}`;
   // VNC 徽标显示远端桌面目标（VNC · host:port）。
   if (isVncMode.value) return vncState.value === "connecting" ? t("vnc.connecting") : `${t("vnc.pillPrefix")} · ${vncTarget.value}`;
+  // RDP 徽标：连接中/重连中（带退避进度）显示状态，其余显示 host:port。
+  if (isRdpMode.value) {
+    if (rdpState.value.state === "connecting") return t("rdp.connecting");
+    if (rdpState.value.state === "reconnecting") {
+      return rdpState.value.maxAttempts > 0
+        ? t("rdp.reconnectingAttempt", { attempt: rdpState.value.attempt, max: rdpState.value.maxAttempts })
+        : t("rdp.reconnecting");
+    }
+    return `${t("rdp.pillPrefix")} · ${rdpTarget.value}`;
+  }
   if (!isLocalMode.value || !localSession.value) return t(`sessionStatus.${sessionStatus.value}`);
   const kind = localSession.value.shell.split(/[\\/]/).pop() || localSession.value.shell;
   return `${t("sessionStatus.local")} · ${kind}`;
@@ -3405,6 +3461,16 @@ function handleBinary(event: DbxPluginBinaryEvent) {
     vncSurface.value?.acceptFrame(payload);
     return;
   }
+  if (event.channel.startsWith("rdp/frame/")) {
+    // RDP 帧补丁：与 vnc/frame 同一 44 字节 patch 头 + RGBA（解码复用
+    // vncFrame），sequence 跨重连单调。首个桌面帧同时把状态推到 running。
+    const rdpId = event.channel.slice("rdp/frame/".length);
+    if (!rdpSession.value || rdpId !== rdpSession.value.sessionId) return;
+    const payload = bridgeBinaryBytes(event, window.dbxPlugin.decodeBase64);
+    if (rdpState.value.state !== "running") rdpState.value = { ...rdpState.value, state: "running" };
+    rdpSurface.value?.acceptFrame(payload);
+    return;
+  }
   const sessionId = activeTerminalSessionId || session.value?.sessionId;
   if (sessionId && event.channel === `ssh/terminal/out/${sessionId}`) {
     const payload = bridgeBinaryBytes(event, window.dbxPlugin.decodeBase64);
@@ -3593,6 +3659,22 @@ function handleEvent(event: DbxPluginEvent) {
     return;
   }
   if (event.method === "ssh/host-key/prompt" || event.method === "connection/challenge") {
+    // RDP 证书确认（kind=rdp-certificate）路由到专属弹窗：SHA256 指纹 +
+    // knownHostStatus + 120s 倒计时；其余挑战沿用 host-key 弹窗。
+    const challengeParams = event.params as Record<string, unknown>;
+    if (isRdpCertificateChallenge(challengeParams)) {
+      rdpCertPrompt.value = {
+        challengeId: String(challengeParams.challengeId),
+        sessionId: String(challengeParams.sessionId || ""),
+        host: String(challengeParams.host || ""),
+        port: Number(challengeParams.port) || 3389,
+        fingerprint: String(challengeParams.fingerprint || ""),
+        knownHostStatus: String(challengeParams.knownHostStatus || "unknown"),
+        receivedAt: Date.now(),
+      };
+      rdpCertRemember.value = false;
+      return;
+    }
     hostKeyPrompt.value = event.params as unknown as HostKeyPrompt;
     connectLog.push("info", t("connectCard.log.hostKeyPrompt"));
     return;
@@ -3677,6 +3759,34 @@ function handleEvent(event: DbxPluginEvent) {
         })
         .catch(() => undefined);
     }
+    return;
+  }
+  // RDP 生命周期（RDP-3 前端）：connecting → connected → (reconnecting →)
+  // connected/closed，errorKind/error 文本在退出覆盖层展示；重连退避进度
+  // （attempt/maxAttempts）驱动 reconnecting 状态条。状态折叠走纯 reducer。
+  if (event.method === "rdp/session/state" && event.params.sessionId === rdpSession.value?.sessionId) {
+    rdpState.value = reduceRdpSessionState(rdpState.value, event.params as Record<string, unknown>);
+    return;
+  }
+  // 远端 → 本地剪贴板（text-only，CF_UNICODETEXT）：回写本地 + 节流提示，与 VNC 同款。
+  if (event.method === "rdp/clipboard" && event.params.sessionId === rdpSession.value?.sessionId) {
+    const text = typeof event.params.text === "string" ? event.params.text : "";
+    if (text) {
+      void navigator.clipboard
+        ?.writeText(text)
+        .then(() => {
+          if (Date.now() - rdpClipboardNoticeAt > 8000) {
+            rdpClipboardNoticeAt = Date.now();
+            showNotice(t("rdp.clipboardReceived"));
+          }
+        })
+        .catch(() => undefined);
+    }
+    return;
+  }
+  // 服务端光标形状（default/hidden/position/bitmap）：落到画布 CSS cursor。
+  if (event.method === "rdp/pointer" && event.params.sessionId === rdpSession.value?.sessionId) {
+    rdpSurface.value?.applyPointer(event.params as unknown as RdpPointerEvent);
     return;
   }
   // 串口生命周期：start 成功即 running；sidecar 只发 closed（主动关闭）与
@@ -4363,10 +4473,10 @@ function sendVncClipboard(text: string) {
   showNotice(t("vnc.clipboardSent"));
 }
 
-// 工具栏 VNC 入口：SSH/本地/Telnet/串口占用终端视图时先经确认。
+// 工具栏 VNC 入口：SSH/本地/Telnet/串口/RDP 占用终端视图时先经确认。
 function requestVnc() {
   if (isVncMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || serialSession.value) {
+  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || serialSession.value || rdpSession.value) {
     vncConfirmOpen.value = true;
     return;
   }
@@ -4380,7 +4490,109 @@ async function confirmVncOpen() {
   if (localSession.value) await closeLocalTerminal();
   if (telnetSession.value) await closeTelnetSession();
   if (serialSession.value) await closeSerialSession();
+  if (rdpSession.value) await closeRdpSession();
   vncDialogOpen.value = true;
+}
+
+// —— RDP 会话生命周期（nyaterm-parity P3-4，与 VNC 同款互斥展示）——
+// 画面走 RdpSurface 画布；帧/输入/剪贴板/指针各走独立通道，断线重连由
+// sidecar 退避梯子驱动（reconnecting 态展示进度），graceful close/终态错误
+// 落退出覆盖层（带 errorKind 友好文案 + 手动 rdp/reconnect 出口）。
+
+/** 退出覆盖层主文案：errorKind 友好化（raw error 作细节行展示）。 */
+const rdpClosedTitle = computed(() => {
+  const kind = rdpErrorKindKey(rdpState.value.errorKind);
+  return kind ? t(`rdp.error.${kind}`) : t("rdp.closed");
+});
+
+async function startRdpSession(options: RdpConnectOptions): Promise<boolean> {
+  // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
+  if (rdpSession.value && rdpState.value.state !== "closed") await closeRdpSession();
+  try {
+    const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("rdp/start", {
+      workbenchId: workbenchId.value,
+      host: options.host,
+      port: options.port,
+      username: options.username,
+      width: options.width,
+      height: options.height,
+      certificatePolicy: options.certificatePolicy,
+      clipboard: options.clipboard,
+      ...(options.password ? { password: options.password } : {}),
+      ...(options.domain ? { domain: options.domain } : {}),
+    });
+    if (disposed) {
+      void window.dbxPlugin.invoke("rdp/close", { sessionId: info.sessionId }).catch(() => undefined);
+      return false;
+    }
+    rdpSession.value = { sessionId: info.sessionId, host: info.host, port: info.port };
+    rdpScaleMode.value = options.scaleMode;
+    rdpState.value = { state: "connecting", error: "", errorKind: "", attempt: 0, maxAttempts: 0 };
+    rdpSurface.value?.reset();
+    await nextTick();
+    rdpSurface.value?.$el?.querySelector("canvas")?.focus();
+    return true;
+  } catch (cause) {
+    showError(cause, "terminal");
+    return false;
+  }
+}
+
+async function closeRdpSession() {
+  const sessionId = rdpSession.value?.sessionId;
+  rdpSession.value = null;
+  rdpState.value = initialRdpSessionState();
+  rdpConfirmOpen.value = false;
+  dismissRdpCertPrompt();
+  if (!sessionId) return;
+  await window.dbxPlugin.invoke("rdp/close", { sessionId }).catch(() => undefined);
+  terminal?.focus();
+}
+
+function sendRdpInput(event: RdpInputEvent) {
+  const sessionId = rdpSession.value?.sessionId;
+  if (!sessionId) return;
+  void window.dbxPlugin.invoke("rdp/input", { sessionId, ...event }).catch(() => undefined);
+}
+
+function sendRdpClipboard(text: string) {
+  const sessionId = rdpSession.value?.sessionId;
+  if (!sessionId || !text) return;
+  void window.dbxPlugin.invoke("rdp/set-clipboard", { sessionId, text }).catch(() => undefined);
+  showNotice(t("rdp.clipboardSent"));
+}
+
+// 手动重连（graceful disconnect / 终态错误后的出口）：generation 递增由
+// sidecar 负责，前端只触发并让 rdp/session/state 事件驱动状态条。
+async function reconnectRdpSession() {
+  const sessionId = rdpSession.value?.sessionId;
+  if (!sessionId) return;
+  try {
+    await window.dbxPlugin.invoke("rdp/reconnect", { sessionId });
+  } catch (cause) {
+    showError(cause, "terminal");
+  }
+}
+
+// 工具栏 RDP 入口：SSH/本地/Telnet/串口/VNC 占用终端视图时先经确认。
+function requestRdp() {
+  if (isRdpMode.value) return;
+  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || serialSession.value || vncSession.value) {
+    rdpConfirmOpen.value = true;
+    return;
+  }
+  rdpDialogOpen.value = true;
+}
+
+// 确认后：关掉占用终端视图的会话，再弹 RDP 连接表单。
+async function confirmRdpOpen() {
+  rdpConfirmOpen.value = false;
+  await closeSession();
+  if (localSession.value) await closeLocalTerminal();
+  if (telnetSession.value) await closeTelnetSession();
+  if (serialSession.value) await closeSerialSession();
+  if (vncSession.value) await closeVncSession();
+  rdpDialogOpen.value = true;
 }
 
 // —— 串口会话生命周期（P3，与 Telnet 同款互斥展示；无 replay，掉帧仅按
@@ -4549,20 +4761,21 @@ function cancelSerialUpload() {
 // 与 Telnet 入口同款流程。
 function requestSerial() {
   if (isSerialMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || vncSession.value) {
+  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || vncSession.value || rdpSession.value) {
     serialConfirmOpen.value = true;
     return;
   }
   serialDialogOpen.value = true;
 }
 
-// 确认后：关掉占用终端视图的 SSH/本地/Telnet/VNC 会话，再弹串口连接表单。
+// 确认后：关掉占用终端视图的 SSH/本地/Telnet/VNC/RDP 会话，再弹串口连接表单。
 async function confirmSerialOpen() {
   serialConfirmOpen.value = false;
   await closeSession();
   if (localSession.value) await closeLocalTerminal();
   if (telnetSession.value) await closeTelnetSession();
   if (vncSession.value) await closeVncSession();
+  if (rdpSession.value) await closeRdpSession();
   serialDialogOpen.value = true;
 }
 
@@ -4570,14 +4783,14 @@ async function confirmSerialOpen() {
 // 与本地终端入口同款流程。
 function requestTelnet() {
   if (isTelnetMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || vncSession.value || serialSession.value) {
+  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || vncSession.value || serialSession.value || rdpSession.value) {
     telnetConfirmOpen.value = true;
     return;
   }
   telnetDialogOpen.value = true;
 }
 
-// 确认后：关掉占用终端视图的 SSH/本地/VNC/串口会话，再弹 Telnet 连接表单。
+// 确认后：关掉占用终端视图的 SSH/本地/VNC/串口/RDP 会话，再弹 Telnet 连接表单。
 // 串口与 requestTelnet 的占用判定同链：漏关会留下孤儿串口会话占用 sidecar PTY。
 async function confirmTelnetOpen() {
   telnetConfirmOpen.value = false;
@@ -4585,6 +4798,7 @@ async function confirmTelnetOpen() {
   if (localSession.value) await closeLocalTerminal();
   if (vncSession.value) await closeVncSession();
   if (serialSession.value) await closeSerialSession();
+  if (rdpSession.value) await closeRdpSession();
   telnetDialogOpen.value = true;
 }
 
@@ -4601,6 +4815,7 @@ if (window.dbxPlugin.workbench?.onClose) {
       ["telnet/close", telnetSession.value?.sessionId],
       ["serial/close", serialSession.value?.sessionId],
       ["vnc/close", vncSession.value?.sessionId],
+      ["rdp/close", rdpSession.value?.sessionId],
     ].filter((pair): pair is [string, string] => typeof pair[1] === "string" && !!pair[1]);
     await Promise.allSettled(ownedSessions.map(([method, sessionId]) => window.dbxPlugin.notify(method, { sessionId })));
     localSession.value = null;
@@ -4608,6 +4823,7 @@ if (window.dbxPlugin.workbench?.onClose) {
     telnetSession.value = null;
     serialSession.value = null;
     vncSession.value = null;
+    rdpSession.value = null;
   });
 }
 
@@ -4623,6 +4839,10 @@ function dismissRestoredLocalShell() {
 // Toolbar local-terminal button: running -> close; restored shell -> reopen directly (nothing to close, skipping
 // SSH confirm flow); serial/telnet mode -> close that session; an SSH state walks the existing confirm flow.
 function toggleLocalTerminal() {
+  if (isRdpMode.value) {
+    void closeRdpSession();
+    return;
+  }
   if (isVncMode.value) {
     void closeVncSession();
     return;
@@ -4664,8 +4884,8 @@ async function restartLocalTerminal() {
 // connecting 途中放行会让在途 ssh/session/open 成功后与本地会话抢同一终端
 // 视图），再开本地终端。
 function requestLocalTerminal() {
-  // 串口/Telnet/VNC 会话占用终端视图时不开本地终端（互斥展示）。
-  if (isSerialMode.value || isTelnetMode.value || isVncMode.value) return;
+  // 串口/Telnet/VNC/RDP 会话占用终端视图时不开本地终端（互斥展示）。
+  if (isSerialMode.value || isTelnetMode.value || isVncMode.value || isRdpMode.value) return;
   if (isLocalMode.value || localState.value === "starting") return;
   if (session.value || reconnectPending.value || terminalState.value === "connecting") {
     localOpenConfirmOpen.value = true;
@@ -5090,6 +5310,54 @@ async function resolveHostKey(accept: boolean) {
       remember: accept && rememberHostKey.value,
     });
     connectLog.push("info", t("connectCard.log.hostKeyResolved"));
+  } catch (cause) {
+    showError(cause, "terminal");
+  }
+}
+
+// —— RDP 证书确认（rdp-certificate challenge）：120s 倒计时 + fail-closed ——
+// 倒计时基于队首 receivedAt + 120s 绝对期限（与 AI 审批弹窗同一 tick 模式），
+// 到 0 仅关弹窗——sidecar 侧超时同样拒绝该挑战，两侧语义一致。
+watch(rdpCertPrompt, (prompt) => {
+  if (rdpCertTimer) {
+    window.clearInterval(rdpCertTimer);
+    rdpCertTimer = 0;
+  }
+  if (!prompt) {
+    rdpCertRemaining.value = 0;
+    return;
+  }
+  const tick = () => {
+    const current = rdpCertPrompt.value;
+    if (!current) return;
+    rdpCertRemaining.value = rdpCertRemainingSecs(current.receivedAt, Date.now());
+    if (rdpCertRemaining.value <= 0) dismissRdpCertPrompt();
+  };
+  tick();
+  rdpCertTimer = window.setInterval(tick, 250);
+});
+
+// 挑战一次性：先出弹窗再 resolve（超时/取消/未知 id 一律按拒绝处理）。
+function dismissRdpCertPrompt() {
+  if (rdpCertTimer) {
+    window.clearInterval(rdpCertTimer);
+    rdpCertTimer = 0;
+  }
+  rdpCertPrompt.value = null;
+  rdpCertRemaining.value = 0;
+}
+
+async function resolveRdpCertificate(accept: boolean) {
+  const prompt = rdpCertPrompt.value;
+  if (!prompt) return;
+  const remember = accept && rdpCertRemember.value;
+  dismissRdpCertPrompt();
+  try {
+    await window.dbxPlugin.invoke("rdp/certificate/resolve", {
+      challengeId: prompt.challengeId,
+      accept,
+      remember,
+    });
   } catch (cause) {
     showError(cause, "terminal");
   }
@@ -9970,6 +10238,9 @@ const modalOpenStates = computed(() => [
   serialUploadDialogOpen.value,
   vncConfirmOpen.value,
   vncDialogOpen.value,
+  rdpConfirmOpen.value,
+  rdpDialogOpen.value,
+  rdpCertPrompt.value !== null,
   folderPickerTarget.value !== null,
   previewOpen.value,
   pasteConfirm.value,
@@ -10500,14 +10771,16 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button icon-amber" :title="t('telnet.open')" @click="requestTelnet"><Globe /></button>
         <!-- VNC 远程桌面入口（nyaterm-parity P2 2d）：与其它会话互斥，占用先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('vnc.open')" @click="requestVnc"><MonitorPlay /></button>
+        <!-- RDP 远程桌面入口（nyaterm-parity P3-4）：与其它会话互斥，占用先经确认。 -->
+        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('rdp.open')" @click="requestRdp"><MonitorUp /></button>
         <!-- 串口会话入口（P3）：与 SSH/本地/Telnet 互斥，占用终态先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('serial.open')" @click="requestSerial"><Usb /></button>
         <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
         <button v-if="isSerialMode" class="icon-button icon-emerald" :title="t('serial.upload.open')" :disabled="serialUploadBusy" @click="serialUploadDialogOpen = true"><FileUp /></button>
         <!-- 本地终端：sidecar 所在机器的登录 shell。与 SSH 会话互斥展示，
              已连接时经确认先关 SSH；退出态由终端覆盖层提供重开出口。 -->
-        <button class="icon-button icon-violet" :class="{ 'is-active': localUiMode }" :title="isVncMode ? t('vnc.disconnect') : isSerialMode ? t('serial.disconnect') : isTelnetMode ? t('telnet.disconnect') : localUiMode && !localShellRestored ? t('localTerminal.close') : t('localTerminal.open')" @click="toggleLocalTerminal"><TerminalIcon /></button>
-        <div v-if="!isTelnetMode && !isSerialMode && !isVncMode">
+        <button class="icon-button icon-violet" :class="{ 'is-active': localUiMode }" :title="isRdpMode ? t('rdp.disconnect') : isVncMode ? t('vnc.disconnect') : isSerialMode ? t('serial.disconnect') : isTelnetMode ? t('telnet.disconnect') : localUiMode && !localShellRestored ? t('localTerminal.close') : t('localTerminal.open')" @click="toggleLocalTerminal"><TerminalIcon /></button>
+        <div v-if="!isTelnetMode && !isSerialMode && !isVncMode && !isRdpMode">
           <!-- 本地终端设置：多平台 shell 选择（local/shells/list 发现）+ 注入开关，
                记入 sidecar 偏好（iframe 沙箱无 localStorage）。 -->
           <Popover :open="localMenuOpen" @update:open="(open) => { if (!open) localMenuOpen = false; }">
@@ -10832,6 +11105,12 @@ onBeforeUnmount(() => {
              帧从 vnc/frame/{id} 二进制通道进入；键盘/鼠标由画布采集后经
              keysym 映射发 vnc/input。连接态/退出覆盖层沿用 terminal-overlay。 -->
         <VncSurface v-if="isVncMode" ref="vncSurface" class="vnc-surface" :scale-mode="vncScaleMode" @input="sendVncInput" @clipboard-out="sendVncClipboard" />
+        <!-- RDP 画布（nyaterm-parity P3-4）：盖在 xterm 之上（z-index 2），帧从
+             rdp/frame/{id} 二进制通道进入（与 vnc/frame 同一 44 字节 patch 头）；
+             键盘经扫描码映射、鼠标/滚轮原样映射发 rdp/input，服务端光标形状
+             （rdp/pointer）落到画布 CSS cursor。连接态/退出覆盖层沿用
+             terminal-overlay。 -->
+        <RdpSurface v-if="isRdpMode" ref="rdpSurface" class="vnc-surface" :scale-mode="rdpScaleMode" @input="sendRdpInput" @clipboard-out="sendRdpClipboard" />
         <!-- P1-2 动作链接命令预览浮签：悬停 / Alt+点击时显示建议命令文本。 -->
         <div v-if="actionLinkHint" class="action-link-hint mono" :style="{ left: `${actionLinkHint.x}px`, top: `${actionLinkHint.y}px` }">{{ actionLinkHint.text }}</div>
         <!-- #33/#71 快速输入丢失诊断浮层：Ctrl/Cmd+Shift+D 切换。keys=onData
@@ -10976,6 +11255,26 @@ onBeforeUnmount(() => {
             <span v-if="vncError" class="mono local-exit-code">{{ vncError }}</span>
             <div class="local-exit-actions">
               <button @click="closeVncSession">{{ t("vnc.close") }}</button>
+            </div>
+          </div>
+        </div>
+        <!-- RDP 重连状态条（退避梯子进行中）：非阻塞展示进度，梯子跑完由
+             closed 覆盖层接管（协议：证书/认证/协商失败永不自动重试）。 -->
+        <div v-if="isRdpMode && rdpState.state === 'reconnecting'" class="zmodem-status" role="status">
+          <Loader2 class="spinning" />
+          <span>{{ rdpState.maxAttempts > 0 ? t("rdp.reconnectingAttempt", { attempt: rdpState.attempt, max: rdpState.maxAttempts }) : t("rdp.reconnecting") }}</span>
+        </div>
+        <!-- RDP 退出覆盖层（graceful close / 终态错误）：errorKind 友好文案为
+             主行、sidecar 原因文本为细节行；给出 Reconnect（rdp/reconnect）与
+             关闭双出口（协议：服务端主动断开不自动重连，由用户决定）。 -->
+        <div v-if="isRdpMode && rdpState.state === 'closed'" class="terminal-overlay">
+          <div class="local-exit-card" role="status">
+            <TriangleAlert class="local-exit-icon" />
+            <strong>{{ rdpClosedTitle }}</strong>
+            <span v-if="rdpState.error" class="mono local-exit-code">{{ rdpState.error }}</span>
+            <div class="local-exit-actions">
+              <button class="primary-button" @click="reconnectRdpSession">{{ t("rdp.reconnect") }}</button>
+              <button @click="closeRdpSession">{{ t("rdp.close") }}</button>
             </div>
           </div>
         </div>
@@ -11990,6 +12289,26 @@ onBeforeUnmount(() => {
       </DialogContent>
     </Dialog>
 
+    <!-- RDP 证书确认（rdp-certificate challenge）：安全弹窗，不允许 Esc / 点击
+         遮罩关闭；SHA256 指纹 + knownHostStatus 徽标 + 120s 倒计时 + remember，
+         超时 fail-closed（应答与 sidecar 超时同样按拒绝处理）。 -->
+    <Dialog :open="!!rdpCertPrompt">
+      <DialogContent class="modal host-key-modal" @escape-key-down.prevent @pointer-down-outside.prevent>
+        <template v-if="rdpCertPrompt">
+        <header><DialogTitle>{{ t("rdp.cert.title") }}</DialogTitle></header>
+        <p>{{ t("rdp.cert.desc") }}</p>
+        <dl>
+          <dt>{{ t("rdp.cert.server") }}</dt><dd>{{ rdpCertPrompt.host }}:{{ rdpCertPrompt.port }}</dd>
+          <dt>{{ t("rdp.cert.fingerprint") }}</dt><dd class="fingerprint">{{ rdpCertPrompt.fingerprint }}</dd>
+        </dl>
+        <p class="muted rdp-cert-status">{{ t(`rdp.cert.status.${rdpCertStatusKey(rdpCertPrompt.knownHostStatus)}`) }}</p>
+        <label class="remember"><input v-model="rdpCertRemember" type="checkbox" /> {{ t("rdp.cert.remember") }}</label>
+        <p class="muted rdp-cert-expires">{{ t("rdp.cert.expires", { seconds: rdpCertRemaining }) }}</p>
+        <footer><button @click="resolveRdpCertificate(false)">{{ t("rdp.cert.reject") }}</button><button class="primary-button" @click="resolveRdpCertificate(true)">{{ t("rdp.cert.accept") }}</button></footer>
+        </template>
+      </DialogContent>
+    </Dialog>
+
     <!-- 安全弹窗：不允许 Esc / 点击遮罩关闭，必须显式批准或拒绝（不在 Esc 链中） -->
     <Dialog :open="!!agentPromptHead">
       <DialogContent class="modal" @escape-key-down.prevent @pointer-down-outside.prevent>
@@ -12133,6 +12452,24 @@ onBeforeUnmount(() => {
     <SerialUploadDialog :locale="locale" :open="serialUploadDialogOpen" :busy="serialUploadBusy" @update:open="(open) => (serialUploadDialogOpen = open)" @start="startSerialUpload" />
 
     <VncConnectDialog :locale="locale" :open="vncDialogOpen" @update:open="(open) => (vncDialogOpen = open)" @connect="startVncSession" />
+
+    <!-- RDP 连接表单（P3-4）：host/port/NLA 凭据/分辨率/证书策略。 -->
+    <RdpConnectDialog :locale="locale" :open="rdpDialogOpen" @update:open="(open) => (rdpDialogOpen = open)" @connect="startRdpSession" />
+
+    <!-- RDP 确认：SSH/本地/Telnet/串口/VNC 会话仍占用终端视图时先关闭再弹连接表单 -->
+    <Dialog :open="rdpConfirmOpen" @update:open="(open) => { if (!open) rdpConfirmOpen = false; }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <header>
+          <DialogTitle>{{ t("rdp.openConfirmTitle") }}</DialogTitle>
+          <button :title="t('close')" class="icon-button" @click="rdpConfirmOpen = false"><X /></button>
+        </header>
+        <p class="muted">{{ t("rdp.openConfirm") }}</p>
+        <footer>
+          <button @click="rdpConfirmOpen = false">{{ t("cancel") }}</button>
+          <button class="primary-button" @click="confirmRdpOpen">{{ t("rdp.open") }}</button>
+        </footer>
+      </DialogContent>
+    </Dialog>
 
     <!-- VNC 确认：SSH/本地/Telnet/串口会话仍占用终端视图时先关闭再弹连接表单 -->
     <Dialog :open="vncConfirmOpen" @update:open="(open) => { if (!open) vncConfirmOpen = false; }">
@@ -12535,4 +12872,8 @@ body.resizing-col { cursor: col-resize !important; user-select: none; }
   opacity: 0.55;
   pointer-events: none;
 }
+/* RDP 证书确认弹窗：状态徽标 + 倒计时行（弹窗骨架复用 host-key-modal 的
+   .remember/.fingerprint 全局类）。 */
+.rdp-cert-status { margin: 0 0 8px; font-size: 11px; }
+.rdp-cert-expires { margin: 0 0 8px; font-size: 11px; }
 </style>
