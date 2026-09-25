@@ -3859,3 +3859,12 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **MCP sftp_upload/sftp_download latin-1 迁移 ✅**（parity-np19-mcp-io，M18 遗留 3 消化）：沿 M17-B/M18 同一模式（显示路径整条 `latin1_encode_display` 还原字节 + 连接级裸包客户端）——`sftp_upload` 走裸包 LSTAT 覆盖预检 + OPEN(CREAT|WRITE|TRUNC) 截断直写 + WRITE 32 KiB 分块（**选型**：沿既有 MCP 传输直写语义，无工作台上传族 `.dbx-part` 暂存需求；复用 M18 `sftp_write_file` 直写核心抽出的 `raw_sftp_write_bytes`，按工具各自响应形状组装）；`sftp_download` 走裸包 OPEN(READ)+READ 分块（`maxDownloadBytes+1` 探测封顶，超限沿 post-read 口径报错；目录 OPEN 被拒后落回高层给 auto 同款「is a directory」错误）。回退沿先例：download 读侧裸包任何失败回退高层重读、upload 写侧仅裸包建立失败回退；auto 模式行为不变（本地校验/传输根/敏感路径/大小上限均先于拨号不受影响）。单测 3 条（duplex 桩字节级）：upload 帧序+路径字节+载荷落帧、upload↔download 同显示路径 OPEN 帧字节一致 + 载荷逐字节回收（往返闭环）。PROTOCOL M19 节 + MCP.zh-CN.md 工具表同步。
 - **smoke latin-1 组补符号链接三命令 ✅**（同线，M18 遗留 2 消化）：smoke_fs_test.py latin-1 组新增 `latin-1 symlink create/read/update round-trip` 用例（needs 链插在 raw rename 与每连接覆盖之间）——`sftp/symlink-create` 0xE9 字节链接名落盘 + 列表 kind=symlink、`sftp/symlink-read` 整条 wire 路径读指向、`sftp/symlink-update` 显示形式新指向再编码回字节后 read 回环验证（latin-1 域内读↔写精确闭环）；链接/锚点 finally 自清理，交还空目录给每连接覆盖组（沿用快照/自清理/needs 门控结构）。
 - **遗留销项**：M18 遗留 2、3 销项；遗留 1（exec 命令串字节参数）维持设计边界登记。sudo 族维持既有策略（非编码家族范围）。
+
+
+## M19 集成收口补记（2026-09-25，raw early-eof 根因修复 + 编码家族收官）
+
+- **raw "early eof" 根因修复 ✅**（parity-fix-raw-eof 1b19a01，merge 本轮）：M18 CI ssh-smoke 真容器首次覆盖裸包客户端即爆雷（71 过/2 挂，`SFTP raw read failed: early eof`）——根因为 **`RawSftp::mkdir` 的 SSH_FXP_MKDIR 帧漏发规范强制的 ATTRS 字段**（draft-ietf-secsh-filexfer-02 §5.2），OpenSSH sftp-server `decode_attrib` 解析失败即 fatal 退出 → 通道 EOF；两失败用例的第一个 raw 操作都是 MKDIR，且 mkdir 回退仅在"裸包客户端建立失败"时触发、INIT 成功后操作错误原样上抛，故直穿到 smoke。修复：`build_mkdir` 携带 flags=0 空 attrs（OpenSSH 按 0777 & umask 建目录，与高层缺省一致）；既有宽松内存桩升级为**严格一致性桩**（draft-02 逐类型精确校验帧布局、违规 hexdump panic）+ `openssh_fatal_server` 负路径桩离线逐字复现 CI 错误串（`attrless_mkdir_reproduces_ci_early_eof_against_openssh_fatal_stub`）。russh 0.62.7 通道层排除（rx EOF 语义/自动扩窗核对）。
+- **MCP 传输工具收官 ✅**（parity-np19-mcp-io 61b6e94，merge 本轮）：sftp_upload（裸包直写车道：LSTAT 预检 + OPEN CREAT|WRITE|TRUNC + WRITE 32KiB 分块）、sftp_download（裸包 OPEN+READ 分块，maxDownloadBytes+1 探测封顶；目录探测由高层给出一致错误）——latin-1 编码保真家族从列表/属性/单文件写/上传族/树到 MCP 工具面全链闭环。smoke latin-1 组补 symlink 三命令 0xE9 字节用例。
+- **过程记录**：M19 线与修复 agent 各遭基础设施中断一次（captcha），分别以"审用半成品重拉"与"保留上下文续跑"恢复，均未触发转人工线。
+- **全量终值（Windows 实测）**：backend cargo **957/957**（940+4 修复 +3 M19）/ clippy 0 / fmt 0；前端零改动沿 ecbc305 口径 vitest 1067 / vue-tsc 0 / build 过；两 merge 零冲突。
+- **CI 复验预期**：ssh-smoke 全组 96 PASS / 0 FAIL 方向（M18 失败的 2 用例 + 连锁 SKIP 5 例恢复）。
