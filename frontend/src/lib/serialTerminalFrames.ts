@@ -32,3 +32,12 @@ export function encodeSerialInputFrame(sequence: number, data: Uint8Array): Uint
   frame.set(data, 9);
   return frame;
 }
+
+/**
+ * serial/start 响应的 B1 能力判定（设计稿 §2 兼容策略）：未声明
+ * `binaryInput: true` 的 sidecar（旧版本/降级路径）一律走 JSON
+ * `serial/write` 兼容路径；字段存在且为 true 才启用二进制写通道。
+ */
+export function supportsBinaryInput(info: { binaryInput?: unknown } | null | undefined): boolean {
+  return info?.binaryInput === true;
+}

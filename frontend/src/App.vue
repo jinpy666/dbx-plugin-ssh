@@ -111,7 +111,7 @@ import { planHostFileDrop } from "./lib/hostFileDrop";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
 import { createOutputGate } from "./lib/terminalBackpressure";
 import { createTerminalInputQueue } from "./lib/terminalInputQueue";
-import { SERIAL_STREAM_STDIN, isKnownStreamTag } from "./lib/serialTerminalFrames";
+import { SERIAL_STREAM_STDIN, isKnownStreamTag, supportsBinaryInput } from "./lib/serialTerminalFrames";
 import { describeReconnectCountdown, describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS, type ReconnectCountdown } from "./lib/terminalReconnect";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
 import { decideConnectRetry, isDuplicatedTransportUnavailableError } from "./lib/connectRetry";
@@ -1311,9 +1311,9 @@ let serialReplayInFlight = false;
 let serialReplayNoProgress = 0;
 // B1 解码契约：输出帧遇到未知流标签（> Stdin=3）一律静默丢弃并计数。
 let serialUnknownStreamFrames = 0;
-// B1 能力开关：true = 键盘走二进制写通道；发送报错（未知通道/旧 sidecar）
-// 一次性降级 JSON 兼容路径。serial/start 的 binaryInput 能力字段在章节4
-// 接线前先以二进制优先、报错降级兜底。
+// B1 能力开关：true = 键盘走二进制写通道。初始值取 serial/start 的
+// binaryInput 能力字段（未声明 = 旧 sidecar → JSON 兼容路径）；通道报错
+// （未知方法/会话消失）时 send 回调一次性降级 JSON。
 const serialBinaryInput = ref(true);
 const isSerialMode = computed(() => serialSession.value !== null);
 const serialTarget = computed(() => (serialSession.value ? `${serialSession.value.port}@${serialSession.value.baudRate}` : ""));
@@ -4445,8 +4445,9 @@ async function startSerialSession(options: SerialConnectOptions) {
   if (serialSession.value && serialState.value !== "closed") await closeSerialSession();
   try {
     // 线上字段为 snake_case：SerialStartRequest 未启用 camelCase rename；
-    // 响应则由 sidecar 手拼 json!，sessionId/port/baudRate 为 camelCase。
-    const info = await window.dbxPlugin.invoke<{ sessionId: string; port: string; baudRate: number }>("serial/start", {
+    // 响应则由 sidecar 手拼 json!，sessionId/port/baudRate 为 camelCase，
+    // binaryInput 为 B1 能力字段（旧 sidecar 缺失 → JSON 兼容路径）。
+    const info = await window.dbxPlugin.invoke<{ sessionId: string; port: string; baudRate: number; binaryInput?: boolean }>("serial/start", {
       workbenchId: workbenchId.value,
       port_name: options.portName,
       baud_rate: options.baudRate,
@@ -4465,7 +4466,9 @@ async function startSerialSession(options: SerialConnectOptions) {
     serialLastSequence.value = 0;
     serialPendingFrames.clear();
     serialUnknownStreamFrames = 0;
-    serialBinaryInput.value = true;
+    // 能力探测降级（设计稿 §2）：未声明 binaryInput 的 sidecar 走 JSON
+    // serial/write；通道报错时再一次性降级（send 回调）。
+    serialBinaryInput.value = supportsBinaryInput(info);
     serialInputQueue.reset();
     // 从 A4 恢复外壳 tab 直接起串口时清掉外壳态，退出覆盖层随即让位。
     localShellRestored.value = false;

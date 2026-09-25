@@ -7,6 +7,7 @@ import {
   SERIAL_STREAM_STDOUT,
   encodeSerialInputFrame,
   isKnownStreamTag,
+  supportsBinaryInput,
 } from "./serialTerminalFrames";
 
 describe("serialTerminalFrames", () => {
@@ -58,5 +59,16 @@ describe("serialTerminalFrames", () => {
     expect(frame[0]).toBe(3);
     expect(Array.from(frame.subarray(1, 9))).toEqual([0, 0, 0, 0, 0, 0, 0, 7]);
     expect(Array.from(frame.subarray(9))).toEqual([0x68, 0x69]);
+  });
+
+  it("enables the binary write channel only on a declared capability", () => {
+    // 能力探测降级（设计稿 §2）：serial/start 未声明 binaryInput 的 sidecar
+    // （旧版本）一律走 JSON 兼容路径；仅显式 true 启用。
+    expect(supportsBinaryInput({ binaryInput: true })).toBe(true);
+    expect(supportsBinaryInput({ binaryInput: false })).toBe(false);
+    expect(supportsBinaryInput({})).toBe(false);
+    expect(supportsBinaryInput({ binaryInput: "true" })).toBe(false);
+    expect(supportsBinaryInput(null)).toBe(false);
+    expect(supportsBinaryInput(undefined)).toBe(false);
   });
 });

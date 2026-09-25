@@ -570,6 +570,7 @@ VNC 远程桌面的帧缓冲更新以 patch 帧推送：`44 字节头 | RGBA 像
 
 - `serial/replay {sessionId, afterSequence}` → 在 `serial/terminal/out/{id}` 上重发其后帧，并返回摘要 `{frameCount, firstAvailableSequence, tailSequence, complete}`。`complete: false` 表示缓冲已绕回、回放不完整，前端提示截断；会话已关闭时返回 "Serial session was not found"。
 - 前端复用既有 gap 检测/drain 机制（`drainSerialFrames`）：缺口经 `serial/replay` 回填；缺口永不可填时按无进度上限 resync 游标。
+- 能力探测降级（设计稿 §2 兼容策略）：`serial/start` 响应新增 `binaryInput: true` 能力字段；未声明该字段的旧 sidecar 由前端走 JSON `serial/write` 兼容路径，前端对 `serial/terminal/in` 通道报错一律一次性降级 JSON，老前端不受影响。`BackspaceMode` 的 DEL→BS 改写在两个通道上语义一致（sidecar 内统一执行）。
 - RS-232 无窗口尺寸概念，串口会话无 `resize` 方法（设计稿 §4 明确不实现）。
 
 ### 写序列化与回压

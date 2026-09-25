@@ -468,6 +468,18 @@ pub(crate) fn usb_port_description(info: &serialport::UsbPortInfo) -> String {
         .unwrap_or_else(|| format!("USB {:04x}:{:04x}", info.vid, info.pid))
 }
 
+/// `serial/start` 响应（camelCase）。`binaryInput` 是 B1 能力探测字段
+/// （设计稿 §2 兼容策略）：声明 true 表示支持 `serial/terminal/in` 二进制
+/// 写通道；未声明该字段的旧 sidecar 由前端降级 JSON `serial/write`。
+fn start_response(session_id: &str, port: &str, baud_rate: u32) -> Value {
+    json!({
+        "sessionId": session_id,
+        "port": port,
+        "baudRate": baud_rate,
+        "binaryInput": true,
+    })
+}
+
 impl SerialSessionRuntime {
     pub fn new() -> Self {
         Self {
@@ -564,11 +576,7 @@ impl SerialSessionRuntime {
             emitter.clone(),
         );
         spawn_writer(session_id.clone(), Arc::clone(&session), emitter);
-        Ok(json!({
-            "sessionId": session_id,
-            "port": port_name,
-            "baudRate": baud_rate,
-        }))
+        Ok(start_response(&session_id, &port_name, baud_rate))
     }
 
     pub(crate) async fn session(&self, session_id: &str) -> Result<Arc<SerialSession>, String> {
@@ -1262,6 +1270,17 @@ mod tests {
         frame.extend_from_slice(&sequence.to_be_bytes());
         frame.extend_from_slice(data);
         frame
+    }
+
+    #[test]
+    fn start_response_declares_the_binary_input_capability() {
+        // 能力探测（设计稿 §2 兼容策略）：响应含 binaryInput=true；旧字段
+        // （sessionId/port/baudRate）形状不变，老前端不受影响。
+        let response = start_response("sid-1", "/dev/ttyUSB0", 115_200);
+        assert_eq!(response["sessionId"], "sid-1");
+        assert_eq!(response["port"], "/dev/ttyUSB0");
+        assert_eq!(response["baudRate"], 115_200);
+        assert_eq!(response["binaryInput"], serde_json::Value::Bool(true));
     }
 
     #[test]
