@@ -155,6 +155,7 @@ import { advanceBatchProgress, batchProgressPercent, createBatchProgress, type B
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
 import { sanitizeCommandOutput } from "./lib/terminalOutputText";
 import { normalizeTerminalInputBytes } from "./lib/terminalInput";
+import { registerTerminalModeQueryHandlers } from "./lib/terminalModeQueries";
 import { installMacWebkitInputFallback } from "./lib/terminalWebkitInput";
 import { looksBinary } from "./lib/textSniff";
 import { formatBytes, formatRate } from "./lib/format";
@@ -889,6 +890,10 @@ let searchAddon: SearchAddon | undefined;
 // 时重挂，终端销毁时统一释放；OSC 52 只在 createTerminal 挂一次。
 let oscColorQueryDisposables: { dispose(): void }[] = [];
 let osc52Disposable: { dispose(): void } | undefined;
+// CSI 能力查询应答（kitty 键盘协议 / XTVERSION / DECRQM）：claude code 等
+// TUI 启动时探测并等待应答；xterm 内核对 `CSI ? u` 静默吞掉不回、XTVERSION
+// 无 handler，TUI 卡在 raw-mode 初始化——表现为"卡住、键盘没反应"。
+let modeQueryDisposables: { dispose(): void }[] = [];
 // 主题色解析失败时颜色查询的兜底应答（深色系常规值，仅在宿主下发非法颜色时触达）。
 const OSC_COLOR_FALLBACK = { foreground: "#c9d1d9", background: "#0d1117" };
 let terminalPasteHandler: ((event: ClipboardEvent) => void) | undefined;
@@ -1032,7 +1037,7 @@ const connectionId = computed(() => normalizeConnectionText(hostContext.value.co
 // locally generated id keeps session scoping per workbench instance (A4 W1
 // helper, spec §11: host-authoritative workbenchId; the fallback covers 1.0
 // hosts that omit the injection — see lib/pluginContext.spec.ts).
-const fallbackWorkbenchId = crypto.randomUUID();
+const fallbackWorkbenchId = randomUUID();
 const workbenchId = computed(() => resolveWorkbenchId(hostContext.value, fallbackWorkbenchId));
 const restored = computed(() => hostContext.value.restored === true);
 const connection = computed<ConnectionSummary>(() => {
@@ -1431,6 +1436,7 @@ function registerOscColorQueryHandlers() {
     if (disposable.dispose) disposable.dispose();
   }
   oscColorQueryDisposables = [];
+  registerModeQueryHandlers();
   if (!terminal) return;
   const term = terminal;
   const colors = appearance.value.colors;
@@ -1442,6 +1448,15 @@ function registerOscColorQueryHandlers() {
       handleTerminalColorQuery(term, 11, colors.background, OSC_COLOR_FALLBACK.background, data),
     ),
   );
+}
+
+// CSI 能力查询应答只在终端创建时挂一次：应答与主题无关，无需随外观重挂。
+function registerModeQueryHandlers() {
+  for (const disposable of modeQueryDisposables) disposable.dispose();
+  modeQueryDisposables = [];
+  if (!terminal) return;
+  const dispose = registerTerminalModeQueryHandlers(terminal);
+  modeQueryDisposables.push({ dispose });
 }
 
 // 字体始终跟随宿主：不写内联字体变量——内联样式会压过 themeSync 桥样式表里的
@@ -6568,8 +6583,11 @@ function networkRateShare(net: { rxRate: number; txRate: number }) {
   return Math.min(100, Math.round((Math.max(net.rxRate, net.txRate) / metricsRatePeak.value) * 100));
 }
 
-const metricsProcGridStyle = { gridTemplateColumns: "48px 64px 48px 52px minmax(0, 1fr)" };
-const procGridStyle = { gridTemplateColumns: "48px 60px 48px 52px 76px minmax(0, 1fr) 132px" };
+// 列宽要放得下 7 位 PID、常见用户名与带天数的 etime（单元格 ellipsis 会截断关键值）；
+// 浮层同步放宽到 448px，满宽时命令列不窄于加宽前；终端面板窄于约 464px 时浮层被
+// calc 钳制、命令列会被压缩，属已接受行为。管理表总宽仍超浮层，横向滚动是既有状态。
+const metricsProcGridStyle = { gridTemplateColumns: "64px 80px 56px 56px minmax(0, 1fr)" };
+const procGridStyle = { gridTemplateColumns: "64px 80px 56px 56px 96px minmax(0, 1fr) 132px" };
 
 // —— F2：指标历史回填 + 进程管理 ———
 
@@ -7762,6 +7780,8 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   for (const disposable of oscColorQueryDisposables) disposable.dispose();
   oscColorQueryDisposables = [];
+  for (const disposable of modeQueryDisposables) disposable.dispose();
+  modeQueryDisposables = [];
   osc52Disposable?.dispose();
   osc52Disposable = undefined;
   disposeInput?.dispose();
