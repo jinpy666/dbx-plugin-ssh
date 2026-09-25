@@ -57,6 +57,7 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `sudo/stat`、`sudo/exists`、`sudo/touch` | sudo 元信息查询与空文件创建 |
 | `sudo/listDir`、`sudo/readFile`、`sudo/writeFile` | sudo 目录浏览与文件读写 |
 | `sudo/mkdir`、`sudo/remove`、`sudo/removeAll`、`sudo/chmod`、`sudo/rename` | sudo 写操作 |
+| `sudo/download/start`、`sudo/download/cancel` | sudo 下载（root 大文件二进制下载，M14-C DownloadSudo）：start 把源文件暂存进同目录 0600 临时件后复用 `sftp/download/next`/`finish` 分块管线与进度事件，见「sudo 下载（DownloadSudo）」节 |
 | `sudo/profiles/list`、`sudo/profiles/save`、`sudo/profiles/delete` | 全局 Quick Sudo 配置管理（多套命名凭据/策略档，插件数据目录持久化，密钥永不回显） |
 | `sudo/profiles/options` | 连接表单动态下拉选项（`sudo_profile` 字段的 `options_action`）：返回 `{options: [{value: id, label: name}]}`，按名称排序，永不携带密钥 |
 | `connection/action` | 连接表单动作（manifest `connection-provider.actions` 声明）：`action=quick-sudo-profiles` 返回全局配置清单与本连接绑定状态的纯文本摘要（`{message, fieldValues}`） |
@@ -822,6 +823,35 @@ offset 语义不变）。中断来源不限：前端中止、sidecar 重启、�
   本任务新建的让位目录，删除不伤及既有文件）；部分成功（`failedCount > 0`）的完成结果保留。
 - 仅桌面本机落盘模式可用（`local/capabilities.canSaveLocal`）；web/docker 无本地文件系统时工作台
   直接提示不可用。单个文件大小仍受 16 GiB 传输上限约束，超限文件记为失败而非中断。
+
+### sudo 下载（DownloadSudo）
+
+root 权限的大文件二进制下载（M14-C，对标 tiny-rdm DownloadSudo），补齐「sudo/readFile 退化下载
+受 exec+base64 包尺寸限制」的缺口。**方案取舍**：选用**远端临时文件**方案——`sudo/download/start`
+把源文件经 sudo 编排（密码/2FA/白名单/只读拒绝与 sudo 族完全一致）拷进远端临时件，再把临时件登记
+进下载注册表；`sftp/download/next`、`sftp/download/finish`、`sftp/transfer/progress` 事件与传输面板
+**全部原样复用**。备选的 `sudo dd` 逐块流式方案被否：exec 输出通道无二进制边界、无 seek/续传、每块
+都要过密码编排，且需要为下载族另建一整套分块/进度/取消管线。
+
+- `sudo/download/start`：参数 `{ sessionId, path, saveToLocal?, downloadDir?, conflict? }`——参数名
+  沿用 sudo 族的 `path`；`saveToLocal`/`downloadDir`/`conflict` 语义与 `sftp/download/start` 完全一致。
+  返回 `{ taskId, fileName, size, chunkSize, resumeOffset, saveToLocal, sudo: true }`（`fileName` 为
+  **源文件名**而非临时件名）。无独立 `status` 方法（对齐下载先例：进度经 `sftp/transfer/progress`
+  事件与 `sftp/transfer/list`/`history` 查询）。
+- **暂存流程**：sudo `stat` 校验源为普通文件并取 size → plain exec `id -u` 取登录用户 uid →
+  `mktemp` 在**源文件同目录**创建 `.dbx-sudo-dl-XXXXXXXX`（同文件系统：空间语义与源一致，避开 /tmp
+  常见 tmpfs——大文件拷贝会吃内存）→ `chown <uid>` + `chmod 600`（SFTP 会话以登录用户读临时件；
+  0600 + 用户属主仍然只有该用户可读，不会出现 root 临时件全局可读的窗口）→ sudo `cat src > tmp` →
+  sudo `stat` 校验临时件与源**等大**（ENOSPC/中断在这里暴露）→ SFTP `metadata` 提前探测登录用户
+  可读（源目录不可穿越——如 `/root` 0700——时给出明确错误而非首块分块才失败）。
+- **限制**：拷贝走一次阻塞 exec，受 5–300s 超时夹取（超时/失败即清理报错）；单个文件仍受 16 GiB
+  传输上限；暂存期间远端需要与源等量的临时空间。
+- **清理（finally 语义）**：完成、失败（未传完即 finish）、取消（`sftp/transfer/cancel` 或
+  `sudo/download/cancel`）、注册失败、会话关闭五条路径都 best-effort sudo `rm -f` 临时件；清理失败
+  不吞掉原结果——成功响应附加 `warning` 字段、其余路径落 sidecar stderr。清理命令有命名空间防护：
+  只允许删除最终文件名以 `.dbx-sudo-dl-` 为前缀的路径。
+- `sudo/download/cancel`：参数 `{ taskId, reason? }`，与 `sftp/transfer/cancel` 同构（任务住同一个
+  传输注册表；reason slug 语义相同）。前端取消路径走 `sftp/transfer/cancel`，效果一致。
 
 ### ssh/metrics/history
 

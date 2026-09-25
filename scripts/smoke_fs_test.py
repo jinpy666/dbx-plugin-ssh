@@ -442,6 +442,33 @@ def main() -> None:
             if not mode_is_0700(mode):
                 raise AssertionError(f"mode={mode!r}, want 0700")
 
+        def case_sudo_download():
+            # M14-C DownloadSudo: start -> sftp/download/next 循环 -> finish，
+            # 随后 sudo/listDir 确认同目录没有 .dbx-sudo-dl- 临时件残留。
+            stat = req("sudo/stat", {"sessionId": session_id, "path": sudo_file_renamed})
+            size = int(stat.get("size") or 0)
+            info = req("sudo/download/start", {"sessionId": session_id, "path": sudo_file_renamed})
+            task_id = str(info.get("taskId") or "")
+            if not task_id or info.get("size") != size:
+                raise AssertionError(f"sudo/download/start shape: {json.dumps(info)[:160]}")
+            if info.get("fileName") != sudo_file_renamed.rsplit("/", 1)[-1]:
+                raise AssertionError(f"fileName should be the source name: {info.get('fileName')!r}")
+            drained = 0
+            while drained < size:
+                chunk = req("sftp/download/next", {"taskId": task_id, "offset": drained})
+                drained += int(chunk.get("length") or 0)
+                if chunk.get("eof"):
+                    break
+            if drained != size:
+                raise AssertionError(f"drained {drained} of {size} bytes")
+            req("sftp/download/finish", {"taskId": task_id})
+            listing = req("sudo/listDir", {"sessionId": session_id, "path": sudo_dir})
+            leftovers = [str(e.get("name")) for e in listing.get("entries", [])
+                         if str(e.get("name")).startswith(".dbx-sudo-dl-")]
+            if leftovers:
+                raise AssertionError(f"staging temp leftovers in {sudo_dir}: {leftovers}")
+            print(f"    sudo download of {sudo_file_renamed} ({size} bytes) finished, no temp leftovers")
+
         def case_sudo_remove_all():
             req("sudo/removeAll", {"sessionId": session_id, "path": sudo_dir})
             try:  # verify via sudo/exists when that method is wired too
@@ -1202,6 +1229,8 @@ def main() -> None:
                    needs="sudo/touch inner file")
         report.run("sudo/chmod 0700 + verify mode", "sudo/chmod", case_sudo_chmod,
                    needs="sudo/rename inner file")
+        report.run("sudo/download + temp cleanup", "sudo/download/start", case_sudo_download,
+                   needs="sudo/chmod 0700 + verify mode")
         report.run("sudo/removeAll .sudo-test", "sudo/removeAll", case_sudo_remove_all,
                    needs="sudo/mkdir .sudo-test")
 

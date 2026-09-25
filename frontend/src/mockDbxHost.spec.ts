@@ -315,4 +315,30 @@ describe("mockDbxHost fixture", () => {
     expect(ctx.restored).toBe(false);
     expect(ctx.surface).toBe("tab");
   });
+
+  // M14-C DownloadSudo: sudo/download/start 用 path 参数、返回源文件名与
+  // sudo 标记；分块循环复用 sftp/download/next 的 binary 通道；cancel 清任务。
+  it("sudo/download mock streams through the shared sftp/download chunk pipeline", async () => {
+    const plugin = await loadMock("");
+    const events: Array<{ method: string; params: Record<string, unknown> }> = [];
+    plugin.onEvent((event) => events.push(event as unknown as { method: string; params: Record<string, unknown> }));
+    const info = await plugin.invoke<{ taskId: string; fileName: string; size: number; chunkSize: number; sudo: boolean }>("sudo/download/start", { sessionId: "visual-session", path: "/etc/nginx/nginx.conf" });
+    expect(info.taskId).toMatch(/^sudo-download-/);
+    expect(info.sudo).toBe(true);
+    expect(info.chunkSize).toBe(262144);
+    let offset = 0;
+    let eof = false;
+    while (!eof) {
+      const result = await plugin.invoke<{ length: number; eof: boolean }>("sftp/download/next", { taskId: info.taskId, offset });
+      offset += result.length;
+      eof = result.eof;
+    }
+    expect(offset).toBe(info.size);
+    // start/next 的进度事件沿既有 sftp/transfer/progress 通道广播（面板复用）。
+    expect(events.some((event) => event.method === "sftp/transfer/progress" && event.params.taskId === info.taskId)).toBe(true);
+    const finish = await plugin.invoke<{ success: boolean }>("sftp/download/finish", { taskId: info.taskId });
+    expect(finish.success).toBe(true);
+    const cancel = await plugin.invoke<{ success: boolean }>("sudo/download/cancel", { taskId: "sudo-download-unknown" });
+    expect(cancel.success).toBe(true);
+  });
 });

@@ -36,6 +36,7 @@ mod ssh;
 mod ssh_algorithms;
 mod startup_commands;
 mod sudo_allowlist;
+mod sudo_download;
 mod sudo_fs;
 mod sudo_profiles;
 mod telnet_session;
@@ -1344,6 +1345,45 @@ impl Plugin {
                 let target = required_string(&params, "targetPath")?;
                 self.runtime
                     .block_on(sudo_fs::rename(&self.ssh, session_id, source, target))?;
+                Ok(json!({ "success": true }))
+            }
+            // sudo 下载（M14-C DownloadSudo）：root 大文件二进制下载。start 把
+            // 源文件 sudo 暂存进同目录 0600 临时件后登记进下载注册表，分块
+            // （sftp/download/next）、finish 与进度事件复用既有下载管线；
+            // cancel 与 sftp/transfer/cancel 同构（任务住同一个注册表）。
+            "sudo/download/start" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let path = required_string(&params, "path")?;
+                let save_to_local = params
+                    .get("saveToLocal")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let download_dir = params
+                    .get("downloadDir")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let conflict = params.get("conflict").and_then(Value::as_str);
+                self.runtime.block_on(self.ssh.start_sudo_download(
+                    session_id,
+                    path,
+                    save_to_local,
+                    download_dir.as_deref(),
+                    conflict,
+                    emitter,
+                ))
+            }
+            "sudo/download/cancel" => {
+                let reason = params
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.chars().take(120).collect::<String>());
+                self.runtime.block_on(self.ssh.cancel_transfer(
+                    required_string(&params, "taskId")?,
+                    reason.as_deref(),
+                    emitter,
+                ))?;
                 Ok(json!({ "success": true }))
             }
             "sudo/profiles/list" => Ok(self.ssh.profiles_list()),

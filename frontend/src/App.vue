@@ -8235,9 +8235,18 @@ function probeLocalCapabilities() {
   return localCapabilities;
 }
 
-async function downloadEntry(entry: SftpEntry) {
+/** 单文件/目录下载入口；forceSudo 走 sudo/download/start（M14-C DownloadSudo，
+ * root 大文件二进制下载）——start 换方法换参数名（path），分块循环、finish、
+ * 取消与进度面板全部复用既有下载管线，取消路径的 sftp/transfer/cancel 对
+ * sudo 任务同样生效（sidecar 会顺带清掉远端临时件）。 */
+async function downloadEntry(entry: SftpEntry, forceSudo = false) {
   fileMenu.value = undefined;
   // 目录条目走递归文件夹下载（tree/start + 同一分块管线）；文件沿用单文件管线。
+  // sudo 下载只覆盖普通文件：root 目录没有对应的暂存语义，明确拒绝。
+  if (forceSudo && entry.kind !== "file") {
+    showError(new Error(t("sudoDownload.filesOnly")));
+    return;
+  }
   if (entry.kind === "directory") {
     await downloadDirectoryEntry(entry);
     return;
@@ -8271,13 +8280,16 @@ async function downloadEntry(entry: SftpEntry) {
   let target: { handleId: string; chunkBytes: number } | undefined;
   const chunks = fileTransfer || saveToLocal ? undefined : ([] as Uint8Array[]);
   try {
-    info = await window.dbxPlugin.invoke<DownloadInfo>("sftp/download/start", {
+    const startParams = {
       sessionId: session.value.sessionId,
-      remotePath: pathFromUri(entry.uri),
       saveToLocal,
       downloadDir: dirOverride || loadDownloadDir() || undefined,
       conflict: conflict === "overwrite" ? "overwrite" : undefined,
-    });
+    };
+    // sudo 下载族参数名用 path（与 sudo/stat 等同族一致），sftp 族用 remotePath。
+    info = forceSudo
+      ? await window.dbxPlugin.invoke<DownloadInfo>("sudo/download/start", { ...startParams, path: pathFromUri(entry.uri) })
+      : await window.dbxPlugin.invoke<DownloadInfo>("sftp/download/start", { ...startParams, remotePath: pathFromUri(entry.uri) });
     transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now() };
     target = fileTransfer ? await fileTransfer.beginSave({ name: info.fileName, size: info.size }) : undefined;
     let offset = 0;
@@ -8357,7 +8369,7 @@ async function downloadEntry(entry: SftpEntry) {
       showNotice(t("transferStatus.cancelled"));
     } else {
       // 失败闭环：横幅带「重试」，按原入口完整重跑（含询问/冲突流程）。
-      showError(cause, "sftp", () => void downloadEntry(entry));
+      showError(cause, "sftp", () => void downloadEntry(entry, forceSudo));
     }
   }
 }
@@ -12106,6 +12118,9 @@ onBeforeUnmount(() => {
                 <template v-else-if="fileMenu">
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'directory' || fileMenu.entry.kind === 'file'" @select="openEntry(fileMenu.entry)"><Folder v-if="fileMenu.entry.kind === 'directory'" /><FileText v-else />{{ fileMenu.entry.kind === "directory" ? t("openFolder") : t("preview") }}</ContextMenuItem>
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' || fileMenu.entry.kind === 'directory'" @select="downloadEntry(fileMenu.entry)"><Download />{{ t("download") }}</ContextMenuItem>
+                  <!-- 以 root 下载（M14-C DownloadSudo）：root 大文件二进制下载，读只读门禁
+                       与 sudo 族一致（sidecar 对只读连接 fail closed，这里 canWrite 同步禁用）。 -->
+                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite" @select="downloadEntry(fileMenu.entry, true)"><Download />{{ t("sudoDownload.action") }}</ContextMenuItem>
                   <!-- 外部编辑器回传（P2-5，桌面端）：web/docker 的 sidecar 不在本机，
                        监听与回传都不可用，localCanSave 未探测到前也保持禁用。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite || !localCanSave || externalEditBusy" @select="openInExternalEditor(fileMenu.entry)"><ExternalLink />{{ t("sftpEdit.openExternal") }}</ContextMenuItem>

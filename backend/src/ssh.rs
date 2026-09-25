@@ -50,6 +50,7 @@ use crate::session_recording;
 use crate::sftp_tree;
 use crate::ssh_algorithms;
 use crate::startup_commands;
+use crate::sudo_download;
 use crate::sudo_profiles;
 use crate::transfer_history;
 use crate::triggers;
@@ -1465,6 +1466,10 @@ struct DownloadState {
     /// the chunk/finish/cancel paths branch on it while sharing the registry,
     /// progress events and cancel plumbing with plain file downloads.
     tree: Option<TreeDownloadState>,
+    /// Present only for sudo-backed downloads (`sudo/download/start`): the
+    /// remote staging temp file that must be removed on finish, cancel,
+    /// error and session close (`sudo_download::discard_tmp`).
+    sudo_tmp: Option<String>,
 }
 
 /// Live state of one recursive folder download. Files stream through the same
@@ -3004,6 +3009,28 @@ impl SshRuntime {
         // Teardown runs while the session is still registered so remote
         // listener cancellation can ride the (still open) SSH handle.
         self.stop_session_forwards(session_id).await;
+        // sudo 下载远端临时件的会话级清理（finally 语义）：趁 SSH handle 还
+        // 活着 best-effort 删除；失败只落提示——本地 .part 由
+        // cleanup_session_transfers 删除，远端残留只能等下次同路径暂存或
+        // 管理员清理（mktemp 名字带前缀，不会顶替任何现有文件）。
+        let staged_tmps: Vec<(String, String)> = match self.downloads.lock() {
+            Ok(downloads) => downloads
+                .iter()
+                .filter(|(_, download)| download.session_id == session_id)
+                .filter_map(|(_, download)| {
+                    download
+                        .sudo_tmp
+                        .clone()
+                        .map(|tmp| (download.session_id.clone(), tmp))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        for (owner_session, tmp) in staged_tmps {
+            if let Err(error) = sudo_download::discard_tmp(self, &owner_session, &tmp).await {
+                eprintln!("[sudo-download] session-close temp cleanup failed ({tmp}): {error}");
+            }
+        }
         let session = self
             .sessions
             .write()
@@ -5477,6 +5504,162 @@ impl SshRuntime {
         )
     }
 
+    /// Creates the optional local sink (staging `.part` file) shared by
+    /// `sftp/download/start` and `sudo/download/start`.
+    async fn build_download_sink(
+        &self,
+        task_id: &str,
+        download_dir: Option<&str>,
+        conflict: Option<&str>,
+    ) -> Result<Option<Arc<DownloadSink>>, String> {
+        let staging = self.transfer_dir.join("downloads");
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| format!("Failed to create download staging directory: {error}"))?;
+        let part_path = staging.join(format!("download-{task_id}.part"));
+        let final_dir = download_dir
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                local_downloads::downloads_base_dir(|key| std::env::var_os(key), &self.data_dir)
+            });
+        if !final_dir.is_absolute() {
+            return Err("Download directory must be an absolute path".to_string());
+        }
+        std::fs::create_dir_all(&final_dir).map_err(|error| {
+            format!(
+                "Failed to create download directory '{}': {error}",
+                final_dir.display()
+            )
+        })?;
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&part_path)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to create local download file '{}': {error}",
+                    part_path.display()
+                )
+            })?;
+        Ok(Some(Arc::new(DownloadSink {
+            part_path,
+            final_dir,
+            overwrite: matches!(conflict, Some("overwrite")),
+            file: AsyncMutex::new(file),
+        })))
+    }
+
+    /// `sudo/download/start`: root-owned files streamed through the regular
+    /// SFTP download pipeline (M14-C DownloadSudo). The source is staged into
+    /// a same-directory sudo temp file (`sudo_download::stage_source`) which
+    /// is registered as the task's read source; `sftp/download/next`,
+    /// `sftp/download/finish` and the progress events are reused unchanged.
+    /// The temp file is removed on finish, cancel, error and session close
+    /// (finally semantics; cleanup failures surface as a non-fatal warning).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_sudo_download(
+        &self,
+        session_id: &str,
+        path: &str,
+        save_to_local: bool,
+        download_dir: Option<&str>,
+        conflict: Option<&str>,
+        emitter: &PluginEmitter,
+    ) -> Result<Value, String> {
+        if self.active_transfer_count(session_id)? >= 3 {
+            return Err("This SSH session already has three active transfers".to_string());
+        }
+        let staged = sudo_download::stage_source(self, session_id, path).await?;
+        let outcome = self
+            .start_sudo_download_staged(
+                session_id,
+                &staged,
+                save_to_local,
+                download_dir,
+                conflict,
+                emitter,
+            )
+            .await;
+        if outcome.is_err() {
+            // 注册失败也要把远端临时件收掉，不能等下载循环来清。
+            if let Err(error) = sudo_download::discard_tmp(self, session_id, &staged.tmp_path).await
+            {
+                eprintln!(
+                    "[sudo-download] staging temp cleanup failed ({}): {error}",
+                    staged.tmp_path
+                );
+            }
+        }
+        outcome
+    }
+
+    async fn start_sudo_download_staged(
+        &self,
+        session_id: &str,
+        staged: &sudo_download::StagedSource,
+        save_to_local: bool,
+        download_dir: Option<&str>,
+        conflict: Option<&str>,
+        emitter: &PluginEmitter,
+    ) -> Result<Value, String> {
+        if staged.size > MAX_TRANSFER_SIZE {
+            return Err(format!(
+                "Transfers are limited to {MAX_TRANSFER_SIZE} bytes"
+            ));
+        }
+        // SFTP 提前探测：源目录对登录用户不可穿越（如 /root 0700）时，普通
+        // SFTP 读不到临时件——在这里给出明确错误，而不是第一块分块才失败。
+        let sftp = self.sftp(session_id).await?;
+        sftp.lock()
+            .await
+            .metadata(staged.tmp_path.clone())
+            .await
+            .map_err(sftp_error)?;
+        let task_id = Uuid::new_v4().to_string();
+        let sink = if save_to_local {
+            self.build_download_sink(&task_id, download_dir, conflict)
+                .await?
+        } else {
+            None
+        };
+        self.downloads
+            .lock()
+            .map_err(|_| "Download registry is poisoned".to_string())?
+            .insert(
+                task_id.clone(),
+                DownloadState {
+                    session_id: session_id.to_string(),
+                    remote_path: staged.tmp_path.clone(),
+                    file_name: staged.file_name.clone(),
+                    size: staged.size,
+                    next_offset: 0,
+                    sink,
+                    tree: None,
+                    sudo_tmp: Some(staged.tmp_path.clone()),
+                },
+            );
+        emitter
+            .event(
+                "sftp/transfer/progress",
+                json!({ "taskId": task_id, "sessionId": session_id, "direction": "download", "transferred": 0, "size": staged.size, "status": "queued" }),
+            )
+            .map_err(plugin_error)?;
+        let connection_id = self.session_connection_id(session_id).await;
+        self.record_transfer_start(
+            &task_id,
+            session_id,
+            &connection_id,
+            "download",
+            &staged.file_name,
+            staged.size,
+        );
+        Ok(
+            json!({ "taskId": task_id, "fileName": staged.file_name, "size": staged.size, "chunkSize": TRANSFER_CHUNK_SIZE, "resumeOffset": 0_u64, "saveToLocal": save_to_local, "sudo": true }),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn start_download(
         &self,
@@ -5527,47 +5710,9 @@ impl SshRuntime {
             .unwrap_or("download")
             .to_string();
         let task_id = Uuid::new_v4().to_string();
-        let sink = if save_to_local {
-            let staging = self.transfer_dir.join("downloads");
-            std::fs::create_dir_all(&staging)
-                .map_err(|error| format!("Failed to create download staging directory: {error}"))?;
-            let part_path = staging.join(format!("download-{task_id}.part"));
-            let final_dir = download_dir
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    local_downloads::downloads_base_dir(|key| std::env::var_os(key), &self.data_dir)
-                });
-            if !final_dir.is_absolute() {
-                return Err("Download directory must be an absolute path".to_string());
-            }
-            std::fs::create_dir_all(&final_dir).map_err(|error| {
-                format!(
-                    "Failed to create download directory '{}': {error}",
-                    final_dir.display()
-                )
-            })?;
-            let file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&part_path)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "Failed to create local download file '{}': {error}",
-                        part_path.display()
-                    )
-                })?;
-            Some(Arc::new(DownloadSink {
-                part_path,
-                final_dir,
-                overwrite: matches!(conflict, Some("overwrite")),
-                file: AsyncMutex::new(file),
-            }))
-        } else {
-            None
-        };
+        let sink = self
+            .build_download_sink(&task_id, download_dir, conflict)
+            .await?;
         self.downloads
             .lock()
             .map_err(|_| "Download registry is poisoned".to_string())?
@@ -5581,6 +5726,7 @@ impl SshRuntime {
                     next_offset: offset,
                     sink,
                     tree: None,
+                    sudo_tmp: None,
                 },
             );
         emitter
@@ -5721,6 +5867,7 @@ impl SshRuntime {
                         skipped,
                         failures: scan.failures,
                     }),
+                    sudo_tmp: None,
                 },
             );
         emitter
@@ -6045,6 +6192,14 @@ impl SshRuntime {
             if let Some(tree) = download.tree.as_ref() {
                 let _ = std::fs::remove_dir_all(&tree.root_local);
             }
+            // sudo 下载取消：远端临时件同样属于本任务，best-effort 删除。
+            if let Some(tmp) = download.sudo_tmp.as_ref() {
+                if let Err(error) =
+                    sudo_download::discard_tmp(self, &download.session_id, tmp).await
+                {
+                    eprintln!("[sudo-download] temp cleanup failed ({tmp}): {error}");
+                }
+            }
         }
         if upload.is_none() && download.is_none() && finishing.is_none() {
             return Err("Transfer task was not found".to_string());
@@ -6114,6 +6269,39 @@ impl SshRuntime {
                 .complete_tree_download(download, task_id, emitter)
                 .await;
         }
+        let sudo_tmp = download.sudo_tmp.clone();
+        let session_id = download.session_id.clone();
+        let result = self
+            .complete_single_file_download(download, task_id, emitter)
+            .await;
+        // finally 语义：sudo 下载的远端临时件在完成/失败两条路径上都要清理；
+        // 清理失败不吞掉原结果，只在成功响应上附加 warning 兜底提示。
+        if let Some(tmp) = sudo_tmp {
+            match sudo_download::discard_tmp(self, &session_id, &tmp).await {
+                Ok(()) => {}
+                Err(error) => {
+                    eprintln!("[sudo-download] temp cleanup failed ({tmp}): {error}");
+                    let mut result = result;
+                    if let Ok(response) = result.as_mut() {
+                        response["warning"] = json!(format!(
+                            "Remote sudo temp file cleanup failed: {tmp} ({error})"
+                        ));
+                    }
+                    return result;
+                }
+            }
+        }
+        result
+    }
+
+    /// Single-file half of `sftp/download/finish`, extracted so the sudo
+    /// variant can run its remote temp cleanup around it.
+    async fn complete_single_file_download(
+        &self,
+        download: DownloadState,
+        task_id: &str,
+        emitter: &PluginEmitter,
+    ) -> Result<Value, String> {
         let record_failed = |error: &str| {
             self.record_transfer(json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "fileName": download.file_name, "size": download.size, "transferred": download.next_offset, "status": "failed", "error": error }));
         };
@@ -9891,6 +10079,7 @@ matrix-ed25519";
                 next_offset: 5,
                 sink: None,
                 tree: None,
+                sudo_tmp: None,
             },
         );
         let no_connection = |_: &str| String::new();
@@ -9986,6 +10175,7 @@ matrix-ed25519";
                     next_offset: 0,
                     sink: None,
                     tree: None,
+                    sudo_tmp: None,
                 },
             );
         }
