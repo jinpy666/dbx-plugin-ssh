@@ -122,3 +122,5 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：X11 反向通道 fail-closed 准入（上限/cookie/替换/disarm）、watch 本地路径来源校验（remote-edit 前缀/穿越/symlink 逃逸）、ghost 锚点 scrollback 语义（可见行/绝对行）、ghost×补全互斥、vnc/frame 跨端 golden 向量；CI 新增 UI walkthrough strict 门。
 
 仍保持未验收（依赖真机/CI）：X server 真机联调、CI walkthrough job 首跑观测；其余人工门不变（真机矩阵、RDP 评审、PR 合入）。
+
+- RDP 实施链（2026-09-25）：rdpFrame 21 用例（golden/坏帧/扫描码/状态机/证书）+ RDP-2 rdp_session 30 用例（分类器/上界/策略状态机/NTLMv2 断言）= 新增 51；cargo 854 / vitest 1019 终值。未验收：真机 RDP server 端到端、WKWebView 位图光标、CBT 端到端核对。

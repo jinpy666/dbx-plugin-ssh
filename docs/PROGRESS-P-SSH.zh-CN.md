@@ -3739,3 +3739,12 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **实施定稿参数**：分帧 4 KiB / 队列 256 KiB / 键入单包 16 KiB（文档标注"实施时定稿"项）；写失败镜像 `serial/write/error` 事件（会话保持）已记入 PROTOCOL 契约。
 - **全量**：backend cargo **867**（825+RDP-2 后合入累计）/ clippy 0 / fmt 0；frontend vitest **998**（100 文件）/ vue-tsc 0 / build 过（ui/ 重生成）。
 - 遗留：二进制事件在宿主桥的流量控制行为需实测（文档标注）；真口回环 smoke 与 install 检查按规约归 integrator。
+
+
+## RDP 实施链收官（2026-09-25，RDP-1/2/3 全链合入）
+
+- **RDP-1 vendored 链 ✅**（0319148e）：六 crate 锁步 + lockstep CI 断言，CI 五平台验证通过。
+- **RDP-2 sidecar 引擎 ✅**（09c84b5e，+31 测试）：IronRDP 客户端独立线程 + vendored 注入补丁接线；证书策略 prompt/strict/accept-temporarily 状态机（120s 窗、remember 落盘、generation 防串话）；CredSSP/NLA；44 字节 patch 帧走 rdp/frame/{id}（与 VNC 同构）；text-only CLIPRDR 双向桥（16 MiB 双向硬上限）；按错误类型重连门控（认证类 fail 不重试，退避 1/2/4/8/15s 封顶 30s）；安全【硬】清单全落地（NTLMv2-only 源码断言钉住、凭据 Zeroizing 不落日志、证书 fail-closed、剪贴板不落审计）。协议 rdp/start|input|resize|set-clipboard|reconnect|certificate/resolve|close|list + PROTOCOL 文档节。
+- **RDP-3 前端 ✅**（本 merge，+21 测试）：RdpSurface（rAF 合帧/缩放三态/pointer 四型含位图光标）+ RdpConnectDialog（分辨率门限/证书策略三选/凭据不落盘）+ App.vue localUiMode 互斥接线 + rdp-certificate 专属确认弹窗（SHA256+倒计时+remember，fail-closed）+ rdp.* 七语 56 键 + mockDbxHost rdp/* 全协议桩（?rdpCert/rdpErr 走查参数）。
+- **全量终值**：backend cargo **854** / clippy 0 / fmt 0 / lockstep PASS；frontend vitest **1019**（101 文件）/ vue-tsc 0 / build 过（ui/ 重生成）。
+- **遗留（人工门）**：RDP 真机 server 联调（握手/帧/剪贴板/重连端到端）、canvas 位图光标 WKWebView 走查、`?rdpCert/rdpErr` mock 走查路径浏览器复验、rdp/resize 前端触发入口（按需）、CredSSP CBT 端到端核对（评审动作）。
