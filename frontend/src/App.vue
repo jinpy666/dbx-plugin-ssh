@@ -1305,6 +1305,10 @@ const serialState = ref<"idle" | "running" | "closed">("idle");
 const serialError = ref("");
 const serialLastSequence = ref(0);
 const serialPendingFrames = new Map<number, { stream: number; data: Uint8Array }>();
+// 序号缺口回放（设计稿 §3）：与 telnet/local 的 drain/replay 体系同构，
+// 复用既有 gap 检测 + 无进度重试上限，不新写恢复逻辑。
+let serialReplayInFlight = false;
+let serialReplayNoProgress = 0;
 // B1 解码契约：输出帧遇到未知流标签（> Stdin=3）一律静默丢弃并计数。
 let serialUnknownStreamFrames = 0;
 // B1 能力开关：true = 键盘走二进制写通道；发送报错（未知通道/旧 sidecar）
@@ -4399,6 +4403,40 @@ function drainSerialFrames() {
   }
   if (serialPendingFrames.size > TERMINAL_PENDING_FRAME_LIMIT) {
     serialPendingFrames.clear();
+  }
+  // 序号缺口 → serial/replay（序号制回放）：重发帧从既有二进制通道到货后
+  // 由同一 drain 消费；缺口永不可填（缓冲绕回/会话重建）时按无进度上限
+  // resync 游标，避免 replay 循环空转冻结工作台。
+  const firstPending = Math.min(...serialPendingFrames.keys());
+  if (Number.isFinite(firstPending) && firstPending > serialLastSequence.value + 1 && !serialReplayInFlight && serialSession.value) {
+    serialReplayInFlight = true;
+    const holeAt = serialLastSequence.value;
+    void window.dbxPlugin
+      .invoke<ReplayResult>("serial/replay", { sessionId: serialSession.value.sessionId, afterSequence: serialLastSequence.value })
+      .then((result) => {
+        // complete: false = 缓冲已绕回、回放不完整（设计稿 §3）——提示截断。
+        if (!result.complete) showNotice(t("serial.replayTruncated"));
+        if (serialLastSequence.value === holeAt) {
+          serialReplayNoProgress += 1;
+          if (serialReplayNoProgress >= 3) {
+            serialLastSequence.value = firstPending - 1;
+            serialReplayNoProgress = 0;
+          }
+        } else {
+          serialReplayNoProgress = 0;
+        }
+      })
+      .catch(() => {
+        // 会话不存在（已关闭/未重建）：resync 过缺口放出后续帧。
+        if (firstPending > serialLastSequence.value) {
+          serialLastSequence.value = firstPending - 1;
+          serialReplayNoProgress = 0;
+        }
+      })
+      .finally(() => {
+        serialReplayInFlight = false;
+        drainSerialFrames();
+      });
   }
 }
 

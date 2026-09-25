@@ -564,6 +564,14 @@ VNC 远程桌面的帧缓冲更新以 patch 帧推送：`44 字节头 | RGBA 像
 - 安全语义：入口为工作台显式按钮（未连接也可用；SSH 会话在连时经确认先关闭），无自动开启路径；manifest 权限集不变（复用 `host.binary`），本机命令执行能力与用户自身终端同级，无提权。
 - 偏好（`local/preferences/*` 白名单新增）：`localShell`（字符串 ≤200，空=自动探测）、`localShellIntegration`（布尔，缺省 true）。shell 选择器在工作台本地终端按钮旁的设置菜单（`local/shells/list` 发现 + 注入开关），徽标显示 `Local · <shell>`，重开按钮在本地会话存活时保持可用（restart 语义：关当前 → 按新偏好重开）。
 
+## 串口终端回放（`serial/replay`）
+
+与 telnet/local 终端完全同构的序号制输出回放（设计稿 `docs/SERIAL_ENHANCE_DESIGN.zh-CN.md` §3）：读线程在会话生命周期内把输出帧存入按字节预算截断的有界环形缓冲（串口会话 128 KiB，远小于终端的 2 MiB——串口输出是控制台流量而非全屏重绘），`serial/terminal/out` 的在线帧与回放帧共用同一单调序号。
+
+- `serial/replay {sessionId, afterSequence}` → 在 `serial/terminal/out/{id}` 上重发其后帧，并返回摘要 `{frameCount, firstAvailableSequence, tailSequence, complete}`。`complete: false` 表示缓冲已绕回、回放不完整，前端提示截断；会话已关闭时返回 "Serial session was not found"。
+- 前端复用既有 gap 检测/drain 机制（`drainSerialFrames`）：缺口经 `serial/replay` 回填；缺口永不可填时按无进度上限 resync 游标。
+- RS-232 无窗口尺寸概念，串口会话无 `resize` 方法（设计稿 §4 明确不实现）。
+
 ## 串口文件上传（X/Y/ZMODEM）
 
 串口会话（RS-232 控制台）支持向对端设备发送文件，三协议引擎为纯状态机（输入=对端字节流，输出=待写字节序列），由串口读线程在既有泵循环内驱动；对端响应既驱动协议也照常上屏（NyaTerm 语义），上传期间的键入由前端拦截（控制字符窗口），sidecar 拒绝并发第二次上传。

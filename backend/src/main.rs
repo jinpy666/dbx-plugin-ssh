@@ -538,6 +538,21 @@ impl Plugin {
                 Ok(json!({ "success": true }))
             }
             "serial/list" => Ok(self.runtime.block_on(self.serial.list())),
+            // 序号制输出回放（设计稿 §3）：webview 重载/断线重连后恢复滚动区
+            // 上下文；帧走既有 serial/terminal/out 二进制通道，摘要走 JSON。
+            "serial/replay" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let after_sequence = params
+                    .get("afterSequence")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let replay = self.runtime.block_on(self.serial.replay(
+                    session_id,
+                    after_sequence,
+                    emitter,
+                ))?;
+                Ok(replay)
+            }
             // 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：引擎是纯
             // 状态机，由串口读线程喂数据/取输出；文件字节由前端 File API
             // 分块（≤64KiB）送入，sidecar 不落盘（web/docker 浏览器兜底）。

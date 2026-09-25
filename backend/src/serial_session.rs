@@ -26,7 +26,7 @@ use dbx_plugin_sdk::PluginEmitter;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::model::{TerminalFrame, TerminalStream};
+use crate::model::TerminalStream;
 use crate::serial_xmodem::{
     self, Output, ProgressState, TransferProgress, UploadEngine, UploadProtocol,
 };
@@ -34,6 +34,10 @@ use crate::serial_xmodem::{
 const READ_BUFFER: usize = 4096;
 /// The blocking read timeout also bounds how long a close can stall.
 const READ_TIMEOUT: Duration = Duration::from_millis(10);
+/// Serial replay budget (design doc §3): per-frame bounded ring kept for the
+/// whole session lifetime, far smaller than the shared 2 MiB terminal limit —
+/// serial output is console chatter, not full-screen repaints.
+const SERIAL_REPLAY_BYTE_LIMIT: usize = 128 * 1024;
 
 /// Erase-byte mapping shared with the telnet session (`BackspaceMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +186,10 @@ pub(crate) struct SerialSession {
     backspace: BackspaceMode,
     /// 进行中的文件上传（每会话至多一个；上传期间的键入由前端拦下）。
     upload: Mutex<Option<SerialUploadJob>>,
+    /// 输出回放环形缓冲（设计稿 §3）：读线程在会话生命周期内逐帧保存，
+    /// `serial/replay` 据此重发。std 互斥锁（读线程与 JSON 侧都是同步上下文，
+    /// 临界区只做入队/拷贝，无 IO）。
+    replay: Arc<std::sync::Mutex<crate::ssh::ReplayBuffer>>,
 }
 
 impl SerialSession {
@@ -309,15 +317,6 @@ pub(crate) fn usb_port_description(info: &serialport::UsbPortInfo) -> String {
         .unwrap_or_else(|| format!("USB {:04x}:{:04x}", info.vid, info.pid))
 }
 
-fn encode_frame(sequence: u64, stream: TerminalStream, data: &[u8]) -> Vec<u8> {
-    TerminalFrame {
-        sequence,
-        stream,
-        data: data.to_vec(),
-    }
-    .encode()
-}
-
 impl SerialSessionRuntime {
     pub fn new() -> Self {
         Self {
@@ -396,6 +395,9 @@ impl SerialSessionRuntime {
             cmd_tx,
             backspace,
             upload: Mutex::new(None),
+            replay: Arc::new(std::sync::Mutex::new(
+                crate::ssh::ReplayBuffer::with_byte_limit(SERIAL_REPLAY_BYTE_LIMIT),
+            )),
         });
         self.sessions
             .write()
@@ -472,6 +474,41 @@ impl SerialSessionRuntime {
             })
             .collect();
         json!({ "sessions": rows })
+    }
+
+    /// 序号制输出回放（设计稿 §3，与 telnet/local 的 after_sequence 先例
+    /// 完全同构）：在 `serial/terminal/out/{id}` 上重发其后帧，返回摘要。
+    /// `complete: false` 表示环形缓冲已绕回、回放不完整。会话已关闭时走
+    /// `session()` 的 "Serial session was not found" 错误。
+    pub async fn replay(
+        &self,
+        session_id: &str,
+        after_sequence: u64,
+        emitter: &PluginEmitter,
+    ) -> Result<Value, String> {
+        let session = self.session(session_id).await?;
+        let replay = session
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let first_available_sequence = replay.first_sequence();
+        let tail_sequence = replay.tail_sequence();
+        let frames = replay.after(after_sequence);
+        drop(replay);
+        for frame in &frames {
+            emitter
+                .binary(
+                    &format!("serial/terminal/out/{session_id}"),
+                    &frame.encode(),
+                )
+                .map_err(|error| error.message)?;
+        }
+        Ok(json!({
+            "frameCount": frames.len(),
+            "firstAvailableSequence": first_available_sequence,
+            "tailSequence": tail_sequence,
+            "complete": after_sequence.saturating_add(1) >= first_available_sequence,
+        }))
     }
 
     // —— 串口文件上传（X/Y/ZMODEM）——————————————————————————————
@@ -722,7 +759,6 @@ fn spawn_reader(
 ) {
     std::thread::spawn(move || {
         let mut buffer = [0u8; READ_BUFFER];
-        let mut sequence: u64 = 0;
         loop {
             if matches!(cmd_rx.try_recv(), Ok(SerialCommand::Close)) {
                 let _ = emitter.event(
@@ -741,10 +777,15 @@ fn spawn_reader(
                     SerialSessionRuntime::pump_upload_tick(&session, &session_id, &emitter);
                 }
                 Ok(n) => {
-                    sequence += 1;
+                    // 序号由回放缓冲统一分配（replay 与在线帧共用同一序列）。
+                    let frame = session
+                        .replay
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(TerminalStream::Stdout, buffer[..n].to_vec());
                     let _ = emitter.binary(
                         &format!("serial/terminal/out/{session_id}"),
-                        &encode_frame(sequence, TerminalStream::Stdout, &buffer[..n]),
+                        &frame.encode(),
                     );
                     SerialSessionRuntime::pump_upload_feed(
                         &session,
@@ -1069,5 +1110,52 @@ mod tests {
             decode_input_frame(&stdin_frame(3, b"")).unwrap(),
             (3, Vec::<u8>::new())
         );
+    }
+
+    // —— serial/replay 序号制回放（设计稿 §3）———————————————————
+
+    #[test]
+    fn replay_buffer_semantics_match_the_serial_summary_contract() {
+        // 读线程经 ReplayBuffer 分配序号后，replay 摘要的字段语义：
+        // after_sequence → 重发帧 + first/tail/complete，与 telnet/local 同构。
+        let mut replay = crate::ssh::ReplayBuffer::with_byte_limit(SERIAL_REPLAY_BYTE_LIMIT);
+        let f1 = replay.push(TerminalStream::Stdout, b"a".to_vec());
+        let f2 = replay.push(TerminalStream::Stdout, b"b".to_vec());
+        assert_eq!((f1.sequence, f2.sequence), (1, 2));
+        assert_eq!(replay.first_sequence(), 1);
+        assert_eq!(replay.tail_sequence(), 2);
+        // 完整回放：afterSequence=0 → 两帧 + complete。
+        let frames = replay.after(0);
+        assert_eq!(frames.len(), 2);
+        assert!(1 >= replay.first_sequence(), "complete = after+1 >= first");
+        // 增量回放：afterSequence=1 → 仅第 2 帧。
+        assert_eq!(replay.after(1).len(), 1);
+        // 空缓冲（会话刚开、尚无输出）：first = tail+1，complete 按同式成立。
+        let empty = crate::ssh::ReplayBuffer::with_byte_limit(SERIAL_REPLAY_BYTE_LIMIT);
+        assert_eq!(empty.first_sequence(), 1);
+        assert_eq!(empty.tail_sequence(), 0);
+        assert!(0 + 1 >= empty.first_sequence());
+    }
+
+    #[test]
+    fn replay_buffer_wraps_at_the_serial_byte_budget_and_reports_incomplete() {
+        // 128 KiB 预算绕回：预算装不下的旧帧被逐出后 first_sequence 前移，
+        // 从被逐出序号之后的请求得到不完整回放（complete: false 的判定来源）。
+        let mut replay = crate::ssh::ReplayBuffer::with_byte_limit(4);
+        replay.push(TerminalStream::Stdout, vec![b'x'; 3]);
+        replay.push(TerminalStream::Stdout, vec![b'y'; 3]);
+        replay.push(TerminalStream::Stdout, vec![b'z'; 3]);
+        // 预算 4 字节只容得下最后一帧（前两帧先后被逐出）。
+        assert_eq!(replay.first_sequence(), 3, "frames 1-2 evicted by the budget");
+        // 请求 afterSequence=0（第 1 帧之后）：第 1、2 帧已不在缓冲 → 不完整。
+        assert!(
+            !(0 + 1 >= replay.first_sequence()),
+            "afterSequence 0 below first_available must be incomplete"
+        );
+        assert_eq!(replay.after(0).len(), 1);
+        // 从可得帧之后回放 → 完整。
+        assert!(2 + 1 >= replay.first_sequence());
+        // 串口实际预算常量为 128 KiB。
+        assert_eq!(SERIAL_REPLAY_BYTE_LIMIT, 128 * 1024);
     }
 }
