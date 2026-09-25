@@ -3836,3 +3836,19 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 1. MCP 面其余工具（sftp_read_file/write_file/stat/exists/chmod/copy/move）latin-1 下按字面量发送——非 ASCII 名探不到目标（报错而非误操作），沿 M17-B 同一模式可补齐。
 2. shell 执行层字节边界（copy/move 跨目录执行、df/tar/sudo 族）与 shell cwd 非 UTF-8 回读丢失——设计边界，已登记 PROTOCOL。
 3. **非观察工程 backlog 至此清零**。剩余：终端 BiDi（观察项，未立项）；真机人工门（latin-1 全链真机联调、多文件 watcher 外部编辑全链路、RDP/sudo smoke 等沿既有登记）。
+
+
+## M18 收口（2026-09-25，欠账清理批次：MCP 剩余工具 / smoke 与 mock 补齐 两线并发）
+
+- **MCP 工具面剩余工具 latin-1 迁移 ✅**（parity-np18-mcp-rest 23b19ba，merge 本轮）：沿 M17-B 同一模式补齐读侧 sftp_stat（裸包 LSTAT，uid/gid shell 查询尽力而为、字节边界失败回 null）/sftp_exists（**只认 SSH_FX_NO_SUCH_FILE 为不存在**，保留"权限错误绝不误报 exists:false"契约）/sftp_read_file（OPEN+READ 32KiB 分块，maxBytes 截断+offset 分页沿既有边界，读失败回退高层）；写侧 sftp_write_file（**直写** OPEN CREAT|WRITE|TRUNC——暂存是工作台上传族需求，MCP 沿既有直写语义）+sftp_chmod（SETSTAT）；sftp_copy/sftp_move 执行层确认远端 shell cp/mv、命令串字节不可控→**执行层不迁**（M17-A 边界保留），裸包车道迁移覆盖预检 + 同目录 move 的 RENAME 快路径（与工作台 M17-A 模式同构）。sftp_raw.rs 收编 M18-A 坠毁实例的留学生改动（read_file(offset,cap)/error_status 桩复用模块）并修复其测试两处小漏。PROTOCOL 遗留③销项 + MCP.zh-CN.md 工具表同步。
+- **smoke 用例补齐 ✅**（parity-np18-smoke-m13fix 8753ab7，merge 本轮）：smoke_fs_test.py 补 9 用例（+252 行，Report.run + SKIP 机制 + needs 链式门控，幂等自清理 + 偏好快照还原）——latin-1 编码族真容器 6 链路（偏好写读→0xE9 字节名落盘→list 解码忠实→write/read 往返→exists 双形态+交叉反例→树下载逐字节→raw RENAME 收口）、每连接编码覆盖生效/回退 2、管线偏好钳制 1、MCP 面经 embedded 桥 mcp/call 往返 1（无需第二进程）。M14-M17"单测+smoke+对标"三件套欠账至此补清。
+- **mockDbxHost Auto 场景 ✅**（同线 d2c74ce，M13 遗留 3 消化）：`?auth=auto|autofail` URL 参数驱动（与 ?err=* 先例同构）——AUTO_AUTH_ORDER 逐方式进度事件（形状镜像 authenticate_auto emitter，成功方式不发事件对齐真实）、全败聚合错误串、缺省零事件；3 条 vitest spec。
+- **过程记录**：A 线首实例死于基础设施错误（Captcha timeout，第 3 次出现），遗留学生改动由重拉实例审用收编（含 2 处测试修复）——未触发转人工线。
+- **全量终值（Windows 实测）**：backend cargo **950/950**（M17 后基线 940+10）/ clippy 0 / fmt 0；frontend vitest **1067/1067**（106 文件，1064+3）/ vue-tsc 0 / build 过（B 线前端改动为 mock/spec 不进产物包，ui/ 无变化）；两 merge 零冲突。
+
+### M18 遗留
+
+1. copy/move 执行层字节闭环需 exec 命令串支持非 UTF-8 字节参数（设计边界，已登记）；sftp_stat latin-1 下 uid/gid 对非 ASCII 名为 null（与工作台一致）。
+2. smoke latin-1 组未覆盖 sftp/symlink-* 的 latin-1 路径（同族可按需补）；smoke_mcp.py stdio 面未新增（embedded 路径已覆盖同一工具实现）。
+3. sftp_upload/sftp_download MCP 工具与 sudo 族维持既有策略（不在本批次范围）。
+4. 工程面 backlog 持续为零；真机人工门沿既有登记。
