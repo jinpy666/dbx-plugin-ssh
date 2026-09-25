@@ -3729,3 +3729,5 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **全量**：backend cargo **823**（vendored 生效后全绿）/ clippy 0 / fmt 0 / lockstep PASS；frontend vitest **990**（99 文件，含并行 M10 波次增量）/ vue-tsc 0 / build 过。
 - 遗留：ironrdp-client 发布包无 LICENSE（已从 upstream monorepo 补 APACHE/MIT 并登记 vendor/README）；ironrdp-tls 补丁状态缺口（计划 §5-1）按"原样搬运"登记，升级轮对照原包核实；Windows native-tls/Schannel 路径依赖 CI windows-regression 兜底。
 - **下一棒 RDP-2**：rdp_session.rs MVP（对标 NyaTerm src/core/rdp.rs：NLA/CredSSP 认证、TLS 证书策略 prompt、text-only 剪贴板桥、按错误类型重连门控）+ rdp/* 协议面 + PROTOCOL 文档——基线含本棒 vendor 链。
+
+> CI 观测补记（M10）：UI walkthrough strict 门经三次观测迭代后于 runner 全绿（run 36080783898，十一门全 success）——首轮暴露 pnpm exec 包装吞 stdout（改为直启 vite 二进制），次轮暴露快捷键冲突步骤的平台键位假设（改为按宿主平台录制实际被占有的组合）。两处均为门外脚本盲区，产品代码零回退。
