@@ -160,3 +160,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：OPEN/WRITE/SETSTAT/READLINK/SYMLINK 帧编解码与 OpenSSH wire 次序；暂存→SETSTAT→原子 rename 提交语义与失败清理；rename-unique 候选名编码探测闭环；resolve_sftp_name_encoding 三态（连接覆盖/全局/缺省）与白名单外回退；overrides 桶清洗（上限 512、非法值丢弃）；connectionNameEncoding 控件纯函数。
 
 仍保持未验收（依赖真机/人工）：latin-1 真实服务器上传写族/exists/rename-unique 联调；连接级覆盖切换即时生效的手工走查；既有真机门不变。
+
+
+## M17（工程面收官批次，2026-09-25）
+
+单测：cargo **940/940**（M16 后基线 937+3：A 线 wire 还原 1 + B 线 MCP 判定优先链/往返闭环 2）、vitest **1064/1064**（106 文件，1061+3：displayPathToWire 等价性/% 自转义/UTF-8 兜底）、vue-tsc 0、build 过、clippy 0、fmt 0。
+
+新增可测面：exists form:"wire" 整条还原；copy/move 覆盖预检 LSTAT 与同目录 RENAME 快路径；displayPathToWire 与 sidecar 组合逐字符等价；MCP 连接级判定优先链三态；MCP 列表显示路径→写工具往返闭环（含 rename）。
+
+仍保持未验收（依赖真机/人工）：latin-1 真机全链联调（粘贴/copy/move/拖入/MCP 工具往返）、多文件 watcher 外部编辑全链路真机手测、既有真机门不变。

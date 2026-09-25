@@ -3821,3 +3821,18 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 2. 终端拖入上传的手输/shell cwd 目标目录非 ASCII 路径无法还原 latin-1 字节。
 3. MCP 工具面 sftp_mkdir/remove/rename 字面量发送——需 MCP 面自身编码模式 + 列表层迁移的后续设计（单点迁移为零收益半迁移，已核实）。
 4. 候选缺口表仅剩：每连接编码选择本口消化完毕后为空（BiDi 为观察项不列），对标缺口表至此后备候选为零。
+
+
+## M17 收口（2026-09-25，工程面收官批次：latin-1 最后收尾 / MCP 工具面编码 两线并发）
+
+- **latin-1 最后收尾 ✅**（parity-np17-enc-last 1c1de5f，merge 054e23d）：粘贴预检走 `sftp/exists` 新增可选 `form:"wire"`（整条 wire 还原，缺省仍为 wire 前缀+显示末段分工）；`sftp/copy`/`sftp/move` 覆盖预检改逐个裸包 LSTAT、同目录 move 快路径改裸包 RENAME（撞名/跨设备回落 shell mv 语义不变）；拖入上传落点（手输/shell cwd 回读）经前端 `displayPathToWire`（与 sidecar `latin1_encode_display`+`escape_wire` 逐字符等价含 % 自转义）转 wire 后命中 write_path_bytes 分工；查漏补缺 `sftp/stat`/`sftp/chmod` 迁 raw（LSTAT/SETSTAT，属主列 shell 查询尽力而为）。**登记边界**：远端 exec 层（cp -a/mv -f/df/tar/sudo 族）命令串为 UTF-8 String，字节不可控——执行层不强迁，clean 名行为不变、转义名由远端报错；shell cwd 回读的非 UTF-8 字节在终端解码层已丢失（U+FFFD）不可恢复。
+- **MCP 工具面编码 ✅**（parity-np17-mcp-enc 7424193，merge bf81cee）：复用连接级判定（`arguments.connectionId` → `sftp_name_encoding_overrides` > 全局 > auto，内联拨号按未覆盖），不引入工具面编码参数；`sftp_list_dir` 走裸包 READDIR，**名字口径为显示形式**——latin-1 解码输出恒在 U+0000..=U+00FF 域，`latin1_encode_display` 是精确逆变换，AI 把返回 path 原样回传 mkdir/remove/rename 即落回原始字节（往返闭环单测）；写工具整条按显示编码还原字节后走裸包（remove 判型分派/symlink 不跟随/递归复用 raw_delete_tree）；回退与工作台一致；auto 模式四工具行为不变。
+- **集成冲突融合**：ssh.rs（classify_raw_kind 可见性双侧同改）取带说明注释侧；PROTOCOL 双方 M17 段全部保留、遗留项融合为单一状态（①②③ 均已消化，MCP 其余工具登记沿同一模式补齐）。
+- **过程记录**：A 线 agent 前两实例死于基础设施错误（Captcha instance timed out，非任务失败），第三次拉起成功——未触发"3 周期失败转人工"线。
+- **全量终值（Windows 实测）**：backend cargo **940/940**（M16 后基线 937：A 线 +1、B 线 +2）/ clippy 0 / fmt 0；frontend vitest **1064/1064**（106 文件，1061+3：displayPathToWire 3）/ vue-tsc 0 / build 过（ui/ 重生成单独 commit）。
+
+### M17 遗留
+
+1. MCP 面其余工具（sftp_read_file/write_file/stat/exists/chmod/copy/move）latin-1 下按字面量发送——非 ASCII 名探不到目标（报错而非误操作），沿 M17-B 同一模式可补齐。
+2. shell 执行层字节边界（copy/move 跨目录执行、df/tar/sudo 族）与 shell cwd 非 UTF-8 回读丢失——设计边界，已登记 PROTOCOL。
+3. **非观察工程 backlog 至此清零**。剩余：终端 BiDi（观察项，未立项）；真机人工门（latin-1 全链真机联调、多文件 watcher 外部编辑全链路、RDP/sudo smoke 等沿既有登记）。
