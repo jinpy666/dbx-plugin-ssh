@@ -804,16 +804,20 @@ impl Plugin {
             "sftp/createDirectory" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let path = required_string(&params, "path")?;
+                // 文件名编码偏好（M15-B）：latin-1 时写操作走原始字节路径。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime
-                    .block_on(self.ssh.sftp_create_directory(session_id, path))?;
+                    .block_on(self.ssh.sftp_create_directory(session_id, path, encoding))?;
                 Ok(json!({ "success": true }))
             }
             "sftp/rename" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let source = required_string(&params, "sourcePath")?;
                 let target = required_string(&params, "targetPath")?;
+                // latin-1：源按 wire 还原、目标按显示文本编码，raw RENAME。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime
-                    .block_on(self.ssh.sftp_rename(session_id, source, target))?;
+                    .block_on(self.ssh.sftp_rename(session_id, source, target, encoding))?;
                 Ok(json!({ "success": true }))
             }
             "sftp/chmod" => {
@@ -1481,8 +1485,10 @@ impl Plugin {
                     .get("recursive")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                // latin-1：wire 路径还原为原始字节，raw REMOVE/RMDIR/树删。
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime
-                    .block_on(self.ssh.sftp_delete(session_id, path, recursive))?;
+                    .block_on(self.ssh.sftp_delete(session_id, path, recursive, encoding))?;
                 Ok(json!({ "success": true }))
             }
             "sftp/upload/start" => {
@@ -1536,6 +1542,7 @@ impl Plugin {
             // 递归目录下载：远端 read_dir 走树（不碰 shell、不产生远端临时
             // 包），逐文件复用下方分块下载管线，本地按相对路径镜像；分块与
             // finish/cancel 与单文件下载共用（任务在同一个注册表里）。
+            // latin-1：远端遍历走裸包 READDIR，整树路径字节保真。
             "sftp/download/tree/start" => {
                 let session_id = required_string(&params, "sessionId")?;
                 let remote_path = required_string(&params, "remotePath")?;
@@ -1543,10 +1550,12 @@ impl Plugin {
                     .get("downloadDir")
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                let encoding = preferences::sftp_name_encoding(&plugin_data_dir());
                 self.runtime.block_on(self.ssh.start_tree_download(
                     session_id,
                     remote_path,
                     download_dir.as_deref(),
+                    encoding,
                     emitter,
                 ))
             }
@@ -1794,8 +1803,12 @@ impl Plugin {
     fn filesystem_create_directory(&self, params: Value) -> Result<Value, String> {
         let session_id = self.filesystem_session(&params)?;
         let path = filesystem_path(&params)?;
-        self.runtime
-            .block_on(self.ssh.sftp_create_directory(&session_id, &path))?;
+        // 宿主 filesystem-provider 固定 auto：编码容错只面向 SFTP 面板。
+        self.runtime.block_on(self.ssh.sftp_create_directory(
+            &session_id,
+            &path,
+            sftp_name::NameEncoding::Auto,
+        ))?;
         Ok(json!({ "success": true }))
     }
 
@@ -1806,8 +1819,12 @@ impl Plugin {
             .get("recursive")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        self.runtime
-            .block_on(self.ssh.sftp_delete(&session_id, &path, recursive))?;
+        self.runtime.block_on(self.ssh.sftp_delete(
+            &session_id,
+            &path,
+            recursive,
+            sftp_name::NameEncoding::Auto,
+        ))?;
         Ok(json!({ "success": true }))
     }
 
@@ -1815,8 +1832,12 @@ impl Plugin {
         let session_id = self.filesystem_session(&params)?;
         let source = required_string(&params, "sourceUri").and_then(path_from_sftp_uri)?;
         let target = required_string(&params, "targetUri").and_then(path_from_sftp_uri)?;
-        self.runtime
-            .block_on(self.ssh.sftp_rename(&session_id, &source, &target))?;
+        self.runtime.block_on(self.ssh.sftp_rename(
+            &session_id,
+            &source,
+            &target,
+            sftp_name::NameEncoding::Auto,
+        ))?;
         Ok(json!({ "success": true }))
     }
 }
