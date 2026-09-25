@@ -24,6 +24,7 @@ mod otp;
 mod otp_store;
 mod preferences;
 mod quick_commands;
+mod rdp_session;
 mod serial_session;
 mod serial_xmodem;
 mod session_recording;
@@ -69,6 +70,7 @@ struct Plugin {
     telnet: Arc<telnet_session::TelnetSessionRuntime>,
     serial: Arc<serial_session::SerialSessionRuntime>,
     vnc: Arc<vnc_session::VncSessionRuntime>,
+    rdp: Arc<rdp_session::RdpSessionRuntime>,
     mcp: Arc<mcp::McpState>,
     watcher: Arc<file_watch::WatchRuntime>,
 }
@@ -91,6 +93,7 @@ impl Plugin {
             telnet: Arc::new(telnet_session::TelnetSessionRuntime::new()),
             serial: Arc::new(serial_session::SerialSessionRuntime::new()),
             vnc: Arc::new(vnc_session::VncSessionRuntime::new()),
+            rdp: Arc::new(rdp_session::RdpSessionRuntime::new()),
             watcher: Arc::new(file_watch::WatchRuntime::new()),
         })
     }
@@ -631,6 +634,75 @@ impl Plugin {
                 Ok(json!({ "success": true }))
             }
             "vnc/list" => Ok(self.runtime.block_on(self.vnc.list())),
+            // RDP 远程桌面会话（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1
+            // vendored IronRDP 链（0.17 lockstep）。范围（评审定案，见
+            // docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md）：密码/NLA（CredSSP）
+            // + TLS + 文本剪贴板 + 断线重连；不做音频/驱动器重定向/网关/UDP/
+            // Kerberos。桌面帧以 44 字节 patch 头走 `rdp/frame/{id}`（与
+            // vnc/frame 同族），生命周期事件 `rdp/session/state`，远端剪贴板
+            // 更新走 `rdp/clipboard` 事件。安全红线：密码以 Zeroizing 持有、
+            // 不进日志/审计/错误；证书策略 fail-closed（prompt 默认、120s
+            // 确认窗、remember 记入 rdp-known-certs.json）；剪贴板 text-only
+            // + 16 MiB 上限；认证类失败不自动重连。
+            "rdp/start" => {
+                let request: rdp_session::RdpStartRequest = parse(params)?;
+                self.runtime
+                    .block_on(self.rdp.start(request, emitter.clone(), &plugin_data_dir()))
+            }
+            // 键盘/指针事件转发（scancode + extended 位，映射同 NyaTerm）；
+            // `rdp/write` 为同语义别名。
+            "rdp/input" | "rdp/write" => {
+                let request: rdp_session::RdpInputRequest = parse(params)?;
+                self.runtime
+                    .block_on(self.rdp.input(&request.session_id, request.input))?;
+                Ok(json!({ "success": true }))
+            }
+            // 服务端动态分辨率（校验桌面尺寸上界后转发引擎）。
+            "rdp/resize" => {
+                let request: rdp_session::RdpResizeRequest = parse(params)?;
+                self.runtime.block_on(self.rdp.resize(
+                    &request.session_id,
+                    request.width,
+                    request.height,
+                ))?;
+                Ok(json!({ "success": true }))
+            }
+            // 本地剪贴板 → 远端（text-only，16 MiB 上限）。
+            "rdp/set-clipboard" => {
+                let session_id = required_string(&params, "sessionId")?;
+                let text = required_string(&params, "text")?.to_string();
+                self.runtime
+                    .block_on(self.rdp.set_clipboard(session_id, text))?;
+                Ok(json!({ "success": true }))
+            }
+            // 手动重连：generation 计数防串话。
+            "rdp/reconnect" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime
+                    .block_on(self.rdp.reconnect(session_id, emitter.clone()))
+            }
+            // 证书确认应答（`connection/challenge` kind=rdp-certificate）。
+            // 缺省 accept=false：超时/取消一律拒绝（fail-closed）。
+            "rdp/certificate/resolve" => {
+                let challenge_id = required_string(&params, "challengeId")?;
+                let accept = params
+                    .get("accept")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let remember = params
+                    .get("remember")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.rdp
+                    .resolve_certificate(challenge_id, accept, remember)?;
+                Ok(json!({ "success": true }))
+            }
+            "rdp/close" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.rdp.close(session_id))?;
+                Ok(json!({ "success": true }))
+            }
+            "rdp/list" => Ok(self.runtime.block_on(self.rdp.list())),
             "workbench/close" => {
                 let workbench_id = required_string(&params, "workbenchId")?;
                 self.runtime
@@ -644,6 +716,8 @@ impl Plugin {
                     .block_on(self.telnet.close_workbench(workbench_id));
                 self.runtime
                     .block_on(self.vnc.close_workbench(workbench_id));
+                self.runtime
+                    .block_on(self.rdp.close_workbench(workbench_id));
                 Ok(json!({ "success": true }))
             }
             "ssh/host-key/resolve" | "connection/challenge/resolve" => {
@@ -657,11 +731,18 @@ impl Plugin {
                     .get("remember")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                self.runtime.block_on(self.ssh.prompts.resolve(
-                    challenge_id,
-                    operation_id,
-                    PromptDecision { accept, remember },
-                ))?;
+                // RDP 证书确认（kind=rdp-certificate）有自己的注册表；先按
+                // id 路由，未命中再进 SSH host-key/agent 的共享 resolve。
+                if self.rdp.has_certificate_challenge(challenge_id) {
+                    self.rdp
+                        .resolve_certificate(challenge_id, accept, remember)?;
+                } else {
+                    self.runtime.block_on(self.ssh.prompts.resolve(
+                        challenge_id,
+                        operation_id,
+                        PromptDecision { accept, remember },
+                    ))?;
+                }
                 Ok(json!({ "success": true }))
             }
             "sftp/home" => {
