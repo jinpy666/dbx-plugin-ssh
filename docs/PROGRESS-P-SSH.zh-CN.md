@@ -3903,4 +3903,4 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **M20/M21 smoke 批次 CI 复验全绿**：run 36168745204 success（SSH container smoke 2m46s，watcher 组在 CI 真容器通过，PR #98 同代码 push CI 36168736222 同绿）。此前 36165580277 / 36166909296 的失败（watch/start 报 "File watching is only available on desktop"）根因为 headless runner 的 `can_save_local` 探测误判，`DBX_SSH_LOCAL_SAVE=1`（3ba0e574，smoke 与 DBX_SSH_DOWNLOAD_DIR 同点注入）覆盖修复。
 - **M22-A**（parity-np22-ci-mcp-smoke c0581681）：ssh-smoke job 追加 smoke_mcp.py 在线段（MCP stdio 独立进程真容器全链；密码走步骤 env DBX_SSH_SMOKE_PASSWORD 注入）——M17-M19 的 MCP 工具面由此获得独立 stdio 进程口径的 CI 覆盖。
 - **M22-B**（parity-np22-protocol-audit e168c41f）：协议-实现对账审计（报告 docs/AUDIT-PROTOCOL-IMPL.zh-CN.md）——12 条差异修文档 8 处（watch/* 族补协议专节、递归下载 latin-1 段批次标注、FEATURE_PARITY 方法数重清点 68→182 等）；实现层仅登记 4 条待人工确认，最重要 R1：工作台与 MCP 两个 sftp/exists 面对 LSTAT 错误的语义不一致（M18「权限错误绝不误报 false」契约只覆盖 MCP 面）。
-- M22 合并后 CI run 36174063661 进行中（本补记时点）。
+- **M22 合并后 CI 全绿**：run 36174063661 success（31m49s，SSH container smoke 3m23s 含 MCP stdio 在线段首跑）。至此 M19.5→M22 全批次 CI 口径收口；可自动化 backlog 清零，剩余 R1（exists 双面语义拉齐，实现变更）等审计登记项待人工决策。
