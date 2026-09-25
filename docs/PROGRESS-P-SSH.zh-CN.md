@@ -3700,3 +3700,23 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **对话框参数记忆 ✅**（6bc0496）：Telnet/Serial/VNC 三弹窗经共享 `lib/connectLastParams.ts` 回填/写穿上次参数（pluginStore 三新键）；凭据字段一律不落盘。
 - **全量**：frontend vitest **980**（98 文件，基线 975 只增不减：connectLastParams 5）/ vue-tsc 0 / build 过（ui/ 重生成）；backend 零改动；connection-forms verify 502 组合全过。
 - **遗留**：telnet/vnc 连接驱动的直启路径需扩展 mockDbxHost fixture（telnet/start mock）后才能 e2e 验证——下一轮；serial 协议化 deferred（参数组不同构）；RDP 表单暴露待实现落地。
+
+
+## M10 收口（2026-09-25，评审修复批次：四线并发 + cron 看护）
+
+两轮代码评审（结构/性能/UI体验/安全）发现的问题按四条并发线修复合入：
+
+- **fe-fix（19cde73/b187746，merge bad2baa）**：ghost 锚点视口公式（cursorY-viewportY → cursorViewportRow/cursorAbsoluteRow，新 lib/terminalAnchor.ts + 5 用例含旧公式负值对照）；confirmTelnetOpen 补关 serialSession；Serial/VNC 弹窗补 X 关闭图标 import；ghost 与结构化补全互斥（ghostMenuSuppressed + ArrowRight 消费顺序）。
+- **x11-gate（2bdeb42，merge 后 backend 818）**：两轮 CRITICAL 闭环——SshClient 覆写 server_channel_open_x11（fail-closed：准入→setup 校验→真 cookie 替换→桥接；accept 后缓冲校验是 SSH 协议顺序约束，文档注释说明）；ACTIVE_GATE OnceLock → Mutex<Option<Arc>>，re-arm 替换 + 最后会话关闭全局 disarm；+6 测试（替换拒绝/计数独立/分块 cookie/setup 超限等）。
+- **watch-path（7a5ca42/967a11d，merge 后 823）**：watch/start+upload_back 复用 validate_remote_edit_path（canonical 前缀 + symlink 逃逸/目录穿越反例测试）；upload_back metadata 预检 + spawn_blocking；指纹哈希异步化；QR 解码 ImageReader limits；OTP tmp 0600 先建后写。
+- **ci-contract（71253b4/78d32b3，merge 后 812→合入时点）**：UI walkthrough 挂入 CI frontend job（DBX_SMOKE_STRICT=1 下依赖缺失即失败，退出码分离实测）；agent-flow validation.local 补两项；PROTOCOL.zh-CN.md 补 vnc/frame 44 字节契约节；跨端 golden hex 向量双侧断言（后端 +1）。
+
+**上轮评审闭环**：CRITICAL 2/2（X11 gate、ghost 锚点）、HIGH 4/4（watch 路径、telnet 漏关、X 图标、浮层互斥）、MEDIUM 若干（QR limits、0600、upload 预检、e2e 门、契约文档）；X 图标与 telnet 漏关为第二轮复核确认的残留，本轮清零。
+
+**全量**：backend cargo **823**（811 → +12，只增不减）/ clippy -D warnings 0 / fmt 干净；frontend vitest **990**（980 → +10）/ vue-tsc 0 / build 过（ui/ 重生成）。CI 含新挂的 UI walkthrough 门（strict 模式），首次 CI 观测项见 commit 注记。
+
+### M10 遗留
+
+1. CI 的 UI walkthrough job 首次运行需观测（runner Chrome 与 playwright-core 协议匹配无法本地验证，回退方案已写入 ci.yml 注释）。
+2. X11 guard 页面缺位：setup 校验在 accept 后（协议约束），畸形流量最坏影响为上限 8 的悬挂通道——已记录，不阻塞。
+3. 评审其余 MEDIUM/LOW（串口上传内存上限/写线程化、gutter 满容量平移、协议表单端口联动、modalOpenStates 注册器化等）留下一轮按优先级消化。

@@ -113,3 +113,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 仍保持未验收（依赖真机/人工）：serial-xymodem 线在途（模块已落盘，验证中）；ghost/spec 真机输入法与宿主渲染联调；DBX 桌面端到端；RDP 评审执行。
 
 - 补录：serial-xymodem 合入（backend 801 / 前端 975 终值），XMODEM/YMODEM/ZMODEM 上传协议状态机与 serialUpload 前端为新增可测面；smoke_serial_upload.py 入实例测试家族。np9 排期清零。
+
+
+## M10（评审修复批次，2026-09-25）
+
+单测：cargo **823/823**（811 → +12：x11 gate 6 + watch/otp 5 + vnc golden 向量 1）、vitest **990/990**（980 → +10：terminalAnchor 5 + ghost 互斥 2 + vncFrame 向量等）、vue-tsc 0 错、build 过（ui/ 重生成）、clippy -D warnings 0、fmt 干净。
+
+新增可测面：X11 反向通道 fail-closed 准入（上限/cookie/替换/disarm）、watch 本地路径来源校验（remote-edit 前缀/穿越/symlink 逃逸）、ghost 锚点 scrollback 语义（可见行/绝对行）、ghost×补全互斥、vnc/frame 跨端 golden 向量；CI 新增 UI walkthrough strict 门。
+
+仍保持未验收（依赖真机/CI）：X server 真机联调、CI walkthrough job 首跑观测；其余人工门不变（真机矩阵、RDP 评审、PR 合入）。
