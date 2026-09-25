@@ -851,7 +851,7 @@ offset 语义不变）。中断来源不限：前端中止、sidecar 重启、�
 `> 1`（init/pid 0 直接拒绝），signal 仅接受 `1/2/9/15`；渲染为 `kill -<NAME> <pid>`（数值全部白名单化，
 无注入面）。返回 `{ success: true, pid }`；远端退出码非 0 报错（如进程不存在）。
 
-### ssh/recording/start、stop、list、get、delete
+### ssh/recording/start、stop、list、get、delete、search
 
 会话级录制：`ssh/recording/start`（参数 `{ sessionId }`）在会话读循环安装录制器，输出
 （stdout+stderr、目录跟随过滤后、不含 State 帧）以 asciicast v2 JSONL 写入
@@ -867,3 +867,17 @@ durationSecs, bytes }] }`（文件 mtime 新→旧；坏文件跳过）。`ssh/r
 events: [{ time, type, data }] }`（旧→新分页）。`ssh/recording/delete` 参数 `{ recordingId }`
 删除文件；id 走路径穿越校验（含 `/`、`\`、`..` 拒绝）。录制属工作台能力，不进 MCP 工具面；
 `ssh/sessions/list` 每行新增 `recording: bool` 反映该会话是否录制中。
+
+`ssh/recording/search`（M14）参数 `{ query }` → `{ recordings: [{ recordingId, sessionId,
+connectionId, host, startedAt, durationSecs, bytes, nameMatch, hits: [{ time, excerpt }] }] }`：
+无持久索引，对现存 `.cast` 即时扫描（上限 200 个录制、每录制最多 5 条命中，excerpt 以
+ANSI/OSC 剥离 + 换行压平后的单行文本截取约 120 字符、命中词完整保留）。命中 = 名称命中
+（`host`/`recordingId` 包含查询词，大小写不敏感，`nameMatch: true`、`hits` 可为空）或内容命中
+（stdout 展平文本包含查询词）。空查询返回空集（前端显示未过滤列表）；新→旧排序同 `list`。
+
+会话自动录制（M14）：偏好键 `auto_record`（`local/preferences/set` 白名单布尔，默认关），
+sidecar 启动与偏好写入时同步进程内快速标志（同 `x11_forwarding` 模式）；`ssh/session/open`
+按该标志对每个新会话自动挂录制器（只读连接不禁用——录制是被动输出捕获），已有录制进行中
+则跳过。两种情形均经事件 `ssh/recording/auto` 提示一次，负载 `{ sessionId, recordingId? }` 或
+`{ sessionId, skipped: true }`，只含 id 不含内容。Transcript 纯文本导出在前端完成（复用
+`ssh/recording/get` 分页 + 既有保存桥，ANSI 剥离/时间戳拼接为纯前端逻辑），不新增协议面。

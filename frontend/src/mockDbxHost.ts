@@ -509,7 +509,7 @@ const highlightRuleViews = () => [...highlightRulesState].sort((a, b) => a.creat
 // 权限档与连接作用域，镜像持久化 + 校验语义。
 const mcpSettingsState = { execPermissionMode: "autonomous", connectionScope: [] as string[] };
 // 插件级 UI 偏好（local/preferences/get|set）：镜像 sidecar preferences.json 的合并语义。
-const localPrefsState = { downloadDir: "", downloadUseDefaultDir: true, downloadConflictPolicy: "rename", localShell: "", localShellIntegration: true };
+const localPrefsState = { downloadDir: "", downloadUseDefaultDir: true, downloadConflictPolicy: "rename", localShell: "", localShellIntegration: true, auto_record: false };
 // 镜像并行批次 ssh/audit/list 的真实形状（AuditEntry：tsMs/tool/connectionId/
 // gate/approval/outcome/exitCode/durationMs/mode/command/output/error，
 // 0.4.77 起带 command/output 尾部）；末条保留计划 §1.1 旧形状（ts 秒 + kind +
@@ -741,6 +741,23 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     const events = RECORDING_FIXTURE_EVENTS.slice(offset, offset + limit);
     result = { events, total: RECORDING_FIXTURE_EVENTS.length, hasMore: offset + events.length < RECORDING_FIXTURE_EVENTS.length };
   }
+  else if (method === "ssh/recording/search") {
+    // M14：镜像真实契约——无持久索引、即时扫描；名称命中（host/recordingId
+    // 包含查询词，大小写不敏感）或内容命中（展平文本包含查询词），回命中摘录。
+    const query = String((params as Record<string, unknown>)?.query || "").trim().toLowerCase();
+    const matches: Array<Record<string, unknown>> = [];
+    if (query) {
+      const summary = RECORDING_FIXTURE_SUMMARY;
+      const nameMatch = summary.host.toLowerCase().includes(query) || summary.recordingId.toLowerCase().includes(query);
+      const stripAnsi = (raw: string) => raw.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").trim();
+      const hits = RECORDING_FIXTURE_EVENTS
+        .filter((event) => stripAnsi(event.data).toLowerCase().includes(query))
+        .slice(0, 5)
+        .map((event) => ({ time: event.time, excerpt: stripAnsi(event.data) }));
+      if (nameMatch || hits.length) matches.push({ ...summary, nameMatch, hits });
+    }
+    result = { recordings: matches };
+  }
   else if (method === "ssh/recording/delete") result = { success: true };
   else if (method === "ssh/recording/clear") result = { success: true, deleted: 1 };
   else if (method === "ssh/recording/reveal") result = { success: true };
@@ -823,6 +840,7 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     if (typeof input.downloadDir === "string") localPrefsState.downloadDir = input.downloadDir.trim();
     if (typeof input.downloadUseDefaultDir === "boolean") localPrefsState.downloadUseDefaultDir = input.downloadUseDefaultDir;
     if (typeof input.downloadConflictPolicy === "string" && ["rename", "ask", "overwrite"].includes(input.downloadConflictPolicy)) localPrefsState.downloadConflictPolicy = input.downloadConflictPolicy;
+    if (typeof input.auto_record === "boolean") localPrefsState.auto_record = input.auto_record;
     result = { ...localPrefsState };
   }
   else if (method === "sftp/upload/start") result = { taskId: `visual-upload-${++fixtureUploadCount.value}`, chunkSize: 262144 };

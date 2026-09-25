@@ -215,6 +215,7 @@ import { pushSample, sparklinePath, METRICS_SAMPLE_CAPACITY } from "./lib/metric
 import { transferPausable, matchResumableUpload, canResumeUpload, type ResumableUploadTask } from "./lib/transferResume";
 import { isLiveTransferStatus, sortTransferTasks } from "./lib/transferOrder";
 import { buildTimeline, eventIndexAtTime, gifFramePlan, mergeEventPages, replayDuration, type RecordingSummary, type ReplayEvent, type ReplayEventPage } from "./lib/replayScheduler";
+import { buildTranscript, transcriptFileName } from "./lib/transcript";
 import { encodeGif } from "./lib/gifEncoder";
 import { canKillProcess, sortProcessRows, type ProcessSortKey } from "./lib/processActions";
 import { distroBadge, type DistroBadge } from "./lib/distroBadge";
@@ -3944,6 +3945,19 @@ function handleEvent(event: DbxPluginEvent) {
     const payload = event.params as { sessionId?: string; stage?: number; kind?: string };
     const stage = Math.max(1, Number(payload.stage) || 1);
     showNotice(t(payload.kind === "timeout" ? "triggerTimeout" : "triggerAnswered", { stage }));
+    return;
+  }
+  // 会话自动录制（M14）：sidecar 在 open_session 时按 auto_record 偏好自动
+  // 挂录制器（或因录制已在进行而跳过），事件每次只发一次，负载仅含 id。
+  if (event.method === "ssh/recording/auto" && event.params.sessionId === session.value?.sessionId) {
+    const payload = event.params as { sessionId?: string; recordingId?: string; skipped?: boolean };
+    if (payload.skipped) {
+      showNotice(t("recordingAutoSkipped"));
+    } else {
+      recordingActive.value = true;
+      startRecordingClock();
+      showNotice(t("recordingAutoStarted"));
+    }
     return;
   }
   if (event.method === "watch/file-modified") {
@@ -9709,6 +9723,8 @@ async function loadRecordings() {
   } finally {
     recordingsLoading.value = false;
   }
+  // 列表有增删（删除/清空/新录制）时同步刷新内容搜索命中。
+  if (recordingsQuery.value.trim()) void runRecordingSearch();
 }
 
 function toggleRecordings() {
@@ -9727,6 +9743,121 @@ async function revealRecording(item: RecordingSummary) {
   } catch (cause) {
     showError(cause);
   }
+}
+
+// —— M14 录制增强：transcript 导出 ———
+// 回放链已把事件分页拉到前端，transcript 在前端拼装（lib/transcript 纯函数）
+// 并走既有保存桥（宿主 fileTransfer → sidecar local/saveFile → 浏览器下载），
+// 不新增协议面。
+async function exportRecordingTranscript(item: RecordingSummary) {
+  if (recordingExportingId.value) return;
+  recordingExportingId.value = item.recordingId;
+  try {
+    const events = await loadReplayEvents(item.recordingId);
+    const text = buildTranscript(events);
+    if (!text) throw new Error(t("replayExportFailed"));
+    const bytes = new TextEncoder().encode(text);
+    const fileName = transcriptFileName(item.recordingId);
+    const fileTransfer = window.dbxPlugin.fileTransfer;
+    if (fileTransfer) {
+      // 宿主原生保存对话框：用户自选目的地。
+      const target = await fileTransfer.beginSave({ name: fileName, contentType: "text/plain", size: bytes.byteLength });
+      try {
+        await fileTransfer.write(target.handleId, 0, bytes);
+        await fileTransfer.finish(target.handleId);
+      } catch (cause) {
+        await fileTransfer.cancel(target.handleId).catch(() => undefined);
+        throw cause;
+      }
+      showNotice(t("replayExported"));
+      return;
+    }
+    const local = await probeLocalCapabilities();
+    if (local?.canSaveLocal) {
+      // sidecar 落盘：默认下载目录（或「每次询问」），冲突走既有协商流。
+      let targetDir = "";
+      let setDefaultAfter = false;
+      if (!loadDownloadUseDefaultDir()) {
+        const chosen = await askDownloadTarget(fileName);
+        if (chosen === undefined) return;
+        targetDir = chosen.dir.trim();
+        setDefaultAfter = chosen.setDefault;
+      }
+      const conflict = await resolveDownloadConflictFor(targetDir, fileName);
+      if (conflict === undefined) return;
+      const saved = await window.dbxPlugin.invoke<{ localPath: string; name: string }>("local/saveFile", {
+        name: fileName,
+        dataBase64: window.dbxPlugin.encodeBase64(bytes),
+        targetDir: targetDir || loadDownloadDir() || undefined,
+        conflict: conflict === "overwrite" ? "overwrite" : undefined,
+      });
+      showNotice(t("downloadedTo", { name: saved.name, path: saved.localPath }), [
+        { label: t("openDownloadedFile"), run: () => void openTransferTarget(saved.localPath) },
+        { label: t("revealInFolder"), run: () => void revealTransferTarget(saved.localPath) },
+      ]);
+      if (setDefaultAfter) applyChosenDirAsDefault(targetDir);
+      return;
+    }
+    saveBrowserDownload([bytes], fileName);
+    showNotice(t("replayExported"));
+  } catch (cause) {
+    showError(cause);
+  } finally {
+    recordingExportingId.value = null;
+  }
+}
+
+// —— M14 录制增强：列表搜索（名称过滤 + 内容全文命中摘录）———
+// 内容搜索走 ssh/recording/search 即时扫描（无持久索引），只回命中摘录，
+// 前端不在搜索路径上拉全量事件。
+const recordingsQuery = ref("");
+const recordingHits = ref<Record<string, string[]>>({});
+const recordingSearchBusy = ref(false);
+let recordingSearchTimer = 0;
+
+const filteredRecordings = computed(() => {
+  const query = recordingsQuery.value.trim().toLowerCase();
+  if (!query) return recordings.value;
+  return recordings.value.filter((item) => {
+    if ((item.host || "").toLowerCase().includes(query)) return true;
+    if (item.recordingId.toLowerCase().includes(query)) return true;
+    return (recordingHits.value[item.recordingId] ?? []).length > 0;
+  });
+});
+
+async function runRecordingSearch() {
+  const query = recordingsQuery.value.trim();
+  if (!query) {
+    recordingHits.value = {};
+    recordingSearchBusy.value = false;
+    return;
+  }
+  recordingSearchBusy.value = true;
+  try {
+    const result = await window.dbxPlugin.invoke<{ recordings: Array<{ recordingId: string; hits?: Array<{ excerpt: string }> }> }>(
+      "ssh/recording/search",
+      { query },
+    );
+    const hits: Record<string, string[]> = {};
+    for (const row of result.recordings ?? []) {
+      hits[row.recordingId] = (row.hits ?? []).map((hit) => hit.excerpt);
+    }
+    recordingHits.value = hits;
+  } catch {
+    recordingHits.value = {};
+  } finally {
+    recordingSearchBusy.value = false;
+  }
+}
+
+watch(recordingsQuery, () => {
+  window.clearTimeout(recordingSearchTimer);
+  recordingSearchTimer = window.setTimeout(() => void runRecordingSearch(), 250);
+});
+
+function clearRecordingsSearch() {
+  recordingsQuery.value = "";
+  recordingHits.value = {};
 }
 
 function deleteRecording(item: RecordingSummary) {
@@ -11571,30 +11702,41 @@ onBeforeUnmount(() => {
             </template>
           </div>
         </section>
-        <!-- 录制记录浮条：列出 .cast 录制，可回放/删除 -->
+        <!-- 录制记录浮条：列出 .cast 录制，可回放/导出/删除；
+             M14 增加名称+内容搜索（命中行摘录）与 transcript 导出。 -->
         <section v-if="recordingsOpen" class="metrics-float recordings-float">
           <header>
             <h2>{{ t("recordingsTitle") }}</h2>
             <button v-if="recordings.length" class="icon-button recording-delete" :title="t('recordingsClear')" :disabled="recordingClearAllSubmitting" @click="recordingClearAllOpen = true"><Trash2 /></button>
             <button :title="t('close')" class="icon-button" @click="toggleRecordings"><X /></button>
           </header>
+          <div class="recordings-search-row" v-if="recordings.length">
+            <Search class="recordings-search-icon" />
+            <input v-model="recordingsQuery" class="recordings-search" type="search" :placeholder="t('recordingsSearchPlaceholder')" :aria-label="t('recordingsSearchPlaceholder')" />
+            <button v-if="recordingsQuery" class="icon-button compact" :title="t('close')" @click="clearRecordingsSearch"><X /></button>
+          </div>
           <div class="metrics-float-body">
             <div v-if="recordingsLoading && !recordings.length" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
             <div v-else-if="!recordings.length" class="empty compact">{{ t("recordingsEmpty") }}</div>
-            <article v-for="item in recordings" :key="item.recordingId" class="recording-card">
-              <Disc class="recording-icon" />
-              <div class="recording-text">
-                <span class="recording-host">{{ item.host || item.recordingId }}</span>
-                <span class="recording-meta">{{ formatRecordedAt(item.startedAt) }}<template v-if="item.bytes"> · {{ formatBytes(item.bytes) }}</template></span>
-              </div>
-              <span class="recording-duration mono">{{ formatDuration(item.durationSecs ?? 0) }}</span>
-              <div class="recording-actions">
-                <button class="icon-button compact" :title="t('replayOpen')" @click="openReplay(item)"><Play /></button>
-                <button class="icon-button compact" :title="t('replayExportGif')" :disabled="replayExporting" @click="exportRecordingFromList(item)"><Loader2 v-if="recordingExportingId === item.recordingId" class="spinning" /><ImagePlay v-else /></button>
-                <button v-if="localCanSave" class="icon-button compact" :title="t('revealInFolder')" :aria-label="t('revealInFolder')" @click="revealRecording(item)"><FolderOpen /></button>
-                <button class="icon-button compact recording-delete" :title="t('recordingDelete')" @click="deleteRecording(item)"><Trash2 /></button>
-              </div>
-            </article>
+            <div v-else-if="!filteredRecordings.length" class="empty compact">{{ t("recordingsNoMatch") }}</div>
+            <template v-for="item in filteredRecordings" :key="item.recordingId">
+              <article class="recording-card">
+                <Disc class="recording-icon" />
+                <div class="recording-text">
+                  <span class="recording-host">{{ item.host || item.recordingId }}</span>
+                  <span class="recording-meta">{{ formatRecordedAt(item.startedAt) }}<template v-if="item.bytes"> · {{ formatBytes(item.bytes) }}</template></span>
+                  <span v-for="(hit, hitIndex) in recordingHits[item.recordingId] ?? []" :key="hitIndex" class="recording-hit mono">{{ hit }}</span>
+                </div>
+                <span class="recording-duration mono">{{ formatDuration(item.durationSecs ?? 0) }}</span>
+                <div class="recording-actions">
+                  <button class="icon-button compact" :title="t('replayOpen')" @click="openReplay(item)"><Play /></button>
+                  <button class="icon-button compact" :title="t('replayExportGif')" :disabled="replayExporting" @click="exportRecordingFromList(item)"><Loader2 v-if="recordingExportingId === item.recordingId" class="spinning" /><ImagePlay v-else /></button>
+                  <button class="icon-button compact" :title="t('recordingExportTranscript')" :aria-label="t('recordingExportTranscript')" :disabled="replayExporting" @click="exportRecordingTranscript(item)"><FileText /></button>
+                  <button v-if="localCanSave" class="icon-button compact" :title="t('revealInFolder')" :aria-label="t('revealInFolder')" @click="revealRecording(item)"><FolderOpen /></button>
+                  <button class="icon-button compact recording-delete" :title="t('recordingDelete')" @click="deleteRecording(item)"><Trash2 /></button>
+                </div>
+              </article>
+            </template>
           </div>
         </section>
         <!-- 回放弹窗：xterm 重放 + 倍速/进度/GIF 导出 -->
@@ -12871,6 +13013,12 @@ onBeforeUnmount(() => {
 .recording-host { overflow: hidden; font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .recording-meta { overflow: hidden; color: var(--muted-foreground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .recording-duration { flex: 0 0 auto; color: var(--foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* M14：录制搜索行（名称过滤 + 内容全文命中）与命中行摘录。 */
+.recordings-search-row { display: flex; align-items: center; gap: 6px; padding: 4px 10px 2px; }
+.recordings-search-icon { width: 13px; height: 13px; flex: 0 0 13px; color: var(--muted-foreground); }
+.recordings-search { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); color: var(--foreground); font-size: 12px; padding: 4px 8px; }
+.recordings-search:focus { outline: none; border-color: var(--ring); }
+.recording-hit { overflow: hidden; color: var(--muted-foreground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .recording-actions { display: flex; flex: 0 0 auto; gap: 2px; }
 .recording-delete { color: var(--muted-foreground); }
 .recording-delete:hover:not(:disabled) { color: var(--destructive); }

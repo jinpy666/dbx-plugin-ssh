@@ -403,6 +403,14 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
             .ok_or_else(|| "x11_forwarding must be a boolean".to_string())?;
         map.insert("x11_forwarding".to_string(), Value::Bool(enabled));
     }
+    // 会话自动录制（M14）：默认关；只读连接不禁用（录制是被动输出捕获，
+    // 不向远端发送任何内容）。
+    if let Some(value) = params.get("auto_record") {
+        let enabled = value
+            .as_bool()
+            .ok_or_else(|| "auto_record must be a boolean".to_string())?;
+        map.insert("auto_record".to_string(), Value::Bool(enabled));
+    }
     if let Some(value) = params.get("transfer_duplicate_policy") {
         let policy = sanitize_conflict_policy(value).ok_or_else(|| {
             "transfer_duplicate_policy must be rename, ask or overwrite".to_string()
