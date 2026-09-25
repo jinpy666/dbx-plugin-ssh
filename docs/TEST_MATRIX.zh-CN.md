@@ -169,3 +169,30 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：exists form:"wire" 整条还原；copy/move 覆盖预检 LSTAT 与同目录 RENAME 快路径；displayPathToWire 与 sidecar 组合逐字符等价；MCP 连接级判定优先链三态；MCP 列表显示路径→写工具往返闭环（含 rename）。
 
 仍保持未验收（依赖真机/人工）：latin-1 真机全链联调（粘贴/copy/move/拖入/MCP 工具往返）、多文件 watcher 外部编辑全链路真机手测、既有真机门不变。
+
+
+## M18（欠账清理批次，2026-09-25）
+
+单测：cargo **950/950**（M17 后基线 940+10：MCP 七工具 latin-1 往返闭环 6 + 收编模块修复配平）、vitest **1067/1067**（106 文件，1064+3：mock auth=auto 场景 3）、vue-tsc 0、build 过、clippy 0、fmt 0。smoke_fs_test.py +9 用例（CI ssh-smoke job 执行）。
+
+新增可测面：MCP stat/exists/read/write/chmod latin-1 裸包分支往返；exists 仅 NO_SUCH_FILE 判不存在的契约；write_file 直写语义；copy/move 预检 LSTAT 与同目录 RENAME 快路径；smoke latin-1 全链（含 exists wire 双形态交叉反例、覆盖回退后 auto 高层删 0xE9 名的清理路径）；mock auth=auto 逐方式事件序列与全败聚合。
+
+仍保持未验收（依赖真机/人工）：latin-1 真机全链联调（工作台+MCP 面）、多文件 watcher 全链路、既有真机门不变。
+
+
+## M19（编码保真收尾批次，2026-09-25）
+
+单测：cargo 基线 950 → **953**（+3：MCP upload/download latin-1 裸包分支往返闭环）、vitest 基线 1067 无前端改动。clippy 0、fmt 0。smoke_fs_test.py latin-1 组 +1 用例（sftp/symlink-create/read/update 往返）。
+
+新增可测面：MCP sftp_upload 直写帧序（LSTAT 预检 + OPEN + WRITE 载荷逐字节）与 sftp_download OPEN(READ) 帧路径字节；同显示路径 upload/download OPEN 帧字节一致 + 载荷回收的往返闭环；smoke 符号链接三命令 latin-1 路径（0xE9 字节链接名 + 显示指向读写回环）。
+
+仍保持未验收（依赖真机/人工）：latin-1 真机全链联调（工作台+MCP 面，含传输工具）、既有真机门不变。
+
+
+## M19.5（真机复验轮，2026-09-25，Mac linuxserver/openssh-server 容器实测）
+
+单测：cargo 基线（win 957）→ mac 口径 **963/963**（+1：`request_type_codes_match_draft02_literals` 全部 23 个 SFTP 类型码对 draft-02 字面值逐一对表 + READDIR 帧字节直读断言）、vitest **1067/1067**、vue-tsc 0、build 过、clippy 0、fmt 0。真机：smoke_fs_test **79/79 全组通过**（修复前 71 过/5 SKIP/2 FAIL）。
+
+修复面：`FXP_READDIR` 常量错值（16=REALPATH → 12）引发的 raw 列表通道 EOF；`sftp/read` latin-1 wire 车道补齐（raw_read_chunk，多读 1 字节 truncated 语义）；树下载 latin-1 逐文件裸包读取（`TreeDownloadState.latin1`）。三者均为「离线桩自洽通过、真容器才爆」的字节级缺口——字面值对表测试专门封堵常量自洽盲区。
+
+仍保持未验收（依赖真机/人工）：latin-1 真机全链联调在 CI 容器口径已过（本轮 79/79），工作台 GUI 手测与既有真机门不变。

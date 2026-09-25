@@ -841,9 +841,24 @@ impl Plugin {
                 let path = required_string(&params, "path")?;
                 let offset = optional_u64(&params, "offset", 0);
                 let max_bytes = bounded_bytes(&params, "maxBytes", 256 * 1024);
-                let (data, truncated) = self
-                    .runtime
-                    .block_on(self.ssh.sftp_read_path(session_id, path, offset, max_bytes))?;
+                // latin-1（M16 收口）：path 是整条 wire 形式（列表回传），
+                // 还原服务器字节后走裸包 READ（download 分片的 raw_read_chunk
+                // 先例）；多读 1 字节对齐高层的 truncated 语义。auto 走高层。
+                let encoding = self.resolve_sftp_encoding(session_id);
+                let (data, truncated) = if encoding == sftp_name::NameEncoding::Latin1 {
+                    let mut data = self.runtime.block_on(self.ssh.raw_read_chunk(
+                        session_id,
+                        path,
+                        offset,
+                        max_bytes.saturating_add(1) as u32,
+                    ))?;
+                    let truncated = data.len() > max_bytes;
+                    data.truncate(max_bytes);
+                    (data, truncated)
+                } else {
+                    self.runtime
+                        .block_on(self.ssh.sftp_read_path(session_id, path, offset, max_bytes))?
+                };
                 Ok(json!({ "dataBase64": BASE64_STANDARD.encode(data), "truncated": truncated }))
             }
             "sftp/createDirectory" => {

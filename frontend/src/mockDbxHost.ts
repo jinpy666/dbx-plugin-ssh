@@ -59,6 +59,45 @@ const rdpCertChallenge = fixtureParams.get("rdpCert") === "1";
 // attempt 1..2 → 终态 error），供退出覆盖层与重连状态条的走查。
 const rdpErrKind = fixtureParams.get("rdpErr");
 
+// ?auth=auto 模拟 Auto 认证链（M13-A，M18 mock 补齐）：ssh/session/open 按后端
+// AUTO_AUTH_ORDER（password → private-key → keyboard-interactive → agent，见
+// backend/src/ssh.rs）逐方式发 ssh/auth/auto 进度事件后拨号成功（agent 兜底
+// 成功，成功方式不发事件——与真实 sidecar「只报非成功阶段」一致）；
+// ?auth=autofail 四个方式全败并抛聚合错误串（auto_auth_failure_message 同构）。
+// 缺省不发任何认证进度事件（显式方式无回退叙事）。
+const authFixture = fixtureParams.get("auth") || "";
+const autoAuthActive = authFixture === "auto" || authFixture === "autofail";
+interface MockAutoAuthAttempt {
+  method: string;
+  status: "skipped" | "failed";
+  detail: string;
+}
+// 剧本：password 失败 → private-key 跳过（本地无私钥）→ keyboard-interactive
+// 失败 → agent 分歧点（auto 成功 / autofail 失败）。覆盖 skipped/failed 两种
+// 状态，事件形状镜像 backend/src/ssh.rs authenticate_auto 的 emitter.event。
+const AUTO_AUTH_BASE_ATTEMPTS: MockAutoAuthAttempt[] = [
+  { method: "password", status: "failed", detail: "password rejected by server" },
+  { method: "private-key", status: "skipped", detail: "no private key configured for this connection" },
+  { method: "keyboard-interactive", status: "failed", detail: "keyboard-interactive authentication timed out" },
+];
+const AUTO_AUTH_AGENT_FAILURE: MockAutoAuthAttempt = { method: "agent", status: "failed", detail: "no agent socket available" };
+// 聚合失败信息（auto_auth_failure_message 同构）：skipped 带前缀、failed 只带原因。
+function autoAuthFailureMessage(attempts: MockAutoAuthAttempt[]): string {
+  const summary = attempts
+    .map((attempt) => (attempt.status === "skipped" ? `${attempt.method} (skipped: ${attempt.detail})` : `${attempt.method} (${attempt.detail})`))
+    .join("; ");
+  return `SSH authentication failed in Auto mode, tried in order — ${summary}`;
+}
+function emitAutoAuthProgress(includeAgentFailure: boolean): void {
+  const attempts = includeAgentFailure ? [...AUTO_AUTH_BASE_ATTEMPTS, AUTO_AUTH_AGENT_FAILURE] : AUTO_AUTH_BASE_ATTEMPTS;
+  for (const attempt of attempts) {
+    for (const listener of eventListeners) listener({
+      method: "ssh/auth/auto",
+      params: { operationId: "visual-auth-auto", connectionId: context.connectionId, method: attempt.method, status: attempt.status, detail: attempt.detail },
+    });
+  }
+}
+
 const context = localOnlyContext
   ? {
       plugin: { mode: "local-terminal" },
@@ -71,7 +110,7 @@ const context = localOnlyContext
   workbenchId: "visual-workbench",
   restored: false,
   workbenchState: { sftpPath: "/home/demo", splitRatio: 58, paneOrder: "terminal-left", visibleColumns: ["size", "modified", "owner", "group", "permissions"] },
-  connection: { name: "Production SSH", host: "192.168.1.64", port: 22, username: "user", color: "#3b82f6", readOnly: !writable },
+  connection: { name: "Production SSH", host: "192.168.1.64", port: 22, username: "user", color: "#3b82f6", readOnly: !writable, ...(autoAuthActive ? { authentication: "auto" } : {}) },
 };
 
 const appearance: DbxPluginAppearance = {
@@ -620,6 +659,10 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   if (method === "ssh/session/open") {
     if (slowSessionOpenMs) await new Promise((resolve) => setTimeout(resolve, slowSessionOpenMs));
     if (failSessionOpen) throw new Error("SSH password authentication failed: password rejected by server");
+    // ?auth=auto|autofail：先按 AUTO_AUTH_ORDER 发逐方式进度事件（真实
+    // sidecar 在认证过程中发、响应前送达），autofail 再抛聚合错误终态。
+    if (autoAuthActive) emitAutoAuthProgress(authFixture === "autofail");
+    if (authFixture === "autofail") throw new Error(autoAuthFailureMessage([...AUTO_AUTH_BASE_ATTEMPTS, AUTO_AUTH_AGENT_FAILURE]));
     // A fresh session restarts sequence numbering at 1 (real sidecar
     // semantics): after an auto-reconnect the client resets its cursor to 0,
     // so continuing the global counter here would leave a permanent hole at
@@ -629,7 +672,7 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     scheduleDisconnect();
     result = { sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, connected: true, sequence: 0, chunkSize: 262144, directoryTrackingSupported: true };
   } else if (method === "ssh/terminal/replay") result = { frameCount: 0, firstAvailableSequence: 1, tailSequence: sequence, complete: true };
-  else if (method === "ssh/sessions/list") result = { sessions: failSessionOpen || freshSessionOpen ? [] : [{ sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, readOnly: !writable, connected: true, sudoKeepalive: true, createdAt: Math.floor(Date.now() / 1000), authMethod: "private-key", host: "server.demo.internal", port: 22, username: "demo" }] };
+  else if (method === "ssh/sessions/list") result = { sessions: failSessionOpen || freshSessionOpen ? [] : [{ sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, readOnly: !writable, connected: true, sudoKeepalive: true, createdAt: Math.floor(Date.now() / 1000), authMethod: authFixture === "auto" ? "auto" : "private-key", host: "server.demo.internal", port: 22, username: "demo" }] };
   else if (method === "ssh/session/attach") {
     const input = params as Record<string, unknown>;
     // 默认启动走 sessions/list → reattach；?slow=N 同样延迟 attach，否则
