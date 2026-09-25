@@ -142,3 +142,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：transcript ANSI/OSC/CR 剥离与时间戳；录制搜索命中摘录；transfer_max_active clamp 1-8；sftpName latin-1 解码与 %XX 转义往返；sudo_download staging/清理命令构造与 0600+chown 语义。
 
 仍保持未验收（依赖真机/人工）：raw SFTPv3 async 回环、非 UTF-8 真实服务器联调、sudo/download 真容器 smoke（smoke_fs_test.py 新用例）、兼容模式老服务器实测、既有真机门不变。
+
+
+## M15（遗留消化批次，2026-09-25）
+
+单测：cargo **929/929**（Windows 基线 920+9；macOS 口径基线 925——平台差异注记见 PROGRESS：A 线并行 watcher 3 + B 线 raw 路径保真 6 净增）、vitest **1057/1057**（105 文件，1047+10：watchEdits 注册表/队列 10）、vue-tsc 0、build 过、clippy 0、fmt 0。
+
+新增可测面：同会话双文件 watcher 互不顶替/各自触发/事件按 watchId+remotePath 区分；modified 队列（未知 id 丢弃/同文件去重/队头出队/过期决议拒绝）；64 并发回传暂存名全不重名；FXP RENAME/REMOVE/MKDIR/RMDIR/LSTAT 帧编解码与 STATUS 错误映射；write_path_bytes 目录前缀 %XX 还原 + 末段显示编码（字面 %XX 不二次转义）；join_raw_path 字节级拼接；latin-1 树删 LSTAT 判型/symlink 不跟随；tokio duplex 内存桩 raw 往返。
+
+仍保持未验收（依赖真机/人工）：多文件 watcher 外部编辑器全链路真机手测；latin-1 真实服务器 rename/delete/mkdir/rmdir/树下载联调；既有真机门不变。

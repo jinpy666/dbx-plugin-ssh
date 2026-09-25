@@ -211,7 +211,7 @@ RDP 已收官（2026-09-25，vendored IronRDP 链 RDP-1/2/3，真机 server 联�
 | 终端关键词高亮（README Features） | ✅ 已有 | `highlight_rules.rs` 存储（上限 30、文件 0600、首启播种后永不重播）+ `ssh/highlightRules/list\|save\|delete`；22 条按严重度分色的默认规则（红=ERROR/FATAL/Permission denied…、琥珀=FAIL/denied/timed out、黄=WARN/deprecated、绿=SUCCESS/PASSED 区分大小写、蓝=IPv4 正则；长短语优先）；前端 `keywordHighlight.ts` 纯函数 + xterm onRender 视口自绘着色（rAF 节流、单行/全局上限、总开关 `ssh-keyword-highlight`）+ 工具栏管理弹层（regex 合法性由前端保存前校验） |
 | 连接日志审计（ConnectionLogsManager） | ✅ 已有（等价收敛） | MCP/AI 执行面 JSONL 审计（`audit-log.jsonl`，5 MiB 单代轮转 `.1`）：gated 工具每调用一条（gate/outcome/exitCode/耗时/命令 ≤512 字符 + 输出尾部 ≤1024）+ 审批生命周期 + exec/终端 auto-sudo 事件；`ssh/audit/list` 工作台只读查看（kind 过滤/truncated 提示）+ `ssh/audit/clear` 清空；与 openocta 对标批同源（见上节），agent 面无审计工具，人工工作台操作不记 |
 | 流量图 / 发行版徽标（TrafficDiagram/DistroAvatar） | ✅ 已有（去资产化） | `lib/metricsSparkline.ts` 60 点环形 SVG（rx/tx 双曲线）+ `lib/distroBadge.ts` 14 发行版纯 CSS monogram（圆角方块 + 首字母 + 主题色变量，**不引入任何图片资产**——Netcatty SVG 资产为 GPL-3.0，刻意隔离）；`ssh/metrics` 追加可选 `osId`/`osPretty`（os-release 解析，缺失整体省略，旧 sidecar 不渲染徽标不报错） |
-| 云同步（CloudSyncManager） | ❌ 不做（导出待议） | 口令加密的 quick-sudo-profiles/quick-commands 导出导入降维为本批遗留候选，见文末「候选缺口（未排期）」 |
+| 云同步（CloudSyncManager） | ❌ 不做（宿主基础能力提供） | DBX 宿主基础能力已提供配置同步/上传（2026-09-25 决策）；插件侧不再立项，口令加密导出导入降维方案一并除名 |
 
 本批同步登记明确不做（IMPL_PLAN §7）：sftp/sudo 文件写操作的审计埋点（审计面现只覆盖
 exec 族 + 审批生命周期 + auto-sudo）、审计日志分页/导出（v1 只读最近条目）、作用域
@@ -552,12 +552,7 @@ PATH 导出，否则 `spawn pnpm ENOENT`。
 
 | 候选项 | 来源线索 | 说明 |
 | --- | --- | --- |
-| 认证 Auto 模式 | Tabby（REVIEW_FORM_VS_TABBY P2-6） | Tabby 支持 Auto（按序尝试各认证方式）；插件现为显式五选一，可增 Auto 依序回退 |
 | 每连接编码选择 | 对标复审线索 | 现无连接级编码覆盖（沿用默认/推断），缺 per-connection encoding |
-| 录制 transcript / 自动录制 / 录制搜索 | iShell 线索 | 现录制为手动 asciicast v2 + 回放/GIF 导出（`ssh/recording/*`）；transcript 文本导出、按会话自动录制、录制内容搜索未做 |
-| SFTP pipeline 深度 / 兼容模式 / 文件名编码 | 对标复审线索 | 传输管线并发深度可配、老旧服务器兼容模式、非 UTF-8 文件名编码处理 |
-| Quick Commands 导入 | Tabby/NetCatty 线索 | 快速命令现为插件内 CRUD（全局 ≤20 条），缺外部格式批量导入 |
-| 进程管理句柄数 / 监听端口维度 | iShell 线索 | `ssh/processes/list` 现为 CPU 序 500 行 + kill；缺句柄数与监听端口维度（iShell 节同款注记） |
-| 多文件并行 watcher 编辑 | M3 遗留（PROGRESS M3 遗留 1） | watcher 外部编辑现为单文件 MVP，多文件并行编辑需排队扩展 |
 | 终端 BiDi | sshbool 对标候选（见上节） | xterm.js 原生无 BiDi/shaping；shaping 管线建议放 `shared/frontend/` 公共层单点实现 |
-| 云同步/口令加密导出导入 | NetCatty CloudSync 降维（见 NetCatty 节） | 待议——涉及凭据导出的安全边界，未立项 |
+
+> 2026-09-25 清理：认证 Auto 模式、Quick Commands 导入、进程管理句柄/端口（M13）、录制 transcript/自动录制/搜索、SFTP pipeline 深度/兼容模式/文件名编码（M14）、多文件并行 watcher 编辑（M15）已交付，从本表移除（见主矩阵各 ✅ 行）。云同步经决策除名——DBX 宿主基础能力已提供配置同步/上传，插件侧不再立项（含口令加密导出导入降维方案）。

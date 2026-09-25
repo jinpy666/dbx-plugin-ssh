@@ -3789,3 +3789,19 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 2. 兼容模式"禁用扩展"落地为"不发起 extended + 禁流水线"；crate 内 fsync-on-flush 仅服务器自报扩展时触发，无法外部关闭。
 3. DownloadSudo 暂存 cat 为阻塞 exec（5-300s 超时夹取，约 16GiB 需 >55MB/s 磁盘）；远端需与源等量临时空间；sudo/download 与无残留清理的真机 smoke 待集成线跑 smoke_fs_test.py。
 4. raw SFTPv3 客户端 async 通道交互需真机回环（沿 smoke 惯例）。
+
+
+## M15 收口（2026-09-25，遗留消化批次：多文件 watcher / SFTP raw 路径保真 两线并发）
+
+- **多文件并行 watcher 编辑 ✅**（parity-np15-watcher-multi 8927fe4/95ad9ee，merge 9d8007d）：侦察发现后端本就按 watchId HashMap + `{sessionId}:{canonicalLocalPath}` dedup 支持并行，瓶颈纯在前端（单 ref 顶替）——**零协议改动**选型：前端并发打开（移除全局 externalEditBusy 门禁）+ `lib/watchEdits.ts` WatchRegistry（watchId→条目，同远端路径按 remotePath 粒度顶替旧条目与 sidecar dedup 收敛一致）；file-modified 三选确认改 `watchModifiedQueue` 队列（未知 watchId 丢弃、同文件未决去重、队头决议出队、过期决议拒绝），多文件同时 modified 排队逐个弹确认不互顶不丢事件；watch/upload 回传前端 promise 串行链逐个执行；回传暂存隔离补 64 并发不重名单测（`.dbx-part-<uuid>` 本就按调用唯一）。
+- **SFTP 非 UTF-8 路径操作 raw 层迁移 ✅**（parity-np15-sftp-raw 0d3b1b2/864f6f0，merge 7205099）：raw 客户端补 FXP_LSTAT/REMOVE/MKDIR/RMDIR/RENAME wire op（错误映射沿既有惯例）；选型**仅 latin-1 切 raw，auto 完全不动**（回归风险最小），判定点在 main.rs handler（与 sftp/list 读偏好模式一致）；回退策略——仅裸包客户端建立失败时回退高层（未发出任何请求，安全），操作发出后失败原样报错不回退（写操作回退可能重复执行）；rename 目标/mkdir 名经 `write_path_bytes`（目录前缀按 %XX 还原 wire 形式 + 最后一段用户新输入显示编码回字节，字面 %XX 不二次转义）；latin-1 树下载遍历走 raw（`scan_tree_with_raw` 单通道 LSTAT 预检 + READDIR 递归，LSTAT 判型 REMOVE/RMDIR/后序递归树删，symlink 绝不跟随）。显示解码绝不回灌传输路径契约不受影响。PROTOCOL 同步 sftp/list 节 M15-B 段 + 递归目录下载节。
+- **候选缺口表清理 ✅**：M13/M14/M15 已交付项从「候选缺口（未排期）」表移除；**云同步经决策除名——DBX 宿主基础能力已提供配置同步/上传，插件侧不再立项**（含口令加密导出导入降维方案）。剩余候选：每连接编码选择、终端 BiDi（观察）。
+- **基线口径注记**：cargo 用例数存在平台差异——M14 记录 925 为 macOS 实测，Windows 实测基线 d023963 为 920（A 线 agent 以基线 commit `--list` 复核、集成线 worktree 全量复测一致）。本轮"只增不减"以同平台 Windows 口径执行：合并后 **929**（920+9）。
+- **全量终值（Windows 实测）**：backend cargo **929/929**（win 基线 920+9）/ clippy 0 / fmt 0；frontend vitest **1057/1057**（105 文件，1047+10）/ vue-tsc 0 / build 过（ui/ 重生成单独 commit 0baa803）。两 merge 零冲突。
+
+### M15 遗留
+
+1. latin-1 模式 `sftp/exists` 覆盖预检、`sftp/rename-unique` 撞名探测仍按字面量发送（预检失败不阻断，已知边界）。
+2. 上传（sftp/upload/*、write、touch、symlink 三命令）新输入名仍按字面量发送；MCP 工具面 sftp_mkdir/remove/rename（mcp.rs 独立客户端）未迁移 raw 层。
+3. raw 客户端每操作独开 sftp 子系统通道（写操作低频，未做复用）；SFTPv3 RENAME 不覆盖已存在目标（与 auto 模式高层语义一致）。
+4. 多文件 watcher：外部编辑器全链路真机手测、FSEvents/inotify 真机联调（沿 M3 既有人工门）。
