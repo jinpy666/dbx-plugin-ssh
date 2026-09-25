@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_MODES,
   approvalRemainingSecs,
+  acceptsAgentPrompt,
+  agentPromptCommandReadOnly,
   buildAgentResolveBody,
+  clearSessionBoundAgentPrompts,
   dropAgentPrompt,
   enqueueAgentPrompt,
+  enqueueAcceptedAgentPrompt,
   findAgentPrompt,
   REMEMBERED_COMMAND_LINE_LIMIT,
   REMEMBERED_COMMAND_LIST_LIMIT,
@@ -38,6 +42,47 @@ describe("agent terminal mode contract", () => {
     expect(approvalRemainingSecs(payload, 2_000_000)).toBe(0);
     // 未到期时仍返回微小的正剩余（0.001s），前端 250ms tick 会立即收口到 0。
     expect(approvalRemainingSecs(payload, 999_999)).toBeCloseTo(0.001, 6);
+  });
+});
+
+describe("agent prompt routing", () => {
+  const activeSessionId = "ssh-session";
+
+  it("keeps process-level MCP confirmations when lifecycle cleanup removes session-bound SSH prompts", () => {
+    const queue = [
+      { challengeId: "docker-1", source: "mcp" as const, tool: "docker_action" },
+      { challengeId: "ssh-1", sessionId: activeSessionId, tool: "ssh_exec" },
+      { challengeId: "ssh-2", sessionId: "other-session", tool: "ssh_exec" },
+    ];
+    expect(clearSessionBoundAgentPrompts(queue)).toEqual([
+      { challengeId: "docker-1", source: "mcp", tool: "docker_action" },
+    ]);
+  });
+
+  it("queues an MCP Docker confirmation without sessionId while preserving SSH session isolation", () => {
+    const mcpDocker = {
+      challengeId: "docker-1",
+      source: "mcp" as const,
+      tool: "docker_action",
+      command: "docker kill d4a7c9f1e2b3",
+      risk: "elevated" as const,
+      requestedAt: 1000,
+      timeoutSecs: 120,
+    };
+    expect(enqueueAcceptedAgentPrompt([], mcpDocker, activeSessionId)).toEqual([mcpDocker]);
+    expect(acceptsAgentPrompt({ source: "mcp", tool: "docker_action" }, activeSessionId)).toBe(true);
+    expect(acceptsAgentPrompt({ source: "mcp", sessionId: "other-session", tool: "docker_action" }, activeSessionId)).toBe(false);
+    expect(acceptsAgentPrompt({ sessionId: activeSessionId, tool: "ssh_exec" }, activeSessionId)).toBe(true);
+    expect(acceptsAgentPrompt({ sessionId: "other-session", tool: "ssh_exec" }, activeSessionId)).toBe(false);
+    expect(acceptsAgentPrompt({ tool: "ssh_exec" }, activeSessionId)).toBe(false);
+  });
+});
+
+describe("MCP approval command editing", () => {
+  it("keeps structured Docker lifecycle actions read-only while normal SSH commands stay editable", () => {
+    expect(agentPromptCommandReadOnly({ source: "mcp", tool: "docker_action" })).toBe(true);
+    expect(agentPromptCommandReadOnly({ source: "mcp", tool: "ssh_exec" })).toBe(false);
+    expect(agentPromptCommandReadOnly({ tool: "docker_action" })).toBe(false);
   });
 });
 

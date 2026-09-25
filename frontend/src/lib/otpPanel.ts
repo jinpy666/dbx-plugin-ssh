@@ -1,7 +1,7 @@
 /**
  * OTP 面板与会话导入向导的纯逻辑层：otp/list 脱敏视图与 bindings 表解析、
  * otp/generate 响应解析与 TOTP 倒计时、otp/import-qr 结果到编辑草稿的映射、
- * otp/save 参数构造、import/parse 预览与 import/commit 参数、二进制转 base64、
+ * otp/save 参数构造、流式导入预览参数、二进制转 base64、
  * 以及「发送验证码到终端」时的活跃会话挑选。组件（OtpPanel.vue /
  * ImportWizard.vue）只做状态编排与 UI；这里全部是可单测的纯函数。
  */
@@ -223,10 +223,13 @@ export function otpDraftError(draft: OtpDraft): "" | "issuer" | "secret" | "coun
 }
 
 // ---------------------------------------------------------------------------
-// 会话导入：import/parse 预览 + import/commit 参数
+// 会话导入：流式预览与脱敏规范化导出
 // ---------------------------------------------------------------------------
 
 export type ImportKind = "moba" | "xshell" | "windterm" | "securecrt" | "finalshell" | "electerm" | "termius";
+
+export const IMPORT_TOTAL_LIMIT = 64 * 1024 * 1024;
+export const IMPORT_CHUNK_LIMIT = 256 * 1024;
 
 export interface ImportSessionView {
   index: number;
@@ -238,10 +241,6 @@ export interface ImportSessionView {
   description: string;
   authKind: string;
   hasSecret: boolean;
-  /**
-   * 凭据缺失原因码（后端 preview 返回）：encrypted = 源客户端加密不可读、
-   * not-carried = 来源本身不携带可读凭据；空串表示无标注。
-   */
   secretNote: string;
 }
 
@@ -251,69 +250,44 @@ function parseSessionView(raw: unknown, index: number): ImportSessionView | null
   const port = typeof view.port === "number" && Number.isFinite(view.port) ? view.port : null;
   return {
     index: typeof view.index === "number" && Number.isFinite(view.index) ? view.index : index,
-    name: asText(view.name),
-    host: asText(view.host),
-    port,
-    username: asText(view.username),
-    groupPath: asText(view.groupPath),
-    description: asText(view.description),
-    authKind: asText(view.authKind),
-    hasSecret: view.hasSecret === true,
-    secretNote: asText(view.secretNote),
+    name: asText(view.name), host: asText(view.host), port, username: asText(view.username),
+    groupPath: asText(view.groupPath), description: asText(view.description),
+    authKind: asText(view.authKind), hasSecret: view.hasSecret === true, secretNote: asText(view.secretNote),
   };
 }
 
-/** 解析 `import/parse` 的 sessions（后端已脱敏，仅 hasSecret 标记）。 */
+/** 解析流式 `import/preview/finish` 的脱敏行。 */
 export function parseImportSessions(payload: unknown): ImportSessionView[] {
   const list = (payload as { sessions?: unknown } | null | undefined)?.sessions;
-  if (!Array.isArray(list)) return [];
-  return list.map(parseSessionView).filter((session): session is ImportSessionView => session !== null);
+  return Array.isArray(list) ? list.map(parseSessionView).filter((session): session is ImportSessionView => session !== null) : [];
 }
 
-/** 解析 `import/commit` 结果 `{ imported, skipped }`。 */
-export function parseImportResult(payload: unknown): { imported: number; skipped: number } {
-  const view = (payload ?? {}) as Record<string, unknown>;
-  return { imported: asNumber(view.imported, 0), skipped: asNumber(view.skipped, 0) };
-}
-
-/**
- * `import/parse` / `import/commit` 共用的基础参数：可选字段仅在非空时携带，
- * 避免把空串当真值传给后端。
- */
-export function importBaseParams(
-  kind: ImportKind,
-  fileBase64: string,
-  userConfigBase64: string,
-  masterPassword: string,
-): Record<string, unknown> {
-  const params: Record<string, unknown> = { kind, fileBase64 };
-  if (kind === "windterm") {
-    if (userConfigBase64) params.userConfigBase64 = userConfigBase64;
-    if (masterPassword) params.masterPassword = masterPassword;
-  }
+/** 发起流式预览：主文件和可选 WindTerm user.config 共用 64 MiB 预算。 */
+export function importPreviewStartParams(kind: ImportKind, mainSize: number, userConfigSize: number, masterPassword: string): Record<string, unknown> {
+  const safeMain = Math.max(0, Math.floor(mainSize));
+  const safeConfig = Math.max(0, Math.floor(userConfigSize));
+  if (safeMain + safeConfig > IMPORT_TOTAL_LIMIT) throw new Error("import-size-limit");
+  const params: Record<string, unknown> = { kind, mainSize: safeMain };
+  if (kind === "windterm" && safeConfig) params.userConfigSize = safeConfig;
+  if (kind === "windterm" && masterPassword) params.masterPassword = masterPassword;
   return params;
 }
 
-export function importCommitParams(
-  kind: ImportKind,
-  fileBase64: string,
-  userConfigBase64: string,
-  masterPassword: string,
-  selectedIndexes: number[],
-): Record<string, unknown> {
-  return {
-    ...importBaseParams(kind, fileBase64, userConfigBase64, masterPassword),
-    selectedIndexes,
-  };
+/** SFTP 同款二进制帧：8 字节 BE offset 后接至多 256 KiB 原始字节。 */
+export function importPreviewChunk(offset: number, bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength > IMPORT_CHUNK_LIMIT) throw new Error("import-chunk-limit");
+  const frame = new Uint8Array(8 + bytes.byteLength);
+  const view = new DataView(frame.buffer);
+  view.setBigUint64(0, BigInt(offset));
+  frame.set(bytes, 8);
+  return frame;
 }
 
-/**
- * 后端错误串 → 面板错误码（可翻译的已知错误）或空串（回退展示原始错误）。
- * 目前只有 WindTerm 缺主密码是契约化文案（"WindTerm master password is required"）。
- */
-export function importErrorCode(error: unknown): "" | "masterPassword" {
+/** 已知 WindTerm 主密码错误转成可翻译错误码。 */
+export function importErrorCode(error: unknown): "" | "masterPassword" | "sizeLimit" {
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /master password/i.test(message) ? "masterPassword" : "";
+  if (/master password/i.test(message)) return "masterPassword";
+  return /64\s*MiB|exceed.*limit|size-limit/i.test(message) ? "sizeLimit" : "";
 }
 
 // ---------------------------------------------------------------------------

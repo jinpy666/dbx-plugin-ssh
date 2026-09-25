@@ -283,10 +283,16 @@ impl TelnetParser {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelnetStartRequest {
+    pub connection_id: Option<String>,
     pub workbench_id: String,
+    /// Logical endpoint retained for identity and display.
     pub host: String,
-    /// Defaults to 23.
+    /// Logical endpoint port. Defaults to 23.
     pub port: Option<u16>,
+    /// Runtime endpoint supplied by the host transport; it is the only target
+    /// dialed by the TCP pump. Missing fields fall back to the logical endpoint.
+    pub runtime_host: Option<String>,
+    pub runtime_port: Option<u16>,
     pub enter_mode: Option<EnterMode>,
     pub backspace_mode: Option<BackspaceMode>,
     /// Initial window size for the first NAWS frame; the workbench sends its
@@ -411,9 +417,12 @@ enum TelnetCommand {
 }
 
 struct TelnetSession {
+    connection_id: Option<String>,
     workbench_id: String,
     host: String,
     port: u16,
+    runtime_host: String,
+    runtime_port: u16,
     created_at_secs: u64,
     cmd_tx: mpsc::Sender<TelnetCommand>,
     replay: Arc<tokio::sync::Mutex<ReplayBuffer>>,
@@ -690,6 +699,17 @@ impl TelnetSessionRuntime {
         if port == 0 {
             return Err("telnet/start: port must be between 1 and 65535".to_string());
         }
+        let runtime_host = request
+            .runtime_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(host.as_str())
+            .to_string();
+        let runtime_port = request.runtime_port.unwrap_or(port);
+        if runtime_port == 0 {
+            return Err("telnet/start: runtimePort must be between 1 and 65535".to_string());
+        }
         let cols = request.cols.unwrap_or(120).clamp(2, u16::MAX as u32) as u16;
         let rows = request.rows.unwrap_or(32).clamp(2, u16::MAX as u32) as u16;
         let enter_mode = request.enter_mode.unwrap_or_default();
@@ -707,9 +727,12 @@ impl TelnetSessionRuntime {
         self.sessions.write().await.insert(
             session_id.clone(),
             Arc::new(TelnetSession {
+                connection_id: request.connection_id.clone(),
                 workbench_id: request.workbench_id.clone(),
                 host: host.clone(),
                 port,
+                runtime_host: runtime_host.clone(),
+                runtime_port,
                 created_at_secs: unix_now_secs(),
                 cmd_tx,
                 replay: replay.clone(),
@@ -720,6 +743,8 @@ impl TelnetSessionRuntime {
             request.workbench_id,
             host.clone(),
             port,
+            runtime_host,
+            runtime_port,
             cols,
             rows,
             enter_mode,
@@ -799,6 +824,20 @@ impl TelnetSessionRuntime {
 
     /// Closing a workbench tears down its Telnet sessions (same contract as
     /// the local shells); a webview reload does NOT pass through here.
+    pub async fn close_connection(&self, connection_id: &str) {
+        let session_ids: Vec<String> = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|(_, session)| session.connection_id.as_deref() == Some(connection_id))
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in session_ids {
+            let _ = self.close(&session_id).await;
+        }
+    }
+
     pub async fn close_workbench(&self, workbench_id: &str) {
         let session_ids: Vec<String> = self
             .sessions
@@ -821,9 +860,12 @@ impl TelnetSessionRuntime {
             .map(|(session_id, session)| {
                 json!({
                     "sessionId": session_id,
+                    "connectionId": session.connection_id,
                     "workbenchId": session.workbench_id,
                     "host": session.host,
                     "port": session.port,
+                    "runtimeHost": session.runtime_host,
+                    "runtimePort": session.runtime_port,
                     "createdAt": session.created_at_secs,
                 })
             })
@@ -938,6 +980,8 @@ fn spawn_pump(
     workbench_id: String,
     host: String,
     port: u16,
+    runtime_host: String,
+    runtime_port: u16,
     cols: u16,
     rows: u16,
     enter_mode: EnterMode,
@@ -961,27 +1005,34 @@ fn spawn_pump(
             emitter.event("telnet/session/state", payload)
         };
         let _ = emit_state("connecting", None);
-        let stream =
-            match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host.as_str(), port)))
-                .await
-            {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(error)) => {
-                    let _ = emit_state("error", Some(format!("connect {host}:{port}: {error}")));
-                    let _ = emit_state("closed", None);
-                    sessions.write().await.remove(&session_id);
-                    return;
-                }
-                Err(_) => {
-                    let _ = emit_state(
-                        "error",
-                        Some(format!("connect {host}:{port} timed out after 10s")),
-                    );
-                    let _ = emit_state("closed", None);
-                    sessions.write().await.remove(&session_id);
-                    return;
-                }
-            };
+        let stream = match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            TcpStream::connect((runtime_host.as_str(), runtime_port)),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                let _ = emit_state(
+                    "error",
+                    Some(format!("connect {runtime_host}:{runtime_port}: {error}")),
+                );
+                let _ = emit_state("closed", None);
+                sessions.write().await.remove(&session_id);
+                return;
+            }
+            Err(_) => {
+                let _ = emit_state(
+                    "error",
+                    Some(format!(
+                        "connect {runtime_host}:{runtime_port} timed out after 10s"
+                    )),
+                );
+                let _ = emit_state("closed", None);
+                sessions.write().await.remove(&session_id);
+                return;
+            }
+        };
         let _ = emit_state("connected", None);
 
         let (mut read_half, mut write_half) = stream.into_split();

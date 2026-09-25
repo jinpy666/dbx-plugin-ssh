@@ -20,6 +20,8 @@ ownership:
 validation:
   local:
     - python3 scripts/validate_repo.py
+    - python3 scripts/check_vendor_lockstep.py
+    - python3 scripts/verify_rdp_vendor_integrity.py
     - node scripts/connection-forms/verify.mjs
     - pnpm --dir frontend typecheck
     - pnpm --dir frontend test

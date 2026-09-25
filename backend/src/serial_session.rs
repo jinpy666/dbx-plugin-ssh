@@ -339,8 +339,8 @@ impl Default for SerialStartRequest {
 }
 
 pub(crate) struct SerialSession {
-    /// 协议往返保留（state 事件与未来多工作台路由使用；当前仅存不计）。
-    #[allow(dead_code)]
+    /// Owning workbench used for reattachment and backend-side cleanup when a
+    /// webview cannot deliver its best-effort close notification.
     workbench_id: String,
     port_name: String,
     baud_rate: u32,
@@ -587,6 +587,7 @@ impl SerialSessionRuntime {
         spawn_reader(
             session_id.clone(),
             Arc::clone(&session),
+            Arc::clone(&self.sessions),
             Arc::clone(&port),
             cmd_rx,
             emitter.clone(),
@@ -634,15 +635,26 @@ impl SerialSessionRuntime {
 
     pub async fn close(&self, session_id: &str) -> Result<(), String> {
         let session = self.session(session_id).await?;
-        let _ = session.cmd_tx.send(SerialCommand::Close);
-        // 关闭写队列（清空 + 唤醒）：写线程丢弃在途之后的块并退出，端口
-        // 随最后一个 Arc 释放而关闭。
-        session.write_queue.shutdown();
-        self.sessions
-            .write()
-            .expect("serial session registry poisoned")
-            .remove(session_id);
+        retire_session(&self.sessions, session_id, &session, true);
         Ok(())
+    }
+
+    pub async fn close_workbench(&self, workbench_id: &str) {
+        let session_ids = {
+            let sessions = self
+                .sessions
+                .read()
+                .expect("serial session registry poisoned");
+            session_ids_for_workbench(
+                sessions
+                    .iter()
+                    .map(|(id, session)| (id.as_str(), session.workbench_id.as_str())),
+                workbench_id,
+            )
+        };
+        for session_id in session_ids {
+            let _ = self.close(&session_id).await;
+        }
     }
 
     pub async fn list(&self) -> Value {
@@ -655,8 +667,10 @@ impl SerialSessionRuntime {
             .map(|(id, session)| {
                 json!({
                     "sessionId": id,
+                    "workbenchId": session.workbench_id,
                     "port": session.port_name,
                     "baudRate": session.baud_rate,
+                    "binaryInput": true,
                     "createdAt": session.created_at_secs,
                 })
             })
@@ -881,6 +895,39 @@ impl SerialSessionRuntime {
     }
 }
 
+fn session_ids_for_workbench<'a>(
+    sessions: impl IntoIterator<Item = (&'a str, &'a str)>,
+    workbench_id: &str,
+) -> Vec<String> {
+    sessions
+        .into_iter()
+        .filter(|(_, owner)| *owner == workbench_id)
+        .map(|(session_id, _)| session_id.to_string())
+        .collect()
+}
+
+/// Removes a session only if the registry still points at this exact Arc. A
+/// reader from an old session must never retire a later session that reused an
+/// identifier. Closing the queue always wakes the writer and rejects new data.
+fn retire_session(
+    sessions: &Arc<RwLock<HashMap<String, Arc<SerialSession>>>>,
+    session_id: &str,
+    session: &Arc<SerialSession>,
+    notify_reader: bool,
+) {
+    if notify_reader {
+        let _ = session.cmd_tx.send(SerialCommand::Close);
+    }
+    session.write_queue.shutdown();
+    let mut registry = sessions.write().expect("serial session registry poisoned");
+    if registry
+        .get(session_id)
+        .is_some_and(|registered| Arc::ptr_eq(registered, session))
+    {
+        registry.remove(session_id);
+    }
+}
+
 /// 引擎输出统一处理：写串口（不带退格改写）+ 进度事件（限流）。
 /// 端口/队列写错误只报第一个，剩余写输出丢弃（协议随后会终止）。
 fn apply_upload_outputs(
@@ -943,6 +990,7 @@ fn emit_upload_progress(emitter: &PluginEmitter, session_id: &str, progress: Tra
 fn spawn_reader(
     session_id: String,
     session: Arc<SerialSession>,
+    sessions: Arc<RwLock<HashMap<String, Arc<SerialSession>>>>,
     port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
     mut cmd_rx: mpsc::UnboundedReceiver<SerialCommand>,
     emitter: PluginEmitter,
@@ -988,6 +1036,7 @@ fn spawn_reader(
                     SerialSessionRuntime::pump_upload_tick(&session, &session_id, &emitter);
                 }
                 Err(error) => {
+                    retire_session(&sessions, &session_id, &session, false);
                     let _ = emitter.event(
                         "serial/session/state",
                         json!({ "sessionId": session_id, "state": "error", "error": error.to_string() }),
@@ -1508,5 +1557,18 @@ mod tests {
             .expect("pop wakes on push")
             .expect("closed queues yield None, open ones yield the chunk");
         assert_eq!(chunk, b"wake".to_vec());
+    }
+
+    #[test]
+    fn workbench_cleanup_selects_only_sessions_owned_by_the_closing_tab() {
+        let sessions = [
+            ("serial-a", "workbench-a"),
+            ("serial-b", "workbench-b"),
+            ("serial-c", "workbench-a"),
+        ];
+        assert_eq!(
+            session_ids_for_workbench(sessions, "workbench-a"),
+            vec!["serial-a".to_string(), "serial-c".to_string()]
+        );
     }
 }

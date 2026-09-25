@@ -63,7 +63,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 
-use crate::model::{path_from_sftp_uri, SessionOpenRequest, StoredConnection, MAX_TRANSFER_SIZE};
+use crate::model::{
+    path_from_sftp_uri, RuntimeEndpoint, SessionOpenRequest, StoredConnection, MAX_TRANSFER_SIZE,
+};
 use crate::ssh::{connection_id_param, filesystem_path, PromptDecision, SshRuntime};
 
 struct Plugin {
@@ -76,6 +78,7 @@ struct Plugin {
     rdp: Arc<rdp_session::RdpSessionRuntime>,
     mcp: Arc<mcp::McpState>,
     watcher: Arc<file_watch::WatchRuntime>,
+    connection_import: connection_import::ImportStream,
 }
 
 impl Plugin {
@@ -84,6 +87,7 @@ impl Plugin {
         let runtime =
             Runtime::new().map_err(|error| format!("Failed to create async runtime: {error}"))?;
         otp_store::init_data_dir(&data_dir);
+        connection_import::remove_legacy_store(&data_dir)?;
         // Sidecar 启动即同步 X11 快速标志（重启会丢进程内状态）。
         let prefs = preferences::load_preferences(&data_dir);
         x11::set_enabled(prefs.get("x11_forwarding").and_then(Value::as_bool) == Some(true));
@@ -103,6 +107,7 @@ impl Plugin {
             vnc: Arc::new(vnc_session::VncSessionRuntime::new()),
             rdp: Arc::new(rdp_session::RdpSessionRuntime::new()),
             watcher: Arc::new(file_watch::WatchRuntime::new()),
+            connection_import: connection_import::ImportStream::default(),
         })
     }
 
@@ -298,19 +303,29 @@ impl Plugin {
                 }))
             }
             "connection/test" => {
-                let connection = StoredConnection::from_lifecycle_params(&params)?;
-                // 协议路由守卫（M9）：telnet/vnc 连接由工作台驱动各自的
-                // 会话协议；SSH 握手对它们是无意义的错误拨号（还会把明文
-                // TELNET banner 误报成握手失败）。这里给出指路错误。
-                if connection.protocol != "ssh" {
-                    return Ok(json!({
-                        "success": false,
-                        "message": format!(
-                            "This connection uses the {} protocol; open it from the workbench session toolbar instead of testing it as SSH.",
-                            connection.protocol
-                        ),
-                    }));
+                let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
+                if endpoint.protocol == "telnet" || endpoint.protocol == "vnc" {
+                    let reachable = self
+                        .runtime
+                        .block_on(tcp_probe(&endpoint.runtime_host, endpoint.runtime_port));
+                    return Ok(match reachable {
+                        Ok(()) => json!({
+                            "success": true,
+                            "message": format!(
+                                "{} TCP endpoint {}:{} is reachable",
+                                endpoint.protocol, endpoint.host, endpoint.port
+                            ),
+                        }),
+                        Err(error) => json!({
+                            "success": false,
+                            "message": format!(
+                                "{} TCP endpoint {}:{} is unreachable: {error}",
+                                endpoint.protocol, endpoint.host, endpoint.port
+                            ),
+                        }),
+                    });
                 }
+                let connection = StoredConnection::from_lifecycle_params(&params)?;
                 let operation_id = operation_id(&params);
                 self.runtime.block_on(self.ssh.test_connection(
                     &connection,
@@ -322,18 +337,11 @@ impl Plugin {
                 )
             }
             "connection/connect" => {
-                let connection = StoredConnection::from_lifecycle_params(&params)?;
-                // 协议路由守卫（M9）：同 connection/test——telnet/vnc 连接
-                // 不进 SSH 连接池；工作台按 protocol 路由到各自会话。
-                if connection.protocol != "ssh" {
-                    return Ok(json!({
-                        "success": false,
-                        "message": format!(
-                            "This connection uses the {} protocol; open it from the workbench session toolbar instead of connecting it as SSH.",
-                            connection.protocol
-                        ),
-                    }));
+                let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
+                if endpoint.protocol == "telnet" || endpoint.protocol == "vnc" {
+                    return Ok(json!({ "success": true }));
                 }
+                let connection = StoredConnection::from_lifecycle_params(&params)?;
                 self.ssh.store_connection(connection)?;
                 Ok(json!({ "success": true }))
             }
@@ -345,6 +353,10 @@ impl Plugin {
                     .ok_or("Missing connection id")?;
                 self.runtime
                     .block_on(self.ssh.disconnect_connection(connection_id))?;
+                self.runtime
+                    .block_on(self.telnet.close_connection(connection_id));
+                self.runtime
+                    .block_on(self.vnc.close_connection(connection_id));
                 Ok(json!({ "success": true }))
             }
             "ssh/session/open" => {
@@ -679,6 +691,10 @@ impl Plugin {
                 self.runtime.block_on(self.vnc.close(session_id))?;
                 Ok(json!({ "success": true }))
             }
+            "vnc/replay" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.vnc.replay(session_id, emitter))
+            }
             "vnc/list" => Ok(self.runtime.block_on(self.vnc.list())),
             // RDP 远程桌面会话（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1
             // vendored IronRDP 链（0.17 lockstep）。范围（评审定案，见
@@ -691,6 +707,7 @@ impl Plugin {
             // 确认窗、remember 记入 rdp-known-certs.json）；剪贴板 text-only
             // + 16 MiB 上限；认证类失败不自动重连。
             "rdp/start" => {
+                rdp_start_gate(&plugin_data_dir())?;
                 let request: rdp_session::RdpStartRequest = parse(params)?;
                 self.runtime
                     .block_on(self.rdp.start(request, emitter.clone(), &plugin_data_dir()))
@@ -748,6 +765,10 @@ impl Plugin {
                 self.runtime.block_on(self.rdp.close(session_id))?;
                 Ok(json!({ "success": true }))
             }
+            "rdp/replay" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.rdp.replay(session_id, emitter))
+            }
             "rdp/list" => Ok(self.runtime.block_on(self.rdp.list())),
             "workbench/close" => {
                 let workbench_id = required_string(&params, "workbenchId")?;
@@ -764,6 +785,8 @@ impl Plugin {
                     .block_on(self.vnc.close_workbench(workbench_id));
                 self.runtime
                     .block_on(self.rdp.close_workbench(workbench_id));
+                self.runtime
+                    .block_on(self.serial.close_workbench(workbench_id));
                 Ok(json!({ "success": true }))
             }
             "ssh/host-key/resolve" | "connection/challenge/resolve" => {
@@ -1790,12 +1813,15 @@ impl Plugin {
                 let id = required_string(&params, "id")?;
                 sftp_bookmarks::delete(&self.ssh.data_dir(), id)
             }
-            // 会话导入（Xshell .xts / MobaXterm .mxtsessions / WindTerm
-            // .sessions）：parse 只回脱敏预览（凭据以 hasSecret 表示），
-            // commit 按选中下标重新解析并入库（凭据经 vault 加密落盘到
-            // imported-connections.json，0600）。
-            "import/parse" => connection_import::handle_parse(&params),
-            "import/commit" => connection_import::handle_commit(&plugin_data_dir(), &params),
+            // 会话导入：主文件与可选 WindTerm user.config 走二进制 offset
+            // 分块，finish 只返回脱敏预览；不持久化连接或任何凭据。
+            "import/preview/start" => self.connection_import.start(&params),
+            "import/preview/finish" => self
+                .connection_import
+                .finish(required_string(&params, "taskId")?),
+            "import/preview/cancel" => Ok(json!({
+                "cancelled": self.connection_import.cancel(required_string(&params, "taskId")?)
+            })),
             "filesystem/list" => self.filesystem_list(params),
             "filesystem/read" => self.filesystem_read(params),
             "filesystem/write" => self.filesystem_write(params),
@@ -2052,6 +2078,30 @@ impl PluginHandler for Plugin {
             )?;
             return Ok(());
         }
+        if let Some(rest) = channel.strip_prefix("import/preview/") {
+            let Some((task_id, part)) = rest.rsplit_once('/') else {
+                return Err(PluginError::new(
+                    -32601,
+                    format!("Unknown import preview binary channel: {channel}"),
+                ));
+            };
+            match self.connection_import.append(task_id, part, &data) {
+                Ok(next_offset) => {
+                    emitter.event(
+                        "import/preview/ack",
+                        json!({ "taskId": task_id, "part": part, "nextOffset": next_offset }),
+                    )?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let _ = emitter.event(
+                        "import/preview/error",
+                        json!({ "taskId": task_id, "part": part, "error": error }),
+                    );
+                    return Err(to_plugin_error(error));
+                }
+            }
+        }
         if let Some(task_id) = channel.strip_prefix("sftp/upload/") {
             // Binary handler failures are only logged by the SDK loop, so the
             // workbench would otherwise learn about a desynced/missing upload
@@ -2187,6 +2237,20 @@ fn bounded_bytes(params: &Value, key: &str, default: usize) -> usize {
 
 /// Reads an optional non-negative integer parameter, falling back to the
 /// default when the key is absent or not a `u64` (negative/invalid).
+async fn tcp_probe(host: &str, port: u16) -> Result<(), String> {
+    const TCP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(
+        TCP_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(format!("connect {host}:{port}: {error}")),
+        Err(_) => Err(format!("connect {host}:{port} timed out after 10s")),
+    }
+}
+
 fn optional_u64(params: &Value, key: &str, default: u64) -> u64 {
     params.get(key).and_then(Value::as_u64).unwrap_or(default)
 }
@@ -2258,6 +2322,17 @@ fn resolve_plugin_data_dir(lookup: impl Fn(&str) -> Option<OsString>) -> PathBuf
                 .join("dbx-plugin-data")
                 .join("io.dbx.ssh")
         })
+}
+
+/// RDP is experimental and must be explicitly enabled in persisted preferences;
+/// keep this backend gate independent of UI visibility so direct RPC cannot
+/// bypass the release posture.
+fn rdp_start_gate(data_dir: &std::path::Path) -> Result<(), String> {
+    if preferences::rdp_experimental_enabled(data_dir) {
+        Ok(())
+    } else {
+        Err("rdp/start is disabled until experimental RDP is explicitly enabled".to_string())
+    }
 }
 
 fn plugin_data_dir() -> PathBuf {
@@ -2398,6 +2473,18 @@ fn spawn_terminal_input_counter() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rdp_start_gate_refuses_by_default_and_allows_explicit_experimental_opt_in() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        assert!(rdp_start_gate(data_dir.path()).is_err());
+        preferences::save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_experimental_enabled": true }),
+        )
+        .expect("enable experimental RDP");
+        assert!(rdp_start_gate(data_dir.path()).is_ok());
+    }
 
     #[test]
     fn trigger_validation_reports_format_without_secret_content() {

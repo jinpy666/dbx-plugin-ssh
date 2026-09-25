@@ -1469,6 +1469,13 @@ window.dbxPlugin = {
   encodeBase64: base64,
   workbenchState: { set: async () => undefined },
   clipboard: { readText: async () => "", writeText: async () => undefined },
+  // 宿主 host.saveFile mock（Host API 1.1，单次整包落盘桥）：与真实宿主同形——
+  // fileName 去路径分隔符、整包 Uint8Array 接受、成功返回 { path }。
+  saveFile: async (options, data) => {
+    const bytes = typeof data === "string" ? Uint8Array.from(atob(data), (c) => c.charCodeAt(0)) : new Uint8Array(data instanceof ArrayBuffer ? data : (data as Uint8Array).buffer);
+    void bytes;
+    return { path: (options.fileName || "download.bin").split(/[\\/]/).pop() || "download.bin" };
+  },
   fileTransfer: {
     pick: async () => ({ files: [] }),
     read: async () => ({ dataBase64: "", length: 0, eof: true }),

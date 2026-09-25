@@ -452,6 +452,9 @@ pub fn load_preferences(data_dir: &Path) -> Value {
     }
     // RDP 安全设置（RDP-2）：use_nla 缺省 true、证书策略缺省 prompt；
     // 键不存在时不出现（前端按缺省处理）。
+    if let Some(enabled) = map.get("rdp_experimental_enabled").and_then(Value::as_bool) {
+        prefs.insert("rdp_experimental_enabled".to_string(), Value::Bool(enabled));
+    }
     if let Some(use_nla) = map.get("rdp_use_nla").and_then(Value::as_bool) {
         prefs.insert("rdp_use_nla".to_string(), Value::Bool(use_nla));
     }
@@ -466,6 +469,15 @@ pub fn load_preferences(data_dir: &Path) -> Value {
     }
 
     Value::Object(prefs)
+}
+
+/// RDP is intentionally opt-in until the real-server validation matrix is complete.
+/// Missing, malformed, or false values fail closed.
+pub fn rdp_experimental_enabled(data_dir: &Path) -> bool {
+    load_preferences(data_dir)
+        .get("rdp_experimental_enabled")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// Merges the allowlisted keys present in `params` into the store and persists
@@ -678,6 +690,13 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
     // RDP 安全设置（RDP-2）：布尔直存；证书策略走白名单（白名单外报错，
     // 不落盘污染），缺省语义由 rdp_session::resolve_security 兜底
     // （use_nla=true、certificate_policy=prompt）。
+    // RDP 仍处实验阶段：仅显式 true 才显示/允许入口，普通用户默认不可用。
+    if let Some(value) = params.get("rdp_experimental_enabled") {
+        let enabled = value
+            .as_bool()
+            .ok_or_else(|| "rdp_experimental_enabled must be a boolean".to_string())?;
+        map.insert("rdp_experimental_enabled".to_string(), Value::Bool(enabled));
+    }
     if let Some(value) = params.get("rdp_use_nla") {
         let use_nla = value
             .as_bool()
@@ -703,12 +722,42 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
         "prefs": Value::Object(map),
     }))
     .map_err(|error| format!("Failed to encode preferences: {error}"))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text)
-        .map_err(|error| format!("Failed to write {}: {error}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|error| format!("Failed to write {}: {error}", path.display()))?;
+    write_preferences_atomically(&path, &text)?;
     Ok(load_preferences(data_dir))
+}
+
+/// Writes preferences through a sibling temporary file then renames it into
+/// place. On Unix the temporary file is created as 0600 before its first byte
+/// is written, so startup-command text never exists with inherited umask
+/// permissions.
+fn write_preferences_atomically(path: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let tmp = path.with_extension("json.tmp");
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp);
+    let mut file = file.map_err(|error| format!("Failed to write {}: {error}", tmp.display()))?;
+    file.write_all(text.as_bytes())
+        .map_err(|error| format!("Failed to write {}: {error}", tmp.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("Failed to sync {}: {error}", tmp.display()))?;
+    drop(file);
+    std::fs::rename(&tmp, path)
+        .map_err(|error| format!("Failed to write {}: {error}", path.display()))
 }
 
 #[cfg(test)]
@@ -846,6 +895,24 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn preference_temp_file_is_created_with_0600_before_rename() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let path = store_path(data_dir.path());
+        write_preferences_atomically(&path, "{\"prefs\":{}}").expect("atomic preference write");
+        assert_eq!(
+            std::fs::metadata(path)
+                .expect("preference metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
+    }
+
     #[test]
     fn startup_commands_pref_roundtrip_with_shape_cleaning() {
         let data_dir = tempfile::tempdir().expect("tempdir");
@@ -881,19 +948,39 @@ mod tests {
     }
 
     #[test]
+    fn rdp_experimental_gate_defaults_closed_and_only_accepts_true() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        assert!(!rdp_experimental_enabled(data_dir.path()));
+        save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_experimental_enabled": true }),
+        )
+        .expect("enable experimental RDP");
+        assert!(rdp_experimental_enabled(data_dir.path()));
+        save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_experimental_enabled": false }),
+        )
+        .expect("disable experimental RDP");
+        assert!(!rdp_experimental_enabled(data_dir.path()));
+    }
+
+    #[test]
     fn rdp_security_prefs_whitelist_and_roundtrip() {
         let data_dir = tempfile::tempdir().expect("tempdir");
         // 空偏好：两键都不出现（前端按缺省 use_nla=true/prompt 处理）。
         let prefs = load_preferences(data_dir.path());
+        assert!(prefs.get("rdp_experimental_enabled").is_none());
         assert!(prefs.get("rdp_use_nla").is_none());
         assert!(prefs.get("rdp_certificate_policy").is_none());
         // 写入 + 读回。
         save_preferences(
             data_dir.path(),
-            &json!({ "rdp_use_nla": false, "rdp_certificate_policy": "strict" }),
+            &json!({ "rdp_experimental_enabled": true, "rdp_use_nla": false, "rdp_certificate_policy": "strict" }),
         )
         .expect("save");
         let prefs = load_preferences(data_dir.path());
+        assert_eq!(prefs["rdp_experimental_enabled"], true);
         assert_eq!(prefs["rdp_use_nla"], false);
         assert_eq!(prefs["rdp_certificate_policy"], "strict");
         // 白名单外证书策略报错且不落盘污染（fail-closed：无「静默接受」项）。
@@ -907,6 +994,11 @@ mod tests {
             "{error}"
         );
         // 非 bool 拒绝。
+        assert!(save_preferences(
+            data_dir.path(),
+            &json!({ "rdp_experimental_enabled": "yes" })
+        )
+        .is_err());
         assert!(save_preferences(data_dir.path(), &json!({ "rdp_use_nla": "yes" })).is_err());
         // 部分更新只改出现的键。
         save_preferences(data_dir.path(), &json!({ "rdp_use_nla": true })).expect("partial");

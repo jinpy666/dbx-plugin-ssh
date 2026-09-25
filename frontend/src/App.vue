@@ -181,7 +181,7 @@ import { formatBytes, formatRate } from "./lib/format";
 import { mergeTransferProgress, transferCancelReason, type TransferPhase } from "./lib/transferProgress";
 import { DBX_POPOVER, resolveAppearance, TERMINAL_ANSI, type DbxPluginAppearanceInput } from "./lib/appearance";
 import { isDbxPluginTheme, onHostThemeChange, themeToAppearance } from "./lib/hostTheme";
-import { AGENT_MODES, approvalRemainingSecs, buildAgentResolveBody, dropAgentPrompt, enqueueAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload, type AgentTerminalMode } from "./lib/agentTerminal";
+import { AGENT_MODES, agentPromptCommandReadOnly, approvalRemainingSecs, buildAgentResolveBody, clearSessionBoundAgentPrompts, dropAgentPrompt, enqueueAcceptedAgentPrompt, enqueueAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload, type AgentTerminalMode } from "./lib/agentTerminal";
 import { purposeKeyLabel, sanitizeTriagePayload, severityClass, type TriageResult } from "./lib/alertTriage";
 import {
   compileRules,
@@ -223,7 +223,7 @@ import { canKillProcess, sortProcessRows, type ProcessSortKey } from "./lib/proc
 import { distroBadge, type DistroBadge } from "./lib/distroBadge";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel, sanitizeAuditEntries, type AuditEntry } from "./lib/auditLog";
 import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
-import { pickLiveSessionForReattach, type SessionSummary } from "./lib/sessionRestore";
+import { pickLiveSessionForReattach, pickProtocolSessionForReattach, type SessionSummary } from "./lib/sessionRestore";
 import { toolbarTintStyle } from "./lib/toolbarTint";
 import { createGhostClickGuard } from "./lib/ghostClickGuard";
 import { createRequestEpoch } from "./lib/requestEpoch";
@@ -324,6 +324,7 @@ import {
 import VncConnectDialog, { type VncConnectOptions } from "./components/VncConnectDialog.vue";
 import VncSurface from "./components/VncSurface.vue";
 import type { VncInputEvent } from "./lib/vncFrame";
+import { rdpExperimentalEnabled } from "./lib/rdpExperimental";
 // RDP 会话（nyaterm-parity P3-4）：画布与 VNC 同构（同一 44 字节 patch 头，
 // 解码复用 vncFrame），输入走扫描码/unicode 双通道，证书确认走
 // connection/challenge kind=rdp-certificate 分支。
@@ -462,6 +463,11 @@ interface WorkbenchState {
   sftpNameWidth?: number | null;
   /** 列配置版本标记：六列默认（issue #35）上线后的一次性迁移，老偏好重置为全开。 */
   columnsV2?: boolean;
+}
+
+interface RuntimeEndpoint {
+  host?: string;
+  port?: number;
 }
 
 interface ConnectionSummary {
@@ -1491,6 +1497,8 @@ const vncTarget = computed(() => (vncSession.value ? `${vncSession.value.host}:$
 const rdpSession = ref<{ sessionId: string; host: string; port: number } | null>(null);
 const rdpDialogOpen = ref(false);
 const rdpConfirmOpen = ref(false);
+// 默认不向普通用户暴露 RDP；仅设置中显式启用实验能力后才显示入口。
+const rdpExperimental = ref(false);
 const rdpState = ref<RdpSessionStateView>(initialRdpSessionState());
 const rdpScaleMode = ref<RdpConnectOptions["scaleMode"]>("fit");
 const rdpSurface = ref<InstanceType<typeof RdpSurface> | null>(null);
@@ -1639,6 +1647,15 @@ const connectionId = computed(() => normalizeConnectionText(hostContext.value.co
 const fallbackWorkbenchId = randomUUID();
 const workbenchId = computed(() => resolveWorkbenchId(hostContext.value, fallbackWorkbenchId));
 const restored = computed(() => hostContext.value.restored === true);
+const runtimeEndpoint = computed<RuntimeEndpoint>(() => {
+  const value = hostContext.value.runtime;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  return {
+    host: normalizeConnectionText(raw.host),
+    port: normalizeConnectionPort(raw.port),
+  };
+});
 const connection = computed<ConnectionSummary>(() => {
   const value = hostContext.value.connection;
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -3474,7 +3491,9 @@ async function saveTrzszDownloadedFiles(files: readonly TrzszDownloadFile[]) {
   if (!fileTransfer) {
     const local = await probeLocalCapabilities();
     if (!local?.canSaveLocal) {
-      for (const file of saving) saveBrowserDownload(file.chunks, file.fileName);
+      // issue #93：沙箱 iframe 内 <a download> 被浏览器静默丢弃，改为宿主
+      // host.saveFile 单次落盘（取消/无桥/超限抛错走 showError）。
+      for (const file of saving) await saveHostFile(file.chunks, file.fileName);
       return;
     }
     // 「使用默认地址」关闭时按批次只问一次，整批落同一目录；取消则整批不保存。
@@ -3517,7 +3536,9 @@ async function saveTrzszDownloadedFiles(files: readonly TrzszDownloadFile[]) {
     return;
   }
   for (const file of saving) {
+    // 契约：用户取消原生保存框返回 null——取消整批（与 SFTP 下载取消语义一致）。
     const target = await fileTransfer.beginSave({ name: file.fileName, size: file.byteLength });
+    if (!target) throw new Error(t("transferStatus.cancelled"));
     try {
       let offset = 0;
       for (const chunk of file.chunks) {
@@ -3966,8 +3987,15 @@ function handleEvent(event: DbxPluginEvent) {
     }
     return;
   }
-  if (event.method === "ssh/agent/prompt" && event.params.sessionId === session.value?.sessionId) {
-    agentPromptQueue.value = enqueueAgentPrompt(agentPromptQueue.value, event.params as unknown as AgentPromptPayload);
+  // MCP confirm-mode prompts are process-level (no sessionId), while ordinary
+  // SSH prompts must remain isolated to the active SSH session.
+  if (event.method === "ssh/agent/prompt") {
+    const prompt = event.params as unknown as AgentPromptPayload;
+    const nextQueue = enqueueAcceptedAgentPrompt(agentPromptQueue.value, prompt, session.value?.sessionId);
+    if (nextQueue.length === agentPromptQueue.value.length && !agentPromptQueue.value.some((item) => item.challengeId === prompt.challengeId)) {
+      return;
+    }
+    agentPromptQueue.value = nextQueue;
     return;
   }
   if (event.method === "ssh/agent/notice" && event.params.sessionId === session.value?.sessionId) {
@@ -4499,9 +4527,12 @@ async function startTelnetSession(options: TelnetConnectOptions): Promise<boolea
       : undefined;
   try {
     const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("telnet/start", {
+      connectionId: connectionId.value || undefined,
       workbenchId: workbenchId.value,
       host: options.host,
       port: options.port,
+      runtimeHost: runtimeEndpoint.value.host || options.host,
+      runtimePort: runtimeEndpoint.value.port || options.port,
       enterMode: options.enterMode,
       backspaceMode: options.backspaceMode,
       cols: terminal?.cols || 120,
@@ -4554,9 +4585,12 @@ async function startVncSession(options: VncConnectOptions): Promise<boolean> {
   if (vncSession.value && vncState.value !== "closed") await closeVncSession();
   try {
     const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("vnc/start", {
+      connectionId: connectionId.value || undefined,
       workbenchId: workbenchId.value,
       host: options.host,
       port: options.port,
+      runtimeHost: runtimeEndpoint.value.host || options.host,
+      runtimePort: runtimeEndpoint.value.port || options.port,
       scaleMode: options.scaleMode,
       ...(options.password ? { password: options.password } : {}),
     });
@@ -4733,7 +4767,7 @@ async function reconnectRdpSession() {
 
 // 工具栏 RDP 入口：SSH/本地/Telnet/串口/VNC 占用终端视图时先经确认。
 function requestRdp() {
-  if (isRdpMode.value) return;
+  if (!rdpExperimental.value || isRdpMode.value) return;
   if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || serialSession.value || vncSession.value) {
     rdpConfirmOpen.value = true;
     return;
@@ -5530,6 +5564,7 @@ async function resolveRdpCertificate(accept: boolean) {
 // 绝对期限，到 0 仅出队队首并标记 expired（后端超时同样拒绝）；排队中已到期的
 // 挑战会在露出为队首的首次 tick 即被跳过出队。
 const agentPromptHead = computed(() => agentPromptQueue.value[0]);
+const agentPromptCommandIsReadOnly = computed(() => agentPromptHead.value ? agentPromptCommandReadOnly(agentPromptHead.value) : false);
 
 watch(agentPromptHead, (head) => {
   stopAgentPromptTimer();
@@ -5568,16 +5603,20 @@ function dismissAgentPrompt() {
   agentPromptQueue.value = dropAgentPrompt(agentPromptQueue.value, head.challengeId);
 }
 
-// 清空整个审批队列（会话切换 / 关闭时不继承旧会话的排队挑战）。
+// 会话切换 / 关闭只清理 SSH 会话绑定挑战；无 sessionId 的 MCP 审批是进程级
+// 交互，必须继续显示，才能被显式允许或拒绝。
 function clearAgentPrompts() {
-  stopAgentPromptTimer();
-  agentPromptQueue.value = [];
-  agentPromptCommand.value = "";
-  agentPromptRemaining.value = 0;
+  agentPromptQueue.value = clearSessionBoundAgentPrompts(agentPromptQueue.value);
+  if (agentPromptQueue.value.length === 0) {
+    stopAgentPromptTimer();
+    agentPromptCommand.value = "";
+    agentPromptRemaining.value = 0;
+  }
 }
 
 // 审批语义对齐 host-key 挑战：先出队再 resolve（挑战一次性，重复 resolve 报错）；
-// 批准时提交编辑后的命令（所见即所执行）；勾选「记住」时携带 remember 标记。
+// 普通 SSH 命令仍可编辑（所见即所执行），但 MCP Docker 动作保留结构化参数，
+// 确认 UI 仅展示、不可改写其规范命令。勾选「记住」时携带 remember 标记。
 async function resolveAgentPrompt(decision: "approve" | "deny") {
   const prompt = agentPromptHead.value;
   if (!prompt) return;
@@ -6882,6 +6921,7 @@ async function hydratePrefsOnce() {
       ctx_search_engines?: unknown;
       wallpaper_enabled?: unknown;
       wallpaper_opacity?: unknown;
+      rdp_experimental_enabled?: unknown;
     }>("local/preferences/get", {});
     // 背景图本体与偏好同拉（旧 sidecar 无 wallpaper/* 时静默缺席）。
     void loadWallpaperImage();
@@ -6914,6 +6954,7 @@ async function hydratePrefsOnce() {
     // 背景图偏好：键缺省保持内存默认（关 / 45%）。
     if (typeof prefs.wallpaper_enabled === "boolean") wallpaperEnabled.value = prefs.wallpaper_enabled;
     if (prefs.wallpaper_opacity !== undefined) wallpaperOpacity.value = Math.min(90, Math.max(10, Math.round(Number(prefs.wallpaper_opacity) || 45)));
+    rdpExperimental.value = rdpExperimentalEnabled(prefs.rdp_experimental_enabled);
     cachePrefs();
   } catch {
     // 旧 sidecar：保留 localStorage 种子或默认。
@@ -8412,7 +8453,14 @@ async function downloadEntry(entry: SftpEntry, forceSudo = false) {
       ? await window.dbxPlugin.invoke<DownloadInfo>("sudo/download/start", { ...startParams, path: pathFromUri(entry.uri) })
       : await window.dbxPlugin.invoke<DownloadInfo>("sftp/download/start", { ...startParams, remotePath: pathFromUri(entry.uri) });
     transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now() };
-    target = fileTransfer ? await fileTransfer.beginSave({ name: info.fileName, size: info.size }) : undefined;
+    // beginSave 在用户取消原生保存框时按契约返回 null：必须立刻终止整个下载，
+    // 否则 target=null 会让循环滑进「只推进度不写盘」分支，最终提示成功却无文件。
+    target = fileTransfer ? (await fileTransfer.beginSave({ name: info.fileName, size: info.size })) ?? undefined : undefined;
+    if (fileTransfer && !target) {
+      await window.dbxPlugin.invoke("sftp/transfer/cancel", { taskId: info.taskId, reason: "user" }).catch(() => undefined);
+      cancelledTransferTasks.add(info.taskId);
+      throw new Error(t("transferStatus.cancelled"));
+    }
     let offset = 0;
     while (offset < info.size) {
       await waitWhilePaused(info.taskId);
@@ -8452,7 +8500,7 @@ async function downloadEntry(entry: SftpEntry, forceSudo = false) {
       await fileTransfer!.finish(target.handleId);
       target = undefined;
     } else if (chunks) {
-      saveBrowserDownload(chunks, info.fileName);
+      await saveHostFile(chunks, info.fileName);
     }
     const finishResult = await window.dbxPlugin.invoke<{ localPath?: string }>("sftp/download/finish", { taskId: info.taskId });
     localPath = finishResult?.localPath;
@@ -8621,19 +8669,30 @@ async function batchDownload() {
   }
 }
 
-function saveBrowserDownload(chunks: Uint8Array[], fileName: string) {
-  // Runtime chunks always come from decodeBase64 (ArrayBuffer-backed); the
-  // ArrayBufferLike generic just doesn't fit BlobPart's stricter view typing.
-  const blob = new Blob(chunks as unknown as BlobPart[]);
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  // Give the browser time to start the download before releasing the blob.
-  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+// 宿主单次落盘上限（pluginHostBridge MAX_BRIDGE_SAVE_BYTES）：超出时明确报错，
+// 绝不回退 iframe 内 <a download>——sandbox="allow-scripts" 下该动作被浏览器
+// 静默丢弃，正是 issue #93「提示成功但本机没有文件」的根因。
+const HOST_SAVE_MAX_BYTES = 512 * MIB;
+
+/**
+ * 无 fileTransfer 宿主（DBX 0.6.14–0.6.17 及全部 web/docker 旧宿主）的落盘路径：
+ * 把整包字节交给宿主顶层页面（host.saveFile）保存。宿主顶层文档不受插件 iframe
+ * 的 sandbox 约束；桌面端宿主同时弹出原生保存对话框。用户取消返回 null。
+ */
+async function saveHostFile(chunks: Uint8Array[], fileName: string): Promise<void> {
+  if (!window.dbxPlugin.saveFile) throw new Error(t("errors.localSaveUnavailable"));
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  if (total > HOST_SAVE_MAX_BYTES) throw new Error(t("errors.localSaveTooLarge", { size: formatBytes(total), limit: formatBytes(HOST_SAVE_MAX_BYTES) }));
+  // Runtime chunks always come from decodeBase64 (ArrayBuffer-backed); merge
+  // into one buffer because host.saveFile is a single-shot, no-append bridge.
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const saved = await window.dbxPlugin.saveFile({ fileName, contentType: "application/octet-stream" }, merged);
+  if (!saved) throw new Error(t("transferStatus.cancelled"));
 }
 
 function waitForDownloadChunk(taskId: string, offset: number) {
@@ -9933,7 +9992,7 @@ async function exportRecordingTranscript(item: RecordingSummary) {
       if (setDefaultAfter) applyChosenDirAsDefault(targetDir);
       return;
     }
-    saveBrowserDownload([bytes], fileName);
+    await saveHostFile([bytes], fileName);
     showNotice(t("replayExported"));
   } catch (cause) {
     showError(cause);
@@ -10257,6 +10316,7 @@ async function exportRecordingGif(summary: RecordingSummary, events: readonly Re
       // destination instead of silently losing the file in an unknown folder.
       const fileTransfer = window.dbxPlugin.fileTransfer;
       const target = await fileTransfer.beginSave({ name: fileName, contentType: "image/gif", size: gif.byteLength });
+      if (!target) return; // 用户在原生保存框取消：安静结束，不提示导出成功
       try {
         await fileTransfer.write(target.handleId, 0, gif);
         await fileTransfer.finish(target.handleId);
@@ -10268,10 +10328,11 @@ async function exportRecordingGif(summary: RecordingSummary, events: readonly Re
     } else {
       // 沙箱 iframe（宿主 fileTransfer 缺失）下的可靠路径：sidecar 落盘到
       // 下载目录（或「每次询问」选择的目录），完成后提示完整路径。
-      // web/docker（sidecar 不在本机）仍回退浏览器 <a download>。
+      // web/docker（sidecar 不在本机）走宿主 host.saveFile——iframe 内
+      // <a download> 被浏览器静默丢弃（issue #93）。
       const local = await probeLocalCapabilities();
       if (!local?.canSaveLocal) {
-        saveBrowserDownload([gif], fileName);
+        await saveHostFile([gif], fileName);
         showNotice(t("replayExported"));
         return;
       }
@@ -10952,6 +11013,9 @@ async function initialize() {
     terminalError.value = t("restartDisconnected");
     return;
   }
+  // Webview 重建必须先按 workbenchId 接回所有非 SSH 协议会话；这些会话不
+  // 写 SSH workbench state，若先走 openSession 会重新创建 Telnet/VNC/RDP/Serial。
+  if (await reattachProtocolSession()) return;
   if (typeof state.sessionId === "string" && state.sessionId) await attachSession(state.sessionId);
   else {
     // 宿主切 tab / 左侧菜单重开可能整体重建工作台 webview。只恢复
@@ -10989,6 +11053,67 @@ async function findReattachSession(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+type ProtocolSessionKind = "telnet" | "vnc" | "rdp" | "serial";
+interface ProtocolSessionSummary extends SessionSummary {
+  host?: string;
+  port?: number;
+  baudRate?: number;
+  binaryInput?: boolean;
+}
+
+async function reattachProtocolSession(): Promise<boolean> {
+  const lists: Array<{ kind: ProtocolSessionKind; method: string }> = [
+    { kind: "telnet", method: "telnet/list" },
+    { kind: "vnc", method: "vnc/list" },
+    { kind: "rdp", method: "rdp/list" },
+    { kind: "serial", method: "serial/list" },
+  ];
+  const candidates = await Promise.all(lists.map(async ({ kind, method }) => {
+    try {
+      const result = await window.dbxPlugin.invoke<{ sessions?: ProtocolSessionSummary[] }>(method, {}, { timeoutMs: 10_000 });
+      const sessionId = pickProtocolSessionForReattach(result?.sessions, workbenchId.value);
+      const session = result?.sessions?.find((entry) => entry?.sessionId === sessionId);
+      return session ? { kind, session } : null;
+    } catch {
+      return null;
+    }
+  }));
+  const live = candidates
+    .filter((candidate): candidate is { kind: ProtocolSessionKind; session: ProtocolSessionSummary } => candidate !== null)
+    .sort((left, right) => (right.session.createdAt ?? 0) - (left.session.createdAt ?? 0))[0];
+  if (!live) return false;
+
+  if (live.kind === "telnet") {
+    telnetSession.value = { sessionId: live.session.sessionId, host: live.session.host || "", port: live.session.port || 23 };
+    telnetState.value = "running";
+    telnetLastSequence.value = 0;
+    telnetPendingFrames.clear();
+    await window.dbxPlugin.invoke<ReplayResult>("telnet/replay", { sessionId: live.session.sessionId, afterSequence: 0 });
+  } else if (live.kind === "vnc") {
+    vncSession.value = { sessionId: live.session.sessionId, host: live.session.host || "", port: live.session.port || 5900 };
+    vncState.value = "running";
+    await window.dbxPlugin.invoke("vnc/replay", { sessionId: live.session.sessionId });
+  } else if (live.kind === "rdp") {
+    rdpSession.value = { sessionId: live.session.sessionId, host: live.session.host || "", port: live.session.port || 3389 };
+    rdpState.value = { state: "running", error: "", errorKind: "", attempt: 0, maxAttempts: 0 };
+    await window.dbxPlugin.invoke("rdp/replay", { sessionId: live.session.sessionId });
+  } else {
+    serialSession.value = {
+      sessionId: live.session.sessionId,
+      port: live.session.port ? String(live.session.port) : "",
+      baudRate: live.session.baudRate || 115_200,
+    };
+    serialState.value = "running";
+    serialLastSequence.value = 0;
+    serialPendingFrames.clear();
+    serialBinaryInput.value = live.session.binaryInput !== false;
+    await window.dbxPlugin.invoke<ReplayResult>("serial/replay", { sessionId: live.session.sessionId, afterSequence: 0 });
+  }
+  await nextTick();
+  scheduleFit();
+  return true;
 }
 
 watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
@@ -11142,8 +11267,8 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button icon-amber" :title="t('telnet.open')" @click="requestTelnet"><Globe /></button>
         <!-- VNC 远程桌面入口（nyaterm-parity P2 2d）：与其它会话互斥，占用先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('vnc.open')" @click="requestVnc"><MonitorPlay /></button>
-        <!-- RDP 远程桌面入口（nyaterm-parity P3-4）：与其它会话互斥，占用先经确认。 -->
-        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('rdp.open')" @click="requestRdp"><MonitorUp /></button>
+        <!-- RDP 默认不向普通用户开放：仅设置中显式启用实验能力后显示。 -->
+        <button v-if="!localUiMode && rdpExperimental" class="icon-button icon-emerald" :title="t('rdp.open')" @click="requestRdp"><MonitorUp /></button>
         <!-- 串口会话入口（P3）：与 SSH/本地/Telnet 互斥，占用终态先经确认。 -->
         <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('serial.open')" @click="requestSerial"><Usb /></button>
         <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
@@ -12618,6 +12743,7 @@ onBeforeUnmount(() => {
       @error="showError"
       @browse-download-dir="folderPickerTarget = 'settings'"
       @update:webgl="setWebglEnabled"
+      @update:rdp-experimental="(enabled) => (rdpExperimental = enabled)"
       @update-behavior="updateTerminalBehavior"
       @update-hotkeys="updateTerminalHotkeys"
       @update:action-links="updateActionLinksSettings"
@@ -12734,7 +12860,7 @@ onBeforeUnmount(() => {
         </div>
         <label class="agent-prompt-command">
           <span>{{ t("agentPromptCommandLabel") }}</span>
-          <textarea v-model="agentPromptCommand" class="mono" rows="3" spellcheck="false" />
+          <textarea v-model="agentPromptCommand" class="mono" rows="3" spellcheck="false" :readonly="agentPromptCommandIsReadOnly" />
         </label>
         <!-- 记住不限风险档：strict 模式下低危命令同样每次弹审、同样需要免审
              记忆（IMPL_PLAN 预期 strict/auto 下 approve+remember 二次零弹窗）；

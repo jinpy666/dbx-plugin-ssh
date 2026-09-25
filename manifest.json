@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.dbx.ssh",
   "name": "SSH Terminal",
-  "version": "0.7.0",
+  "version": "0.7.1-beta.1",
   "publisher": "jinpy",
   "description": "A secure SSH terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
   "source": "https://github.com/jinpy666/dbx-plugin-ssh",
@@ -38,7 +38,7 @@
       "label": "SSH server",
       "icon": "assets/plugin.svg",
       "database_type": "ssh",
-      "description": "SSH, Telnet, or VNC connection with protocol-appropriate authentication.",
+      "description": "SSH, Telnet, or VNC connection with protocol-appropriate authentication. Experimental RDP stays disabled by default and is not available as a connection profile.",
       "fields": [
         {
           "key": "display_name",
@@ -68,7 +68,7 @@
               "value": "vnc"
             }
           ],
-          "description": "Session protocol carried by this connection. Telnet and VNC connections open their own session view in the workbench (per-protocol options live there); RDP is not offered yet."
+          "description": "Session protocol carried by this connection. Telnet and VNC connections open their own session view in the workbench (per-protocol options live there); experimental RDP is disabled by default and is not offered as a connection profile."
         },
         {
           "key": "host",
@@ -999,7 +999,7 @@
                 "telnet": "Telnet",
                 "vnc": "VNC"
               },
-              "description": "Protocolo de sesión de esta conexión. Las conexiones Telnet y VNC abren su propia vista de sesión en el espacio de trabajo (las opciones por protocolo están ahí); RDP no está disponible todavía."
+              "description": "Protocolo de sesión de esta conexión. Las conexiones Telnet y VNC abren su propia vista de sesión en el espacio de trabajo (las opciones por protocolo están ahí); RDP experimental está desactivado de forma predeterminada y no se ofrece como perfil de conexión."
             },
             "host": {
               "label": "Host"
@@ -1197,7 +1197,7 @@
                 "telnet": "Telnet",
                 "vnc": "VNC"
               },
-              "description": "Protocollo di sessione di questa connessione. Le connessioni Telnet e VNC aprono la propria vista sessione nel workbench (le opzioni per protocollo si trovano lì); RDP non è ancora disponibile."
+              "description": "Protocollo di sessione di questa connessione. Le connessioni Telnet e VNC aprono la propria vista sessione nel workbench (le opzioni per protocollo si trovano lì); RDP sperimentale è disabilitato per impostazione predefinita e non è disponibile come profilo di connessione."
             },
             "host": {
               "label": "Host"
@@ -1395,7 +1395,7 @@
                 "telnet": "Telnet",
                 "vnc": "VNC"
               },
-              "description": "この接続が扱うセッションプロトコル。Telnet と VNC 接続はワークベンチ内で各自のセッションビューを開きます（プロトコル固有の設定もそこにあります）。RDP は未対応です。"
+              "description": "この接続が扱うセッションプロトコル。Telnet と VNC 接続はワークベンチ内で各自のセッションビューを開きます（プロトコル固有の設定もそこにあります）。実験的な RDP は既定で無効であり、接続プロファイルでは提供しません。"
             },
             "host": {
               "label": "ホスト"
@@ -1593,7 +1593,7 @@
                 "telnet": "Telnet",
                 "vnc": "VNC"
               },
-              "description": "Protocolo de sessão desta conexão. Conexões Telnet e VNC abrem sua própria visualização de sessão no workbench (as opções por protocolo ficam lá); RDP ainda não é oferecido."
+              "description": "Protocolo de sessão desta conexão. Conexões Telnet e VNC abrem sua própria visualização de sessão no workbench (as opções por protocolo ficam lá); o RDP experimental fica desativado por padrão e não é oferecido como perfil de conexão."
             },
             "host": {
               "label": "Host"
@@ -1791,7 +1791,7 @@
                 "telnet": "Telnet",
                 "vnc": "VNC"
               },
-              "description": "此连接承载的会话协议。Telnet 与 VNC 连接会在工作台内打开各自的会话视图（协议选项在工作台内设置）；暂不提供 RDP。"
+              "description": "此连接承载的会话协议。Telnet 与 VNC 连接会在工作台内打开各自的会话视图（协议选项在工作台内设置）；实验性 RDP 默认关闭，且不作为连接配置提供。"
             },
             "host": {
               "label": "主机"
@@ -1989,7 +1989,7 @@
                 "telnet": "Telnet",
                 "vnc": "VNC"
               },
-              "description": "此連線承載的會話協議。Telnet 與 VNC 連線會在工作台內開啟各自的會話檢視（協議選項在工作台內設定）；暫不提供 RDP。"
+              "description": "此連線承載的會話協議。Telnet 與 VNC 連線會在工作台內開啟各自的會話檢視（協議選項在工作台內設定）；實驗性 RDP 預設關閉，且不作為連線設定提供。"
             },
             "host": {
               "label": "主機"

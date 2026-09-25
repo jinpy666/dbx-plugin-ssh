@@ -14,6 +14,22 @@
 | `picky` | 7.0.0-rc.25 | Devolutions/picky-rs | NyaTerm vendor 副本（crates.io 7.0.0-rc.25 包） | MIT OR Apache-2.0 |
 | `sspi` | 0.21.0 | Devolutions/sspi-rs | NyaTerm vendor 副本（crates.io 0.21.0 包） | MIT OR Apache-2.0 |
 
+## 来源与完整性核验
+
+本仓库不伪造未知的上游 tarball hash。每次 vendor 链更新必须在可复现的
+维护环境中，以**该版本 crates.io 下载件或记录的上游 revision**为来源，并把已知的
+SHA-256 与来源记录在上表；未知项先保持“待核验”，不得猜填。提交前运行：
+
+```bash
+python3 scripts/check_vendor_lockstep.py
+python3 scripts/verify_rdp_vendor_integrity.py
+```
+
+第二个脚本只执行离线可验证项：逐一检查六个 vendored crate 的包名/版本、许可证文件、
+来源登记，以及不允许将未经登记的额外 Cargo crate 放进 `backend/vendor/`。它会将尚未
+记录完整性 hash 的条目列为待人工核验，不把该缺口伪装为已验证；CI 可通过
+`--require-recorded-hashes` 将这类待核验升级为硬失败，供正式发布门使用。
+
 世代约束：umbrella `ironrdp` 0.17 依赖 `ironrdp-client ^0.1` / `ironrdp-connector ^0.10`，
 与上表版本强绑定；**升级 umbrella 必须整链同轮核对**，不允许只升 umbrella 不升链（或反向）。
 

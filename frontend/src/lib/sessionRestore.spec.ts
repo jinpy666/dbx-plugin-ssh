@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pickLiveSessionForReattach, type SessionSummary } from "./sessionRestore";
+import { pickLiveSessionForReattach, pickProtocolSessionForReattach, type SessionSummary } from "./sessionRestore";
 
 const session = (overrides: Partial<SessionSummary>): SessionSummary => ({
   sessionId: "s-1",
@@ -50,5 +50,18 @@ describe("pickLiveSessionForReattach", () => {
     expect(pickLiveSessionForReattach(undefined, { connectionId: "conn-1", workbenchId: "wb-1" })).toBe("");
     expect(pickLiveSessionForReattach([null as unknown as SessionSummary], { connectionId: "conn-1", workbenchId: "wb-1" })).toBe("");
     expect(pickLiveSessionForReattach([session({})], { connectionId: "", workbenchId: "wb-1" })).toBe("");
+  });
+
+  it("returns the newest protocol session owned by a remounting workbench", () => {
+    expect(
+      pickProtocolSessionForReattach(
+        [
+          session({ sessionId: "telnet-old", workbenchId: "wb-1", createdAt: 10 }),
+          session({ sessionId: "vnc-current", workbenchId: "wb-1", createdAt: 20 }),
+          session({ sessionId: "other-tab", workbenchId: "wb-2", createdAt: 30 }),
+        ],
+        "wb-1",
+      ),
+    ).toBe("vnc-current");
   });
 });

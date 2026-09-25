@@ -19,6 +19,24 @@ export interface SessionSummary {
  * a fresh `ssh/session/open`, which is also how a new same-connection tab gets
  * its independent PTY.
  */
+export function pickProtocolSessionForReattach(
+  sessions: SessionSummary[] | undefined,
+  workbenchId: string,
+): string {
+  const candidates = (Array.isArray(sessions) ? sessions : []).filter(
+    (session) =>
+      session &&
+      typeof session.sessionId === "string" &&
+      session.sessionId &&
+      session.workbenchId === workbenchId &&
+      session.connected !== false,
+  );
+  if (candidates.length === 0) return "";
+  return candidates.reduce((best, session) =>
+    (session.createdAt ?? 0) >= (best.createdAt ?? 0) ? session : best,
+  ).sessionId;
+}
+
 export function pickLiveSessionForReattach(
   sessions: SessionSummary[] | undefined,
   options: { connectionId: string; workbenchId: string },

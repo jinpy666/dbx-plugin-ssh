@@ -4,6 +4,8 @@
 
 Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`sessionId` 或 `taskId` 为键。`connection/connect` 只接收并缓存宿主注入的连接配置；`connection/disconnect` 会关闭该连接下的终端、SFTP 子系统和传输任务。工作台不会接收密码字段。
 
+Telnet/VNC 的 saved connection 生命周期也走同一入口，但不会进入 SSH 连接池：`connection/connect` 对 `external_config.protocol: "telnet"|"vnc"` 返回成功，`connection/test` 对宿主给出的 `runtime.host:runtime.port` 做 10 秒 TCP 可达性探测，`connection/disconnect` 按 `connection.id` 清理其 Telnet/VNC 会话。逻辑端点始终来自 `connection.host:connection.port`，用于界面显示和身份；实际 TCP 拨号只使用 `runtime.host:runtime.port`（缺省时回退逻辑端点）。
+
 工作台的“新建会话”保持独立 transport 语义，会重新完成 SSH 认证（堡垒机可再次要求 MFA）；“复制会话（免再次验证）”则向 `ssh/session/open` 传 `reuseAuthenticatedTransport: true` 和当前 `reuseAuthenticatedSessionId`，在用户所点窗口当前存活且已认证的 transport 上新开独立 PTY channel。复制会话拥有独立 `sessionId`、`workbenchId`、回放缓冲和终端任务，不复制或缓存 OTP。打开复制 channel 前会先预占共享 transport 引用，因此源会话在 channel/PTY/shell 建立期间关闭也不会提前释放跳板链；关闭任一复制会话只关闭自己的 channel，最后一个共享引用释放后才断开跳板链。每个复制会话都会额外占用一个 SSH channel，数量受服务端 `MaxSessions` 限制（OpenSSH 常见默认值为 10）；超过限制时 `open` 返回 channel 建立失败。
 
 显式传入 `reuseAuthenticatedSessionId` 时严格 fail closed：指定来源不存在、已关闭或连接不匹配都会返回 `No live authenticated SSH connection`。前端收到该错误后只降级一次，以普通“新建会话”语义重新登录，允许堡垒机再次要求 MFA；该错误同时属于永久重试错误，不进入对同一失效 sessionId 的退避重试。只传 `reuseAuthenticatedTransport: true` 的旧调用方保留兼容行为：后端会从同一连接中确定性选取最早创建的存活会话，因此 transport 来源不保证对应调用方当前显示的窗口。
@@ -54,6 +56,7 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `sftp/transfer/history` | 跨重启传输历史查询（持久化 + 内存 live 合并，见下文） |
 | `sftp/transfer/history/clear` | 清空已持久化及当前进程中的传输历史 |
 | `sftp/transfer/resumable` | 可续传上传扫描（中断任务的 spool 前缀仍在磁盘上的清单，见下文） |
+| `import/preview/start`、`finish`、`cancel` | 第三方 SSH 客户端会话导入的临时流式预览与脱敏规范化导出（不落盘，见下文） |
 | `sudo/stat`、`sudo/exists`、`sudo/touch` | sudo 元信息查询与空文件创建 |
 | `sudo/listDir`、`sudo/readFile`、`sudo/writeFile` | sudo 目录浏览与文件读写 |
 | `sudo/mkdir`、`sudo/remove`、`sudo/removeAll`、`sudo/chmod`、`sudo/rename` | sudo 写操作 |
@@ -72,6 +75,18 @@ Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`se
 | `local/session/list`、`local/session/close` | 本地终端会话清单（webview 重载后接回）与关闭 |
 | `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。`transfer_concurrency`（u64，1..=10，默认 3）、`transfer_duplicate_policy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`transfer_max_active`（M14-B 会话级并发传输深度，u64，1..=8，默认 3；sidecar 每次任务启动现读现用——改动即时生效，新任务按新深度启动，进行中任务按旧深度自然完成）、`sftp_compat_mode`（M14-B 老旧服务器兼容模式，bool，默认 false；开启后 SFTP 会话不做流水线并发（读写各 1 路）并把并发深度强制 1，对新建 SFTP 会话生效（重连后应用）；SFTP 探测失败时 sidecar 对该会话一次性在错误信息中附带建议开启的提示）、`sftp_name_encoding`（M14-B 文件名显示编码，`auto`/`latin-1`，默认 `auto`，语义见 `sftp/list` 节）、`sftp_name_encoding_overrides`（M16 连接级文件名编码覆盖，对象按 connectionId 分桶 `{ <connectionId>: "auto"|"latin-1" }`；整体非对象报错，桶内非法值/空 connectionId 清洗丢弃，桶数上限 512；缺省语义为「跟随全局」——桶内无本连接条目即回退全局 `sftp_name_encoding`，再缺省 `auto`；判定优先级 连接覆盖 > 全局偏好 > 缺省 auto，覆盖值非法（白名单外）同样按未覆盖回退；判定点现读现用（`sftp/list`、`sftp/rename`、`sftp/delete`、`sftp/createDirectory`、`sftp/download/tree/start`），改动对下一次调用即时生效；sessionId 无法映射到连接（已断开）时按未覆盖处理）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
 | `serial/upload/start`、`serial/upload/data`、`serial/upload/cancel` | 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：协议状态机在 sidecar（`backend/src/serial_xmodem.rs` 纯状态机，由串口读线程喂数据/取输出），文件字节由前端 File API 分块（≤64KiB）经 `data` 送入，sidecar 不落盘；单次上传总量上限 256 MiB；进度事件 `serial/upload/progress`（`sent`/`total`，不含文件内容）；同一会话同一时刻至多一个上传（并发第二次 `start` 报错），见「串口文件上传（X/Y/ZMODEM）」节 |
+| `telnet/list`、`vnc/list`、`rdp/list`、`serial/list` | 活跃非 SSH 会话清单（均含 `sessionId`、`workbenchId`、逻辑端点和创建时间；Telnet/VNC saved connection 会额外带 `connectionId`、`runtimeHost`、`runtimePort`）。工作台重建只按相同 `workbenchId` 回附，绝不按连接抢占另一标签页会话。 |
+| `telnet/replay`、`serial/replay`、`vnc/replay`、`rdp/replay` | Webview 重建回附的输出恢复：Telnet/Serial 重发序号制终端帧；VNC 重发当前完整 framebuffer；RDP 重发一张有明确内存预算的完整合成 framebuffer，绝不重放不能独立恢复画面的增量 patch 序列。 |
+
+## 会话导入：流式预览与脱敏规范化导出
+
+`import/preview/start` 参数为 `{ kind, mainSize, userConfigSize?, masterPassword? }`：`kind` 为 `moba`、`xshell`、`windterm`、`securecrt`、`finalshell`、`electerm` 或 `termius`；主文件与仅 WindTerm 可用的 `userConfigSize` 共用 **64 MiB** 总预算。返回 `{ taskId, chunkSize }`，当前 `chunkSize` 为 256 KiB，刻意保持在 SDK 8 MiB JSON 上限以下。
+
+文件内容不经 JSON/base64 RPC 传输。前端按 SFTP 上传同款发送二进制通道 `import/preview/<taskId>/main`；WindTerm 可选文件使用 `import/preview/<taskId>/user-config`。每帧是 `[u64 BE offset][raw bytes]`，必须连续、从 offset 0 开始，单块至多 `chunkSize`。sidecar 成功接收后发 `import/preview/ack { taskId, part, nextOffset }`；前端等待 ACK 再发下一块。协议错误会发 `import/preview/error { taskId, part, error }`，并立即清理该任务。
+
+`import/preview/finish { taskId }` 只接受所有声明字节已到齐的任务；它在返回前移除原始文件字节和 WindTerm 主密码，返回 `{ sourceKind, sessions, totalSessions, truncated, export }`。这是一次性**临时 preview/export**：不创建连接、没有 `import/commit` 成功语义、也不持久化导入结果。所有格式（含 ZIP）使用解析前受限 accumulator，在每个 session `push` 前强制 `MAX_PREVIEW_SESSIONS=1000`，超限 fail-closed 而不是先构造巨大 `Vec` 后截断；ZIP 另受条目、单项与总解压预算限制。`sessions` 是最多 1000 行的脱敏预览（仅名称、主机、端口、用户、分组、描述、认证类别、`hasSecret` 与 `secretNote`）；`export` 是可供前端保存的规范化 JSON：`{ schemaVersion, sourceKind, sessions }`。每一行认证信息只有 `kind`、`hasSecret`、`keyPath`（路径元数据）和 `secretNote`；普通密码、私钥内容和私钥口令都不进入 `ImportedAuth` 预览模型，解密/检查仅用 `Zeroizing` 临时缓冲后立即释放；因此它们在任何响应、导出或插件私有文件中均不存在。该插件不再创建或读取 `imported-connections.json`。
+
+`import/preview/cancel { taskId }` 幂等地丢弃未完成的内存上传；组件卸载、读取失败、ACK 超时和用户返回均应调用它。sidecar 进程退出同样释放进程内状态。导出优先使用宿主 `saveFile`，其次 `fileTransfer`；Host API 1.0 同时缺失两项时，顶层、非 sandbox 页面使用浏览器 Blob 下载。因 issue #93，sandbox iframe **不得**尝试 `<a download>`：它必须失败并提示用户升级到带 `saveFile`/`fileTransfer` 的宿主或在顶层浏览器上下文打开，不能静默返回无导出结果。
 
 ## 运行时设置
 
@@ -572,7 +587,7 @@ VNC 远程桌面的帧缓冲更新以 patch 帧推送：`44 字节头 | RGBA 像
 
 编解码两侧（sidecar `encode_frame_patch` / 前端 `decodeVncFramePatch`）校验同一组不变式，任一不满足整帧丢弃（前端抛错丢帧；sidecar 判会话失败）：桌面与矩形尺寸非零；`x+width ≤ desktopWidth`、`y+height ≤ desktopHeight`（带回绕保护）；`stride ≥ width*4`；`payloadLength ≥ stride*height`；帧总长恰为 `44 + payloadLength`；`pixelFormat == 2`。桌面有界（≤3840×2160）使补丁负载天然 < 64 MiB。`sequence` 无需请求重放——丢帧只影响画面，下一帧补丁或全帧刷新（重连重画）自愈。
 
-参考实现：`backend/src/vnc_session.rs`（编码端）、`frontend/src/lib/vncFrame.ts`（解码端）；跨端 golden 向量以同一 hex 字符串硬编码在两侧测试中（`patch_frame_golden_vector_matches_frontend` / `vncFrame.spec.ts` 的 golden 断言，互指本文档）。`vnc/start`、`vnc/input`、`vnc/session/state` 等 JSON 契约见 sidecar 模块文档与 `docs/SPIKE_VNC_SESSION.zh-CN.md`。
+参考实现：`backend/src/vnc_session.rs`（编码端）、`frontend/src/lib/vncFrame.ts`（解码端）；跨端 golden 向量以同一 hex 字符串硬编码在两侧测试中（`patch_frame_golden_vector_matches_frontend` / `vncFrame.spec.ts` 的 golden 断言，互指本文档）。`vnc/start {connectionId?, workbenchId, host, port?, runtimeHost?, runtimePort?, ...}` 和 `telnet/start` 同理：`host/port` 是逻辑显示端点、`runtimeHost/runtimePort` 是唯一拨号端点（省略时回退逻辑端点）；`vnc/replay {sessionId}` 通过原帧通道发送当前完整 framebuffer 并返回 `{frameCount, complete:true}`，不会新建会话。
 
 ### 死会话输入事件（`ssh/terminal/error`）
 
@@ -640,6 +655,7 @@ RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRD
 - `rdp/set-clipboard {sessionId, text}`：本地文本 → 远端（暂存 + 以 CF_UNICODETEXT 广告）。**仅文本**；上限 16 MiB，超限整包拒绝（不截断）。返回 `{success}`。
 - `rdp/reconnect {sessionId}`：手动重连（generation 计数防串话）。返回 `{sessionId, success}`。
 - `rdp/close {sessionId}`：关闭会话（凭据随会话丢弃、待定证书确认全部拒绝、剪贴板暂存清空）。返回 `{success}`。
+- `rdp/replay {sessionId}`：Webview 重建后在原 `rdp/frame/{sessionId}` 通道重发**一张完整合成 framebuffer**，返回 `{frameCount: 1, complete:true}`。只有一张覆盖整个当前桌面的全屏 patch（`x=0,y=0,width=desktopWidth,height=desktopHeight`）才能建立 replay 基线；首帧为局部 patch、尺寸改变、close/error/reconnect 清理后均返回 `{frameCount: 0, complete:false}`，前端必须等待新的全屏基线，绝不得把增量 patch 误当完整桌面。实时 patch 合成、sequence 分配、replay 帧构造与发布由同一个会话锁串行，重挂帧不能插队到已分配但尚未发布的实时 sequence 之前。合成图严格限制为一张 RGBA 画面，尺寸上限 3840×2160，最大 **31,850,496 bytes（约 30.4 MiB）**；不保留多张 patch（旧方案在 4K 下可能累积数百 MiB）。
 - `rdp/list` → `{sessions: [{sessionId, workbenchId, host, port, username, hasPassword, useNla, certificatePolicy, clipboard, createdAt}]}`（按创建时间排序；不含密码与实时状态）。
 - `rdp/certificate/resolve {challengeId, accept?, remember?}`：证书确认应答。`accept` 缺省 false——超时/取消/未知 id 一律拒绝（fail-closed）。`remember=true` 时把指纹记入 `<plugin-data>/rdp-known-certs.json`（`{"host:port": "SHA256:hex"}`，上限 1024 条，与 SSH known_hosts 先例同作用域语义）。共享入口 `connection/challenge/resolve` 亦按 challengeId 路由到 RDP 注册表。
 
@@ -655,7 +671,7 @@ RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRD
 
 安全红线（实现与评审对照见 `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）：NTLMv2-only（vendored sspi 明示不支持 NTLMv1/LM，源码断言钉在 `vendored_sspi_marks_ntlmv1_and_lm_as_unsupported`）；CredSSP 仅在 TLS 之上（`with_tls(true)` 恒开）；证书策略 fail-closed（`prompt` 默认 / `strict` / `accept-temporarily`，无「静默接受」路径）；剪贴板 text-only + 16 MiB + 不落审计；凭据 `Zeroizing` 持有、不进日志/事件/错误。用户文档保留「连接期间远端可读写会话剪贴板、凭据实质交付目标主机，仅连接可信主机」警示。
 
-偏好（`local/preferences/*` 白名单新增，RDP-2）：`rdp_use_nla`（布尔，缺省 true）、`rdp_certificate_policy`（`prompt`（缺省）| `strict` | `accept-temporarily`，白名单外拒绝写入）。不新增 manifest 字段。
+实验门控与偏好（`local/preferences/*` 白名单，RDP-2）：`rdp_experimental_enabled` 仅显式布尔 `true` 才启用，缺失、非法或 false 均默认关闭；用户在**设置 → 实验性 RDP → 启用实验性 RDP**写入该键，前端才展示入口。后端在 `rdp/start` 前独立检查同一偏好，因此门关闭时直接 RPC 默认拒绝，不能绕过 UI。另有 `rdp_use_nla`（布尔，缺省 true）、`rdp_certificate_policy`（`prompt`（缺省）| `strict` | `accept-temporarily`，白名单外拒绝写入）。不新增 manifest 字段。
 
 ## 主机密钥确认通道(requestUserInput)
 

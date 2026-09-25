@@ -30,6 +30,22 @@ export interface AgentPromptPayload {
 }
 
 /** `ssh/agent/notice` 事件 payload：低危命令直接注入终端时的告知。 */
+/** MCP Docker lifecycle actions carry structured arguments; never allow the
+ * confirmation dialog to turn their rendered command into arbitrary SSH.
+ * Normal SSH command confirmations remain editable. */
+export function agentPromptCommandReadOnly(prompt: Pick<AgentPromptPayload, "source" | "tool">): boolean {
+  return prompt.source === "mcp" && prompt.tool === "docker_action";
+}
+
+/** MCP confirmations are process-level and arrive without a terminal session;
+ * legacy SSH prompts remain isolated to the active SSH session. */
+export function acceptsAgentPrompt(
+  prompt: Pick<AgentPromptPayload, "source" | "tool"> & { sessionId?: string },
+  activeSessionId: string | undefined,
+): boolean {
+  return (prompt.source === "mcp" && !prompt.sessionId) || prompt.sessionId === activeSessionId;
+}
+
 export interface AgentNoticePayload {
   sessionId: string;
   tool: string;
@@ -67,6 +83,22 @@ export function enqueueAgentPrompt<Q extends { challengeId: string }>(
 ): Q[] {
   if (queue.some((item) => item.challengeId === payload.challengeId)) return [...queue];
   return [...queue, payload];
+}
+
+/** Routes a prompt into the approval queue only when it belongs to the active
+ * SSH session or is an MCP process-level confirmation with no session id. */
+export function enqueueAcceptedAgentPrompt<Q extends { challengeId: string; source?: "mcp"; sessionId?: string; tool: string }>(
+  queue: readonly Q[],
+  payload: Q,
+  activeSessionId: string | undefined,
+): Q[] {
+  return acceptsAgentPrompt(payload, activeSessionId) ? enqueueAgentPrompt(queue, payload) : [...queue];
+}
+
+/** Session lifecycle cleanup only owns terminal-bound prompts. Process-level
+ * MCP prompts intentionally omit sessionId and must survive SSH tab changes. */
+export function clearSessionBoundAgentPrompts<Q extends { sessionId?: string }>(queue: readonly Q[]): Q[] {
+  return queue.filter((prompt) => !prompt.sessionId);
 }
 
 /** 移除指定 challengeId 的挑战；未命中返回等价浅拷贝。 */
