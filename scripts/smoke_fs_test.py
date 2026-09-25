@@ -1584,6 +1584,7 @@ def main() -> None:
         # saveToLocal 单文件下载（finish.localPath）。
         watch_dir = f"{home}/.dbx-watch-smoke"
         watch_state = {}
+        watch_lat_dir = f"{home}/.dbx-watch-latin1"
         enc_tree_local = Path(tempfile.mkdtemp(prefix="dbx-ssh-smoke-enc-tree-"))
         prefs_snapshot = req("local/preferences/get", {})
         mcp_stamp = int(time.time())
@@ -1906,6 +1907,44 @@ def main() -> None:
                 raise AssertionError(f"stop-all stopped={result}")
             print("    stop removes exactly its watch; b survives; stop-all sweeps")
 
+        def case_watch_latin1_back():
+            # latin-1 连接口径的真机门收口：wire 路径的注册/外部编辑/回写全链
+            # （此前只有 write_bytes latin-1 分支的单测与 MCP 往返覆盖，真容器
+            # 没跑过）。组尾自愈：回写校验后删残留并把偏好归位 auto。
+            req("local/preferences/set", {"sftp_name_encoding": "latin-1"})
+            req("sftp/createDirectory", {"sessionId": session_id, "path": watch_lat_dir})
+            wire = f"{watch_lat_dir}/caf%E9.txt"
+            req("sftp/write", {"sessionId": session_id, "remotePath": wire,
+                               "dataBase64": base64.b64encode(b"latin1 watch v1\n").decode()})
+            local, size = watch_download_local(wire)
+            if size != len(b"latin1 watch v1\n"):
+                raise AssertionError(f"latin-1 watch fixture size: {size}")
+            watch_id = str(req("watch/start", {"sessionId": session_id, "remotePath": wire,
+                                               "localPath": local}).get("watchId") or "")
+            if not watch_id:
+                raise AssertionError("latin-1 watch id missing")
+            marker = len(client.events)
+            time.sleep(2.5)  # 越过 pump 启动抑制窗
+            Path(local).write_text(f"latin-1 external edit {time.time()}\n")
+            event = wait_watch_event(watch_id, marker)
+            if (event.get("params") or {}).get("remotePath") != wire:
+                raise AssertionError(f"latin-1 event remotePath: {event.get('params')}")
+            marker = len(client.events)
+            back = req("watch/upload", {"watchId": watch_id})
+            local_bytes = Path(local).read_bytes()
+            if int(back.get("size") or -1) != len(local_bytes):
+                raise AssertionError(f"latin-1 upload-back size: {back}")
+            read_back = req("sftp/read", {"sessionId": session_id, "path": wire,
+                                          "maxBytes": 4096})
+            if base64.b64decode(read_back.get("dataBase64", "")) != local_bytes:
+                raise AssertionError("latin-1 upload-back content mismatch")
+            # 自愈：watch 已停，趁偏好仍在 latin-1 删掉 0xE9 字节名残留，再归位 auto。
+            req("watch/stop", {"watchId": watch_id})
+            req("sftp/delete", {"sessionId": session_id, "path": watch_lat_dir,
+                                "recursive": True})
+            req("local/preferences/set", {"sftp_name_encoding": "auto"})
+            print("    latin-1 wire register/edit/upload-back round-trip ok")
+
         def case_mcp_sftp_toolface():
             # M17-B MCP 工具面：sftp_mkdir/sftp_list_dir/sftp_rename/sftp_remove
             # （+ sftp_exists 收口）在 autonomous 模式经 mcp/call 基本往返。
@@ -1981,6 +2020,9 @@ def main() -> None:
         report.run("watch/stop drops exactly its watch; stop-all sweeps", "watch/stop-all",
                    case_watch_stop_semantics,
                    needs="watcher external edit routes events per watch + upload-back")
+        report.run("watcher latin-1 wire path register/edit/upload-back", "watch/upload",
+                   case_watch_latin1_back,
+                   needs="watch/stop drops exactly its watch; stop-all sweeps")
 
         step("cleanup leftovers")
         # Best-effort mode/secret restore even when a late case failed: the
