@@ -267,28 +267,68 @@ fn permission_mode_from_env(lookup: impl FnOnce(&str) -> Option<String>) -> Opti
     }
 }
 
+/// Effective connection-scope policy. Persisted empty arrays retain their
+/// original "unrestricted" UI meaning, while an explicitly empty environment
+/// override is fail-closed and therefore must use a distinct representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConnectionScope {
+    Unrestricted,
+    DenyAll,
+    AllowList(Vec<String>),
+}
+
+impl ConnectionScope {
+    fn from_persisted(entries: Vec<String>) -> Self {
+        if entries.is_empty() {
+            Self::Unrestricted
+        } else {
+            Self::AllowList(entries)
+        }
+    }
+
+    fn allows(&self, id: &str, name: Option<&str>, host: &str) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::DenyAll => false,
+            Self::AllowList(entries) => scope_allows(entries, id, name, host),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        !matches!(self, Self::Unrestricted)
+    }
+
+    fn entries(&self) -> &[String] {
+        match self {
+            Self::AllowList(entries) => entries,
+            Self::Unrestricted | Self::DenyAll => &[],
+        }
+    }
+}
+
 /// Parses `DBX_SSH_MCP_CONNECTION_SCOPE` (comma-separated entries). An env
 /// var that is set but parses to zero entries still counts as an override —
 /// an operator pinning an empty list means "no connections", not "unset".
-fn scope_from_env(lookup: impl FnOnce(&str) -> Option<String>) -> Option<Vec<String>> {
+fn scope_from_env(lookup: impl FnOnce(&str) -> Option<String>) -> Option<ConnectionScope> {
     let value = lookup("DBX_SSH_MCP_CONNECTION_SCOPE")?;
-    Some(
-        value
-            .split(',')
-            .map(|entry| entry.trim().to_string())
-            .filter(|entry| !entry.is_empty())
-            .take(CONNECTION_SCOPE_MAX_ENTRIES)
-            .collect(),
-    )
+    let entries: Vec<String> = value
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .take(CONNECTION_SCOPE_MAX_ENTRIES)
+        .collect();
+    Some(if entries.is_empty() {
+        ConnectionScope::DenyAll
+    } else {
+        ConnectionScope::AllowList(entries)
+    })
 }
 
 /// Scope match rule (§1.3): an entry allows a connection when it equals the
 /// connection id, equals the connection name, or equals the host ASCII
-/// case-insensitively. An empty scope allows everything.
+/// case-insensitively. Empty entry lists are only used by callers that have
+/// already selected the unrestricted policy.
 pub fn scope_allows(scope: &[String], id: &str, name: Option<&str>, host: &str) -> bool {
-    if scope.is_empty() {
-        return true;
-    }
     scope.iter().any(|entry| {
         entry == id
             || name.map(|name| entry == name).unwrap_or(false)
@@ -644,7 +684,11 @@ impl McpState {
         let (mode, scope) = self.effective_permission();
         if let Some(object) = payload.as_object_mut() {
             object.insert("execPermissionMode".to_string(), json!(mode));
-            object.insert("connectionScope".to_string(), json!(scope));
+            object.insert("connectionScope".to_string(), json!(scope.entries()));
+            object.insert(
+                "connectionScopeDenyAll".to_string(),
+                json!(matches!(scope, ConnectionScope::DenyAll)),
+            );
             let persisted = self
                 .permission
                 .read()
@@ -743,7 +787,7 @@ impl McpState {
     /// Effective (env-overridden) permission pair: `(mode, scope)`. The env
     /// vars win when present-and-valid; the persisted values apply
     /// otherwise.
-    fn effective_permission(&self) -> (String, Vec<String>) {
+    fn effective_permission(&self) -> (String, ConnectionScope) {
         let persisted = self
             .permission
             .read()
@@ -751,8 +795,8 @@ impl McpState {
             .clone();
         let mode = permission_mode_from_env(|key| std::env::var(key).ok())
             .unwrap_or(persisted.exec_permission_mode);
-        let scope =
-            scope_from_env(|key| std::env::var(key).ok()).unwrap_or(persisted.connection_scope);
+        let scope = scope_from_env(|key| std::env::var(key).ok())
+            .unwrap_or_else(|| ConnectionScope::from_persisted(persisted.connection_scope));
         (mode, scope)
     }
 
@@ -764,7 +808,7 @@ impl McpState {
     }
 
     /// Effective scope for gate checks.
-    fn effective_scope(&self) -> Vec<String> {
+    fn effective_scope(&self) -> ConnectionScope {
         self.effective_permission().1
     }
 
@@ -977,11 +1021,10 @@ impl McpState {
         // be widened by dialing around the registry.
         {
             let scope = self.effective_scope();
-            if !scope.is_empty() && is_connection_scoped_tool(name) {
+            if scope.is_active() && is_connection_scoped_tool(name) {
                 match resolved_ref.as_ref() {
                     Some(connection) => {
-                        if !scope_allows(
-                            &scope,
+                        if !scope.allows(
                             &connection.id,
                             connection.name.as_deref(),
                             &connection.host,
@@ -1127,8 +1170,19 @@ impl McpState {
                 .runtime
                 .request_mcp_confirm(name, &command, connection_id, emitter)
                 .await?;
-            // The approval dialog is editable: the confirmed text replaces
-            // the original for the actual execution.
+            // docker_action is intentionally structured: its canonical text
+            // is evidence for the action/container pair, not an alternate
+            // shell input. Refuse edits instead of displaying one action and
+            // executing another.
+            if name == "docker_action" && approved != command {
+                return Err(
+                    "Docker action confirmation text is not editable; approve the displayed canonical command or cancel"
+                        .to_string(),
+                );
+            }
+            // Other command-based tools retain the existing editable approval
+            // contract: the approved text replaces the original execution
+            // input.
             if approved != command {
                 let mut rewritten = arguments.clone();
                 if let Some(map) = rewritten.as_object_mut() {
@@ -2074,13 +2128,8 @@ impl McpState {
                         .ok_or_else(|| format!("No saved connection matched '{raw}'"))?
                 }
             };
-            if !scope.is_empty()
-                && !scope_allows(
-                    &scope,
-                    &resolved.id,
-                    resolved.name.as_deref(),
-                    &resolved.host,
-                )
+            if scope.is_active()
+                && !scope.allows(&resolved.id, resolved.name.as_deref(), &resolved.host)
             {
                 return Err(format!(
                     "Connection '{}' ({} / {}) is outside this MCP server's connectionScope; \
@@ -3417,22 +3466,21 @@ fn registry_connection_view(connection: &StoredConnection) -> Value {
 fn connection_list_result(
     bridge: Result<Vec<Value>, String>,
     registry: &[StoredConnection],
-    scope: &[String],
+    scope: &ConnectionScope,
 ) -> Value {
-    // §1.3: a non-empty scope hides out-of-scope entries from the list view
+    // §1.3: an active scope hides out-of-scope entries from the list view
     // (both bridge and registry sources), so discovery cannot enumerate
-    // beyond the operator's allowlist.
-    fn in_scope(entry: &Value, scope: &[String]) -> bool {
-        scope.is_empty()
-            || scope_allows(
-                scope,
-                entry.get("id").and_then(Value::as_str).unwrap_or_default(),
-                entry.get("name").and_then(Value::as_str),
-                entry
-                    .get("host")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            )
+    // beyond the operator's allowlist. DenyAll intentionally produces an
+    // empty list rather than reusing the persisted unrestricted empty array.
+    fn in_scope(entry: &Value, scope: &ConnectionScope) -> bool {
+        scope.allows(
+            entry.get("id").and_then(Value::as_str).unwrap_or_default(),
+            entry.get("name").and_then(Value::as_str),
+            entry
+                .get("host")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
     }
     match bridge {
         Ok(entries) => {
@@ -3448,12 +3496,7 @@ fn connection_list_result(
                 .iter()
                 .filter(|connection| !listed.contains(&connection.id))
                 .filter(|connection| {
-                    scope_allows(
-                        scope,
-                        &connection.id,
-                        connection.name.as_deref(),
-                        &connection.host,
-                    )
+                    scope.allows(&connection.id, connection.name.as_deref(), &connection.host)
                 })
             {
                 merged.push(registry_connection_view(connection));
@@ -3464,8 +3507,7 @@ fn connection_list_result(
             "connections": registry
                 .iter()
                 .filter(|connection| {
-                    scope_allows(
-                        scope,
+                    scope.allows(
                         &connection.id,
                         connection.name.as_deref(),
                         &connection.host,
@@ -4705,8 +4747,9 @@ mod tests {
         let scope = |entries: &[&str]| -> Vec<String> {
             entries.iter().map(|entry| entry.to_string()).collect()
         };
-        // 空作用域放行一切。
-        assert!(scope_allows(&[], "c1", Some("prod"), "db.local"));
+        // 空 entry 列表本身不授予权限；持久化空数组会在 ConnectionScope
+        // 层映射为 Unrestricted，显式空环境变量则映射为 DenyAll。
+        assert!(!scope_allows(&[], "c1", Some("prod"), "db.local"));
         let entries = scope(&["conn-9", "ops@LEGACY", "Web-01"]);
         assert!(scope_allows(&entries, "conn-9", None, "other.local"));
         assert!(scope_allows(&entries, "other-id", Some("ops@LEGACY"), "x")); // name 精确（大小写敏感）
@@ -4721,7 +4764,7 @@ mod tests {
     }
 
     #[test]
-    fn env_permission_parsers_validate_and_default() {
+    fn env_permission_parsers_distinguish_unset_allowlist_and_deny_all() {
         assert_eq!(
             permission_mode_from_env(|_| Some("confirm".to_string())).as_deref(),
             Some("confirm")
@@ -4731,11 +4774,26 @@ mod tests {
         assert!(permission_mode_from_env(|_| Some("yolo".to_string())).is_none());
         assert_eq!(
             scope_from_env(|_| Some(" a , b,,c ".to_string())),
-            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+            Some(ConnectionScope::AllowList(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ]))
         );
-        // 显式空列表也是有效覆盖（=拒绝一切）。
-        assert_eq!(scope_from_env(|_| Some(" , ".to_string())), Some(vec![]));
+        // 显式空列表是有效的 fail-closed 覆盖，绝不能与持久化空数组
+        // （未限制）复用同一种状态。
+        assert_eq!(
+            scope_from_env(|_| Some(" , ".to_string())),
+            Some(ConnectionScope::DenyAll)
+        );
         assert!(scope_from_env(|_| None).is_none());
+    }
+
+    #[test]
+    fn connection_scope_policy_preserves_persisted_empty_as_unrestricted() {
+        assert!(ConnectionScope::from_persisted(Vec::new()).allows("id", Some("name"), "host"));
+        assert!(!ConnectionScope::DenyAll.allows("id", Some("name"), "host"));
+        assert!(ConnectionScope::AllowList(vec!["host".to_string()]).allows("id", None, "HOST"));
     }
 
     #[test]
@@ -5016,13 +5074,13 @@ mod tests {
             }))
             .unwrap()
         };
-        // 空作用域：两来源都全量。
+        // 持久化空作用域映射为未限制：两来源都全量。
         let all = connection_list_result(
             Ok(vec![
                 json!({"id":"conn-9","name":"staging","host":"stg.local"}),
             ]),
             &[stored()],
-            &[],
+            &ConnectionScope::Unrestricted,
         );
         assert_eq!(all["connections"].as_array().unwrap().len(), 2);
         // host 作用域：bridge 条目按 host 过滤，registry 条目按 id/name/host。
@@ -5032,7 +5090,7 @@ mod tests {
                 json!({"id":"conn-1","name":"prod","host":"db.local"}),
             ]),
             &[stored()],
-            &["db.local".to_string()],
+            &ConnectionScope::AllowList(vec!["db.local".to_string()]),
         );
         let ids: Vec<&str> = filtered["connections"]
             .as_array()
@@ -5045,7 +5103,7 @@ mod tests {
         let degraded = connection_list_result(
             Err("bridge down".to_string()),
             &[stored()],
-            &["conn-9".to_string()],
+            &ConnectionScope::AllowList(vec!["conn-9".to_string()]),
         );
         assert_eq!(degraded["connections"].as_array().unwrap().len(), 0);
     }
@@ -7090,7 +7148,7 @@ mod tests {
         let degraded = connection_list_result(
             Err("bridge down".to_string()),
             std::slice::from_ref(&stored),
-            &[],
+            &ConnectionScope::Unrestricted,
         );
         assert_eq!(degraded["source"], "session-registry");
         assert!(
@@ -7130,7 +7188,11 @@ mod tests {
             }
         }))
         .unwrap();
-        let merged = connection_list_result(Ok(vec![bridge_entry]), &[stored, extra], &[]);
+        let merged = connection_list_result(
+            Ok(vec![bridge_entry]),
+            &[stored, extra],
+            &ConnectionScope::Unrestricted,
+        );
         assert_eq!(merged["source"], "dbx-app-bridge");
         assert!(merged.get("note").is_none(), "bridge hit must not degrade");
         let entries = merged["connections"].as_array().unwrap();
@@ -7867,7 +7929,8 @@ mod tests {
             bridge_entry("conn-y", "other.example.test"),
         ]);
 
-        let merged = connection_list_result(bridge.clone(), &registry, &[]);
+        let merged =
+            connection_list_result(bridge.clone(), &registry, &ConnectionScope::Unrestricted);
         assert_eq!(merged["source"], "dbx-app-bridge");
         let rows = merged["connections"].as_array().unwrap();
         assert_eq!(rows.len(), 2, "id conflict must deduplicate, not append");
@@ -7878,13 +7941,21 @@ mod tests {
         );
 
         // 作用域对桥与注册表两来源都过滤：只留 conn-y。
-        let scoped = connection_list_result(bridge, &registry, &["conn-y".to_string()]);
+        let scoped = connection_list_result(
+            bridge,
+            &registry,
+            &ConnectionScope::AllowList(vec!["conn-y".to_string()]),
+        );
         let rows = scoped["connections"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["id"], "conn-y");
 
         // 桥不可用时降级到注册表 + note（同 id 冲突无从发生）。
-        let degraded = connection_list_result(Err("bridge down".into()), &registry, &[]);
+        let degraded = connection_list_result(
+            Err("bridge down".into()),
+            &registry,
+            &ConnectionScope::Unrestricted,
+        );
         assert_eq!(degraded["source"], "session-registry");
         assert_eq!(degraded["connections"].as_array().unwrap().len(), 2);
     }

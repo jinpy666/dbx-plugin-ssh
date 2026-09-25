@@ -764,6 +764,8 @@ impl Plugin {
                     .block_on(self.vnc.close_workbench(workbench_id));
                 self.runtime
                     .block_on(self.rdp.close_workbench(workbench_id));
+                self.runtime
+                    .block_on(self.serial.close_workbench(workbench_id));
                 Ok(json!({ "success": true }))
             }
             "ssh/host-key/resolve" | "connection/challenge/resolve" => {
