@@ -1492,6 +1492,10 @@ struct TreeDownloadState {
     files_done: u64,
     skipped: u64,
     failures: Vec<Value>,
+    /// latin-1 连接标记：files 的 remote_path 是 wire 形式（raw 扫描），
+    /// 逐文件读取必须走裸包车道——高层客户端按 UTF-8 open 字节名路径必
+    /// NO_SUCH_FILE（真机 smoke 曝露的第四层 wire 缺口）。
+    latin1: bool,
 }
 
 struct FinishingUpload {
@@ -4403,7 +4407,7 @@ impl SshRuntime {
 
     /// 裸包读一个下载分片（转义路径专用）：`%XX` 转义的 wire 路径先还原为
     /// 服务器原始字节再交给 SFTP READ。requested=0 直接回空（EOF 语义）。
-    async fn raw_read_chunk(
+    pub(crate) async fn raw_read_chunk(
         &self,
         session_id: &str,
         remote_path: &str,
@@ -6201,6 +6205,7 @@ impl SshRuntime {
                         files_done: 0,
                         skipped,
                         failures: scan.failures,
+                        latin1: encoding == NameEncoding::Latin1,
                     }),
                     sudo_tmp: None,
                 },
@@ -6297,32 +6302,59 @@ impl SshRuntime {
                 finalize_tree_current(self, &mut tree).await;
                 continue;
             }
-            let mut source = match sftp.lock().await.open(file.remote_path.clone()).await {
-                Ok(source) => source,
-                Err(error) => {
-                    tree.failures
-                        .push(json!({ "path": file.relative, "error": sftp_error(error) }));
-                    discard_tree_current(&mut tree);
-                    continue;
-                }
-            };
-            if let Err(error) = source
-                .seek(std::io::SeekFrom::Start(tree.current_offset))
-                .await
-            {
-                tree.failures.push(json!({ "path": file.relative, "error": format!("SFTP download seek failed: {error}") }));
-                discard_tree_current(&mut tree);
-                continue;
-            }
             let requested = remaining.min(TRANSFER_CHUNK_SIZE as u64) as usize;
-            let mut chunk = vec![0_u8; requested];
-            let length = match source.read(&mut chunk).await {
-                Ok(length) => length,
-                Err(error) => {
-                    tree.failures.push(json!({ "path": file.relative, "error": format!("SFTP download failed: {error}") }));
+            let (mut chunk, length) = if tree.latin1 {
+                // latin-1：远端路径是 wire 形式（raw 扫描），高层 open 按
+                // UTF-8 找不到字节名文件——走裸包 READ（download 分片的
+                // raw_read_chunk 同款：整条 unescape 后裸包 OPEN/READ）。
+                match self
+                    .raw_read_chunk(
+                        &download.session_id,
+                        &file.remote_path,
+                        tree.current_offset,
+                        requested as u32,
+                    )
+                    .await
+                {
+                    Ok(data) => {
+                        let length = data.len();
+                        (data, length)
+                    }
+                    Err(error) => {
+                        tree.failures
+                            .push(json!({ "path": file.relative, "error": error }));
+                        discard_tree_current(&mut tree);
+                        continue;
+                    }
+                }
+            } else {
+                let mut source = match sftp.lock().await.open(file.remote_path.clone()).await {
+                    Ok(source) => source,
+                    Err(error) => {
+                        tree.failures
+                            .push(json!({ "path": file.relative, "error": sftp_error(error) }));
+                        discard_tree_current(&mut tree);
+                        continue;
+                    }
+                };
+                if let Err(error) = source
+                    .seek(std::io::SeekFrom::Start(tree.current_offset))
+                    .await
+                {
+                    tree.failures.push(json!({ "path": file.relative, "error": format!("SFTP download seek failed: {error}") }));
                     discard_tree_current(&mut tree);
                     continue;
                 }
+                let mut chunk = vec![0_u8; requested];
+                let length = match source.read(&mut chunk).await {
+                    Ok(length) => length,
+                    Err(error) => {
+                        tree.failures.push(json!({ "path": file.relative, "error": format!("SFTP download failed: {error}") }));
+                        discard_tree_current(&mut tree);
+                        continue;
+                    }
+                };
+                (chunk, length)
             };
             if length == 0 {
                 // 远端文件比扫描时短：只记失败，不把半成品留在本地。

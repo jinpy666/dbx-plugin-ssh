@@ -452,6 +452,8 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 | `offset` | number | 否 | 起始字节偏移，默认 `0`；省略或非法值按 `0` 处理 |
 | `maxBytes` | number | 否 | 本次最多返回的字节数，默认 256 KiB，上限 1 MiB（至少为 1） |
 
+**文件名编码（M19 收口）**：生效编码为 `latin-1` 时 `path` 是整条 wire 形式（列表回传的 `%XX` 转义路径），sidecar 整条还原为服务器字节后走裸包 READ（与下载分片同一车道）；`auto` 按 UTF-8 走高层客户端。
+
 返回 `{ dataBase64, truncated }`：内容 base64 编码；返回字节数达到 `maxBytes` 且文件还有剩余时 `truncated` 为 `true`，调用方以 `offset += 返回字节数` 续读。`offset` 在文件末尾或超出文件大小时返回空内容且 `truncated: false`（不报错，与 `sudo/readFile` 的「offset 超界报错」语义不同——SFTP 侧以空读表示 EOF）。错误：路径不存在或不是普通文件；无读取权限。
 
 ### sftp/touch

@@ -3868,3 +3868,13 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **过程记录**：M19 线与修复 agent 各遭基础设施中断一次（captcha），分别以"审用半成品重拉"与"保留上下文续跑"恢复，均未触发转人工线。
 - **全量终值（Windows 实测）**：backend cargo **957/957**（940+4 修复 +3 M19）/ clippy 0 / fmt 0；前端零改动沿 ecbc305 口径 vitest 1067 / vue-tsc 0 / build 过；两 merge 零冲突。
 - **CI 复验预期**：ssh-smoke 全组 96 PASS / 0 FAIL 方向（M18 失败的 2 用例 + 连锁 SKIP 5 例恢复）。
+
+## M19.5 真机复验轮（2026-09-25，Mac 容器实测：MKDIR 修复后连剥三层 wire 缺口至全绿）
+
+- **CI 复验揭出修复只到第一层**：run 36155020114（含 1b19a015 MKDIR ATTRS 修复）ssh-smoke 仍红（3m10s），与 Mac 本地容器（同 linuxserver/openssh-server 镜像）复现完全一致（71 过/5 SKIP/2 挂，FAIL 仍报 `SFTP raw read failed: early eof`）——MKDIR ATTRS 是必要非充分。
+- **诊断方法**：独立探针进程（russh 直连容器手搓 wire 帧）与 sidecar 临时 `[raw-trace]` 帧级日志对剖——探针侧 INIT/MKDIR(带 ATTRS)/LSTAT/OPENDIR 全部正常，把挂点逼进 sidecar 独有的帧内容；trace 显示 raw list 的第三笔请求 `type=16`，实锤第四层。连剥三层：
+  1. **`FXP_READDIR` 常量错值 16（=REALPATH，规范值 12）**：raw 列表的 READDIR 实际发出 REALPATH 帧（4 字节 handle 被当路径且含 NUL）→ OpenSSH sftp-server fatal → 通道 EOF。离线桩测不出的根因是**自洽盲区**——`validate_request` 严格校验器用同一错误常量对照。修复：常量 12 + 新增 `request_type_codes_match_draft02_literals` 把全部 23 个类型码对 draft-02 **字面值**逐一对表（读帧字节而非读常量）。
+  2. **`sftp/read` 缺 latin-1 车道**：M16 编码家族唯一漏网（wire 路径直入高层客户端按 UTF-8 open → NO_SUCH_FILE）。修复：分发层按 `resolve_sftp_encoding` 分支，Latin1 走 `raw_read_chunk`（download 分片同款整条 wire 还原 + 裸包 READ；多读 1 字节对齐高层 `truncated` 语义）。
+  3. **树下载逐文件读取无 raw 车道**：扫描是 raw READDIR 字节保真（files 的 remote_path 为 wire 形式），但分块读取高层 open → NO_SUCH_FILE 记 failure 跳过 → 本地缺文件（只剩空目录骨架）。修复：`TreeDownloadState.latin1` 标记，latin-1 下逐文件分块走 `raw_read_chunk`，实现与本节 PROTOCOL「分块下载按转义自动走 raw READ」的既有声明对齐。
+- **Mac 真机终值**：smoke_fs_test **79 PASS / 0 SKIP / 0 FAIL**（71/5/2 → 全组恢复，含 M18 两条失败用例与 np19 symlink 用例）；全量 cargo **963/963**（win 957 + 字面值对表 1，mac 口径 963）/ clippy 0 / fmt 0 / vitest 1067 / vue-tsc 0 / build 过（ui/ 无变化还原）。
+- **过程记录**：接力会话接手时交接的 Windows 修复线（E:\...np19-fix-raw-eof）已在远端完成收口（0c1b3dad docs(m19)）；Mac 侧重建 worktree 后先复验揭出上述三层，全部改动在本轮一并落地（codex/ssh/parity-fix-raw-eof 分支续用）。

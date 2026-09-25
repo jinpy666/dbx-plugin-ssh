@@ -187,3 +187,12 @@ e2e（headless Chrome，`mock.html?fresh=1&slow=2`，Playwright + 系统 Chrome�
 新增可测面：MCP sftp_upload 直写帧序（LSTAT 预检 + OPEN + WRITE 载荷逐字节）与 sftp_download OPEN(READ) 帧路径字节；同显示路径 upload/download OPEN 帧字节一致 + 载荷回收的往返闭环；smoke 符号链接三命令 latin-1 路径（0xE9 字节链接名 + 显示指向读写回环）。
 
 仍保持未验收（依赖真机/人工）：latin-1 真机全链联调（工作台+MCP 面，含传输工具）、既有真机门不变。
+
+
+## M19.5（真机复验轮，2026-09-25，Mac linuxserver/openssh-server 容器实测）
+
+单测：cargo 基线（win 957）→ mac 口径 **963/963**（+1：`request_type_codes_match_draft02_literals` 全部 23 个 SFTP 类型码对 draft-02 字面值逐一对表 + READDIR 帧字节直读断言）、vitest **1067/1067**、vue-tsc 0、build 过、clippy 0、fmt 0。真机：smoke_fs_test **79/79 全组通过**（修复前 71 过/5 SKIP/2 FAIL）。
+
+修复面：`FXP_READDIR` 常量错值（16=REALPATH → 12）引发的 raw 列表通道 EOF；`sftp/read` latin-1 wire 车道补齐（raw_read_chunk，多读 1 字节 truncated 语义）；树下载 latin-1 逐文件裸包读取（`TreeDownloadState.latin1`）。三者均为「离线桩自洽通过、真容器才爆」的字节级缺口——字面值对表测试专门封堵常量自洽盲区。
+
+仍保持未验收（依赖真机/人工）：latin-1 真机全链联调在 CI 容器口径已过（本轮 79/79），工作台 GUI 手测与既有真机门不变。

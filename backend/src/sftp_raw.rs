@@ -39,10 +39,14 @@ const FXP_WRITE: u8 = 6;
 const FXP_LSTAT: u8 = 7;
 const FXP_SETSTAT: u8 = 9;
 const FXP_OPENDIR: u8 = 11;
+// READDIR 是 12（draft-ietf-secsh-filexfer-02 §3）：16 是 REALPATH——曾误写成
+// 16，发出的帧被 OpenSSH sftp-server 当 REALPATH 解析（handle 当路径，含
+// NUL 字节），进程 fatal 退出即通道 EOF（真机表现为 "SFTP raw read failed:
+// early eof"）。
+const FXP_READDIR: u8 = 12;
 const FXP_REMOVE: u8 = 13;
 const FXP_MKDIR: u8 = 14;
 const FXP_RMDIR: u8 = 15;
-const FXP_READDIR: u8 = 16;
 const FXP_STAT: u8 = 17;
 const FXP_RENAME: u8 = 18;
 const FXP_READLINK: u8 = 19;
@@ -875,6 +879,39 @@ mod tests {
         // type + id + handle len + handle 之后才是 offset/len。
         assert_eq!(&frame[14..22], &9_u64.to_be_bytes());
         assert_eq!(&frame[22..26], &100_u32.to_be_bytes());
+    }
+
+    /// 请求类型码对 draft-02 字面值逐一对表：防"常量与校验器共用同一错值"
+    /// 的自洽回归盲区（READDIR 曾误写 16=REALPATH，离线桩测不出，真机
+    /// sftp-server fatal 即通道 EOF）。
+    #[test]
+    fn request_type_codes_match_draft02_literals() {
+        assert_eq!(FXP_INIT, 1_u8);
+        assert_eq!(FXP_VERSION, 2_u8);
+        assert_eq!(FXP_OPEN, 3_u8);
+        assert_eq!(FXP_CLOSE, 4_u8);
+        assert_eq!(FXP_READ, 5_u8);
+        assert_eq!(FXP_WRITE, 6_u8);
+        assert_eq!(FXP_LSTAT, 7_u8);
+        assert_eq!(FXP_SETSTAT, 9_u8);
+        assert_eq!(FXP_OPENDIR, 11_u8);
+        assert_eq!(FXP_READDIR, 12_u8);
+        assert_eq!(FXP_REMOVE, 13_u8);
+        assert_eq!(FXP_MKDIR, 14_u8);
+        assert_eq!(FXP_RMDIR, 15_u8);
+        // 16 = REALPATH：客户端不发起该请求，无对应常量（曾误把 16 当 READDIR）。
+        assert_eq!(FXP_STAT, 17_u8);
+        assert_eq!(FXP_RENAME, 18_u8);
+        assert_eq!(FXP_READLINK, 19_u8);
+        assert_eq!(FXP_SYMLINK, 20_u8);
+        assert_eq!(FXP_STATUS, 101_u8);
+        assert_eq!(FXP_HANDLE, 102_u8);
+        assert_eq!(FXP_DATA, 103_u8);
+        assert_eq!(FXP_NAME, 104_u8);
+        assert_eq!(FXP_ATTRS, 105_u8);
+        // 读/列目录两大关键帧用字面值再钉一次（回归直接读帧字节）。
+        assert_eq!(build_readdir(2, b"h")[4], 12_u8);
+        assert_eq!(build_string_request(FXP_OPENDIR, 3, b"h")[4], 11_u8);
     }
 
     #[test]
