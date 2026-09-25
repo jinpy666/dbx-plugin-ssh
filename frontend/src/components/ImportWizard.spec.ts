@@ -64,6 +64,20 @@ describe("ImportWizard", () => {
     expect(bridge.invoke.mock.calls.map(([method]) => method)).not.toContain("import/commit");
   });
 
+  it("cancels an active preview when the wizard unmounts", async () => {
+    const bridge = installBridge();
+    bridge.sendBinary.mockImplementation(() => new Promise<void>(() => undefined));
+    const wrapper = mount(ImportWizard, { props: { t } });
+    await wrapper.findAll(".import-source").at(0)!.trigger("click");
+    setFiles(wrapper.find<HTMLInputElement>("input[type=file]").element, new File(["x"], "sessions.mxtsessions"));
+    await flushPromises();
+    await wrapper.find(".import-nav .primary-button").trigger("click");
+    await flushPromises();
+    wrapper.unmount();
+    await flushPromises();
+    expect(bridge.invoke).toHaveBeenCalledWith("import/preview/cancel", { taskId: "preview-1" });
+  });
+
   it("cancels the server preview when the binary stream fails", async () => {
     const bridge = installBridge();
     bridge.sendBinary.mockRejectedValueOnce(new Error("transport closed"));

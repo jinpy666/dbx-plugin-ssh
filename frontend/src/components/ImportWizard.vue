@@ -2,7 +2,7 @@
 // 会话导入不再写入插件私有连接库。主文件和可选 WindTerm user.config 以
 // SFTP 同款 start + 二进制 offset 分块 + ACK 流上传；finish 仅返回脱敏预览
 // 与可下载的规范化元数据导出，密码、私钥内容和口令永不离开 sidecar。
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 import { Download, FileUp, FolderInput, Loader2, PencilLine, RotateCcw } from "@lucide/vue";
 import {
   IMPORT_CHUNK_LIMIT,
@@ -40,6 +40,7 @@ const exporting = ref(false);
 const exportError = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
 const userConfigInput = ref<HTMLInputElement | null>(null);
+const activeUploads = new Set<string>();
 const currentSource = computed(() => SOURCES.find((source) => source.kind === kind.value) ?? SOURCES[0]);
 const hasNotedSecrets = computed(() => sessions.value.some((session) => session.secretNote));
 function secretNoteText(session: ImportSessionView): string { return SECRET_NOTE_KEYS[session.secretNote] ? props.t(SECRET_NOTE_KEYS[session.secretNote]) : session.secretNote; }
@@ -74,6 +75,14 @@ async function streamFile(taskId: string, part: "main" | "user-config", file: Fi
     offset = nextOffset;
   }
 }
+async function cancelActiveUploads() {
+  const taskIds = [...activeUploads];
+  activeUploads.clear();
+  await Promise.all(taskIds.map((taskId) => window.dbxPlugin.invoke("import/preview/cancel", { taskId }).catch(() => undefined)));
+}
+
+onBeforeUnmount(() => { void cancelActiveUploads(); });
+
 async function parse() {
   const file = mainFile.value;
   if (!file) return;
@@ -82,6 +91,7 @@ async function parse() {
   try {
     const started = await window.dbxPlugin.invoke<{ taskId: string }>("import/preview/start", importPreviewStartParams(kind.value, file.size, userConfigFile.value?.size ?? 0, masterPassword.value));
     taskId = started.taskId;
+    activeUploads.add(taskId);
     await streamFile(taskId, "main", file);
     if (userConfigFile.value) await streamFile(taskId, "user-config", userConfigFile.value);
     const payload = await window.dbxPlugin.invoke<{ sessions?: unknown; export?: unknown }>("import/preview/finish", { taskId });
@@ -91,7 +101,11 @@ async function parse() {
   } catch (cause) {
     parseError.value = cause instanceof Error ? cause.message : String(cause); parseErrorCode.value = importErrorCode(cause);
     if (taskId) await window.dbxPlugin.invoke("import/preview/cancel", { taskId }).catch(() => undefined);
-  } finally { parsing.value = false; masterPassword.value = ""; }
+  } finally {
+    if (taskId) activeUploads.delete(taskId);
+    parsing.value = false;
+    masterPassword.value = "";
+  }
 }
 async function exportPreview() {
   if (!normalizedExport.value) return;

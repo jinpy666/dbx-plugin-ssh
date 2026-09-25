@@ -40,12 +40,15 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use zeroize::Zeroizing;
 
 /// Hard caps for Xshell ZIP archives (zip-bomb protection).
 pub const MAX_ZIP_ENTRIES: usize = 10_000;
@@ -59,6 +62,13 @@ pub const IMPORT_CHUNK_LIMIT: usize = 256 * 1024;
 /// Bound the JSON preview/export response to remain below the SDK 8 MiB limit.
 pub const MAX_PREVIEW_SESSIONS: usize = 1000;
 const MAX_PREVIEW_TEXT_BYTES: usize = 4096;
+/// At most this many unfinished imports may retain process memory at once.
+pub const MAX_IMPORT_TASKS: usize = 4;
+/// Declared input budgets across every live task share one process cap.
+pub const MAX_IMPORT_MEMORY_BYTES: u64 = MAX_INPUT_BYTES as u64;
+/// Unfinished preview uploads are discarded after this period.
+pub const IMPORT_TASK_TTL: Duration = Duration::from_secs(5 * 60);
+const LEGACY_STORE_FILE: &str = "imported-connections.json";
 /// Error returned when WindTerm encryption is detected (master-password
 /// switch on in `user.config`) but the caller did not supply the password.
 pub const WINDTERM_MASTER_PASSWORD_REQUIRED: &str = "WindTerm master password is required";
@@ -1845,40 +1855,56 @@ fn is_termius_encrypted_blob(value: &str) -> bool {
 // Streaming preview protocol
 // ---------------------------------------------------------------------------
 
-/// In-memory upload state. This deliberately owns the raw source bytes only
-/// between start and finish/cancel; completion and every failure remove it.
+/// Removes the obsolete pre-streaming connection store at startup. It is not
+/// migrated because the new contract never retains imported connections.
+pub fn remove_legacy_store(data_dir: &Path) -> Result<(), String> {
+    let legacy = data_dir.join(LEGACY_STORE_FILE);
+    match std::fs::remove_file(legacy) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Failed to remove legacy import store".to_string()),
+    }
+}
+
+/// In-memory upload state. The source bytes and master password are wrapped in
+/// `Zeroizing`, so removal from the state map wipes their backing buffers.
 struct ImportUpload {
     kind: String,
     main: ImportFile,
     user_config: Option<ImportFile>,
-    master_password: Option<String>,
+    master_password: Option<Zeroizing<String>>,
+    created_at: Instant,
+    reserved_bytes: u64,
 }
 
 struct ImportFile {
     expected: u64,
-    bytes: Vec<u8>,
+    bytes: Zeroizing<Vec<u8>>,
 }
 
 impl ImportFile {
     fn new(expected: u64) -> ImportFile {
         ImportFile {
             expected,
-            bytes: Vec::with_capacity(usize::try_from(expected).unwrap_or(0)),
+            bytes: Zeroizing::new(Vec::with_capacity(usize::try_from(expected).unwrap_or(0))),
         }
     }
 }
 
-/// Owns stream state for the sidecar lifetime. No state is written to the
-/// plugin data directory: source files and master passwords vanish at finish,
-/// cancel, malformed chunks, and process exit.
+#[derive(Default)]
+struct ImportState {
+    uploads: HashMap<String, ImportUpload>,
+    reserved_bytes: u64,
+}
+
+/// Owns temporary preview data. Every state exit (finish, cancel, protocol
+/// error and TTL sweep) drops `Zeroizing` source bytes and WindTerm passwords.
 #[derive(Default)]
 pub struct ImportStream {
-    uploads: Mutex<HashMap<String, ImportUpload>>,
+    state: Arc<Mutex<ImportState>>,
 }
 
 impl ImportStream {
-    /// Starts a source upload. `mainSize` plus optional `userConfigSize` share
-    /// one 64 MiB budget, which avoids the SDK's 8 MiB JSON payload limit.
     pub fn start(&self, params: &Value) -> Result<Value, String> {
         let kind = params
             .get("kind")
@@ -1893,10 +1919,10 @@ impl ImportStream {
                 "import/preview/start: userConfigSize is only valid for WindTerm".to_string(),
             );
         }
-        let total = main_size
+        let reserved_bytes = main_size
             .checked_add(user_config_size.unwrap_or(0))
             .ok_or("import/preview/start: size overflow")?;
-        if total > MAX_INPUT_BYTES as u64 {
+        if reserved_bytes > MAX_INPUT_BYTES as u64 {
             return Err(format!(
                 "Import files exceed the {} MiB total limit",
                 MAX_INPUT_BYTES / (1024 * 1024)
@@ -1906,7 +1932,7 @@ impl ImportStream {
             .get("masterPassword")
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+            .map(|value| Zeroizing::new(value.to_owned()));
         if master_password
             .as_ref()
             .is_some_and(|value| value.len() > 4096)
@@ -1915,22 +1941,42 @@ impl ImportStream {
                 "import/preview/start: masterPassword exceeds the 4096 byte limit".to_string(),
             );
         }
-        let task_id = uuid::Uuid::new_v4().to_string();
-        let upload = ImportUpload {
-            kind: kind.to_string(),
-            main: ImportFile::new(main_size),
-            user_config: user_config_size.map(ImportFile::new),
-            master_password,
-        };
-        self.uploads
+        let mut state = self
+            .state
             .lock()
-            .map_err(|_| "import preview state is unavailable")?
-            .insert(task_id.clone(), upload);
+            .map_err(|_| "import preview state is unavailable")?;
+        expire_locked(&mut state, Instant::now());
+        if state.uploads.len() >= MAX_IMPORT_TASKS {
+            return Err("Too many active import previews".to_string());
+        }
+        if state.reserved_bytes.saturating_add(reserved_bytes) > MAX_IMPORT_MEMORY_BYTES {
+            return Err("Active import previews exceed the process memory budget".to_string());
+        }
+        let task_id = uuid::Uuid::new_v4().to_string();
+        state.reserved_bytes += reserved_bytes;
+        state.uploads.insert(
+            task_id.clone(),
+            ImportUpload {
+                kind: kind.to_string(),
+                main: ImportFile::new(main_size),
+                user_config: user_config_size.map(ImportFile::new),
+                master_password,
+                created_at: Instant::now(),
+                reserved_bytes,
+            },
+        );
+        drop(state);
+        let state = Arc::clone(&self.state);
+        let expiry_task_id = task_id.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(IMPORT_TASK_TTL);
+            if let Ok(mut state) = state.lock() {
+                let _ = remove_upload(&mut state, &expiry_task_id);
+            }
+        });
         Ok(json!({ "taskId": task_id, "chunkSize": IMPORT_CHUNK_LIMIT }))
     }
 
-    /// Appends one `[u64 BE offset][payload]` binary frame. The caller emits
-    /// the resulting `nextOffset` as the ACK event after this returns.
     pub fn append(&self, task_id: &str, part: &str, frame: &[u8]) -> Result<u64, String> {
         let result = (|| {
             if frame.len() < 8 {
@@ -1945,11 +1991,13 @@ impl ImportStream {
                     IMPORT_CHUNK_LIMIT
                 ));
             }
-            let mut uploads = self
-                .uploads
+            let mut state = self
+                .state
                 .lock()
                 .map_err(|_| "import preview state is unavailable")?;
-            let upload = uploads
+            expire_locked(&mut state, Instant::now());
+            let upload = state
+                .uploads
                 .get_mut(task_id)
                 .ok_or("import preview task was not found")?;
             let file = match part {
@@ -1962,9 +2010,7 @@ impl ImportStream {
             };
             let expected_offset = file.bytes.len() as u64;
             if offset != expected_offset {
-                return Err(format!(
-                    "import preview chunk offset {offset} does not match expected {expected_offset}"
-                ));
+                return Err(format!("import preview chunk offset {offset} does not match expected {expected_offset}"));
             }
             let next_offset = offset
                 .checked_add(payload.len() as u64)
@@ -1981,15 +2027,15 @@ impl ImportStream {
         result
     }
 
-    /// Parses a fully uploaded source and atomically clears its bytes and
-    /// password before returning the sanitized preview.
     pub fn finish(&self, task_id: &str) -> Result<Value, String> {
-        let upload = self
-            .uploads
-            .lock()
-            .map_err(|_| "import preview state is unavailable")?
-            .remove(task_id)
-            .ok_or("import preview task was not found")?;
+        let upload = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "import preview state is unavailable")?;
+            expire_locked(&mut state, Instant::now());
+            remove_upload(&mut state, task_id).ok_or("import preview task was not found")?
+        };
         if upload.main.bytes.len() as u64 != upload.main.expected {
             return Err("import preview main file is incomplete".to_string());
         }
@@ -2005,7 +2051,10 @@ impl ImportStream {
                 .user_config
                 .as_ref()
                 .map(|config| config.bytes.as_slice()),
-            upload.master_password.as_deref(),
+            upload
+                .master_password
+                .as_deref()
+                .map(|value| value.as_str()),
         )?;
         let visible = sessions.len().min(MAX_PREVIEW_SESSIONS);
         let selected = (0..visible).collect::<Vec<_>>();
@@ -2017,27 +2066,49 @@ impl ImportStream {
             .enumerate()
             .map(|(index, session)| preview_view(index, session))
             .collect::<Vec<_>>();
-        Ok(json!({
-            "sourceKind": upload.kind,
-            "sessions": preview,
-            "totalSessions": sessions.len(),
-            "truncated": sessions.len() > visible,
-            "export": normalized,
-        }))
+        Ok(
+            json!({ "sourceKind": upload.kind, "sessions": preview, "totalSessions": sessions.len(), "truncated": sessions.len() > visible, "export": normalized }),
+        )
     }
 
-    /// Drops an unfinished upload. Cancellation is idempotent so component
-    /// teardown can always issue it without needing a status probe.
     pub fn cancel(&self, task_id: &str) -> bool {
         self.clear(task_id)
     }
 
-    fn clear(&self, task_id: &str) -> bool {
-        self.uploads
+    /// Deterministic testable TTL sweep; every public operation invokes it.
+    #[cfg(test)]
+    pub fn expire_before(&self, now: Instant) -> bool {
+        self.state
             .lock()
-            .map(|mut uploads| uploads.remove(task_id).is_some())
+            .map(|mut state| expire_locked(&mut state, now) > 0)
             .unwrap_or(false)
     }
+
+    fn clear(&self, task_id: &str) -> bool {
+        self.state
+            .lock()
+            .map(|mut state| remove_upload(&mut state, task_id).is_some())
+            .unwrap_or(false)
+    }
+}
+
+fn remove_upload(state: &mut ImportState, task_id: &str) -> Option<ImportUpload> {
+    let upload = state.uploads.remove(task_id)?;
+    state.reserved_bytes = state.reserved_bytes.saturating_sub(upload.reserved_bytes);
+    Some(upload)
+}
+
+fn expire_locked(state: &mut ImportState, now: Instant) -> usize {
+    let expired = state
+        .uploads
+        .iter()
+        .filter(|(_, upload)| now.saturating_duration_since(upload.created_at) >= IMPORT_TASK_TTL)
+        .map(|(task_id, _)| task_id.clone())
+        .collect::<Vec<_>>();
+    for task_id in &expired {
+        let _ = remove_upload(state, task_id);
+    }
+    expired.len()
 }
 
 fn required_size(params: &Value, field: &str) -> Result<u64, String> {
@@ -3160,6 +3231,49 @@ mod tests {
     }
 
     // -- Streaming preview protocol -----------------------------------------
+
+    #[test]
+    fn startup_removes_legacy_import_store_without_exposing_its_contents() {
+        let dir = std::env::temp_dir().join(format!("dbx-import-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("imported-connections.json");
+        std::fs::write(&legacy, r#"{"password":"do-not-leak"}"#).unwrap();
+        assert!(remove_legacy_store(&dir).is_ok());
+        assert!(!legacy.exists());
+        assert!(
+            remove_legacy_store(&dir).is_ok(),
+            "missing legacy files are ignored"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preview_start_enforces_task_and_process_memory_budgets() {
+        let stream = ImportStream::default();
+        for _ in 0..MAX_IMPORT_TASKS {
+            stream
+                .start(&json!({ "kind": "moba", "mainSize": 0 }))
+                .unwrap();
+        }
+        assert!(stream
+            .start(&json!({ "kind": "moba", "mainSize": 0 }))
+            .is_err());
+        let bounded = ImportStream::default();
+        assert!(bounded
+            .start(&json!({ "kind": "moba", "mainSize": MAX_IMPORT_MEMORY_BYTES + 1 }))
+            .is_err());
+    }
+
+    #[test]
+    fn expired_preview_is_removed_before_next_operation() {
+        let stream = ImportStream::default();
+        let task = stream
+            .start(&json!({ "kind": "moba", "mainSize": 1 }))
+            .unwrap();
+        let id = task["taskId"].as_str().unwrap();
+        assert!(stream.expire_before(std::time::Instant::now() + IMPORT_TASK_TTL));
+        assert!(stream.finish(id).is_err());
+    }
 
     #[test]
     fn streaming_preview_requires_contiguous_offsets_and_cleans_up_on_failure() {

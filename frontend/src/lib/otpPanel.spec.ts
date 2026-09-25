@@ -1,4 +1,4 @@
-// otpPanel 纯逻辑测试：otp/list 与 import/parse 的容错解析、otp/generate
+// otpPanel 纯逻辑测试：otp/list 与流式导入预览的容错解析、otp/generate
 // 三种响应形态、倒计时换算、QR 响应到编辑草稿的映射、save/commit 参数构造、
 // base64 分块编码与发送目标会话挑选。
 import { describe, expect, it } from "vitest";

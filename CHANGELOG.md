@@ -14,8 +14,8 @@ This file records user-facing changes for DBX SSH Terminal. Unless noted otherwi
   **File watcher (desktop):** notify-based non-recursive watches with session dedup, 500ms debounce, 2s suppression window and len/mtime/SHA256 fingerprints — `watch/file-modified` only fires on real content changes.
 - **OTP 面板**：条目列表 + TOTP 倒计时环形（reused 提示）、HOTP 生成（counter+1 持久化）、扫码导入（图片 base64 → `otp/import-qr` 预填）、新增/编辑（secret 遮蔽，编辑留空保留旧密钥）、连接绑定、发送验证码到终端。
   **OTP panel:** entry list with countdown, HOTP generation, QR import, masked editing, connection bindings and send-to-terminal.
-- **导入向导**：三步流程（来源 → 文件+主密码 → 脱敏预览勾选入库），WindTerm 主密码缺失的可读提示，"保存在插件本机，不进 DBX 连接库"注记。
-  **Import wizard:** three-step flow with masked preview, readable WindTerm master-password prompt and a local-storage notice.
+- **导入向导**：主文件与可选 WindTerm `user.config` 走有界二进制分块与 ACK 的临时流式预览（64 MiB 总预算、超时/取消即清理），可导出脱敏规范化 JSON；插件不再保存导入会话，密码、私钥内容与口令绝不导出或持久化。
+  **Import wizard:** bounded binary chunks with ACKs provide temporary previews for the main export and optional WindTerm `user.config` (64 MiB total; timeout/cancel cleans up), with sanitized normalized JSON export; imported sessions are never stored and passwords, private-key material and passphrases never leave the sidecar.
 - **终端大输出保护**：写入积压 ≥128KiB 进入 strained（32KiB 分帧、挂起 gutter/高亮扫描），<64KiB 恢复；七语提示。
   **Large-output protection:** write backlog ≥128KiB strains the terminal (32KiB framing, gutter/highlight scans suspended) until <64KiB; localized notice.
 - **终端右键菜单 + 选中文本在线搜索**：Copy/Paste/搜索引擎列表（可配 `ctx_search_engines`，%s 模板）；宿主 openExternal 缺失时降级复制链接。
@@ -27,8 +27,8 @@ This file records user-facing changes for DBX SSH Terminal. Unless noted otherwi
 
 - **OTP 中心化库**：TOTP/HOTP 算法（RFC 4226/6238 向量单测）、`otpauth://` 解析、二维码扫码导入（`rqrr`+`image`，新依赖）、条目库（secret 经 vault 加密落盘）、连接绑定、跨路径共享的 TOTP 防重放缓存；登录/sudo 自动应答取码新增「绑定条目」来源（连接 `totp_secret` 优先级不变）。MCP 无新增工具（`otp/*` 为 workbench 内部协议）。
   **Centralized OTP library:** TOTP/HOTP with RFC vectors, otpauth:// parsing, QR import (rqrr+image, new deps), encrypted entry store, connection bindings and a shared replay guard; login/sudo auto-answer now consults bound entries after the connection `totp_secret`.
-- **会话导入（Xshell / MobaXterm / WindTerm）**：`.xts`（ZIP+GBK+INI）、`.mxtsessions`（INI 管道格式）、`.sessions`（JSON+PBKDF2-SHA3-512/AES-CBC 主密码解密）三解析器；`import/parse` 预览（脱敏）+ `import/commit` 勾选入库，凭据经 vault 加密存插件本机（不进 DBX 连接库）；zip-bomb 防护（条目/单条/总量上限）。新依赖 `zip`/`encoding_rs`/`sha3`/`cbc`/`aes`/`pbkdf2`。
-  **Session import:** three parsers for Xshell/MobaXterm/WindTerm with preview-then-commit, vault-encrypted credentials stored plugin-side, and zip-bomb guards.
+- **会话导入（Xshell / MobaXterm / WindTerm）**：`.xts`（ZIP+GBK+INI）、`.mxtsessions`（INI 管道格式）、`.sessions`（JSON+PBKDF2-SHA3-512/AES-CBC 主密码解密）解析器；现采用 `import/preview/start|finish|cancel` 临时流式预览与脱敏导出，旧 `import/commit` 与插件私有连接存储已移除；zip-bomb 防护（条目/单条/总量上限）。新依赖 `zip`/`encoding_rs`/`sha3`/`cbc`/`aes`/`pbkdf2`。
+  **Session import:** parsers for Xshell/MobaXterm/WindTerm now use temporary `import/preview/start|finish|cancel` streaming previews and sanitized exports; the old `import/commit` and plugin-private connection storage are removed, with zip-bomb guards retained.
 - **Telnet 会话**（明文协议，UI 提示仅限可信网络）：手写 IAC 协商（WILL/DO/NAWS、跨块状态机、IAC IAC 还原）、回车与 Backspace 模式、Expect 自动登录（复用 triggers 规则解析）、`telnet/start|write|resize|close|list` + `telnet/terminal/out` 帧通道；工作台 "New Telnet session" 入口（与 SSH/本地会话互斥确认后切换）。
   **Telnet sessions:** hand-rolled IAC negotiation with cross-chunk state machine, enter/backspace modes, Expect auto-login reusing the trigger rule parser, and a workbench entry with mutual-exclusion confirm.
 

@@ -87,6 +87,7 @@ impl Plugin {
         let runtime =
             Runtime::new().map_err(|error| format!("Failed to create async runtime: {error}"))?;
         otp_store::init_data_dir(&data_dir);
+        connection_import::remove_legacy_store(&data_dir)?;
         // Sidecar 启动即同步 X11 快速标志（重启会丢进程内状态）。
         let prefs = preferences::load_preferences(&data_dir);
         x11::set_enabled(prefs.get("x11_forwarding").and_then(Value::as_bool) == Some(true));
