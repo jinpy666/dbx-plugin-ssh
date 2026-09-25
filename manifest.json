@@ -126,11 +126,15 @@
               "value": "agent"
             },
             {
+              "label": "Auto (try each in order)",
+              "value": "auto"
+            },
+            {
               "label": "No authentication",
               "value": "none"
             }
           ],
-          "description": "Choose how to sign in to the server: password, private key, SSH agent, or none.",
+          "description": "Choose how to sign in to the server: password, private key, SSH agent, none, or Auto (tries password, private key, interactive prompts and SSH agent in order until one works).",
           "visible_when": {
             "field": "protocol",
             "one_of": [
@@ -167,7 +171,8 @@
                 "field": "authentication",
                 "one_of": [
                   "password",
-                  "private-key-password"
+                  "private-key-password",
+                  "auto"
                 ]
               }
             ]
@@ -178,7 +183,7 @@
           "label": "Password",
           "type": "password",
           "binding": "password",
-          "description": "Password for \"Password\" and \"Private key, then password\", used when Password source is \"Enter in this form\". Switch Password source to \"Local command\" to fetch it with a local command instead.",
+          "description": "Password for \"Password\", \"Private key, then password\" and \"Auto\", used when Password source is \"Enter in this form\". Switch Password source to \"Local command\" to fetch it with a local command instead. Auto tries each method in order, so this is one of its possible sources.",
           "visible_when": {
             "all_of": [
               {
@@ -254,7 +259,8 @@
                 "field": "authentication",
                 "one_of": [
                   "private-key",
-                  "private-key-password"
+                  "private-key-password",
+                  "auto"
                 ]
               }
             ]
@@ -278,7 +284,8 @@
                 "field": "authentication",
                 "one_of": [
                   "private-key",
-                  "private-key-password"
+                  "private-key-password",
+                  "auto"
                 ]
               }
             ]
@@ -303,7 +310,8 @@
                 "field": "authentication",
                 "one_of": [
                   "private-key",
-                  "private-key-password"
+                  "private-key-password",
+                  "auto"
                 ]
               }
             ]
@@ -326,7 +334,8 @@
               {
                 "field": "authentication",
                 "one_of": [
-                  "agent"
+                  "agent",
+                  "auto"
                 ]
               }
             ]
@@ -833,7 +842,8 @@
                 "field": "authentication",
                 "one_of": [
                   "private-key",
-                  "private-key-password"
+                  "private-key-password",
+                  "auto"
                 ]
               }
             ]
@@ -1008,13 +1018,14 @@
                 "private-key": "Clave privada",
                 "private-key-password": "Clave privada y después contraseña",
                 "agent": "Agente SSH",
+                "auto": "Automático (probar en orden)",
                 "none": "Sin autenticación"
               },
-              "description": "Cómo iniciar sesión en el servidor: contraseña, clave privada, agente SSH o sin autenticación."
+              "description": "Cómo iniciar sesión en el servidor: contraseña, clave privada, agente SSH, sin autenticación o automático (prueba contraseña, clave privada, preguntas interactivas y agente SSH en orden hasta que uno funcione)."
             },
             "password": {
               "label": "Contraseña",
-              "description": "Contraseña para «Contraseña» y «Clave privada y después contraseña»; obligatoria cuando «Origen de la contraseña» es «Escribir en este formulario». Para obtenerla con un comando local, cambia ese origen a «Comando local»."
+              "description": "Contraseña para «Contraseña», «Clave privada y después contraseña» y «Automático»; obligatoria cuando «Origen de la contraseña» es «Escribir en este formulario». Para obtenerla con un comando local, cambia ese origen a «Comando local». Automático prueba cada método en orden, así que esta es una de sus posibles fuentes."
             },
             "password_source": {
               "label": "Origen de la contraseña",
@@ -1205,13 +1216,14 @@
                 "private-key": "Chiave privata",
                 "private-key-password": "Chiave privata, poi password",
                 "agent": "SSH Agent",
+                "auto": "Automatico (prova in ordine)",
                 "none": "Nessuna autenticazione"
               },
-              "description": "Come accedere al server: password, chiave privata, agent o nessuna autenticazione."
+              "description": "Come accedere al server: password, chiave privata, agent, nessuna autenticazione o automatico (prova password, chiave privata, prompt interattivi e agent SSH in ordine finché uno funziona)."
             },
             "password": {
               "label": "Password",
-              "description": "Password per «Password» e «Chiave privata, poi password»; obbligatoria quando «Origine password» è «Inserisci nel modulo». Per recuperarla con un comando locale, cambia l'origine in «Comando locale»."
+              "description": "Password per «Password», «Chiave privata, poi password» e «Automatico»; obbligatoria quando «Origine password» è «Inserisci nel modulo». Per recuperarla con un comando locale, cambia l'origine in «Comando locale». Automatico prova ogni metodo in ordine, quindi questa è una delle possibili fonti."
             },
             "password_source": {
               "label": "Origine password",
@@ -1402,13 +1414,14 @@
                 "private-key": "秘密鍵",
                 "private-key-password": "秘密鍵の後にパスワード",
                 "agent": "SSH Agent",
+                "auto": "自動（順に試行）",
                 "none": "認証なし"
               },
-              "description": "サーバーへのサインイン方法：パスワード、秘密鍵、SSH Agent、または認証なし。"
+              "description": "サーバーへのサインイン方法：パスワード、秘密鍵、SSH Agent、認証なし、または自動（パスワード→秘密鍵→対話プロンプト→SSH Agent の順に成功するまで試行します）。"
             },
             "password": {
               "label": "パスワード",
-              "description": "「パスワード」「秘密鍵の後にパスワード」で使うパスワードです。「パスワードの取得方法」が「このフォームに入力」のときは必須です。ローカルコマンドで取得する場合は取得方法を「ローカルコマンド」に切り替えてください。"
+              "description": "「パスワード」「秘密鍵の後にパスワード」「自動」で使うパスワードです。「パスワードの取得方法」が「このフォームに入力」のときは必須です。ローカルコマンドで取得する場合は取得方法を「ローカルコマンド」に切り替えてください。自動は各方式を順に試行するため、これは候補ソースの 1 つです。"
             },
             "password_source": {
               "label": "パスワードの取得方法",
@@ -1599,13 +1612,14 @@
                 "private-key": "Chave privada",
                 "private-key-password": "Chave privada e depois senha",
                 "agent": "Agente SSH",
+                "auto": "Automático (tentar em ordem)",
                 "none": "Sem autenticação"
               },
-              "description": "Como entrar no servidor: senha, chave privada, agente SSH ou sem autenticação."
+              "description": "Como entrar no servidor: senha, chave privada, agente SSH, sem autenticação ou automático (tenta senha, chave privada, prompts interativos e agente SSH em ordem até que um funcione)."
             },
             "password": {
               "label": "Senha",
-              "description": "Senha para «Senha» e «Chave privada e depois senha»; obrigatória quando «Origem da senha» é «Digitar neste formulário». Para obtê-la com um comando local, mude a origem para «Comando local»."
+              "description": "Senha para «Senha», «Chave privada e depois senha» e «Automático»; obrigatória quando «Origem da senha» é «Digitar neste formulário». Para obtê-la com um comando local, mude a origem para «Comando local». Automático tenta cada método em ordem, então esta é uma das possíveis fontes."
             },
             "password_source": {
               "label": "Origem da senha",
@@ -1796,13 +1810,14 @@
                 "private-key": "私钥",
                 "private-key-password": "私钥后密码",
                 "agent": "SSH Agent",
+                "auto": "自动（按序尝试）",
                 "none": "无认证"
               },
-              "description": "选择登录服务器的方式：密码、私钥、SSH Agent 或无认证。"
+              "description": "选择登录服务器的方式：密码、私钥、SSH Agent、无认证或自动（按密码→私钥→交互式提问→SSH Agent 的顺序依次尝试，直到成功）。"
             },
             "password": {
               "label": "密码",
-              "description": "供「密码」「私钥后密码」两种认证使用；「密码来源」选「在表单中填写」时必填。若由本地命令取回，请把「密码来源」改为「本地命令取回」。"
+              "description": "供「密码」「私钥后密码」「自动」三种认证使用；「密码来源」选「在表单中填写」时必填。若由本地命令取回，请把「密码来源」改为「本地命令取回」。自动按序尝试各认证方式，密码只是其中一种来源。"
             },
             "password_source": {
               "label": "密码来源",
@@ -1993,13 +2008,14 @@
                 "private-key": "私鑰",
                 "private-key-password": "私鑰後密碼",
                 "agent": "SSH Agent",
+                "auto": "自動（依序嘗試）",
                 "none": "無認證"
               },
-              "description": "選擇登入伺服器的方式：密碼、私鑰、SSH Agent 或無認證。"
+              "description": "選擇登入伺服器的方式：密碼、私鑰、SSH Agent、無認證或自動（按密碼→私鑰→互動式提問→SSH Agent 的順序依次嘗試，直到成功）。"
             },
             "password": {
               "label": "密碼",
-              "description": "供「密碼」「私鑰後密碼」兩種認證使用；「密碼來源」選「在表單中填寫」時必填。若由本機命令取回，請把「密碼來源」改為「本機命令取回」。"
+              "description": "供「密碼」「私鑰後密碼」「自動」三種認證使用；「密碼來源」選「在表單中填寫」時必填。若由本機命令取回，請把「密碼來源」改為「本機命令取回」。自動依序嘗試各認證方式，密碼只是其中一種來源。"
             },
             "password_source": {
               "label": "密碼來源",

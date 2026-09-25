@@ -141,7 +141,7 @@ assert.deepEqual(byKey.passphrase_command.visible_when, {
   all_of: [
     PROTOCOL_SSH,
     { field: "advanced_options", one_of: ["true"] },
-    { field: "authentication", one_of: ["private-key", "private-key-password"] },
+    { field: "authentication", one_of: ["private-key", "private-key-password", "auto"] },
   ],
 }, "passphrase_command must combine protocol=ssh, the advanced switch and key-based auth");
 // Sudo and 2FA are first-class entry points, not advanced trivia: hiding them
@@ -188,8 +188,11 @@ for (const advanced_options of [false, true]) {
         for (const auth_flow_mode of options("auth_flow_mode")) {
           for (const read_only of [false, true]) {
             const current = state({ advanced_options, authentication, password_source, sudo_source, auth_flow_mode, read_only });
-            const passwordAuth = ["password", "private-key-password"].includes(authentication);
-            const privateKey = ["private-key", "private-key-password"].includes(authentication);
+            // Auto（M13-A）按序回退会用到全部凭据来源：password_source /
+            // password / 密钥字段 / agent_socket 全部可见，但 none 仍不可见
+            // 的字段一个不多（与 manifest one_of 门控逐项对应）。
+            const passwordAuth = ["password", "private-key-password", "auto"].includes(authentication);
+            const privateKey = ["private-key", "private-key-password", "auto"].includes(authentication);
             // The login password is an explicit either-or: "Enter in this form"
             // requires the Password field, "Local command" requires Password
             // command. The user-chosen source is what makes strict validation
@@ -206,7 +209,7 @@ for (const advanced_options of [false, true]) {
             current.visible("private_key_path", privateKey); current.required("private_key_path", false);
             current.required("private_key", false);
             current.visible("private_key_passphrase", privateKey); current.required("private_key_passphrase", false);
-            current.visible("agent_socket", authentication === "agent");
+            current.visible("agent_socket", ["agent", "auto"].includes(authentication));
             // Sudo details follow their source only. The obvious extra rule -
             // "hide them on read-only connections" - cannot be expressed while
             // `read_only` itself sits behind `advanced_options`: the host's `not`

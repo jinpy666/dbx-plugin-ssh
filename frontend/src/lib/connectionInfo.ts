@@ -32,7 +32,7 @@ export function formatLatency(ms: number | null | undefined): string {
   return `${(ms / 1000).toFixed(1)} s`;
 }
 
-export const KNOWN_AUTH_METHODS = ["password", "private-key", "private-key-password", "agent", "none"] as const;
+export const KNOWN_AUTH_METHODS = ["password", "private-key", "private-key-password", "agent", "auto", "none"] as const;
 export type KnownAuthMethod = (typeof KNOWN_AUTH_METHODS)[number];
 
 /** 认证方式展示标签：已知方法名走 translate 本地化，未知值原样展示，空缺返回占位符。 */
