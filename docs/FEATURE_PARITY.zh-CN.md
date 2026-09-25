@@ -1,8 +1,10 @@
 # SSH/SFTP 特性能力清单
 
-插件现状：`backend/src/main.rs` 方法表（**68 个分发方法臂、69 个方法名**——`ssh/host-key/resolve`
-与 `connection/challenge/resolve` 共用一臂（main.rs:174），含 sftp/copy、sftp/move、ssh/host-key/check、
-keys/discover/options；2026-08-29 收口复核，修正如下的「68 臂」口径）。
+插件现状：`backend/src/main.rs` 方法表（**182 个分发方法臂、183 个方法名**——`ssh/host-key/resolve`
+与 `connection/challenge/resolve` 共用一臂（main.rs:792），含 sftp/copy、sftp/move、ssh/host-key/check、
+keys/discover/options，以及 watch/*、sftp/download/tree/start、sudo/download/*、rdp/*、serial/* 等
+后续批次方法；2026-09-26 协议审计复核，原「68 臂 / 69 名」为 2026-08-29 收口值、共用臂当时在
+main.rs:174）。
 原则：补齐完整 SSH/SFTP 能力面；DBX 已由宿主承担的能力（连接管理、
 profile 分组、全局外观）不重复实现。
 
@@ -552,7 +554,7 @@ PATH 导出，否则 `spawn pnpm ENOENT`。
 
 | 候选项 | 来源线索 | 说明 |
 | --- | --- | --- |
-| 每连接编码选择 | 对标复审线索 | 现无连接级编码覆盖（沿用默认/推断），缺 per-connection encoding |
 | 终端 BiDi | sshbool 对标候选（见上节） | xterm.js 原生无 BiDi/shaping；shaping 管线建议放 `shared/frontend/` 公共层单点实现 |
 
 > 2026-09-25 清理：认证 Auto 模式、Quick Commands 导入、进程管理句柄/端口（M13）、录制 transcript/自动录制/搜索、SFTP pipeline 深度/兼容模式/文件名编码（M14）、多文件并行 watcher 编辑（M15）已交付，从本表移除（见主矩阵各 ✅ 行）。云同步经决策除名——DBX 宿主基础能力已提供配置同步/上传，插件侧不再立项（含口令加密导出导入降维方案）。
+> 2026-09-26 协议审计清理：「每连接编码选择」行移除——M16 已交付连接级编码覆盖（偏好键 `sftp_name_encoding_overrides`，语义见 PROTOCOL `local/preferences` 行），该行「现无连接级编码覆盖」的陈述已失效。

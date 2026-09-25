@@ -45,9 +45,10 @@ Telnet/VNC 的 saved connection 生命周期也走同一入口，但不会进入
 | `sftp/home`、`sftp/list`、`sftp/read` | 浏览、预览远端文件（`sftp/list` 支持可选 `includeOwner` 附加属主/属组；`sftp/read` 支持可选 `offset` 分片续读，见下文） |
 | `sftp/createDirectory`、`sftp/rename`、`sftp/delete`、`sftp/exists`、`sftp/rename-unique`、`sftp/touch`、`sftp/write`、`sftp/symlink-create/read/update`、`sftp/upload/start/finish`、`sftp/upload-local`、`watch/upload` | SFTP 写操作/预检（`sftp_name_encoding` 为 `latin-1` 时走裸包客户端字节保真，路径来源分工见 `sftp/list` 节 M15-B/M16 段） |
 | `sftp/upload/start`、`finish` | 上传事务生命周期（`resumeTaskId` 断点续传；`finish` 校验后交后台任务推送并立即返回，见「上传两阶段计数与收尾语义」） |
+| `watch/start`、`watch/stop`、`watch/stop-all`、`watch/upload` | 外部编辑器回写 watcher（仅桌面端，见「外部编辑器 watcher（watch/*）」节）：`start` 对 `remote-edit/` 下载目录内的本机文件登记监听并返回 `{watchId}`，内容确认变化后发 `watch/file-modified` 事件；`upload` 把监听文件当前字节按 `sftp/write` 同款原子提交推回远端（latin-1 按所属连接编码走裸包字节保真，M21） |
 | `sftp/download/start`、`next`、`finish` | 下载事务生命周期（`offset` 断点续传，见下文；桌面端可选 `downloadDir` 指定本机绝对保存目录） |
 | `sftp/download/tree/start` | 递归目录下载启动：远端 `read_dir` 走树扫描（有界），本地镜像目录布局后复用 `sftp/download/next`/`finish`/`sftp/transfer/cancel` 分块管线（见「递归目录下载」节） |
-| `sftp/stat`、`sftp/exists`、`sftp/touch`、`sftp/write` | 扩展文件操作：元信息单查、存在性检查、空文件创建、小文件直写；latin-1 下 `sftp/stat`/`sftp/exists` 整条 wire 还原走裸包 LSTAT（M17，见 `sftp/list` 节） |
+| `sftp/stat`、`sftp/exists`、`sftp/touch`、`sftp/write` | 扩展文件操作：元信息单查、存在性检查、空文件创建、小文件直写；latin-1 下 `sftp/stat` 整条 wire 还原走裸包 LSTAT，`sftp/exists` 按 `form` 参数分工还原（缺省「wire 前缀 + 显示末段」、`form: "wire"` 整条），均走裸包 LSTAT（M17，见 `sftp/exists` 节） |
 | `sftp/archive`、`sftp/extract` | 远端 tar.gz 打包与解压 |
 | `sftp/copy`、`sftp/move` | 服务器内复制 / 剪切（逐项执行，目标存在需 `overwrite`）；latin-1 下覆盖预检与同目录 move rename 快路径走裸包字节保真（M17，shell 执行层边界见 `sftp/list` 节） |
 | `sftp/bookmarks/list`、`sftp/bookmarks/save`、`sftp/bookmarks/delete` | SFTP 路径书签管理（全局命名清单，插件数据目录持久化，见下文） |
@@ -410,7 +411,7 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 返回 `{ entries: SftpEntry[] }`。`SftpEntry` 基础字段：`name`、`uri`、`kind`（`file`/`directory`/`symlink`/`other`）、`size`、`modifiedAt`、`permissions`、`contentType`（可选字段缺省时省略）。
 
-**文件名编码（M14-B / M15-B）**：偏好 `sftp_name_encoding`（`auto`/`latin-1`，默认 `auto`）控制列表文件名的显示解码。`auto` 走高层客户端（合法 UTF-8 服务器字节往返无损），wire 名含 U+FFFD（上游 lossy 解码已替换非法字节）时条目附带 `lossy: true`（false 时字段省略）。`latin-1` 改走独立裸包客户端（SFTPv3，严格串行）拿原始文件名字节：`name` 为 latin-1 解码的显示文本，`uri` 中的文件名为 `%XX` 转义的 wire 形式——**传输路径始终用服务器原始字节/转义形式，显示层解码绝不回灌**；下载这类条目时 sidecar 自动把转义还原为原始字节走 raw OPEN/READ（每 chunk 独立 open/close）。raw 路径失败（服务器版本协商/异常包）自动回退高层客户端。**M16 连接级覆盖**：编码判定来源升级为「连接覆盖 > 全局偏好 > 缺省 auto」——覆盖存储在偏好键 `sftp_name_encoding_overrides`（语义见 `local/preferences` 行），全局偏好缺省时的行为完全不变；本节所述 raw/auto 两条路径的语义只取决于**最终生效的编码值**，与它来自连接覆盖还是全局无关。
+**文件名编码（M14-B / M15-B）**：偏好 `sftp_name_encoding`（`auto`/`latin-1`，默认 `auto`）控制列表文件名的显示解码。`auto` 走高层客户端（合法 UTF-8 服务器字节往返无损），wire 名含 U+FFFD（上游 lossy 解码已替换非法字节）时条目附带 `lossy: true`（false 时字段省略）。`latin-1` 改走独立裸包客户端（SFTPv3，严格串行）拿原始文件名字节：`name` 为 latin-1 解码的显示文本，`uri` 中的文件名为 `%XX` 转义的 wire 形式——**传输路径始终用服务器原始字节/转义形式，显示层解码绝不回灌**；下载这类条目时 sidecar 自动把转义还原为原始字节走 raw OPEN/READ（每 chunk 独立 open/close；`start` 的 size 探测同样整条还原后走裸包 STAT——M21 收口）。**回退口径按车道区分（2026-09-26 审计修正）**：列表 raw 路径失败（服务器版本协商/异常包）自动回退高层客户端（只读安全）；下载车道（size 探测与分块读取）不做回退，raw 失败原样上抛——转义名在高层客户端本就打不开，回退只会重演同一错误；写路径按 M15 先例仅在裸包客户端**建立**失败时回退。**M16 连接级覆盖**：编码判定来源升级为「连接覆盖 > 全局偏好 > 缺省 auto」——覆盖存储在偏好键 `sftp_name_encoding_overrides`（语义见 `local/preferences` 行），全局偏好缺省时的行为完全不变；本节所述 raw/auto 两条路径的语义只取决于**最终生效的编码值**，与它来自连接覆盖还是全局无关。
 
 **M15-B 起 latin-1 模式下路径写操作同样走裸包客户端字节保真**：`sftp/rename`、`sftp/delete`（含 `recursive: true` 的递归树删）、`sftp/createDirectory` 对路径参数先还原为服务器原始字节再发送 raw RENAME/REMOVE/RMDIR/MKDIR（判型用 raw LSTAT，symlink 绝不跟随，与 auto 语义一致）。路径处理规则：目录前缀（列表回传的 wire 形式）按 `%XX` 转义还原；rename 目标 / mkdir 名这类**用户新输入的最后一段**按 latin-1 显示编码回字节（>U+00FF 的字符按 UTF-8 兜底；输入中的字面 `%XX` 序列保持字面量，不再转义）。裸包客户端**建立**失败时自动回退高层客户端（此时尚未发出任何请求，回退安全）；操作已发出后的失败原样报错，不回退（避免重复执行写操作）。`auto` 模式下所有操作行为完全不变（继续走高层客户端）。
 
@@ -467,7 +468,7 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 | `offset` | number | 否 | 起始字节偏移，默认 `0`；省略或非法值按 `0` 处理 |
 | `maxBytes` | number | 否 | 本次最多返回的字节数，默认 256 KiB，上限 1 MiB（至少为 1） |
 
-**文件名编码（M19 收口）**：生效编码为 `latin-1` 时 `path` 是整条 wire 形式（列表回传的 `%XX` 转义路径），sidecar 整条还原为服务器字节后走裸包 READ（与下载分片同一车道）；`auto` 按 UTF-8 走高层客户端。
+**文件名编码（M19.5 落地）**：生效编码为 `latin-1` 时 `path` 是整条 wire 形式（列表回传的 `%XX` 转义路径），sidecar 整条还原为服务器字节后走裸包 READ（与下载分片同一车道）；`auto` 按 UTF-8 走高层客户端。
 
 返回 `{ dataBase64, truncated }`：内容 base64 编码；返回字节数达到 `maxBytes` 且文件还有剩余时 `truncated` 为 `true`，调用方以 `offset += 返回字节数` 续读。`offset` 在文件末尾或超出文件大小时返回空内容且 `truncated: false`（不报错，与 `sudo/readFile` 的「offset 超界报错」语义不同——SFTP 侧以空读表示 EOF）。错误：路径不存在或不是普通文件；无读取权限。
 
@@ -842,7 +843,9 @@ offset 语义不变）。中断来源不限：前端中止、sidecar 重启、�
 下载**恢复**：`sftp/download/start` 新增可选 `offset`（默认 0）——调用方本地已持有前 `offset` 字节，
 后端把 `nextOffset` 置为该值继续分片；`offset > size` 报错。身份校验仅为 best-effort 的 size 一致
 （同尺寸改写会拼接错内容，文档明示）；返回体新增 `resumeOffset` 回显。会话内暂停/恢复为纯前端语义
-（分片循环在两分片之间挂起），不涉及新方法。
+（分片循环在两分片之间挂起），不涉及新方法。本地落盘下载（`saveToLocal: true`）不支持续传——与
+`offset > 0` 组合直接报错 `Local save downloads cannot resume from an offset`（2026-09-26 审计补记，
+此前该错误语义未入文档）。
 
 ### 递归目录下载（sftp/download/tree/start）
 
@@ -855,7 +858,8 @@ offset 语义不变）。中断来源不限：前端中止、sidecar 重启、�
 
 **文件名编码（M15-B，M16 起判定走连接级优先级）**：生效编码为 `latin-1`（全局偏好或本连接覆盖，见 `local/preferences` 行）时远端遍历改走裸包 READDIR（同一
 通道内 LSTAT 根预检 + 递归），整树路径字节保真——远端文件路径用 wire 转义形式（分块下载按
-转义自动走 raw READ），本地落盘名（含根目录名）用 latin-1 解码的显示名；symlink/特殊条目同样
+转义自动走 raw READ——该车道 M19.5 才真正落地，此前转义名的逐文件读取会以 NO_SUCH_FILE
+记失败跳过、本地只剩空目录骨架），本地落盘名（含根目录名）用 latin-1 解码的显示名；symlink/特殊条目同样
 跳过不跟随，容量上限与容错语义不变。裸包通道建立失败自动回退高层遍历（只读，安全）。`auto`
 模式行为完全不变。
 
@@ -880,6 +884,32 @@ offset 语义不变）。中断来源不限：前端中止、sidecar 重启、�
   本任务新建的让位目录，删除不伤及既有文件）；部分成功（`failedCount > 0`）的完成结果保留。
 - 仅桌面本机落盘模式可用（`local/capabilities.canSaveLocal`）；web/docker 无本地文件系统时工作台
   直接提示不可用。单个文件大小仍受 16 GiB 传输上限约束，超限文件记为失败而非中断。
+
+### 外部编辑器 watcher（watch/start、watch/stop、watch/stop-all、watch/upload）
+
+SFTP「用外部编辑器打开」的回写链（M15 立项，M20/M21 真容器收口；实现 `backend/src/file_watch.rs`）。
+前端先把远端文件经 `sftp/download/start` 带 `downloadDir=<下载目录>/remote-edit/<时间戳>/` 落盘，
+打开 OS 默认应用后调 `watch/start` 登记监听；编辑器保存且 sidecar 确认内容真变后发
+`watch/file-modified` 事件，工作台弹确认并由 `watch/upload` 把当前磁盘字节推回远端。
+
+- `watch/start {sessionId, remotePath, localPath}` → `{watchId}`。仅桌面端（本地下载能力缺失直接拒绝，
+  web/docker 无本机文件系统语义）；`localPath` 必须是插件自身 `remote-edit/` 下载目录之下、经
+  canonicalize 校验的既有普通文件——路径来源门禁（watchId 是持有即可用的令牌，任意本机路径绝不可
+  监听、更不可经回写推到远端）。同一 `{sessionId, canonical localPath}` 重复登记时旧 watcher 先拆、
+  以新快照为基线。指纹上限 64 MiB：登记时文件超过该值即拒绝（无法建立基线）；监听期间文件长过
+  该值则快照不可判、不发事件。
+- 事件判定：notify 事件 500ms 防抖合并；`start` 后 2s 启动抑制窗（编辑器预热噪音直接丢弃，不入队
+  不延迟）；基线指纹（len+mtime 预滤 + SHA-256 权威比对）确认字节真变才发
+  `watch/file-modified {watchId, sessionId, localPath, remotePath}`（不含文件内容）；发出后的状态
+  成为新基线——同内容重复保存不再触发。文件消失或所属会话死亡时 watcher 自清理；
+  `ssh/session/close` 回收该会话的全部 watcher。
+- `watch/stop {watchId}` → `{success}`，未知 id 报 `Watch was not found`；`watch/stop-all {sessionId}`
+  → `{success, stopped}`（移除数量）。
+- `watch/upload {watchId}` → `{remotePath, size}`：sidecar 重新校验路径来源（防 start 后本地路径被
+  符号链接调包）后读取当前字节（≤64 MiB，整文件读入内存做单次原子提交，超限拒绝且不启动读取），
+  按 `sftp/write` 同款「`.dbx-part` 暂存 → 原子 rename、权限位保留」落回远端；只读门禁
+  `ensure_writable` 与其他 SFTP 写一致。latin-1 连接按 watch 所属连接的编码判定整条 wire 还原后
+  走裸包字节保真回写（M21）。
 
 ### sudo 下载（DownloadSudo）
 
