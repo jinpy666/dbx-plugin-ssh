@@ -266,6 +266,18 @@ impl Plugin {
             }
             "connection/test" => {
                 let connection = StoredConnection::from_lifecycle_params(&params)?;
+                // 协议路由守卫（M9）：telnet/vnc 连接由工作台驱动各自的
+                // 会话协议；SSH 握手对它们是无意义的错误拨号（还会把明文
+                // TELNET banner 误报成握手失败）。这里给出指路错误。
+                if connection.protocol != "ssh" {
+                    return Ok(json!({
+                        "success": false,
+                        "message": format!(
+                            "This connection uses the {} protocol; open it from the workbench session toolbar instead of testing it as SSH.",
+                            connection.protocol
+                        ),
+                    }));
+                }
                 let operation_id = operation_id(&params);
                 self.runtime.block_on(self.ssh.test_connection(
                     &connection,
@@ -278,6 +290,17 @@ impl Plugin {
             }
             "connection/connect" => {
                 let connection = StoredConnection::from_lifecycle_params(&params)?;
+                // 协议路由守卫（M9）：同 connection/test——telnet/vnc 连接
+                // 不进 SSH 连接池；工作台按 protocol 路由到各自会话。
+                if connection.protocol != "ssh" {
+                    return Ok(json!({
+                        "success": false,
+                        "message": format!(
+                            "This connection uses the {} protocol; open it from the workbench session toolbar instead of connecting it as SSH.",
+                            connection.protocol
+                        ),
+                    }));
+                }
                 self.ssh.store_connection(connection)?;
                 Ok(json!({ "success": true }))
             }
