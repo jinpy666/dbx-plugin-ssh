@@ -5,9 +5,8 @@
 /scripts/__pycache__/
 /docs/screenshots-ui-mock/
 /dist/
+# 构建产物不入库：发布与候选打包在 CI 现构建前端（release.yml / ci.yml）
 /ui/
-!/ui/
-!/ui/.gitkeep
 .dbx-repository-signing-key.env
 
 # git worktrees (feature isolation)

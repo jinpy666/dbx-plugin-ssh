@@ -52,13 +52,8 @@ jobs:
       - run: pnpm --dir frontend typecheck
       - run: pnpm --dir frontend test
       - run: pnpm --dir frontend build
-      - name: Committed ui/ output is fresh
-        run: |
-          if ! git diff --quiet -- ui/; then
-            git diff --stat -- ui/
-            echo "ui/ is stale: run 'pnpm --dir frontend build' and commit the output" >&2
-            exit 1
-          fi
+      # ui/index.html 已脱库：发布与候选打包各自现构建前端，
+      # 不再用「重建后 git diff 必须为空」的 freshness 门卡主仓。
 
   backend:
     name: Rust sidecar checks

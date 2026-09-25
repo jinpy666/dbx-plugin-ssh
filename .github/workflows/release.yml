@@ -79,9 +79,18 @@ jobs:
         # 在 Linux 被 cfg 门控掉（走 keyfile 层），nasm 只服务 aws-lc-sys 的
         # MSVC 预置对象路径。
         run: sudo apt-get update && sudo apt-get install -y pkg-config musl-tools
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      # 发布自带前端构建：ui/index.html 由 frontend/ 源码现生成后再打包，
+      # 不再依赖仓里提交的副本（该副本已脱库，见 .gitignore /ui/）。
+      - run: pnpm --dir frontend install --frozen-lockfile
+      - run: pnpm --dir frontend build
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
