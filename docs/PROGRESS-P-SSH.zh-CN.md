@@ -3878,3 +3878,11 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
   3. **树下载逐文件读取无 raw 车道**：扫描是 raw READDIR 字节保真（files 的 remote_path 为 wire 形式），但分块读取高层 open → NO_SUCH_FILE 记 failure 跳过 → 本地缺文件（只剩空目录骨架）。修复：`TreeDownloadState.latin1` 标记，latin-1 下逐文件分块走 `raw_read_chunk`，实现与本节 PROTOCOL「分块下载按转义自动走 raw READ」的既有声明对齐。
 - **Mac 真机终值**：smoke_fs_test **79 PASS / 0 SKIP / 0 FAIL**（71/5/2 → 全组恢复，含 M18 两条失败用例与 np19 symlink 用例）；全量 cargo **963/963**（win 957 + 字面值对表 1，mac 口径 963）/ clippy 0 / fmt 0 / vitest 1067 / vue-tsc 0 / build 过（ui/ 无变化还原）。
 - **过程记录**：接力会话接手时交接的 Windows 修复线（E:\...np19-fix-raw-eof）已在远端完成收口（0c1b3dad docs(m19)）；Mac 侧重建 worktree 后先复验揭出上述三层，全部改动在本轮一并落地（codex/ssh/parity-fix-raw-eof 分支续用）。
+
+## M20 批次（2026-09-26，watcher 外部编辑真容器链路收口：smoke +3 至 82/82 全绿）
+
+- **批次来源**：M19.5 后工程 backlog 清零（交接口径），从"真机人工门"清单里挑可自动化部分立项——「多文件 watcher 外部编辑全链路」此前只有前端 watchEdits 单测与 file_watch 单测，smoke 层零覆盖。
+- **新增**：smoke_fs_test.py watcher external-edit 组 3 用例——双文件并发注册（watchId 互异）、外部保存按 watchId 精确路由 + upload-back 远端字节校验 + 同内容重复保存 sha256 去重、stop 精确移除 + stop-all 全清。localPath 沿工作台 `openInExternalEditor` 同一分工（`sftp/download/start` 带 `downloadDir=<下载目录>/remote-edit/<stamp>/`），落在 `validate_remote_edit_path` 白名单域内。
+- **用例开发中顺带确认的行为点**（非缺陷，均已登记进用例注释）：pump 有 SUPPRESS_WINDOW=2s 启动抑制窗（编辑器预热噪音丢弃），外部编辑用例须先越过；持久档 `sftp_name_encoding` 历史残留会让 auto 语义用例误走 latin-1 裸包分支，watcher 组进组显式归位 auto 自洽。
+- **Mac 真机终值**：smoke_fs_test **82 PASS / 0 SKIP / 0 FAIL**；backend 代码零改动，cargo 963 / clippy 0 / fmt 0 沿 M19.5。
+
