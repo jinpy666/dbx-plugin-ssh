@@ -47,6 +47,7 @@ mod triggers;
 mod vault;
 mod vnc_session;
 mod x11;
+mod zmodem_detect;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

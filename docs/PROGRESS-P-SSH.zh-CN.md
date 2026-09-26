@@ -4110,3 +4110,35 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
 - **验证**：`pnpm vitest run` **1124/1124 通过（114 文件）**（基线 1099/112，+25 用例 +2 文件，只增不减）/ `vue-tsc --noEmit` 0 错误 / `pnpm run build` 通过（`ui/` 重生成，integrator 所有权）。`git diff --check` 干净。
 - **边界遵守**：未改 `manifest.json`、后端零改动（无协议/权限/能力变化）、未关闭 issue #96（关闭由人工决定）、未 merge integration、未触发 CI；未使用真实凭据。
 - **已知边界**：① `truncated`（>1 MiB 只加载头部）不提供格式化视图——半截 JSON 无法可靠 parse；② `.jsonl` 按设计不做整篇 pretty；③ `.json` 扩展名但内容为 JSON-lines 的文件会落入 `invalid` 提示 + 原文视图；④ 编辑态切回 `TextPreview`（可编辑 CodeMirror），保存后按新文本重新检测。
+
+## M31-D 批次（2026-09-26，终端输出族两 issue：#95 取证闭环 + #90 ZMODEM 触发检测）
+
+分支 `codex/ssh/parity-np31-terminal-output`（基线 cd205df4）。两 issue 同属 PTY 数据通路，一线统一处置。
+
+### #95「终端执行 git 的时候看不到内容」——取证完成，非插件数据通路缺陷，不做猜测性修复
+
+**取证方法**：本地容器 `dbx-ssh-test`（apk 装 git 2.54.0，对齐用户"跑 git"场景；lrzsz 未装属 #90 范围）+ `scripts/sidecar_client.py` 建真实 PTY 会话（120×30），逐帧抓 `ssh/terminal/out/<id>` 二进制帧原始字节（探针脚本与完整输出留档 `/tmp/np31_probe/`，不进仓库）。
+
+**证据链**：
+1. `git --version` / `git status`（含 `\x1b[31m` 红色着色）输出在二进制帧上**字节级完好**；
+2. `git log` 触发 pager（git 默认 `LESS=FRX`，单屏内容渲染即退出）时，`\x1b[0;0H…\x1b[K` 渲染帧同样完好送达——**pager/alternate screen 假设排除**（且 xterm.js 本身支持 1049 切换）；
+3. 前端输出管线逐环节审计：`terminalCommandMarkers.ts`（OSC 633）与 `terminalDirectoryTracking.ts`（OSC 7）解析器都是**旁路观察**（返回 updates，原始字节原样进 xterm）、`terminalWriteThrottle` 与 `terminalBackpressure` 字节保持（有单测）、zmodem.js sentry 与 trzsz filter 空闲态透传——**无吞字节环节**；
+4. issue 截图（611×210）重新判读：`On branch master` 标题、`(use "git add…")` 提示、`nothing added to commit` 页脚全部完整——若输出被流解析吞掉，这些英文行同样会碎；"红色碎片"（`'`、`i`、`0,`、`[`、`true,`）实为 TAB 缩进的**完整短行**，正是 git 未跟踪文件的文件名，且其形态是 JSON/Python 字面量（`'i'`、`0,`、`[True,`…）被 shell 按空白分词后逐 token 成名的特征。
+
+**结论**：终端渲染的正是 git 的真实输出；"看不到内容"源于提问者仓库里确实存在这些垃圾文件名（最可能由更早一条未加引号的命令或粘贴事故创建），不是输出丢失。三个候选（pager/alternate screen、viewport 滚动、ANSI 净化误伤）逐一排除或与截图矛盾。**处置**：TRIAGE #95 行改判"取证完成"，建议回复提问者让其核对 `ls -la` 的未跟踪文件；不改任何代码。
+
+### #90「sz 命令下载文件没有反应，无任何反馈」——反馈层修复（MVP）
+
+**现状取证**：容器无 lrzsz（按任务约束不安装）；此前行为=远端 `sz` 发 ZRQINIT 后前端 zmodem.js sentry 检测到 `role="receive"` 会话即 `detection.deny()`，无提示无传输——即 issue 所述"没有任何反馈"。
+
+**协议依据**（lrzsz 0.12.20 源码核实，`zmodem.h`/`zm.c`/`lsz.c`/`lrz.c`）：`'B'`=ZHEX、`'A'`=ZBIN、`'C'`=ZBIN32（lrzsz 命名与 spec 惯例相反）；ZRQINIT=0x00、ZRINIT=0x01；`sz` 上线与重试全走 `zshhdr` hex 帧：`**\x18B` + `"00"` + 12 hex（4 字节数据+crc16）+ `0D 8A` + `11`（XON），重试间隔 10s、3 次后放弃（~30s 生命周期）；`rz` 上线发 hex ZRINIT（`**\x18B01…`），**必须原样透传**——前端 sentry 的 rz 上传流程依赖看到它。
+
+**实施**：
+- `backend/src/zmodem_detect.rs`（新，纯状态机）：流式检测 `2A 2A 18` + framin + ZRQINIT 帧型；命中即进入 40s 抑制窗口（覆盖 sz 整个重试生命周期，超时自动回透传，无需手动复位），窗口内同类头静默丢弃；`PendingDrop::HexRun` 处理 hex 头跨 binary 帧切割（哨兵、类型位、12 hex 负载、CRLF/XON 尾都可能被任意分帧）。**9 条单测**：单帧命中、8 种切分位置跨帧检测零泄漏、ZRINIT 字节级透传、二进制 ZBIN32 ZRQINIT 命中、二进制 ZRINIT 透传、窗口内重试静默+窗口后复位、字面 `**` 文本无损（含分帧）、非 ZRQINIT hex 帧型透传、尾部候选字节不丢。
+- `backend/src/ssh.rs` 接线：PTY 输出泵（channel.wait 分支 + directory-filter 定时冲刷分支）在录制/发布前过检测器（仅 Stdout 流；空帧不发布），首次命中发 `ssh/zmodem` 事件 `{sessionId, kind: "zrqinit"}`（重试不重复发）；状态随会话任务存续。
+- 前端：`App.vue` 事件分发新增 `ssh/zmodem` 处理 → `showNotice(t("zmodemDownloadUnsupported"))`；i18n 七语全补（zh-CN/zh-TW/en/es/it/ja/pt）。
+- 协议文档：`PROTOCOL.zh-CN.md` 新增「ZMODEM 触发检测」节。
+
+**验证**：cargo **994/994**（基线 985 + 9 新增）/ clippy `--all-targets -D warnings` 0 / `cargo fmt --check` 0；`scripts/smoke_zmodem_detect.py`（新）四用例全 PASS（真实容器 PTY：sz ZRQINIT 抑制+事件恰一次、窗口内重试静默、ZRINIT 透传、字面 `**` 文本无损）；`smoke_fs_test.py` **83/0/0**；vitest **1099/1099**（112 文件）/ `vue-tsc --noEmit` 0。
+
+**明确不做（边界）**：不实现 ZMODEM 协议本身（不应答 ZRINIT、不收发文件）——"sz 直传下载"需独立立项（接收方向状态机 + 进度 UI + 与 SFTP 面板的关系）；检测器仅接 SSH PTY stdout，local/serial/telnet 通路未接；manifest.json 未动；未关闭任何 issue。
