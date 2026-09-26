@@ -4088,3 +4088,10 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
 - **本轮实施②：#73 终端底色净化**（`frontend/src/lib/terminalBackground.ts`，103 行，纯函数 + 9 用例）。在 `@xterm/xterm@6.1.0-beta.304` 打包产物中直接核实到落黑机制：`ThemeService._setTheme` 用内部 `css.toColor()` 解析 `theme.background`，解析抛错时**静默回退内建常量**（`function m(e,t){if(void 0!==e)try{return a.css.toColor(e)}catch{} return t}`，t = `css.toColor("#000000")`）；而 `css.toColor` 只可靠处理 hex / **逗号分隔** `rgb()/rgba()` / 字面 `transparent`（解析成功但 rgba=0），其余靠 canvas 探针——探针对 `var()`/`color-mix()` 这类需级联求值的形态必抛 `Unsupported css format`。宿主设背景图时下发的 `--color-background` 恰好常落这两类 → 静默黑底。`21c66bf2`（已在 integration）修的只是 viewport 的 `#000` 规则即黑边框那一半，主题底色这半本轮补上。净化口径只拦"可证明 xterm 拿不到色"的四类（空值 / 字面 `transparent` / 需级联求值的函数形态 / 显式 `alpha≤0`），其余原样透传（hsl、命名色不改写），调用点 `App.vue:2043`（`hostTerminalTheme()`，净化值同时喂 xterm ITheme 与 `--ssh-terminal-background` 变量，`--background` 等 UI 变量不经过本模块）。**登记未做**：让背景图真正透出终端需 xterm `allowTransparency: true`（连带渲染器/WebGL 取舍），属独立决策。
 - **验证**：`pnpm vitest run` **1092/1092 通过**（基线 1079 + 13 新增：9 底色净化 + 4 uuid 守卫）/ `vue-tsc --noEmit` 0 错误 / `python3 scripts/validate_repo.py` PASS（`io.dbx.ssh 0.7.1-beta.3`）。纯前端批次，cargo/(smoke) 不适用。
 - **边界遵守**：未改 `manifest.json`、未使用真实凭据、未关闭任何 issue（关闭由人工决定）、未 merge integration、未触发 CI。单 issue 改动均远低于 ~150 行阈值，未触协议/认证语义。
+
+## M30 收口补记（2026-09-26）
+
+- **M30-A/B 合并后全量验证全绿**：vitest **1099/1099**（112 文件）/ vue-tsc 0 / cargo **985/985** / 容器 smoke **83/0/0**。integration head = f1f3f6f1。
+- **main 3 提交已并入**（#116 fileTransfer ArrayBuffer 修复 + 目录跟随偏好 + panel 图标禁用），且 integration 独有的 transcript 导出第 4 处 fileTransfer.write 站点按同模式补齐（4/4 归一）——宿主桥 transfer 缺陷在两条线全部堵上。
+- **open issue 分诊完成**（ISSUE-TRIAGE.zh-CN.md）：20 条定性完毕，#77 UUID 守卫与 #73 终端底色净化本轮落地（13 新增前端用例）；14 条需人工（需补料 #23/#25/#103/#100、宿主侧 #72、未立项 #90/#96/#78/#66、需复现 #95 等），关闭候选建议见报告——**未关闭任何 issue**（人工决定）。
+- **登记转人工**：`codex/host-capability-form` 分支（f42d6354，动 manifest.json 199 行 + engines 版本要求，2026-09-17 旧分支，patch-id 未命中 main/integration）——按守卫（不改 manifest.json）不自动合并，需人工评估是否还有效。
