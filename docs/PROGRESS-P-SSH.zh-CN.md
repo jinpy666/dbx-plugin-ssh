@@ -3918,3 +3918,7 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **修复范围**（`backend/src/mcp.rs`，每臂拿到路径后立即归一）：`sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_read_file` / `sftp_write_file` / `sftp_mkdir` / `sftp_remove` / `sftp_rename`（sourcePath 与 targetPath 均归一）/ `sftp_chmod` / `sftp_disk_usage`（与工作台 `sftp_disk_usage` 的 df -kP 前归一同口径）/ `sftp_upload`、`sftp_download` 的 remotePath（localPath 不动）。latin-1 臂归一发生在 `latin1_encode_display` 编码还原之前（clean 名字节还原不受影响）；helper（`raw_sftp_exists`/`raw_sftp_read_file`/`raw_sftp_write_file`/`raw_sftp_write_bytes`/`raw_sftp_chmod`）内部不重复归一（调用方已归一），且经 grep 排查无绕过分发臂的调用方。`sftp_copy`/`sftp_move` 的 from/toDir 经 `sftp_copy::parse_request` 内部本已归一，无需改动。
 - **单测**：`tests` 模块新增 3 条 M25 契约用例（归一映射 `/a//b/../c`→`/a/c` 等；拒空串/含 NUL；latin-1 显示域 clean 名归一前后字节还原一致，列表回传路径往返闭环不被破坏）。
 - **验证**：cargo **984/984**（基线 981 + 3）/ clippy 0 / fmt 0；本地容器（dbx-ssh-test）smoke_fs_test **83 PASS / 0 SKIP / 0 FAIL**；smoke_mcp 在线段（--host 127.0.0.1 --port 2222）**all green**。发现记录已登记 docs/AUDIT-PROTOCOL-IMPL.zh-CN.md「后续发现」节。
+
+## M25 收口巡检补记（2026-09-26）
+
+- **M25 合并后 CI 全绿**：run 36217342433 success（15m32s）。M24/M25 两批归一拉齐后，工作台与 MCP 两条车道、auto 与 latin-1 两种编码的远端路径组件归一口径完全一致。
