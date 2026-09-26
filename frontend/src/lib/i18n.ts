@@ -2094,7 +2094,7 @@ export const messages = {
     },
     terminalCommand: {
       running: "运行中：{command}",
-      finished: "退出码 {code} · 用时 {duration}",
+      finished: "退出码 {code} · 耗时 {duration}",
       hint: "Shell 集成已生效",
       tooltipCommand: "命令",
       tooltipExitCode: "退出码",
@@ -2490,7 +2490,7 @@ export const messages = {
     },
     terminalCommand: {
       running: "執行中：{command}",
-      finished: "退出碼 {code} · 用時 {duration}",
+      finished: "退出碼 {code} · 耗時 {duration}",
       hint: "Shell 整合已生效",
       tooltipCommand: "指令",
       tooltipExitCode: "結束代碼",
