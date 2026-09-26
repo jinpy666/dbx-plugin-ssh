@@ -155,8 +155,8 @@ function deviceKeyTitle(device: NpuDeviceView) {
 .gpu-npu-process-name { min-width: 0; overflow: hidden; color: var(--muted-foreground); text-overflow: ellipsis; white-space: nowrap; }
 .gpu-npu-cann { display: inline-block; margin-left: 8px; color: var(--muted-foreground); font-size: 10px; }
 /* 窄卡片（auto-fit 两列时 ~185px）里显存数值会被挤成竖排折行：禁止折行并
-   缩一号字，溢出由卡片 overflow 承担，保证 "33.00 GiB / 40.00 GiB · 83%" 一行可读。 */
-.gpu-npu-section .numeric { white-space: nowrap; font-size: 10px; }
+   缩一号字；放不下时以省略号截断（完整值在 title 里），不再被卡片硬裁丢尾。 */
+.gpu-npu-section .numeric { min-width: 0; overflow: hidden; white-space: nowrap; font-size: 10px; text-overflow: ellipsis; }
 .gpu-npu-driver { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 /* 不可用态刻意弱化：面板其余区域保持主要地位。 */
 .gpu-npu-unavailable { opacity: 0.75; }
