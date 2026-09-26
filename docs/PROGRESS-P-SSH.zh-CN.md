@@ -3964,3 +3964,9 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **单测回归**：`sftp_name.rs` 新增 `has_wire_lane_branches_on_effective_encoding`——latin-1 转义名走 raw、latin-1 无转义名与 auto 全形态（含字面 `%XX`、字面 `%`、纯 UTF-8）一律高层。
 - **文档落地**：NAME-ENCODING-BOUNDARY 矩阵 `sftp/download/start`/`next` 两行按编码区分口径改写、D-7 条目标「已修（M28-B）」含修复描述与验证数；PROTOCOL RPC 表 `sftp/download/start|next|finish` 行与 `sftp/list` 节各补一句「车道判定按生效编码区分（M28-B）」。
 - **验证**：cargo **985/985**（基线 984 + 1，只增不减）/ clippy `-D warnings` 0 / fmt --check 0 / build 通过；本地容器（dbx-ssh-test）smoke_fs_test **83 PASS / 0 SKIP / 0 FAIL**——smoke 的 latin-1 下载与树下载用例是本修复的直接回归。
+
+## M29 收口补记（2026-09-26）
+
+- **总收口 CI 全绿**：run 36233032323 success（18m11s，11 job 全过，darwin-x64 包候选含 Offline MCP smoke 恢复）。此前 36231728791 的 darwin-x64 挂因为 8 MiB 巨行用例在慢 CI runner 超 60s 性能预算——该用例验证"不 panic 不 hang"而非耗时上限，预算放宽至 120s（68b6b82f，慢 runner 余量、非功能上限）；再前一轮 36228886665 的 darwin-x64 挂因为 GitHub upload-artifact 基础设施超时（与本仓无关）。
+- **字节边界矩阵疑点登记簿 D1-D7 全部闭环**：D1（M27-A 裁决契约内正确）、D2（M27-B shell_quote 三处收编）、D3-D6（M28-A 文档澄清）、D7（M28-B auto 车道按生效编码判分支，985/985 + smoke 83/0/0）。
+- **迭代全景（M19.5→M29 十一轮）**：early eof 五层 wire 缺口修复 → watcher/latin-1 真容器收口（smoke 71/5/2→83/0/0）→ MCP stdio 在线段进 CI → 协议对账审计（R1-R4）→ 归一四象限拉齐（M24/M25）→ 边界矩阵与疑点全闭环（M26-M28）→ CI 预算余量（M29）。cargo 基线 950→985，integration head = 700ac07a。剩余人工门：PR #98 合并、watcher/latin-1 GUI 手测、终端 BiDi（未立项）。
