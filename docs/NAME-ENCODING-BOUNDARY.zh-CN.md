@@ -52,9 +52,9 @@
 | `sftp/delete` | `sftp_remove` | `path`（整条 wire） | ✅ | ✅ 整条 `unescape_wire` 后 `raw_delete_path`（LSTAT 判型 → REMOVE/RMDIR/递归树删，symlink 绝不跟随） | 树删 `raw_delete_path` `ssh.rs:8477` | `main.rs:1582` → `ssh.rs:4589`（归一 4597、unescape 4604） |
 | `sftp/upload/start` | — | `remotePath`（wire 前缀 + 显示末段） | ✅（`ssh.rs:5379`） | ✅（落盘阶段） | start 本身只落本地 spool、不发远端请求；字节保真在 finish 执行 | `main.rs:1596` → `ssh.rs:5359` |
 | `sftp/upload/finish` | — | start 登记的 `remotePath` | ✅（承 start） | ✅ latin-1 走 `raw_push_upload_file`：`write_path_bytes` 还原后裸包暂存 + 原子提交 | 裸包建立失败回退高层暂存 | `main.rs:1616` → `ssh.rs:5618`（raw 分支 5673–5681）→ `sftp_ext.rs:895`（write_path_bytes 903） |
-| `sftp/download/start` | — | `remotePath`（整条 wire） | ✅（`ssh.rs:6003`） | ✅ 含转义（`has_wire_escapes`，`sftp_name.rs:122`）时整条 `unescape_wire` 后裸包 STAT 取真实字节数（M21 收口）；下载车道 raw 失败**不回退**（回退只会重演同一错误） | 字面 `%XX` 歧义已裁决：下载车道 wire 形式为排他契约，契约内正确（D-1 闭环，M27-A）；auto/回退列表 uri 未自转义的往返缺口另见 D-7 | `main.rs:1624` → `ssh.rs:5993`（判分支 6018、raw stat 6024） |
+| `sftp/download/start` | — | `remotePath`（整条 wire） | ✅（`ssh.rs:6007`） | ✅ latin-1 生效且含转义时整条 `unescape_wire` 后裸包 STAT 取真实字节数（M21 收口）；车道判定按生效编码收口在 `has_wire_lane`（`sftp_name.rs`，M28-B 修 D-7）——**auto 一律走高层客户端**（auto 列表 uri 字面 `%` 未经 `%25` 自转义，wire 串里的 `%XX` 是文件名字面量，不能还原）；下载车道 raw 失败**不回退**（回退只会重演同一错误） | 字面 `%XX` 歧义已裁决：latin-1 下载车道 wire 形式为排他契约（D-1 闭环，M27-A）；auto/回退列表 uri 未自转义的往返缺口**已修（M28-B）**，见 D-7 | `main.rs:1624` → `ssh.rs:5999`（编码判定 main.rs 1637、判分支 6030、raw stat 6037） |
 | `sftp/download/tree/start` | — | `remotePath`（整条 wire） | ✅（`ssh.rs:6123`） | ✅ latin-1 整树裸包 READDIR 遍历（`scan_tree_with_raw`，`ssh.rs:8386`），本地根名按原始字节解码显示 | 裸包建立失败回退高层遍历（读安全） | `main.rs:1651` → `ssh.rs:6109`（unescape 6146） |
-| `sftp/download/next` | — | start 登记的 `remotePath`（树模式为逐文件 wire 路径） | ✅（`raw_read_chunk` 内，M24/R3） | ✅ 单文件转义路径裸包 READ（每 chunk 独立 open/close）；树模式 latin-1 分支同样 `raw_read_chunk`（`ssh.rs:6338–6348`） | 同 D-1 裁决：`has_wire_escapes` 判分支按 wire 形式契约解读（M27-A 闭环） | `main.rs:1668` → `ssh.rs:6451`（判分支 6483 → raw 6484） |
+| `sftp/download/next` | — | start 登记的 `remotePath`（树模式为逐文件 wire 路径） | ✅（`raw_read_chunk` 内，M24/R3） | ✅ 单文件 latin-1 转义路径裸包 READ（每 chunk 独立 open/close，按 start 登记的生效编码 `download.latin1` 判——M28-B 修 D-7，auto 一律高层）；树模式 latin-1 分支同样 `raw_read_chunk`（`ssh.rs:6344–6354`） | latin-1 车道按 D-1 裁决维持 wire 契约（M27-A）；auto 判分支已按编码区分（M28-B） | `main.rs:1678` → `ssh.rs:6465`（判分支 6501 → raw 6502） |
 
 小计：**24 个 ✅ 入口**。
 
@@ -168,17 +168,22 @@ AI 把列表返回的 `path` 原样回传即落回服务器原始字节（往返
 - **D-6（行为差异确认）MCP `sftp_download` 目录探测**：latin-1 裸包分支不单独 STAT 目录，依赖 OPEN 被
   服务器拒绝后回退高层给出「is a directory」错误（`mcp.rs:2979–2984` 注释登记）——与 auto 分支的
   metadata 判目录路径不同但最终报错语义一致，属有意选型。
-- **D-7（D-1 裁决分离出的真实边界，登记待议）auto/回退列表产出的字面 `%XX` 名在单文件下载被误还原**：
-  单文件下载的 `has_wire_escapes` 判分支（`ssh.rs:6018` size 探测、`ssh.rs:6483` 分块读取）**不区分
+- **D-7（D-1 裁决分离出的真实边界）auto/回退列表产出的字面 `%XX` 名在单文件下载被误还原。已修（M28-B）**：
+  单文件下载原 `has_wire_escapes` 判分支（原 `ssh.rs:6018` size 探测、原 `ssh.rs:6483` 分块读取）**不区分
   编码**——`auto` 模式与 latin-1 裸包失败回退高层的列表条目（`ssh.rs:4310`/`ssh.rs:4305`）uri 由高层
   `sftp_uri(&entry.path())` 产出（`ssh.rs:4367`），服务器字节合法 UTF-8 时文件名**原样透传**、字面 `%`
   不做 `%25` 自转义（`escape_wire` 只服务 latin-1 raw 列表，`ssh.rs:4396`）。此时真实文件名含形如
   `%E9` 字面序列的条目回传给 `sftp/download/start`，会被判为转义并 `unescape_wire` 还原成单字节路径
   ——与 latin-1 车道行为相反（同名文件在 latin-1 列表下 uri 为 `%25E9`，往返无损）。这是 D-1 裁决
   （latin-1 车道 wire 契约内正确）**之外**的真实往返缺口：auto 车道里「字面 `%XX` 名下载命中不了」。
-  影响面小（auto 语义下合法 UTF-8 名含字面 `%XX` 十六进制对的情况罕见；当前前端无手输下载路径入口），
-  修复方向（单文件下载判分支加编码判定、或 auto 车道 uri 同样自转义 `%`）涉及 wire 编码空间的全局
-  一致性选型，登记由后续批次决策，本批不动代码。
+  **修复（M28-B，按生效编码区分车道）**：`main.rs` `sftp/download/start` 分发臂 resolve 编码
+  （连接覆盖 > 全局偏好，与 `sftp/download/tree/start` 同口径）传入 `start_download`，登记进
+  `DownloadState.latin1`（新字段，参照 `TreeDownloadState.latin1` 先例）；size 探测与 `download_chunk`
+  分块读取统一按 `has_wire_lane(remote_path, encoding)` 判车道（`sftp_name.rs` 纯函数）——latin-1
+  维持现状（`has_wire_escapes` → raw 车道，D-1 契约不动），**auto 一律走高层客户端**（auto 车道
+  本就以字面量语义与列表一致：列表回传什么名就按什么名打开）。树下载分支按 `tree.latin1` 判（M21）、
+  sudo 下载走独立车道（sudo_download.rs），均不在本修复范围。单测回归：`has_wire_lane_branches_on_effective_encoding`
+  （`sftp_name.rs`）。cargo 985/985（基线 984 + 1）、clippy 0、fmt 0、smoke 83/0/0。
 
 ---
 
