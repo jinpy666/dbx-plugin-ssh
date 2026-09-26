@@ -15,6 +15,7 @@ describe("ssh pluginStore wiring", () => {
       [
         "sftp-path-history",
         "ssh-command-history",
+        "ssh-follow-directory",
         "ssh-sftp-pane-open",
         "ssh-sftp-side-tab",
         "ssh-sftp-side-collapsed",

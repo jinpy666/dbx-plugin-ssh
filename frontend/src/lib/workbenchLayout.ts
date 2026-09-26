@@ -25,3 +25,20 @@ export function resolveSftpPaneOpen(state: { sftpPaneOpen?: unknown }, defaultOp
 export function sanitizeSftpPaneDefaultOpen(raw: string | null): boolean {
   return raw === "true";
 }
+
+/**
+ * Resolves the directory-follow switch for a restored workbench: the persisted
+ * per-workbench flag wins; a fresh workbench falls back to the global
+ * preference persisted by the pluginStore (see sanitizeDirectoryFollowPref).
+ */
+export function resolveDirectoryFollow(state: { followDirectory?: unknown }, followByDefault: boolean): boolean {
+  return typeof state.followDirectory === "boolean" ? state.followDirectory : followByDefault;
+}
+
+/**
+ * Parses the persisted global directory-follow preference. Default is OFF:
+ * only the explicit opt-in makes new workbenches start with the switch on.
+ */
+export function sanitizeDirectoryFollowPref(raw: string | null): boolean {
+  return raw === "true";
+}

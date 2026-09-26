@@ -184,7 +184,7 @@ import { encodeGif } from "./lib/gifEncoder";
 import { canKillProcess, sortProcessRows, type ProcessSortKey } from "./lib/processActions";
 import { distroBadge, type DistroBadge } from "./lib/distroBadge";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel, sanitizeAuditEntries, type AuditEntry } from "./lib/auditLog";
-import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
+import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
 import { pickLiveSessionForReattach, type SessionSummary } from "./lib/sessionRestore";
 import { toolbarTintStyle } from "./lib/toolbarTint";
 import { createGhostClickGuard } from "./lib/ghostClickGuard";
@@ -431,6 +431,9 @@ const QUICK_COMMANDS_KEY = "ssh-quick-commands";
 // 终端字号/字体族键移入 lib/terminalFont.ts（issue #31 字体单独设置）统一管理。
 // SFTP 面板默认打开偏好：pluginStore 全局持久化（"false" = 新工作台仅终端）。
 const SFTP_PANE_OPEN_KEY = "ssh-sftp-pane-open";
+// 目录跟随全局偏好：pluginStore 持久化（"true" = 新工作台初始即开启；per-tab
+// 的 workbenchState.followDirectory 仍优先，恢复的 tab 不被全局值覆盖）。
+const FOLLOW_DIRECTORY_KEY = "ssh-follow-directory";
 // 侧栏形态偏好：tree/quick tab（默认 tree）与收起状态，pluginStore 全局持久化。
 const SFTP_SIDE_TAB_KEY = "ssh-sftp-side-tab";
 const SFTP_SIDE_COLLAPSED_KEY = "ssh-sftp-side-collapsed";
@@ -530,7 +533,7 @@ const sftpHomePath = ref("");
 const termSelectCopy = ref(loadSelectCopyEnabled());
 // 沙箱宿主读不到系统剪贴板：右键粘贴的降级链靠这份插件视图内的复制副本。
 const terminalCopyCache = createTerminalCopyCache();
-const followDirectory = ref(false);
+const followDirectory = ref(loadDirectoryFollowPref());
 // 终端 shell 最近一次上报的 cwd（OSC 7 / OSC 633 Cwd，无论跟随开关是否打开
 // 都记录）：终端拖拽上传的「当前目录」落点解析靠它，避免误用 SFTP 面板的
 // 浏览目录（初始值 "/"，拼根路径会被服务器以权限拒绝）。
@@ -1222,7 +1225,8 @@ function restoreUiState() {
   // users who want SFTP open the workbench tab.
   sftpPaneOpen.value = panelSurface.value ? false : resolveSftpPaneOpen(state, sftpPaneDefaultOpen.value);
   // Dock panel surface：目录跟随是 SFTP 域能力，面板一律关闭。
-  followDirectory.value = panelSurface.value ? false : state.followDirectory === true;
+  // 恢复的 tab 用 per-workbench 状态；全新工作台回落全局偏好（pluginStore）。
+  followDirectory.value = panelSurface.value ? false : resolveDirectoryFollow(state, loadDirectoryFollowPref());
   sudoMode.value = state.sudoMode === true && canWrite.value;
   // 一次性迁移：六列默认上线前的旧偏好重置为全开（之后用户自定义照常持久化）。
   const legacyColumns = state.visibleColumns != null && state.columnsV2 !== true;
@@ -4131,6 +4135,7 @@ async function setDirectoryTracking(enabled: boolean) {
   try {
     await window.dbxPlugin.invoke("ssh/terminal/directoryTracking", { sessionId: session.value.sessionId, enabled });
     followDirectory.value = enabled;
+    persistDirectoryFollowPref(enabled);
     directoryParser.reset();
     persistState();
   } catch (cause) {
@@ -4165,6 +4170,24 @@ function loadSftpPaneDefaultOpen(): boolean {
     return sanitizeSftpPaneDefaultOpen(pluginStore.getItem(SFTP_PANE_OPEN_KEY));
   } catch {
     return false;
+  }
+}
+
+// 目录跟随全局偏好：开关切换时同步写入（与 per-tab workbenchState 并行，
+// 后者为恢复的 tab 提供更精确的状态；这里是新 tab 的缺省来源）。
+function loadDirectoryFollowPref(): boolean {
+  try {
+    return sanitizeDirectoryFollowPref(pluginStore.getItem(FOLLOW_DIRECTORY_KEY));
+  } catch {
+    return false;
+  }
+}
+
+function persistDirectoryFollowPref(enabled: boolean) {
+  try {
+    pluginStore.setItem(FOLLOW_DIRECTORY_KEY, enabled ? "true" : "false");
+  } catch {
+    // pluginStore 不可用时全局偏好仅对当前会话生效，per-tab 恢复不受影响。
   }
 }
 

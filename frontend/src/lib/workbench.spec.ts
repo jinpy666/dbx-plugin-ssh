@@ -10,7 +10,7 @@ import { clampFontSize } from "./terminalZoom";
 import { pushPathHistory, sanitizePathHistories } from "./sftpPathHistory";
 import { formatBytes, formatRate } from "./format";
 import { expandSelection, filterSftpEntries } from "./sftpFileFilters";
-import { getSshWorkbenchSplitLayout, resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen } from "./workbenchLayout";
+import { getSshWorkbenchSplitLayout, resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref } from "./workbenchLayout";
 import { commandMarkerTooltip, formatCommandDuration, getOsc633ParserState, Osc633CommandParser, parseOsc633StreamChunk, runningCommandElapsedMs } from "./terminalCommandMarkers";
 import { describeWorkbenchSessionStatus, isUsableSshSession, normalizeSshSessionStatus } from "./sessionStatus";
 import { sanitizeCommandOutput, stripCommandEcho, stripHiddenCommandEchoes, stripTerminalControlSequences } from "./terminalOutputText";
@@ -144,6 +144,26 @@ describe("SSH workbench protocol helpers", () => {
     expect(sanitizeSftpPaneDefaultOpen("true")).toBe(true);
     expect(sanitizeSftpPaneDefaultOpen("garbage")).toBe(false);
     expect(sanitizeSftpPaneDefaultOpen("false")).toBe(false);
+  });
+
+  it("resolves the directory-follow switch from the workbench state or the global preference", () => {
+    expect(resolveDirectoryFollow({}, false)).toBe(false);
+    expect(resolveDirectoryFollow({}, true)).toBe(true);
+    // The persisted per-workbench flag wins over the global preference.
+    expect(resolveDirectoryFollow({ followDirectory: true }, false)).toBe(true);
+    expect(resolveDirectoryFollow({ followDirectory: false }, true)).toBe(false);
+    // Corrupted values fall back to the preference instead of coercing.
+    expect(resolveDirectoryFollow({ followDirectory: "yes" }, true)).toBe(true);
+    expect(resolveDirectoryFollow({ followDirectory: 0 }, false)).toBe(false);
+  });
+
+  it("parses the persisted directory-follow preference defensively", () => {
+    // Global default is OFF: only the explicit opt-in starts new workbenches
+    // with directory following enabled.
+    expect(sanitizeDirectoryFollowPref(null)).toBe(false);
+    expect(sanitizeDirectoryFollowPref("true")).toBe(true);
+    expect(sanitizeDirectoryFollowPref("garbage")).toBe(false);
+    expect(sanitizeDirectoryFollowPref("false")).toBe(false);
   });
 });
 

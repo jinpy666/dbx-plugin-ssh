@@ -3428,3 +3428,27 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
   拒绝、或运行在 Host API < 1.3 的旧宿主时，右键粘贴仍能粘贴终端内复制的
   文本，实现两层保护。
 - `ui/index.html` 重新生成，本地验证全绿。
+
+### 目录跟随开关持久化到全局偏好（纯前端轮，2026-09-26）
+
+用户报告「目录跟随」开关每次打开工作台都要重新设置。定位结论：`followDirectory`
+一直随 workbenchState 按 tab 持久化（恢复的 tab 能回来），但侧边栏新开的连接
+tab 拿到的是空 state，永远回落到硬编码的 `false`——缺少跨 tab 的全局缺省。
+
+修复（对齐 `ssh-sftp-pane-open` 既有模式，零协议改动）：
+
+- `lib/workbenchLayout.ts`：新增纯函数 `resolveDirectoryFollow`
+  （per-tab workbenchState 优先，缺省回落全局偏好，损坏值不强转）与
+  `sanitizeDirectoryFollowPref`（仅显式 "true" 开，默认关）。
+- App.vue：新增 pluginStore 键 `ssh-follow-directory`（全局偏好，仅影响
+  新工作台初始态）；`followDirectory` 初值与 `restoreUiState` 回落值均取
+  该偏好；用户显式切换（`setDirectoryTracking`）时同步写偏好。后端强制
+  关闭（`directory-tracking-unavailable` / 滤波失败）不覆写全局偏好——
+  那是运行时能力裁决，不是用户决策；下个支持的会话仍按用户偏好重试。
+- `lib/pluginStore.ts`：`ssh-follow-directory` 注册进 `PLUGIN_STORE_KEYS`
+  （宿主 storage 水合需显式声明）。
+- 单测：workbench.spec.ts +2 用例（跟随解析 / 偏好解析，含损坏值回退）。
+
+**剩余风险**：面板（Dock panel）形态仍一律强制关闭（SFTP 域能力，设计如此）；
+真机端到端（开关联动 sidecar directoryTracking 脚本注入）未在本轮实测。
+
