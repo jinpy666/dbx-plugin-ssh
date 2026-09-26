@@ -14,14 +14,24 @@ Telnet/VNC/Serial/RDP 的 saved connection 生命周期也走同一入口，但�
 
 `ssh/session/open` 还可接收可选 `requestedSessionId`。前端可在调用长连接 RPC 前预分配该 id，使 `ssh/terminal/out/{sessionId}` 的首帧无需等待 RPC 返回即可进入终端；sidecar 会在注册表冲突或旧调用方缺失该字段时安全回退到新的 UUID，返回的 `sessionId` 始终是权威值。旧前端/sidecar 继续使用现有 replay 语义。交互 PTY 会先建立，远端 shell 能力探测只在启用目录跟踪时懒执行，不阻塞首个 Prompt。
 
-第一阶段不声明 `test` 能力。真实 SSH 握手在 `ssh/session/open` 发起，主机密钥确认完成前不会调用密码认证。
-`connection/test`（宿主发起，带 RPC 截止 = 宿主有效连接超时）的拨号预算与宿主截止对齐并留 1s 余量：`connect_timeout_secs` 显式时预算 = 该值 − 1s；缺省时宿主按 dbx-core `default_connect_timeout_secs()` 回退 10s（`crates/dbx-core/src/models/connection.rs:501`，stored 0 → 宿主 10s，与本插件 manifest 默认 30s 分叉），预算取 9s，超时错误附带「高级选项调大 SSH timeout」的指引。工作台 `ssh/session/open` 由插件前端发起、无宿主截止，仍按连接配置的完整超时拨号。
+## 同 transport 命令会话（WezTerm `spawn` 对标，WT-4）
+
+WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 channel 直接执行指定命令（独立 PTY/session），适配「一键开 htop 第二个 tab」类场景。本插件经 `ssh/session/open` 的可选参数 `spawnCommand`（string，camelCase）实现等价能力，无新增方法号——命令会话与复制会话共用同一条「复制会话链路」，只是 channel 的启动动作不同。
+
+- **方法与参数**：`ssh/session/open` 新增可选 `spawnCommand`。缺省、空串或纯空白 → 现行行为不变（shell，或连接级 `remote_command`）；trim 后非空 → 该 channel 在 `request_pty` + `set_env` 之后以 `exec` 执行 `sh -c '<命令>'` 替代 `request_shell`。`spawnCommand` 显式覆盖连接级 `remote_command`（每次打开的请求优先于连接配置）。命令字节数上限 4096（与启动命令单条上限同量级），超限报错；含 NUL 字节报错（exec 字符串不能携带 NUL，fail closed 不静默截断）。
+- **命令转义（安全约定）**：远端命令一律 shell 单引号转义（仓库硬性约定）。sidecar 用既有 `exec::shell_quote` 把整条命令包成 `sh -c '<单引号转义后的命令>'`：外层登录 shell 只收到一个安全单参，引号内元字符无法逃逸；内层 `sh -c` 保留完整 shell 语义（管道、重定向、多命令按用户输入原样生效）。
+- **返回值**：与现行 `ssh/session/open` 完全一致（`sessionId`/`connectionId`/`connected`/`sequence`/`chunkSize`/`directoryTrackingSupported`），无新增字段。
+- **与「复制会话」的差异**：仅 channel 启动动作不同（`exec` 指定命令 vs `request_shell`）。其余语义完全复用——独立 `sessionId`、`workbenchId`、回放缓冲与终端任务；`reuseAuthenticatedTransport` + `reuseAuthenticatedSessionId` 组合时的共享引用预占（retain 先于任何 await）、跳板链生命周期与 sudo 编排快照继承均与复制会话一致；关闭会话只关自己的 channel，最后一个共享引用释放才断开跳板链。差异点二：命令会话跳过 `startup_commands` 注入——exec 替代了交互 shell，向其键入预置命令是语义冲突（与连接级 `remote_command` 的既有豁免同款）。
+- **参数正交性**：`spawnCommand` 不强制与复用参数组合。与复用组合是主路径（WezTerm spawn 语义，免再次认证）；不带复用时按普通新建会话认证后在新 transport 上执行同一命令——前端「复制 transport 失效降级一次重登」路径依赖此正交性，降级后命令意图不丢。`spawnCommand` 是一次性打开参数：打开成功后该工作台的后续重连回到普通 shell 会话语义（对齐复制会话 reuse 意图的一次性消费），不把 exec 命令固化进连接配置。
+- **错误形态（沿用 sidecar String 错误上抛体系，无数字错误码）**：参数非法 → `spawnCommand must not contain NUL bytes` / `spawnCommand exceeds the 4096 byte limit`；复用来源失效 → 既有 `No live authenticated SSH connection`（前端单次降级为普通登录）；channel/PTY/exec 建立失败 → 既有 `Failed to open SSH terminal channel` / `Failed to request SSH PTY` / `Failed to start remote command` 前缀并携带服务端原因原文。
+- **MaxSessions 语义**：命令会话与复制会话一样各占用一个 SSH channel，数量受服务端 `MaxSessions` 限制（OpenSSH 常见默认 10）。超限时 `exec`/`channel_open_session` 被服务端拒绝，`open` 以错误返回且错误文本携带服务端原因——失败对用户可见，不静默降级、不自动重连（与复制会话既有语义一致）。
+- **前端入口**：工作台工具栏「复制会话」按钮旁新增「命令会话」入口，弹窗输入命令后以 `openWorkbench` 打开新 tab，context 携带 `spawnCommand` + 复用参数（`spawnCommand` 非宿主保留字段，随 context 原样透传给工作台）。
 
 ## RPC
 
 | 方法 | 作用 |
 | --- | --- |
-| `ssh/session/open`、`ssh/session/close` | 创建、关闭 PTY 会话（`open` 可选 `requestedSessionId`、`reuseAuthenticatedTransport` + `reuseAuthenticatedSessionId`，`requestedSessionId` 供前端在长 RPC 返回前按预分配 id 接收终端首帧，sidecar 在注册表冲突或缺省时回退服务端 UUID；复用指定同连接存活会话的认证 transport 并新开独立 channel；显式 ID 不可用时 fail closed，只有布尔参数时兼容选择同连接最早存活会话；复用会继承来源会话已解析的 sudo 编排快照；连接 `remote_command` 非空时 exec 该命令替代 shell，`set_env` 随会话注入；连接配置 `triggers` 时挂载自动交互触发器引擎，命中发 `ssh/trigger` 事件，见「自动交互触发器（Expect）与外部密码管理器」节；`startup_commands` 偏好启用的连接在 shell 建立后按序自动键入预置命令并发 `ssh/startup` 事件，见「启动命令（Login scripts 对标）」节） |
+| `ssh/session/open`、`ssh/session/close` | 创建、关闭 PTY 会话（`open` 可选 `requestedSessionId`、`reuseAuthenticatedTransport` + `reuseAuthenticatedSessionId`、`spawnCommand`，`requestedSessionId` 供前端在长 RPC 返回前按预分配 id 接收终端首帧，sidecar 在注册表冲突或缺省时回退服务端 UUID；复用指定同连接存活会话的认证 transport 并新开独立 channel；显式 ID 不可用时 fail closed，只有布尔参数时兼容选择同连接最早存活会话；复用会继承来源会话已解析的 sudo 编排快照；连接 `remote_command` 非空时 exec 该命令替代 shell，`spawnCommand` 非空时以单引号转义的 `sh -c` exec 覆盖两者（WezTerm spawn 对标，见「同 transport 命令会话」节），`set_env` 随会话注入；连接配置 `triggers` 时挂载自动交互触发器引擎，命中发 `ssh/trigger` 事件，见「自动交互触发器（Expect）与外部密码管理器」节；`startup_commands` 偏好启用的连接在 shell 建立后按序自动键入预置命令并发 `ssh/startup` 事件，见「启动命令（Login scripts 对标）」节） |
 | `ssh/terminal/resize` | 调整 PTY 行列 |
 | `ssh/terminal/replay` | 从指定序号补发终端输出 |
 | `ssh/host-key/resolve` | 处理工作台内的主机密钥确认 |
