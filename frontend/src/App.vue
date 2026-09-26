@@ -634,12 +634,11 @@ const terminalError = ref("");
 // 连接卡片：用户取消（在途 open 无法中止，仅切换 UI 态并在 promise 落地后回收
 // 孤儿会话）、Show logs 展开态与连接尝试日志（环形 200 条，跨尝试保留历史）。
 const connectCancelled = ref(false);
-// 成功过渡动画：open 成功后先切 success 卡片（进度到顶 + 对号），hold 播完再进终端。
+// 连接成功后立即揭示终端；success 标记只用于非阻塞的视觉状态。
 const connectSucceeded = ref(false);
 // 手动重连撞上 "Connection is not active"（sidecar 注册表丢凭据）：卡片保持
 // connecting 态并提示用户在 DBX 侧边栏重开连接，插件在有界窗口内自动轮等待宿主重放凭据。
 const inactiveWaiting = ref(false);
-const CONNECT_SUCCESS_HOLD_MS = 750;
 const connectLogsOpen = ref(false);
 const connectLog = createConnectLog();
 const sftpError = ref("");
@@ -2374,15 +2373,16 @@ function createTerminal() {
       terminalDiag.swallowed += 1;
       return;
     }
+    // 首帧优化：键入字节先发送，输入记录随后同步完成，bookkeeping 不阻塞发送路径。
     // 命令建议（P1-1）：行快照先于 trackPendingInput 取（\r 会清空行缓冲），
     // 之后按输入事件推进抑制门并刷新浮层。快速命令/粘贴/自动应答不走路由，
     // 天然不会触发浮层，也不会进入采集。
+    sendTerminalBytes(new TextEncoder().encode(data));
     const lineBeforeInput = pendingTerminalInput;
     trackPendingInput(data);
     refreshSuggestionsAfterInput(data, lineBeforeInput);
     refreshGhostAfterInput(data);
     terminalDiag.keys += 1;
-    sendTerminalBytes(new TextEncoder().encode(data));
   };
   disposeInput = terminal.onData(routeTerminalData);
   // xterm.js 6.1 still drops rapid direct commits on macOS WKWebView when an
@@ -3088,13 +3088,14 @@ function scheduleFit() {
       fitAddon.fit();
       // trzsz 进度条按终端列宽渲染（filter 内部文本进度条虽未启用，列宽保持同步）。
       trzszFilter?.setTerminalColumns(terminal.cols);
+      const sshSessionId = activeTerminalSessionId || session.value?.sessionId;
       if (telnetSession.value) {
         // Telnet NAWS：sidecar 发 SB NAWS 子协商，尽力而为。
         void window.dbxPlugin.notify("telnet/resize", { sessionId: telnetSession.value.sessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
       } else if (localSession.value) {
         void window.dbxPlugin.notify("local/terminal/resize", { sessionId: localSession.value.sessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
-      } else if (session.value) {
-        void window.dbxPlugin.notify("ssh/terminal/resize", { sessionId: session.value.sessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
+      } else if (sshSessionId) {
+        void window.dbxPlugin.notify("ssh/terminal/resize", { sessionId: sshSessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
       }
     } catch {
       // The iframe can briefly be detached while DBX switches tabs.
@@ -4177,9 +4178,15 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
   const attemptStarted = Date.now();
   const attemptTimeoutMs = openRetryAttempt === 0 ? 120_000 : 30_000;
   try {
+    const requestedSessionId = randomUUID();
+    activeTerminalSessionId = requestedSessionId;
+    lastSequence = 0;
+    pendingTerminalFrames.clear();
+    replayNoProgress = 0;
     const info = await window.dbxPlugin.invoke<SessionInfo>("ssh/session/open", {
       connectionId: connectionId.value,
       workbenchId: workbenchId.value,
+      requestedSessionId,
       ...sessionTransportOpenParams(transportReuseState),
       cols: terminal?.cols || 120,
       rows: terminal?.rows || 32,
@@ -4191,40 +4198,30 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
       connectLog.push("warn", t("connectCard.log.orphanClosed"));
       return;
     }
-    // Duplicate is an open-time intent, not a permanent reconnect policy.
-    // Once its PTY exists, this tab owns an ordinary session; a later network
-    // drop must be able to run a fresh login instead of replaying the old
-    // source session id forever.
+    // The caller-provided id lets the binary listener accept first output before
+    // the long-running open RPC resolves. The returned id remains authoritative.
+    const requestedMatches = info.sessionId === requestedSessionId;
     markSessionTransportOpenSucceeded(transportReuseState, info.sessionId);
     activeTerminalSessionId = info.sessionId;
-    lastSequence = 0;
-    // A fresh session restarts sequence numbering: buffered frames from the
-    // dead session belong to a different stream and must not poison the
-    // in-order drain (a stale higher sequence would fake a permanent hole).
-    pendingTerminalFrames.clear();
-    replayNoProgress = 0;
-    // 成功过渡（Termius 式）：先切 success 卡片——进度线填满到顶、终端图标变
-    // 对号；replay 在动画期间并行拉取，hold 播完才置 connected 进终端，避免
-    // 连接成功瞬间生硬跳变。reduced-motion 下不 hold，立即进终端。
-    // Dock 面板（surface=panel）根本不渲染连接卡片（见模板 terminal-overlay
-    // 的 v-if="!panelSurface"），hold 动画用户看不见——750ms 纯属白等，跳过。
-    // 注意 session/directoryTrackingSupported 等响应式状态在 hold 结束后才写入：
-    // 提前写入会让 SFTP/工具栏等 watcher 在动画播放期间就开始渲染（画面抖动）。
+    session.value = info;
+    directoryTrackingSupported.value = info.directoryTrackingSupported ?? true;
+    if (!requestedMatches) {
+      // Older sidecars ignore requestedSessionId, or the backend had to avoid a
+      // collision. Discard frames captured under the speculative id and replay
+      // the authoritative stream from its beginning.
+      lastSequence = 0;
+      pendingTerminalFrames.clear();
+      replayNoProgress = 0;
+    }
     connectSucceeded.value = true;
     inactiveWaiting.value = false;
-    const successShownAt = Date.now();
     connectLog.push("info", t("connectCard.log.connected", { seconds: ((Date.now() - attemptStarted) / 1000).toFixed(1) }));
     const replay = await window.dbxPlugin.invoke<ReplayResult>("ssh/terminal/replay", {
       sessionId: info.sessionId,
-      afterSequence: 0,
+      afterSequence: requestedMatches ? lastSequence : 0,
     });
     if (!replay.complete) throw new Error(t("sessionUnrecoverable"));
-    const holdMs = window.matchMedia("(prefers-reduced-motion: reduce)").matches || panelSurface.value ? 0 : CONNECT_SUCCESS_HOLD_MS;
-    const remainMs = holdMs - (Date.now() - successShownAt);
-    if (remainMs > 0) await new Promise((resolve) => window.setTimeout(resolve, remainMs));
     connectSucceeded.value = false;
-    session.value = info;
-    directoryTrackingSupported.value = info.directoryTrackingSupported ?? true;
     terminalState.value = "connected";
     await afterSessionConnected();
     // WKWebView（macOS 宿主）在"卡片遮盖 → 终端显示"过渡后可能漏一帧重绘，

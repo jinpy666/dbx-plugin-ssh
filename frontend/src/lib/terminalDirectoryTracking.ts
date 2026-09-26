@@ -1,8 +1,10 @@
 export class Osc7DirectoryParser {
   private pending = "";
+  private readonly decoder = new TextDecoder();
 
   push(chunk: Uint8Array | string): string[] {
-    this.pending += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk, { stream: true });
+    if (typeof chunk !== "string" && this.pending.length === 0 && !chunk.includes(0x1b)) return [];
+    this.pending += typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true });
     const directories: string[] = [];
 
     while (true) {
@@ -31,6 +33,7 @@ export class Osc7DirectoryParser {
 
   reset() {
     this.pending = "";
+    this.decoder.decode();
   }
 }
 

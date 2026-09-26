@@ -1177,6 +1177,8 @@ const TERMINAL_KEEPALIVE_INPUT: &[u8] = b" \x7f";
 enum RemoteShell {
     Bash,
     Zsh,
+    /// Shell capability has not been probed yet; keep the terminal usable.
+    Unknown,
     Other,
 }
 
@@ -1937,8 +1939,8 @@ impl SshRuntime {
                 )
             };
         let terminal = async {
-            let remote_shell = detect_remote_shell(&handle).await;
-            let directory_tracking_supported = remote_shell.supports_directory_tracking();
+            let remote_shell = RemoteShell::Unknown;
+            let directory_tracking_supported = true;
             let mut channel = handle.channel_open_session().await.map_err(|error| {
                 if reused_transport {
                     format!("The authenticated SSH connection can no longer be reused; use New session to reconnect: {error}")
@@ -1982,7 +1984,7 @@ impl SshRuntime {
             Ok::<_, String>((remote_shell, directory_tracking_supported, channel))
         }
         .await;
-        let (remote_shell, directory_tracking_supported, mut channel) = match terminal {
+        let (mut remote_shell, directory_tracking_supported, mut channel) = match terminal {
             Ok(terminal) => terminal,
             Err(error) => {
                 transport_lease.release().await;
@@ -1990,7 +1992,12 @@ impl SshRuntime {
             }
         };
 
-        let session_id = Uuid::new_v4().to_string();
+        let mut session_id = request
+            .requested_session_id
+            .as_deref()
+            .filter(|id| valid_requested_session_id(id))
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let (terminal_tx, mut terminal_rx) = mpsc::channel(256);
         let replay = Arc::new(AsyncMutex::new(ReplayBuffer::default()));
         let bound_profile = {
@@ -2027,10 +2034,11 @@ impl SshRuntime {
         });
         Self::sync_auto_sudo(&entry, &connection);
         Self::sync_triggers(&entry, &connection);
-        self.sessions
-            .write()
-            .await
-            .insert(session_id.clone(), entry.clone());
+        let mut sessions = self.sessions.write().await;
+        if sessions.contains_key(&session_id) {
+            session_id = Uuid::new_v4().to_string();
+        }
+        sessions.insert(session_id.clone(), entry.clone());
 
         // Terminal activity keepalive (opt-in per connection): resets
         // server-side idle policies that watch PTY input, which protocol
@@ -2152,7 +2160,20 @@ impl SshRuntime {
                             let _ = channel.window_change(cols.max(1), rows.max(1), 0, 0).await;
                         }
                         Some(TerminalCommand::DirectoryTracking { enabled }) => {
-                            if remote_shell == RemoteShell::Other || directory_tracking_enabled == enabled {
+                            if remote_shell == RemoteShell::Unknown {
+                                remote_shell = detect_remote_shell(&entry.handle).await;
+                            }
+                            if remote_shell == RemoteShell::Other {
+                                publish_terminal(
+                                    &task_id,
+                                    TerminalStream::State,
+                                    b"directory-tracking-unavailable".to_vec(),
+                                    &replay,
+                                    &emitter,
+                                ).await;
+                                continue;
+                            }
+                            if directory_tracking_enabled == enabled {
                                 continue;
                             }
                             directory_tracking_enabled = enabled;
@@ -8995,15 +9016,17 @@ fn directory_tracking_script(enabled: bool, session_id: &str, shell: RemoteShell
             r#"if [ -n "${__DBX_CWD_ACTIVE+x}" ]; then precmd_functions=(${precmd_functions:#__dbx_emit_cwd}); unfunction __dbx_emit_cwd 2>/dev/null || true; if [[ "${__DBX_OLD_HIST_IGNORE_SPACE-1}" = 0 ]]; then unsetopt HIST_IGNORE_SPACE; fi; unset __DBX_CWD_ACTIVE __DBX_OLD_HIST_IGNORE_SPACE; fi"#,
             " \r",
         ),
-        (RemoteShell::Other, _) => ("", ""),
+        (RemoteShell::Other, _) | (RemoteShell::Unknown, _) => ("", ""),
     };
     format!(" {body}; printf '{marker}'\r{history_flush}")
 }
 
-impl RemoteShell {
-    fn supports_directory_tracking(self) -> bool {
-        matches!(self, Self::Bash | Self::Zsh)
-    }
+/// A caller-supplied session id is honoured only when it is safe as a registry
+/// key and event-channel suffix: non-empty, no path separator, and bounded so
+/// a hostile caller cannot inflate map keys. Anything else falls back to a
+/// server-generated UUID.
+fn valid_requested_session_id(id: &str) -> bool {
+    !id.is_empty() && !id.contains('/') && id.len() <= 128
 }
 
 async fn detect_remote_shell(handle: &Handle<SshClient>) -> RemoteShell {
@@ -10146,6 +10169,23 @@ matrix-ed25519";
         assert!(bash.contains("PROMPT_COMMAND"));
         assert!(bash.contains("dbx-directory-ready-session-1"));
         assert!(zsh.contains("precmd_functions"));
+        // Unknown shell: the script is deferred until the first toggle probes
+        // the remote shell; before that it must degrade to a no-op script.
+        assert_eq!(
+            directory_tracking_script(true, "session-1", RemoteShell::Unknown),
+            directory_tracking_script(true, "session-1", RemoteShell::Other)
+        );
+    }
+
+    #[test]
+    fn requested_session_ids_are_validated_before_registry_use() {
+        // 合法：非空、无路径分隔符、不超过 128 字节。
+        assert!(valid_requested_session_id("session-1"));
+        assert!(valid_requested_session_id(&"a".repeat(128)));
+        // 非法：空串、路径分隔符、超长。
+        assert!(!valid_requested_session_id(""));
+        assert!(!valid_requested_session_id("a/b"));
+        assert!(!valid_requested_session_id(&"a".repeat(129)));
     }
 
     #[test]
@@ -11320,6 +11360,7 @@ matrix-ed25519";
                         workbench_id: "workbench-1".into(),
                         reuse_authenticated_transport: false,
                         reuse_authenticated_session_id: None,
+                        requested_session_id: None,
                         cols: 80,
                         rows: 24,
                     },
@@ -11337,6 +11378,7 @@ matrix-ed25519";
                         reuse_authenticated_session_id: first["sessionId"]
                             .as_str()
                             .map(str::to_string),
+                        requested_session_id: None,
                         cols: 80,
                         rows: 24,
                     },
@@ -11404,6 +11446,7 @@ matrix-ed25519";
                         workbench_id: "copied-workbench".into(),
                         reuse_authenticated_transport: true,
                         reuse_authenticated_session_id: Some("missing-session".into()),
+                        requested_session_id: None,
                         cols: 80,
                         rows: 24,
                     },

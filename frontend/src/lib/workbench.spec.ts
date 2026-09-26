@@ -11,7 +11,7 @@ import { pushPathHistory, sanitizePathHistories } from "./sftpPathHistory";
 import { formatBytes, formatRate } from "./format";
 import { expandSelection, filterSftpEntries } from "./sftpFileFilters";
 import { getSshWorkbenchSplitLayout, resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen } from "./workbenchLayout";
-import { commandMarkerTooltip, formatCommandDuration, getOsc633ParserState, parseOsc633StreamChunk, runningCommandElapsedMs } from "./terminalCommandMarkers";
+import { commandMarkerTooltip, formatCommandDuration, getOsc633ParserState, Osc633CommandParser, parseOsc633StreamChunk, runningCommandElapsedMs } from "./terminalCommandMarkers";
 import { describeWorkbenchSessionStatus, isUsableSshSession, normalizeSshSessionStatus } from "./sessionStatus";
 import { sanitizeCommandOutput, stripCommandEcho, stripHiddenCommandEchoes, stripTerminalControlSequences } from "./terminalOutputText";
 import { browseCommandHistory, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./commandHistory";
@@ -27,6 +27,23 @@ describe("SSH workbench protocol helpers", () => {
     expect(parseOsc7Path("invalid")).toBeNull();
   });
 
+  it("skips plain byte chunks without ESC but keeps decoding when a carry is pending", () => {
+    // 快路径（首帧优化）：不含 ESC 且无 pending 的字节块零解码返回；
+    // 跨块序列在 carry 期间仍必须继续拼接。字节块同样适用。
+    const parser = new Osc7DirectoryParser();
+    expect(parser.push(new TextEncoder().encode("plain output\r\n"))).toEqual([]);
+    expect(parser.push(new TextEncoder().encode("\u001b]7;file://server/ho"))).toEqual([]);
+    expect(parser.push(new TextEncoder().encode("me/data\u0007"))).toEqual(["/home/data"]);
+    // reset 后 pending/decoder 全清，续块不再拼接旧序列。
+    parser.push("prompt\u001b]7;file://server/half");
+    parser.reset();
+    expect(parser.push("alf\u0007")).toEqual([]);
+  });
+
+  it("keeps OSC 633 fast-path chunks allocation-free when no escape sequence is present", () => {
+    const parser = new Osc633CommandParser();
+    expect(parser.push(new TextEncoder().encode("plain output\r\n"))).toEqual({});
+  });
   it("uses bounded reconnect backoff only for the same live session", () => {
     expect([0, 1, 2, 3, 99].map(terminalReconnectDelay)).toEqual([500, 1000, 2000, 5000, 5000]);
     expect(shouldReattachTerminal({ disposed: false, state: "connecting", expectedSessionId: "a", currentSessionId: "a" })).toBe(true);
