@@ -689,6 +689,7 @@ watch(panelSurface, (panel) => {
   if (!panel) return;
   batchBarOpen.value = false;
   sftpPaneOpen.value = false;
+  transferPanelOpen.value = false;
 }, { immediate: true });
 // 保存为快速命令的内联名称态（保存走 ssh/quickCommands/save，全局共享）。
 const batchSaveMode = ref(false);
@@ -2576,8 +2577,9 @@ function updateTransfer(params: Record<string, unknown>) {
   if (!existing && isLiveTransferStatus(transferTasks[taskId].status)) {
     // 面板已开时不得重开：openTransferPanel 的"先收口再开"会卸载弹层、
     // 复位滚动位置，用户正往下看历史时会被弹回顶部（issue #18）。互斥族
-    // 保证面板开着时没有其他弹层，直接置 open 即可。
-    if (!transferPanelOpen.value) transferPanelOpen.value = true;
+    // 保证面板开着时没有其他弹层，直接置 open 即可。Dock panel surface
+    // 同样不弹：面板是单一聚焦终端，传输记录入口整体禁用。
+    if (!transferPanelOpen.value && !panelSurface.value) transferPanelOpen.value = true;
   }
 }
 
@@ -7835,10 +7837,10 @@ onBeforeUnmount(() => {
         </Popover>
       </div>
       <div class="toolbar-actions">
-        <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" @click="togglePaneOrder"><ArrowLeftRight /></button>
+        <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
         <!-- Local terminal UI hides SSH-only actions outright (not disabled): the local
              shell has no SSH session to act on. -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
         <button class="icon-button" :title="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
         <button class="icon-button" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><SquarePlus /></button>
@@ -7922,7 +7924,7 @@ onBeforeUnmount(() => {
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :disabled="!session" @click="forwardsOpen = true"><Network /></button>
         <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
-          <Switch size="sm" :model-value="followDirectory" :disabled="!connected" @update:model-value="setDirectoryTracking" />
+          <Switch size="sm" :model-value="followDirectory" :disabled="!connected || panelSurface" @update:model-value="setDirectoryTracking" />
           <span>{{ t("followTerminal") }}</span>
         </label>
         <span class="toolbar-separator" aria-hidden="true" />
@@ -8056,7 +8058,7 @@ onBeforeUnmount(() => {
         <div>
           <Popover :open="columnsOpen" @update:open="(open) => { if (!open) columnsOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-violet" :title="t('customizeColumns')" @click.stop="toggleColumnsMenu"><Columns3 /></button>
+              <button class="icon-button icon-violet" :title="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
             </PopoverAnchor>
             <PopoverContent class="popover columns-popover" align="end" :side-offset="5">
             <label v-for="column in (['size', 'modified', 'owner', 'group', 'permissions'] as SftpColumn[])" :key="column"><input type="checkbox" :checked="visibleColumns.includes(column)" @change="toggleColumn(column)" />{{ t(column) }}</label>
@@ -8071,7 +8073,7 @@ onBeforeUnmount(() => {
                连同菜单一起卸载，动作丢失。 -->
           <Popover :open="transferPanelOpen" @update:open="(open) => { if (!open && !transferHistoryMenu) transferPanelOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-blue" :title="t('transfers')" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
+              <button class="icon-button icon-blue" :title="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
             </PopoverAnchor>
             <PopoverContent class="popover transfer-popover" align="end" :side-offset="5">
             <h3>{{ t("transfers") }}</h3>
