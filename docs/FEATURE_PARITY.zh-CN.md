@@ -547,6 +547,47 @@ PATH 导出，否则 `spawn pnpm ENOENT`。
 `metricsSwap` 与拖拽上传对话框的 5 个键需要真实会话/拖拽事件才能触达，
 故只在单测层（运行时语言表解析）覆盖，不在 e2e 覆盖。
 
+## WezTerm 对标补充（2026-09-26，本分支登记）
+
+以 [wezterm/wezterm](https://github.com/wezterm/wezterm)（Rust GPU 终端 + 内置 SSH + 多路复用）
+为参照的能力对照与差距收敛。产品形态不同（独立终端 vs 宿主内插件）：WezTerm 的配置系统
+（Lua 热重载 + 插件系统）、分屏/workspace/mux server、背景图/毛玻璃/WebGPU 等桌面级渲染特性
+均属宿主边界或沙箱不可达（连字经 opentype.js 触达 Node 内置模块即崩，见 App.vue 既有注释），
+**不做**；本节只取协议兼容、导入兼容与终端交互域内可对齐项。SFTP/文件传输、会话录制回放、
+串口/Telnet/RDP 协议广度等 WezTerm 未覆盖或弱于本插件的维度不在差距之列。
+
+| WezTerm 能力 | 插件状态 | 说明 |
+| --- | --- | --- |
+| 终端内核与 WebGL 渲染 | ✅ 同水位 | xterm.js 6 + WebGL addon（默认开、context loss 回退）；WezTerm 自研内核走 WebGPU 属原生应用形态，不追 |
+| Sixel + iTerm2 OSC 1337 内联图形 | ✅ 已有（更完整） | `ImageAddon` 固定开启、32 MiB 像素上限；WezTerm 自认 sixel「preliminary and incomplete」（上游 #217），kitty 图形协议双方均不支持 |
+| kitty 键盘协议 `CSI ? u` | ✅ 已有（更保守） | 补答 flags=0 保持 legacy 编码（`terminalModeQueries.ts`）；WezTerm 以 `enable_kitty_keyboard` 可选启用，应用面暂无刚需 |
+| OSC 52 剪贴板 | ✅ 设计一致 | 双方均只写不读；写方向 1 MiB 防御上限，读查询故意吞掉防隐私泄漏 |
+| DECSET 2026 同步渲染 | ❌ 差距（M27 立项） | WezTerm 支持并做帧合并；本插件 DECRQM 故意回「不支持」防应用重试循环（`terminalModeQueries.ts`）。改为应答支持 + 复用 `terminalWriteThrottle.ts` rAF 合帧实现帧提交，`cat` 大文件与 vim 重绘的撕裂闪烁可显著收敛 |
+| 转义序列应答矩阵文档化 | ⚠️ 差距（M28 立项） | WezTerm 把 DA/DSR/OSC 的应答、忽略、故意不支持逐项写成活文档。本插件 XTVERSION/kitty `CSI ? u`/DECRQM 2026 已补答（d1ecaeba 等），但 DSR 5/6、Primary DA、SGR 冒号形式在自研 decoration/关键词高亮路径的行为、OSC 忽略白名单（9/777/1337 SetUserVar）均未成文核对 |
+| OSC 1337 SetUserVar / OSC 9·777 通知 | ❌ 未接（M28 立项） | WezTerm 以 `user-var-changed` 事件消费 shell 集成元数据；本插件目录跟随靠提示符注入猜测，SetUserVar 可带来更精确的 cwd/命令元数据通道（纯前端 onParser 层，零 sidecar 协议） |
+| tmux control mode（DCS 1000）桥接 | ⚠️ 双方均不完整 | WezTerm 自认 incomplete（上游 #336）；本插件不做（终端内正常使用 tmux，control-mode 桥接需 mux 底座） |
+| SSH 客户端算法与认证面 | ✅ 同水位 | russh 现代套件优先 + legacy 尾部兼容（SHA-1 MAC/DH GEX/AES-CBC/3DES 堡垒机），认证密码/密钥/agent/TOTP/keyboard-interactive 齐全；WezTerm `ssh_backend` 可选 libssh，ServerAliveInterval 走 IGNORE 包——本插件另有终端活动保活绕 TMOUT/堡垒机审计，领先 |
+| **`~/.ssh/config` 兼容解析/导入** | ❌ 差距（M29 立项） | WezTerm 解析 `~/.ssh/config`（Host 通配/Hostname/User/Port/IdentityFile/IdentityAgent/ProxyCommand/UserKnownHostsFile/Include/部分 Match）。本插件 `connection_import.rs` 已有 7 种第三方客户端格式导入管线，OpenSSH config 可作第 8 种来源接入，用户上手摩擦最大的一刀 |
+| SSH 会话多路复用（新 tab 开新 channel 免重认证） | ✅ 等价（「复制会话」） | `sessionTransportReuse.ts` 复用已认证 transport；差一项 WezTerm `spawn` 语义——同 transport 指定命令新开 channel（M30 候选）。WezTerm 声明 SSH 会话**不持久**，本插件重连阶梯 + reattach + boot 恢复在 SSH 场景更实用 |
+| 分屏/panes/workspaces/PaneSelect | ❌ 刻意不做 | 宿主工作台承担标签与分屏（「不重复宿主」原则）；WezTerm 的 mux server 持久会话需自研服务端组件，插件形态下立项不成立 |
+| Quick Select Mode / vi Copy Mode | ❌ 差距（M27 立项 Quick Select） | 正则抽取屏幕上 URL/路径/IP/hash 一键复制，纯前端可依 SearchAddon buffer 实现，运维场景价值极高；vi Copy Mode 与 xterm.js 交互模型冲突大，不做 |
+| 命令面板/启动器/字符选择器 | ⚠️ 宿主承担 | DBX 工作台已有命令入口体系（快速命令/批量发送/命令历史），不重复 |
+| Lua 配置 + 插件系统、桌面级渲染（背景图/毛玻璃/WebGPU） | ❌ 不做 | 宿主负责设置与主题（沿用 Tabby 主题轮的「默认跟随宿主」守卫）；沙箱 iframe 限制连字已不可达，桌面渲染无对应物 |
+
+### 实施排期（M27–M30，编号接续 PROGRESS M26-A）
+
+| 批次 | 内容 | 改动面 | 验收口径 |
+| --- | --- | --- | --- |
+| **M27** 终端交互批（纯前端，低成本高价值） | ① Quick Select Mode：URL/路径/IPv4/hash 正则抽取，`Cmd/Ctrl+Shift+O`（快捷键注册表登记，可改）唤起 overlay 菜单，一键复制单项；② DECSET 2026 应答翻转：`terminalModeQueries.ts` DECRQM 2026 改答「支持」，以既有 rAF 合帧写入通道实现「批次内缓冲、模式结束后整体提交」的帧同步语义 | 仅 `frontend/`（新纯逻辑模块 + App.vue 接线 + 七语 + 快捷键表）；后端零改动、无新 sidecar 方法 | 纯函数单测（抽取正则/2026 缓冲边界）；`smoke_ui_mock` 回归全绿；DECRQM 应答翻转的单测与注释同步更新 |
+| **M28** 协议应答矩阵审计批（前端为主） | ① 逐项核对并成文：DSR 5/6、Primary DA（xterm 内核已答则记录实测证据，缺则补）、SGR 冒号形式（`4:3`/`38:2::r:g:b`）在命令标记/关键词高亮自研路径的行为；② OSC 忽略白名单落地：OSC 9/777 → 工作台通知，OSC 1337 SetUserVar → `user-var-changed` 等价消费（优先替代目录跟随的提示符猜测）；③ `TEST_MATRIX.zh-CN.md` 新增「终端应答矩阵」节 | 仅 `frontend/` + 测试文档；无新 sidecar 方法 | 应答矩阵文档逐行标注「应答/忽略/不支持+理由」；SetUserVar 元数据通道单测；七语 key 对齐断言通过 |
+| **M29** OpenSSH config 导入批（后端 + 前端） | `~/.ssh/config` 作为 `connection_import` 第 8 种来源：Host 通配、Hostname/User/Port/IdentityFile（路径映射，不读密钥材料）、UserKnownHostsFile、Include（递归上限 + 环检测）、`Match host/user` 受限支持；ProxyCommand 仅识别并标注「需手动映射」（不执行外部命令——与 tssh Expect 同款「密文/外部命令不自动执行」信任模型）；复用现有 preview/sanitize 流水线与 `secret_note` 原因码 | `backend/src/connection_import.rs` 扩展 + main.rs 一处来源注册 + 前端导入向导七语 | cargo test 新增 parser 单测（敌意输入沿用既有 no-panic/容量上限模式）；smoke 导入预览用例；不持久化任何凭据的既有断言保持 |
+| **M30** 同 transport 命令会话批（后端 + 前端） | WezTerm `spawn` 语义：已认证 transport 上新开 channel 执行指定命令（独立 PTY/session），复用「复制会话」的共享引用预占与跳板链生命周期，适配「一键开 htop 第二个 tab」类场景；受服务端 `MaxSessions` 限制沿用既有语义 | `backend/src/ssh.rs` 复制会话链路参数化 + PROTOCOL 新节 + smoke | smoke 新增 spawn 会话开合与共享引用并发关闭用例；PROTOCOL 契约先行评审 |
+
+排期外的明确不做（附理由）：vi Copy Mode（与 xterm.js 键位模型冲突大，选区/搜索已覆盖）、
+tmux control-mode 桥接（需 mux 底座）、Lua/插件化配置、SSH 持久 mux server、
+WezTerm 私有 SGR 色彩模式 6（RGBA 扩展，生态无应用依赖）、8 位 C1 控制码（维持 UTF-8-only 立场，
+GBK 堡垒机行为纳入 M28 应答矩阵实测记录）。
+
 ## 候选缺口（未排期）
 
 对标复审（Tabby / NetCatty / iShell 文档线索 + 本仓批次遗留）沉淀的候选登记。
