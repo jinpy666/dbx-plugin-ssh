@@ -3573,7 +3573,6 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
   文本，实现两层保护。
 - `ui/index.html` 重新生成，本地验证全绿。
 
-
 ## M5.5 收口（2026-09-24，main 同步 + 三会话并行线）
 
 **三条并行线产出**（用户拆分的独立会话，不等轮次顺序）：
@@ -3970,3 +3969,113 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **总收口 CI 全绿**：run 36233032323 success（18m11s，11 job 全过，darwin-x64 包候选含 Offline MCP smoke 恢复）。此前 36231728791 的 darwin-x64 挂因为 8 MiB 巨行用例在慢 CI runner 超 60s 性能预算——该用例验证"不 panic 不 hang"而非耗时上限，预算放宽至 120s（68b6b82f，慢 runner 余量、非功能上限）；再前一轮 36228886665 的 darwin-x64 挂因为 GitHub upload-artifact 基础设施超时（与本仓无关）。
 - **字节边界矩阵疑点登记簿 D1-D7 全部闭环**：D1（M27-A 裁决契约内正确）、D2（M27-B shell_quote 三处收编）、D3-D6（M28-A 文档澄清）、D7（M28-B auto 车道按生效编码判分支，985/985 + smoke 83/0/0）。
 - **迭代全景（M19.5→M29 十一轮）**：early eof 五层 wire 缺口修复 → watcher/latin-1 真容器收口（smoke 71/5/2→83/0/0）→ MCP stdio 在线段进 CI → 协议对账审计（R1-R4）→ 归一四象限拉齐（M24/M25）→ 边界矩阵与疑点全闭环（M26-M28）→ CI 预算余量（M29）。cargo 基线 950→985，integration head = 700ac07a。剩余人工门：PR #98 合并、watcher/latin-1 GUI 手测、终端 BiDi（未立项）。
+
+### 目录跟随开关持久化到全局偏好（纯前端轮，2026-09-26）
+
+用户报告「目录跟随」开关每次打开工作台都要重新设置。定位结论：`followDirectory`
+一直随 workbenchState 按 tab 持久化（恢复的 tab 能回来），但侧边栏新开的连接
+tab 拿到的是空 state，永远回落到硬编码的 `false`——缺少跨 tab 的全局缺省。
+
+修复（对齐 `ssh-sftp-pane-open` 既有模式，零协议改动）：
+
+- `lib/workbenchLayout.ts`：新增纯函数 `resolveDirectoryFollow`
+  （per-tab workbenchState 优先，缺省回落全局偏好，损坏值不强转）与
+  `sanitizeDirectoryFollowPref`（仅显式 "true" 开，默认关）。
+- App.vue：新增 pluginStore 键 `ssh-follow-directory`（全局偏好，仅影响
+  新工作台初始态）；`followDirectory` 初值与 `restoreUiState` 回落值均取
+  该偏好；用户显式切换（`setDirectoryTracking`）时同步写偏好。后端强制
+  关闭（`directory-tracking-unavailable` / 滤波失败）不覆写全局偏好——
+  那是运行时能力裁决，不是用户决策；下个支持的会话仍按用户偏好重试。
+- `lib/pluginStore.ts`：`ssh-follow-directory` 注册进 `PLUGIN_STORE_KEYS`
+  （宿主 storage 水合需显式声明）。
+- 单测：workbench.spec.ts +2 用例（跟随解析 / 偏好解析，含损坏值回退）。
+
+**剩余风险**：面板（Dock panel）形态仍一律强制关闭（SFTP 域能力，设计如此）；
+真机端到端（开关联动 sidecar directoryTracking 脚本注入）未在本轮实测。
+
+### SFTP 下载 fileTransfer 落盘必炸（issue #116，根因在宿主桥 transferable 校验，2026-09-26）
+
+用户（DBX 0.6.24 + 插件 0.7.1-beta3）SFTP 下载报
+`Failed to execute 'postMessage' on 'Window': Value at index 0 does not have a
+transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常。
+
+**根因链**（证据齐备）：
+
+- 下载落盘分两路：`canSaveLocal=true` 走 sidecar `saveToLocal`（前端不传
+  二进制）；否则走宿主 `fileTransfer.write` 分块落盘（`canSaveLocal` 在
+  Linux 需要 sidecar 进程能读到 `DISPLAY`/`WAYLAND_DISPLAY`，读不到即回退
+  该路）。
+- 宿主桥 `fileTransfer.write` 分支（dbx `pluginHostBridge.ts`，自
+  `bc490772e` 引入起）构造的是 `new Uint8Array(data.slice().buffer)`——
+  注释意图正确（拷贝视图防越界），但 transfer 列表里放的是 `Uint8Array`
+  视图而非 `ArrayBuffer`；`request()` 裸 `parent.postMessage(msg,'*',[transfer])`
+  被 Chromium 拒绝（transfer 列表只收 ArrayBuffer/MessagePort 等），凡走
+  该路 100% 抛上述 DOMException。无头 Chrome 实测逐字复现该报错；detached
+  buffer（二次 transfer）报的是另一条 "already detached"，排除。
+- 错误进插件 catch → `showError(cause,"sftp",重试)` → 横幅 + 传输卡"已取消"，
+  与截图一致；sidecar 侧零感知。
+
+**插件侧规避（本轮落地，随插件发版生效，不依赖宿主升级）**：
+
+- `lib/standaloneBuffer.ts`：`standaloneArrayBuffer()` 纯函数——全跨度视图
+  零拷贝直返底层 `ArrayBuffer`，否则拷贝视图区间成独立 buffer（宿主修复后
+  该形状依然正确：接收端 `binary instanceof ArrayBuffer` 本就是协议期望）。
+- App.vue 三处 `fileTransfer.write` 调用点（SFTP 下载 / trzsz 下载 / GIF
+  导出）统一改传 `standaloneArrayBuffer(chunk)`。
+- 单测 `standaloneBuffer.spec.ts` 5 用例；前端 71 文件 608 用例全绿，
+  `vue-tsc` 0 错。无头 Chrome 端到端复刻桥 `request()` transfer 语义：
+  修复前逐字复现 issue 报错，修复后宿主收到正确字节数（subview 场景仅
+  拷贝视图区间 1024B，不越界到底层 2048B）。
+
+**宿主侧根治建议**（dbx 仓库，需宿主发版）：`pluginHostBridge.ts` write
+分支去掉 `new Uint8Array(...)` 包装、直接 transfer `ArrayBuffer`（与同文件
+`sendBinary`/`saveFile` 分支对齐），并补真实 postMessage 边界的 spec 用例
+（现有 spec 未覆盖该分支，jsdom 无 transfer 校验所以从未拦截）。
+
+## M30-A 批次（2026-09-26，main 未吸收 3 提交并入 integration 线）
+
+- **动机**：`origin/main` 领先 `origin/codex/ssh/nyaterm-parity-integration` 3 个提交
+  （integration 反向领先 342 个 nyaterm parity 提交），用户在 main 上直推的三项
+  修复/增强一直没被 integration 吸收，其中 **#116 是用户报的关键 bug**（SFTP 下载
+  必炸）。本轮在 `codex/ssh/parity-np30-main-sync`（基线 63931060）先做集成验证，
+  由主会话收口 merge 进 integration。
+- **并入的 3 提交**：
+  1. `03ab46c8` fix(sftp)：fileTransfer 落盘改传独立 ArrayBuffer 修复下载必炸
+     （issue #116，宿主桥 transfer 列表只收 ArrayBuffer，Uint8Array 视图被
+     Chromium 拒绝）；
+  2. `9a149c4a` feat(workbench)：目录跟随开关持久化为全局偏好
+     （`ssh-follow-directory`，per-tab 的 workbenchState 仍优先）；
+  3. `f65f48c4` fix(workbench)：面板（底部栏）形态禁用 SFTP 域工具栏图标
+     （含新传输事件不再自动弹出传输面板）。
+- **冲突处理**：`git merge origin/main` 两处冲突，均按语义融合（双方意图都保）——
+  - `frontend/src/App.vue`：两侧各加一行 import（integration 加
+    `pickProtocolSessionForReattach`，main 加 `resolveDirectoryFollow` /
+    `sanitizeDirectoryFollowPref`），取并集；两符号在合并后 body 中均被引用
+    （`pickProtocolSessionForReattach` 于 reattach 路径、`resolveDirectoryFollow` /
+    `sanitizeDirectoryFollowPref` 于 restoreUiState 与偏好读取处），无死 import。
+  - `docs/PROGRESS-P-SSH.zh-CN.md`：两侧均为纯追加、零删除（base→HEAD +542 行 /
+    base→main +62 行），保留双方段落。
+  - **`ui/index.html` 无冲突**：`.gitignore` 第 9 行 `/ui/` 使其在三个分支上均未入库
+    （`git ls-tree` 计数 0），且 main 的 3 提交都不碰 `ui/`；仍按仓库惯例由
+    `frontend && pnpm run build`（`build.mjs` 输出 `../ui`）重新生成，
+    `ui/index.html` 4,138,980 B。
+- **融合时发现并修复的语义缺口（本轮独有）**：#116 在 main 只覆盖 3 个
+  `fileTransfer.write` 调用点（trzsz 下载 / SFTP 下载 / GIF 导出），integration 线
+  独有 M14 的 **transcript 导出**第 4 处（`exportRecordingTranscript`）仍传裸
+  `Uint8Array`——同源缺陷（同一宿主桥 transfer 校验），main 因缺该功能无法覆盖。
+  已按同一模式改为 `standaloneArrayBuffer(bytes)` 并补注释；合并后 4/4 站点全部
+  归一（`grep fileTransfer.write | grep -v standaloneArrayBuffer` 为空）。
+- **验证**（全部在合并+融合后的最终代码上跑）：
+  - 前端三件套：`pnpm vitest run` **110 文件 / 1086 用例全绿**（含
+    `standaloneBuffer.spec.ts` 5 用例）；`vue-tsc --noEmit` 0 错；
+    `pnpm run build` 通过并重生成 `ui/`。
+  - backend：`cargo test --locked` **985/985**（基线 985，只增不减）/ clippy
+    `--all-targets -- -D warnings` 0 / `cargo fmt --check` 0。
+  - 本地容器 smoke（`dbx-ssh-test` Up，debug sidecar）：`smoke_fs_test.py`
+    **83 PASS / 0 SKIP / 0 FAIL**（59.7s）。
+  - #116 核验：`standaloneBuffer.ts` 与 main 逐字一致（`git diff origin/main` 空），
+    全跨度视图零拷贝直返底层 buffer、否则按视图区间拷贝；四处调用点均传
+    `standaloneArrayBuffer(...)`。
+- **剩余风险**：宿主侧根治（`pluginHostBridge.ts` write 分支去掉 `new
+  Uint8Array(...)` 包装）仍需宿主发版，插件侧规避随本线发版生效；真机 GUI 手测
+  （下载落盘、目录跟随跨新 tab、panel surface 图标禁用）留待人工门。
