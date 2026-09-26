@@ -3934,3 +3934,10 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 
 - **M26-A/B 合并后 CI 全绿**：run 36220536854 success（18m50s）。latin-1 字节保真边界矩阵（NAME-ENCODING-BOUNDARY.zh-CN.md，45 入口 38✅/16⚠️/5❌）成为该家族的权威盘点与维护基线；PROTOCOL 失实的「字面量残留点」登记已重写为分层准确口径。
 - **下轮候选（登记簿疑点 D1）**：`sftp/download/start|next` 以 `has_wire_escapes` 判分支，手输字面 `%XX` 文件名会被误按转义还原，与 PROTOCOL「字面 %XX 保持字面量」表述存在张力——属行为语义决策（方案空间：入口区分 wire/显示形态、或明确契约），先核实 wire 域内 `%` 自转义约定再立项。
+
+## M27-A 批次（2026-09-26，纯文档裁决：疑点 D1 定性为契约内正确 + 下载车道 wire 形式契约明示）
+
+- **裁决结论（D1 闭环）**：`sftp/download/start|next` 的 `has_wire_escapes` 判分支（`ssh.rs:6018/6483`）在 latin-1 车道是**契约内正确行为**，非缺陷。证据链：① wire 域 `%` 自转义约定——`escape_wire` 把字面 `%` 编码为 `%25`（`sftp_name.rs:85–99`，单测 `escape_wire_percent_escapes_invalid_bytes`），因此 wire 字符串中出现的 `%XX`（X∈hex）唯一解读就是转义，字面 `%` 在 wire 域内不存在歧义；② 前端三个下载入口（单文件 `App.vue:8451`、外部编辑 `:8215`、目录树 `:8571`）与 sudo 下载 `:8450` 一律传 `pathFromUri(entry.uri)`（`App.vue:10869`），即列表回传的 wire 形式——latin-1 列表 uri 由 `escape_wire` 产出（`ssh.rs:4396–4401`），该入口是排他 wire 契约、无用户自由输入显示文本的链路，「手输字面 `%XX` 文件名」在该入口不可达；③ PROTOCOL M15-B 的「字面 `%XX` 保持字面量」本就限定于写操作末段显示编码（`latin1_encode_display`，`sftp_name.rs:186`），与下载车道的 wire 整条还原是 M16 段两条不同分工，张力为表述缺声明而非真矛盾。
+- **裁决分离出的真实边界（D-7 登记，不动代码）**：单文件下载判分支不区分编码——auto/latin-1 回退列表（`ssh.rs:4310/4305`）uri 由高层 `sftp_uri(&entry.path())` 产出（`ssh.rs:4367`），字面 `%` 未经 `%25` 自转义，含字面 `%XX` 序列的合法 UTF-8 文件名经该列表回传下载会被误还原。影响面小（罕见名形 + 前端无手输下载路径入口），修复涉及 wire 编码空间全局一致性选型，登记于 NAME-ENCODING-BOUNDARY「疑点」节 D-7 供后续批次决策。
+- **文档落地**：PROTOCOL RPC 表 `sftp/download/start|next|finish` 行与 `sftp/download/tree/start` 行补「路径形态契约（M27-A）」声明（latin-1 下载 `remotePath` 必须是列表回传 wire 形式、字面 `%` 在 wire 域编码为 `%25`）；PROTOCOL `sftp/list` 节 M14-B 段补「下载路径形态契约（M27-A 明示）」段并澄清与 M15-B 末段显示编码分工不矛盾；NAME-ENCODING-BOUNDARY 矩阵 `sftp/download/start`/`next` 两行备注改指 D-1 闭环，D-1 条目闭环（含证据链），新增 D-7 登记。
+- **验证**：git diff --check 无空白错误。代码零改动（纯文档批次，cargo/(smoke) 不适用）。
