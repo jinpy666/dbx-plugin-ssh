@@ -3922,3 +3922,10 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 ## M25 收口巡检补记（2026-09-26）
 
 - **M25 合并后 CI 全绿**：run 36217342433 success（15m32s）。M24/M25 两批归一拉齐后，工作台与 MCP 两条车道、auto 与 latin-1 两种编码的远端路径组件归一口径完全一致。
+
+## M26-A 批次（2026-09-26，纯文档审计：latin-1「字面量残留」登记失实表述修正）
+
+- **审计范围**：PROTOCOL.zh-CN.md M17 段末「仍按字面量发送的残留点」登记逐点对照实现核实——工作台 `sftp_disk_usage`（ssh.rs：normalize → shell_quote → `df -kP`）、MCP 面 diskUsage（mcp.rs M25 已同口径归一）、`sftp_ext::archive`/`extract`（`clean_source_paths` 逐个归一 + archivePath/destinationPath 归一 + tar 命令逐参数 `shell_quote`）、sudo 全族（sudo_fs.rs 十一个入口 + sudo_download.rs 的 mktemp/cat/chown 链全部 normalize + `shell_quote`，无裸拼路径）。
+- **修正点**：PROTOCOL 该登记段由失实的「仍按字面量发送、由远端报错」改写为分层表述——路径参数**已 normalize + shell_quote**（穿越/注入安全），但 **shell 参数字节保真不可达**（SSH exec 命令串是 UTF-8 String，latin-1 字节名经该边界按 UTF-8 重编码，远端按 locale 解释，与服务器原始字节不一致）；核实结论为**无完全字面量裸拼的残留入口**，真正不可变的只有 exec 命令串的 UTF-8 字节边界本身（与 copy/move 执行层、`stat -c` 属主查询边界同源）；sudo 族补充「无 wire 名字来源、latin-1 裸包车道不适用」的原状说明。
+- **交叉核对**：FEATURE_PARITY.zh-CN.md grep 字面量/字节不可控/shell 相关行——无同类失实表述（M22-B 审计已对账）；MCP.zh-CN.md 的 copy/move「执行层按字面量发送」表述与实现一致，不改。
+- **验证**：git diff --check 无空白错误；grep 确认修正后 PROTOCOL 不再有「仍按字面量发送的残留点」失实表述。代码零改动（cargo/(smoke) 口径沿 M25：不适用于纯文档批次）。
