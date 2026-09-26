@@ -4142,3 +4142,15 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
 **验证**：cargo **994/994**（基线 985 + 9 新增）/ clippy `--all-targets -D warnings` 0 / `cargo fmt --check` 0；`scripts/smoke_zmodem_detect.py`（新）四用例全 PASS（真实容器 PTY：sz ZRQINIT 抑制+事件恰一次、窗口内重试静默、ZRINIT 透传、字面 `**` 文本无损）；`smoke_fs_test.py` **83/0/0**；vitest **1099/1099**（112 文件）/ `vue-tsc --noEmit` 0。
 
 **明确不做（边界）**：不实现 ZMODEM 协议本身（不应答 ZRINIT、不收发文件）——"sz 直传下载"需独立立项（接收方向状态机 + 进度 UI + 与 SFTP 面板的关系）；检测器仅接 SSH PTY stdout，local/serial/telnet 通路未接；manifest.json 未动；未关闭任何 issue。
+
+## M31-A 批次（2026-09-26，issue #78 文件夹上传：SFTP 面板递归目录上传）
+
+- **动机**：分诊（ISSUE-TRIAGE）将 #78「希望支持文件夹上传」定性为中等改动未立项。MVP 结论：**纯前端编排**，零新增后端方法——后端 `sftp/upload/start|next|finish`（本地 spool 管线）、`sftp/createDirectory`、`sftp/exists`、`sftp/rename-unique` 能力已齐，PROTOCOL 不改。
+- **方案**：SFTP 面板空白右键菜单新增「上传文件夹…」（`FolderUp` 图标），隐藏 `<input type="file" webkitdirectory>` 选择目录；`lib/folderUpload.ts`（纯函数层，零 UI/零 sidecar 依赖）把 FileList 整理为上传计划：`webkitRelativePath` 归一（Windows 反斜杠→`/`、空段/`.` 跳过、`..` 栈式回弹），远端目录集去重且父先于子（深度升序 + 字典序），树落在当前目录下以所选根名命名的一层（与目录下载同语义）。App.vue 仅接线：逐目录 `sftp/createDirectory`（单目录失败不阻断，由文件上传结果兜底）→ 逐文件 `uploadSource` 复用既有管线（并发调度/暂停/断点/进度事件全部继承）。
+- **冲突策略对接**：`transfer_duplicate_policy=rename/overwrite` 交给既有 `resolveUploadDuplicateName`（rename-unique 探测 / 直接覆盖）；`ask` 在文件夹批量下**降级为已存在跳过**（`sftp/exists` 预检 + 计数），完成提示尾注说明，避免上百次逐文件弹窗。
+- **进度展示**：传输面板新增聚合进度卡「目录 X/Y · 文件 N/M · 字节 + 在传相对路径」（`folderUploadProgress` ref），逐文件任务卡照常出现在下方；完成 toast 报成功/失败/跳过计数。
+- **能力探测**：onMounted 一次性探测 `webkitdirectory`（老 webview 缺失时菜单项与 input 均不渲染，文件级上传不受影响）。
+- **i18n**：`folderUploadMessages` supplemental 块七语全补（action/title/progress/completed/completedWithFailures/skippedNote/empty，7 键 × 7 语）。
+- **验证**：`pnpm vitest run` **1107/1107**（113 文件；本 worktree 基线 cd205df4 = 112 文件/1099 用例，+1 文件 +8 用例 `folderUpload.spec.ts`，只增不减；M31-C/D 在 integration 分支、按守卫未并入本分支）/ `vue-tsc --noEmit` 0 错 / `pnpm run build` 成功（ui/ 重生成，integrator 所有）/ `git diff --check` 0。纯前端批次，cargo/(smoke) 不适用。
+- **边界遵守**：未改 `manifest.json`、未新增后端方法/协议条目、未使用真实凭据、未 merge integration、未触发 CI、未关闭/评论 issue。App.vue 改动控制在接线级（编排逻辑全在 lib/）。
+- **已知边界**：①空目录不传（浏览器 File API 天然不产空目录条目，远端不会出现空目录骨架）；②单目录 createDirectory 失败（如权限）不中止整批，受影响文件在上传阶段自然失败计入 failed；③ask 降级与单文件上传的逐个询问语义有差异（批量 MVP 取舍，尾注已说明）；④超大目录（万级文件）为逐文件串行 ensure/exists，无批量 RPC，速度受 RTT 影响——后续可评估后端批量 mkdir/mput。

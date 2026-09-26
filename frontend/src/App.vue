@@ -37,6 +37,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderUp,
   Gauge,
   Globe,
   ImagePlay,
@@ -242,6 +243,15 @@ import {
 import { resolveRemotePath, splitRemotePathSegments } from "./lib/remotePathInput";
 import { shouldCommitRename } from "./lib/sftpRename";
 import { folderDownloadOutcome, type FolderDownloadFinish } from "./lib/sftpFolderDownload";
+import {
+  advanceFolderUploadDirectories,
+  buildFolderUploadPlan,
+  createFolderUploadProgress,
+  folderUploadOutcome,
+  folderUploadPercent,
+  settleFolderUploadFile,
+  type FolderUploadProgress,
+} from "./lib/folderUpload";
 import { decideFileRowAction } from "./lib/fileRowKeydown";
 import { attachWebglRenderer, loadWebglEnabled, persistWebglEnabled, syncWebglRenderer, type WebglRecoveryOptions, type WebglRendererLike } from "./lib/terminalWebgl";
 import {
@@ -626,6 +636,11 @@ const terminalHost = ref<HTMLElement>();
 const sftpPane = ref<HTMLElement>();
 const paneContainer = ref<HTMLElement>();
 const uploadInput = ref<HTMLInputElement>();
+// 文件夹上传（issue #78）：webkitdirectory 选择器 + 能力探测（缺失时入口隐藏）。
+const folderUploadInput = ref<HTMLInputElement>();
+const folderUploadSupported = ref(false);
+// 文件夹批量上传的聚合进度（复用传输面板展示；目录 X/Y · 文件 N/M）。
+const folderUploadProgress = ref<FolderUploadProgress>();
 const zmodemInput = ref<HTMLInputElement>();
 const trzszInput = ref<HTMLInputElement>();
 const hostContext = ref<Record<string, unknown>>({});
@@ -6617,7 +6632,7 @@ function onFileAreaContextMenu(event: MouseEvent) {
   blankMenu.value = true;
 }
 
-function blankMenuAction(action: "mkdir" | "newFile" | "upload" | "refresh" | "symlink") {
+function blankMenuAction(action: "mkdir" | "newFile" | "upload" | "uploadFolder" | "refresh" | "symlink") {
   const menu = blankMenu.value;
   blankMenu.value = false;
   if (!menu) return;
@@ -6632,6 +6647,8 @@ function blankMenuAction(action: "mkdir" | "newFile" | "upload" | "refresh" | "s
     beginSymlinkCreate();
   } else if (action === "upload") {
     void chooseUpload();
+  } else if (action === "uploadFolder") {
+    chooseFolderUpload();
   } else {
     openNewFileDialog();
   }
@@ -8882,6 +8899,106 @@ function onUploadInput(event: Event) {
   const files = Array.from(input.files || []);
   input.value = "";
   if (files.length) void uploadLocalFiles(files).catch(showError);
+}
+
+// —— 文件夹上传（issue #78）：纯前端编排，复用既有 sftp/upload 管线 ——
+// 选目录 → buildFolderUploadPlan 生成远端目录集 + 文件清单 → 逐目录
+// sftp/createDirectory（逐个 ensure，父先于子）→ 逐文件 uploadSource
+// （冲突策略：rename/overwrite 交给既有 resolveUploadDuplicateName；ask 在
+// 批量下降级为「已存在即跳过」+ 完成提示计数，避免上百次弹窗交互）。
+// 能力探测：浏览器无 webkitdirectory 支持时入口隐藏（onMounted 一次性探测）。
+
+function chooseFolderUpload() {
+  if (!connected.value || !canWrite.value || !folderUploadSupported.value) return;
+  openTransferPanel();
+  folderUploadInput.value?.click();
+}
+
+function onFolderUploadInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = "";
+  if (!files.length) return;
+  void uploadFolderFiles(files.map((file) => ({
+    name: file.name,
+    relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || "",
+    size: file.size,
+    readChunk: (offset: number, length: number) => file.slice(offset, offset + length).arrayBuffer().then((buffer) => new Uint8Array(buffer)),
+  }))).catch(showError);
+}
+
+interface FolderUploadEntry {
+  name: string;
+  relativePath: string;
+  size: number;
+  readChunk: (offset: number, length: number) => Promise<Uint8Array>;
+}
+
+async function uploadFolderFiles(entries: readonly FolderUploadEntry[]) {
+  if (!session.value || !canWrite.value) return;
+  const plan = buildFolderUploadPlan(entries);
+  if (!plan.files.length) {
+    showNotice(t("folderUpload.empty"));
+    return;
+  }
+  openTransferPanel();
+  let progress = createFolderUploadProgress(plan);
+  const publish = (currentFile = "") => {
+    folderUploadProgress.value = { ...progress, currentFile };
+  };
+  publish();
+  // 逐目录 ensure：集合已去重且父先于子；单目录失败不阻断（文件上传会
+  // 因目录缺失自然失败并计入 failed），创建失败只降级提示。
+  for (const relative of plan.directories) {
+    const remotePath = joinRemote(currentPath.value, relative);
+    try {
+      await window.dbxPlugin.invoke("sftp/createDirectory", { sessionId: session.value.sessionId, path: remotePath });
+    } catch {
+      // 已存在/权限不足等：由后续文件上传结果兜底，这里不中止整批。
+    }
+    progress = advanceFolderUploadDirectories(progress);
+    publish();
+  }
+  let skipped = 0;
+  let failed = 0;
+  for (const [index, file] of plan.files.entries()) {
+    const entry = entries[index];
+    progress.currentFile = file.relativePath;
+    publish(file.relativePath);
+    const segments = file.relativePath.split("/");
+    const dirSegments = segments.slice(0, -1);
+    const fileName = segments[segments.length - 1];
+    const targetDir = dirSegments.length ? joinRemote(currentPath.value, dirSegments.join("/")) : currentPath.value;
+    // ask 模式批量降级：已存在则跳过（rename/overwrite 走既有解析，不预检）。
+    if (loadTransferDuplicatePolicy() === "ask") {
+      const probe = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", { sessionId: session.value.sessionId, path: joinRemote(targetDir, fileName) }).catch(() => ({ exists: false }));
+      if (probe.exists === true) {
+        skipped += 1;
+        progress = settleFolderUploadFile(progress, { file, ok: false });
+        publish(file.relativePath);
+        continue;
+      }
+    }
+    try {
+      await uploadSource(fileName, file.size, entry.readChunk, undefined, targetDir);
+      progress = settleFolderUploadFile(progress, { file, ok: true });
+    } catch {
+      failed += 1;
+      progress = settleFolderUploadFile(progress, { file, ok: false });
+    }
+    publish();
+  }
+  const outcome = folderUploadOutcome(progress, skipped, failed);
+  folderUploadProgress.value = undefined;
+  await loadDirectory();
+  let message: string;
+  if (outcome.failed) {
+    message = t("folderUpload.completedWithFailures", { count: outcome.failed, total: outcome.fileCount });
+  } else {
+    message = t("folderUpload.completed", { count: outcome.uploaded });
+  }
+  if (outcome.skipped) message += t("folderUpload.skippedNote", { count: outcome.skipped });
+  showNotice(message);
 }
 
 /**
@@ -11172,6 +11289,11 @@ watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleCo
 
 onMounted(() => {
   document.addEventListener("click", onDocumentClickCloseMenus);
+  // 文件夹上传能力探测（issue #78）：webkitdirectory 非标准属性，缺失环境
+  // （老 webview）隐藏入口，文件级上传不受影响。
+  const folderProbe = document.createElement("input");
+  folderProbe.type = "file";
+  folderUploadSupported.value = "webkitdirectory" in folderProbe;
   document.addEventListener("click", onDocumentClickCapture, true);
   document.addEventListener("mousedown", onDocumentMouseDownCapture, true);
   document.addEventListener("keydown", onDocumentKeydown);
@@ -11581,7 +11703,15 @@ onBeforeUnmount(() => {
             </PopoverAnchor>
             <PopoverContent class="popover transfer-popover" align="end" :side-offset="5">
             <h3>{{ t("transfers") }}</h3>
-            <div v-if="!transferList.length" class="empty compact">{{ t("noTransfers") }}</div>
+            <div v-if="!transferList.length && !folderUploadProgress" class="empty compact">{{ t("noTransfers") }}</div>
+            <!-- 文件夹批量上传（issue #78）：聚合进度卡——目录 X/Y · 文件 N/M · 字节。
+                 逐文件的任务卡仍会正常出现在下方（uploadSource 注册 transferTasks）。 -->
+            <article v-if="folderUploadProgress" class="transfer-card">
+              <div class="transfer-title"><FolderUp /><span>{{ t("folderUpload.title") }}</span><strong>{{ folderUploadPercent(folderUploadProgress) }}%</strong></div>
+              <progress :value="folderUploadPercent(folderUploadProgress)" max="100" />
+              <div class="transfer-meta"><span>{{ t("folderUpload.progress", { dirs: folderUploadProgress.directoriesDone, dirsTotal: folderUploadProgress.directoriesTotal, files: folderUploadProgress.filesDone, filesTotal: folderUploadProgress.filesTotal }) }}</span><span>{{ formatBytes(folderUploadProgress.bytesDone) }} / {{ formatBytes(folderUploadProgress.totalBytes) }}</span></div>
+              <p v-if="folderUploadProgress.currentFile" class="transfer-path mono" :title="folderUploadProgress.currentFile">{{ folderUploadProgress.currentFile }}</p>
+            </article>
             <article v-for="task in transferList" :key="task.taskId" class="transfer-card">
               <div class="transfer-title"><FileUp v-if="task.direction === 'upload'" /><Download v-else /><span>{{ task.fileName || task.taskId }}</span><strong v-if="task.phase !== 'staging'">{{ transferPercent(task) }}%</strong></div>
               <progress :value="transferBarValue(task)" max="100" />
@@ -12446,6 +12576,7 @@ onBeforeUnmount(() => {
                   <ContextMenuItem :disabled="!canWrite" @select="blankMenuAction('newFile')"><FilePlus />{{ t("sftpNewFile.action") }}</ContextMenuItem>
                   <ContextMenuItem :disabled="!canWrite" @select="blankMenuAction('symlink')"><Link2 />{{ t("symlink.createAction") }}</ContextMenuItem>
                   <ContextMenuItem :disabled="!connected || !canWrite" @select="blankMenuAction('upload')"><FileUp />{{ t("upload") }}</ContextMenuItem>
+                  <ContextMenuItem v-if="folderUploadSupported" :disabled="!connected || !canWrite" @select="blankMenuAction('uploadFolder')"><FolderUp />{{ t("folderUpload.action") }}</ContextMenuItem>
                   <ContextMenuItem :disabled="!connected || loadingFiles" @select="blankMenuAction('refresh')"><RefreshCw />{{ t("refresh") }}</ContextMenuItem>
                 </template>
               </ContextMenuContent>
@@ -13127,6 +13258,8 @@ onBeforeUnmount(() => {
     </Dialog>
 
     <input ref="uploadInput" class="hidden" type="file" multiple @change="onUploadInput" />
+    <!-- webkitdirectory 会自动携带多选语义；目录选择以相对路径（webkitRelativePath）回传。 -->
+    <input v-if="folderUploadSupported" ref="folderUploadInput" class="hidden" type="file" multiple webkitdirectory @change="onFolderUploadInput" />
     <input ref="zmodemInput" class="hidden" type="file" multiple @change="onZmodemInput" />
     <input ref="trzszInput" class="hidden" type="file" multiple @change="onTrzszPickInput" @cancel="onTrzszPickCancel" />
   </main>
