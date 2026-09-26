@@ -208,6 +208,7 @@ import { decideFileRowAction } from "./lib/fileRowKeydown";
 import { attachWebglRenderer, loadWebglEnabled, persistWebglEnabled, syncWebglRenderer, type WebglRecoveryOptions, type WebglRendererLike } from "./lib/terminalWebgl";
 import { cellFromMouseEvent, clickCursorArrows, resolveClickCursorMove } from "./lib/terminalClickCursor";
 import { bridgeBinaryBytes } from "../../shared/frontend/binaryEvent";
+import { standaloneArrayBuffer } from "./lib/standaloneBuffer";
 import { applyTreeChildren, createTreeRoot, findTreeNode, markTreeStale, type DirTreeNode } from "./lib/sftpDirTree";
 import { workbenchMessage } from "./lib/i18n";
 import { randomUUID } from "./lib/uuid";
@@ -2248,7 +2249,10 @@ async function saveTrzszDownloadedFiles(files: readonly TrzszDownloadFile[]) {
     try {
       let offset = 0;
       for (const chunk of file.chunks) {
-        const write = await fileTransfer.write(target.handleId, offset, chunk);
+        // issue #116：宿主桥 write 分支把 payload 直放 postMessage transfer
+        // 列表，Uint8Array 视图会被 Chromium 拒绝（transferable type），必须
+        // 交独立 ArrayBuffer。
+        const write = await fileTransfer.write(target.handleId, offset, standaloneArrayBuffer(chunk));
         offset = write.nextOffset;
       }
       await fileTransfer.finish(target.handleId);
@@ -5457,7 +5461,8 @@ async function downloadEntry(entry: SftpEntry) {
           task.transferred = offset;
         }
       } else if (fileTransfer && target) {
-        const write = await fileTransfer.write(target.handleId, offset, chunk);
+        // issue #116：同 trzsz 落盘——transfer 列表只收 ArrayBuffer，交独立 buffer。
+        const write = await fileTransfer.write(target.handleId, offset, standaloneArrayBuffer(chunk));
         offset = write.nextOffset;
       } else {
         // saveToLocal：字节已在 sidecar 侧写入暂存文件，这里只跟进进度。
@@ -7006,7 +7011,8 @@ async function exportRecordingGif(summary: RecordingSummary, events: readonly Re
       const target = await fileTransfer.beginSave({ name: fileName, contentType: "image/gif", size: gif.byteLength });
       if (!target) return; // 用户在原生保存框取消：安静结束，不提示导出成功
       try {
-        await fileTransfer.write(target.handleId, 0, gif);
+        // issue #116：同 SFTP/trzsz 落盘——transfer 列表只收 ArrayBuffer。
+        await fileTransfer.write(target.handleId, 0, standaloneArrayBuffer(gif));
         await fileTransfer.finish(target.handleId);
       } catch (cause) {
         await fileTransfer.cancel(target.handleId).catch(() => undefined);

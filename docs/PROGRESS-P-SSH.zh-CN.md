@@ -3452,3 +3452,41 @@ tab 拿到的是空 state，永远回落到硬编码的 `false`——缺少跨 t
 **剩余风险**：面板（Dock panel）形态仍一律强制关闭（SFTP 域能力，设计如此）；
 真机端到端（开关联动 sidecar directoryTracking 脚本注入）未在本轮实测。
 
+### SFTP 下载 fileTransfer 落盘必炸（issue #116，根因在宿主桥 transferable 校验，2026-09-26）
+
+用户（DBX 0.6.24 + 插件 0.7.1-beta3）SFTP 下载报
+`Failed to execute 'postMessage' on 'Window': Value at index 0 does not have a
+transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常。
+
+**根因链**（证据齐备）：
+
+- 下载落盘分两路：`canSaveLocal=true` 走 sidecar `saveToLocal`（前端不传
+  二进制）；否则走宿主 `fileTransfer.write` 分块落盘（`canSaveLocal` 在
+  Linux 需要 sidecar 进程能读到 `DISPLAY`/`WAYLAND_DISPLAY`，读不到即回退
+  该路）。
+- 宿主桥 `fileTransfer.write` 分支（dbx `pluginHostBridge.ts`，自
+  `bc490772e` 引入起）构造的是 `new Uint8Array(data.slice().buffer)`——
+  注释意图正确（拷贝视图防越界），但 transfer 列表里放的是 `Uint8Array`
+  视图而非 `ArrayBuffer`；`request()` 裸 `parent.postMessage(msg,'*',[transfer])`
+  被 Chromium 拒绝（transfer 列表只收 ArrayBuffer/MessagePort 等），凡走
+  该路 100% 抛上述 DOMException。无头 Chrome 实测逐字复现该报错；detached
+  buffer（二次 transfer）报的是另一条 "already detached"，排除。
+- 错误进插件 catch → `showError(cause,"sftp",重试)` → 横幅 + 传输卡"已取消"，
+  与截图一致；sidecar 侧零感知。
+
+**插件侧规避（本轮落地，随插件发版生效，不依赖宿主升级）**：
+
+- `lib/standaloneBuffer.ts`：`standaloneArrayBuffer()` 纯函数——全跨度视图
+  零拷贝直返底层 `ArrayBuffer`，否则拷贝视图区间成独立 buffer（宿主修复后
+  该形状依然正确：接收端 `binary instanceof ArrayBuffer` 本就是协议期望）。
+- App.vue 三处 `fileTransfer.write` 调用点（SFTP 下载 / trzsz 下载 / GIF
+  导出）统一改传 `standaloneArrayBuffer(chunk)`。
+- 单测 `standaloneBuffer.spec.ts` 5 用例；前端 71 文件 608 用例全绿，
+  `vue-tsc` 0 错。无头 Chrome 端到端复刻桥 `request()` transfer 语义：
+  修复前逐字复现 issue 报错，修复后宿主收到正确字节数（subview 场景仅
+  拷贝视图区间 1024B，不越界到底层 2048B）。
+
+**宿主侧根治建议**（dbx 仓库，需宿主发版）：`pluginHostBridge.ts` write
+分支去掉 `new Uint8Array(...)` 包装、直接 transfer `ArrayBuffer`（与同文件
+`sendBinary`/`saveFile` 分支对齐），并补真实 postMessage 边界的 spec 用例
+（现有 spec 未覆盖该分支，jsdom 无 transfer 校验所以从未拦截）。
