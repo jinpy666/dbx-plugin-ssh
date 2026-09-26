@@ -26,6 +26,7 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "sftp-path-history",
   "ssh-command-history",
   "ssh-sftp-pane-open",
+  "ssh-follow-directory",
   "ssh-sftp-side-tab",
   "ssh-sftp-side-collapsed",
   "ssh-terminal-select-copy",

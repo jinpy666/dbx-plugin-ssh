@@ -222,7 +222,7 @@ import { encodeGif } from "./lib/gifEncoder";
 import { canKillProcess, sortProcessRows, type ProcessSortKey } from "./lib/processActions";
 import { distroBadge, type DistroBadge } from "./lib/distroBadge";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel, sanitizeAuditEntries, type AuditEntry } from "./lib/auditLog";
-import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
+import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
 import { pickLiveSessionForReattach, pickProtocolSessionForReattach, type SessionSummary } from "./lib/sessionRestore";
 import { toolbarTintStyle } from "./lib/toolbarTint";
 import { createGhostClickGuard } from "./lib/ghostClickGuard";
@@ -279,6 +279,7 @@ import {
 } from "./lib/terminalHotkeys";
 import { cellFromMouseEvent, clickCursorArrows, resolveClickCursorMove } from "./lib/terminalClickCursor";
 import { bridgeBinaryBytes } from "../../shared/frontend/binaryEvent";
+import { standaloneArrayBuffer } from "./lib/standaloneBuffer";
 import { applyTreeChildren, createTreeRoot, findTreeNode, markTreeStale, type DirTreeNode } from "./lib/sftpDirTree";
 import { workbenchMessage } from "./lib/i18n";
 import { randomUUID } from "./lib/uuid";
@@ -561,6 +562,9 @@ const QUICK_COMMANDS_KEY = "ssh-quick-commands";
 // 终端字号/字体族键移入 lib/terminalFont.ts（issue #31 字体单独设置）统一管理。
 // SFTP 面板默认打开偏好：pluginStore 全局持久化（"false" = 新工作台仅终端）。
 const SFTP_PANE_OPEN_KEY = "ssh-sftp-pane-open";
+// 目录跟随全局偏好：pluginStore 持久化（"true" = 新工作台初始即开启；per-tab
+// 的 workbenchState.followDirectory 仍优先，恢复的 tab 不被全局值覆盖）。
+const FOLLOW_DIRECTORY_KEY = "ssh-follow-directory";
 // 侧栏形态偏好：tree/quick tab（默认 tree）与收起状态，pluginStore 全局持久化。
 const SFTP_SIDE_TAB_KEY = "ssh-sftp-side-tab";
 const SFTP_SIDE_COLLAPSED_KEY = "ssh-sftp-side-collapsed";
@@ -705,7 +709,7 @@ const termSelectCopy = computed(() => terminalBehavior.value.copyOnSelect);
 const terminalHotkeys = ref<TerminalHotkeyBindings>(loadTerminalHotkeys(applePlatform));
 // 沙箱宿主读不到系统剪贴板：右键粘贴的降级链靠这份插件视图内的复制副本。
 const terminalCopyCache = createTerminalCopyCache();
-const followDirectory = ref(false);
+const followDirectory = ref(loadDirectoryFollowPref());
 // 终端 shell 最近一次上报的 cwd（OSC 7 / OSC 633 Cwd，无论跟随开关是否打开
 // 都记录）：终端拖拽上传的「当前目录」落点解析靠它，避免误用 SFTP 面板的
 // 浏览目录（初始值 "/"，拼根路径会被服务器以权限拒绝）。
@@ -1060,6 +1064,7 @@ watch(panelSurface, (panel) => {
   if (!panel) return;
   batchBarOpen.value = false;
   sftpPaneOpen.value = false;
+  transferPanelOpen.value = false;
 }, { immediate: true });
 // 保存为快速命令的内联名称态（保存走 ssh/quickCommands/save，全局共享）。
 const batchSaveMode = ref(false);
@@ -1866,7 +1871,8 @@ function restoreUiState() {
   // users who want SFTP open the workbench tab.
   sftpPaneOpen.value = panelSurface.value ? false : resolveSftpPaneOpen(state, sftpPaneDefaultOpen.value);
   // Dock panel surface：目录跟随是 SFTP 域能力，面板一律关闭。
-  followDirectory.value = panelSurface.value ? false : state.followDirectory === true;
+  // 恢复的 tab 用 per-workbench 状态；全新工作台回落全局偏好（pluginStore）。
+  followDirectory.value = panelSurface.value ? false : resolveDirectoryFollow(state, loadDirectoryFollowPref());
   sudoMode.value = state.sudoMode === true && canWrite.value;
   // 一次性迁移：六列默认上线前的旧偏好重置为全开（之后用户自定义照常持久化）。
   const legacyColumns = state.visibleColumns != null && state.columnsV2 !== true;
@@ -3543,7 +3549,10 @@ async function saveTrzszDownloadedFiles(files: readonly TrzszDownloadFile[]) {
     try {
       let offset = 0;
       for (const chunk of file.chunks) {
-        const write = await fileTransfer.write(target.handleId, offset, chunk);
+        // issue #116：宿主桥 write 分支把 payload 直放 postMessage transfer
+        // 列表，Uint8Array 视图会被 Chromium 拒绝（transferable type），必须
+        // 交独立 ArrayBuffer。
+        const write = await fileTransfer.write(target.handleId, offset, standaloneArrayBuffer(chunk));
         offset = write.nextOffset;
       }
       await fileTransfer.finish(target.handleId);
@@ -4102,8 +4111,9 @@ function updateTransfer(params: Record<string, unknown>) {
   if (!existing && isLiveTransferStatus(transferTasks[taskId].status)) {
     // 面板已开时不得重开：openTransferPanel 的"先收口再开"会卸载弹层、
     // 复位滚动位置，用户正往下看历史时会被弹回顶部（issue #18）。互斥族
-    // 保证面板开着时没有其他弹层，直接置 open 即可。
-    if (!transferPanelOpen.value) transferPanelOpen.value = true;
+    // 保证面板开着时没有其他弹层，直接置 open 即可。Dock panel surface
+    // 同样不弹：面板是单一聚焦终端，传输记录入口整体禁用。
+    if (!transferPanelOpen.value && !panelSurface.value) transferPanelOpen.value = true;
   }
 }
 
@@ -6676,6 +6686,7 @@ async function setDirectoryTracking(enabled: boolean) {
   try {
     await window.dbxPlugin.invoke("ssh/terminal/directoryTracking", { sessionId: session.value.sessionId, enabled });
     followDirectory.value = enabled;
+    persistDirectoryFollowPref(enabled);
     directoryParser.reset();
     persistState();
   } catch (cause) {
@@ -6710,6 +6721,24 @@ function loadSftpPaneDefaultOpen(): boolean {
     return sanitizeSftpPaneDefaultOpen(pluginStore.getItem(SFTP_PANE_OPEN_KEY));
   } catch {
     return false;
+  }
+}
+
+// 目录跟随全局偏好：开关切换时同步写入（与 per-tab workbenchState 并行，
+// 后者为恢复的 tab 提供更精确的状态；这里是新 tab 的缺省来源）。
+function loadDirectoryFollowPref(): boolean {
+  try {
+    return sanitizeDirectoryFollowPref(pluginStore.getItem(FOLLOW_DIRECTORY_KEY));
+  } catch {
+    return false;
+  }
+}
+
+function persistDirectoryFollowPref(enabled: boolean) {
+  try {
+    pluginStore.setItem(FOLLOW_DIRECTORY_KEY, enabled ? "true" : "false");
+  } catch {
+    // pluginStore 不可用时全局偏好仅对当前会话生效，per-tab 恢复不受影响。
   }
 }
 
@@ -8479,7 +8508,8 @@ async function downloadEntry(entry: SftpEntry, forceSudo = false) {
           task.transferred = offset;
         }
       } else if (fileTransfer && target) {
-        const write = await fileTransfer.write(target.handleId, offset, chunk);
+        // issue #116：同 trzsz 落盘——transfer 列表只收 ArrayBuffer，交独立 buffer。
+        const write = await fileTransfer.write(target.handleId, offset, standaloneArrayBuffer(chunk));
         offset = write.nextOffset;
       } else {
         // saveToLocal：字节已在 sidecar 侧写入暂存文件，这里只跟进进度。
@@ -9954,7 +9984,9 @@ async function exportRecordingTranscript(item: RecordingSummary) {
       // 宿主原生保存对话框：用户自选目的地。
       const target = await fileTransfer.beginSave({ name: fileName, contentType: "text/plain", size: bytes.byteLength });
       try {
-        await fileTransfer.write(target.handleId, 0, bytes);
+        // issue #116：同 SFTP/trzsz/GIF 落盘——transfer 列表只收 ArrayBuffer，
+        // 交独立 buffer（transcript 导出是 integration 线独有入口，与三处同源）。
+        await fileTransfer.write(target.handleId, 0, standaloneArrayBuffer(bytes));
         await fileTransfer.finish(target.handleId);
       } catch (cause) {
         await fileTransfer.cancel(target.handleId).catch(() => undefined);
@@ -10315,7 +10347,8 @@ async function exportRecordingGif(summary: RecordingSummary, events: readonly Re
       const target = await fileTransfer.beginSave({ name: fileName, contentType: "image/gif", size: gif.byteLength });
       if (!target) return; // 用户在原生保存框取消：安静结束，不提示导出成功
       try {
-        await fileTransfer.write(target.handleId, 0, gif);
+        // issue #116：同 SFTP/trzsz 落盘——transfer 列表只收 ArrayBuffer。
+        await fileTransfer.write(target.handleId, 0, standaloneArrayBuffer(gif));
         await fileTransfer.finish(target.handleId);
       } catch (cause) {
         await fileTransfer.cancel(target.handleId).catch(() => undefined);
@@ -11252,10 +11285,10 @@ onBeforeUnmount(() => {
         </Popover>
       </div>
       <div class="toolbar-actions">
-        <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" @click="togglePaneOrder"><ArrowLeftRight /></button>
+        <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
         <!-- Local terminal UI hides SSH-only actions outright (not disabled): the local
              shell has no SSH session to act on. -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
         <button class="icon-button" :title="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
         <button class="icon-button" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><SquarePlus /></button>
@@ -11349,7 +11382,7 @@ onBeforeUnmount(() => {
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :disabled="!session" @click="forwardsOpen = true"><Network /></button>
         <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
-          <Switch size="sm" :model-value="followDirectory" :disabled="!connected" @update:model-value="setDirectoryTracking" />
+          <Switch size="sm" :model-value="followDirectory" :disabled="!connected || panelSurface" @update:model-value="setDirectoryTracking" />
           <span>{{ t("followTerminal") }}</span>
         </label>
         <span class="toolbar-separator" aria-hidden="true" />
@@ -11507,7 +11540,7 @@ onBeforeUnmount(() => {
         <div>
           <Popover :open="columnsOpen" @update:open="(open) => { if (!open) columnsOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-violet" :title="t('customizeColumns')" @click.stop="toggleColumnsMenu"><Columns3 /></button>
+              <button class="icon-button icon-violet" :title="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
             </PopoverAnchor>
             <PopoverContent class="popover columns-popover" align="end" :side-offset="5">
             <label v-for="column in (['size', 'modified', 'owner', 'group', 'permissions'] as SftpColumn[])" :key="column"><input type="checkbox" :checked="visibleColumns.includes(column)" @change="toggleColumn(column)" />{{ t(column) }}</label>
@@ -11522,7 +11555,7 @@ onBeforeUnmount(() => {
                连同菜单一起卸载，动作丢失。 -->
           <Popover :open="transferPanelOpen" @update:open="(open) => { if (!open && !transferHistoryMenu) transferPanelOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-blue" :title="t('transfers')" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
+              <button class="icon-button icon-blue" :title="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
             </PopoverAnchor>
             <PopoverContent class="popover transfer-popover" align="end" :side-offset="5">
             <h3>{{ t("transfers") }}</h3>
