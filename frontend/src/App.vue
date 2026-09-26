@@ -285,6 +285,8 @@ import { applyTreeChildren, createTreeRoot, findTreeNode, markTreeStale, type Di
 import { workbenchMessage } from "./lib/i18n";
 import { randomUUID } from "./lib/uuid";
 import TextPreview from "./components/TextPreview.vue";
+import JsonPreviewPanel from "./components/JsonPreviewPanel.vue";
+import { buildJsonPreview, type JsonPreviewState } from "./lib/jsonPreview";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
 import TerminalGutter from "./components/TerminalGutter.vue";
 import CommandSuggestions from "./components/CommandSuggestions.vue";
@@ -1857,6 +1859,11 @@ const previewDirty = computed(() => previewEditable.value && previewDraft.value 
 // 编辑保存走 sftp/write 整文件覆写：只有完整加载（未截断）且不超直写上限的
 // 文本才允许进入编辑，否则保存会把未加载部分丢掉。
 const previewEditableAllowed = computed(() => canWrite.value && previewMode.value === "text" && !previewTruncated.value && previewSize.value <= MAX_DIRECT_WRITE_BYTES);
+// JSON 格式化预览（issue #96）：.json/无后缀嗅探命中时在预览弹窗里提供格式化
+// 视图与字段复制；unavailable/编辑态回落既有 TextPreview（检测/降级见 lib/jsonPreview.ts）。
+const jsonPreviewState = computed<JsonPreviewState>(() =>
+  buildJsonPreview(previewTitle.value, previewText.value, { truncated: previewTruncated.value }),
+);
 
 function initialState(): WorkbenchState {
   const value = hostContext.value.workbenchState;
@@ -12469,6 +12476,9 @@ onBeforeUnmount(() => {
         <div v-else-if="previewMode === 'image'" class="preview-image-stage">
           <img class="preview-image" :class="{ 'preview-image--full': previewImageZoomed }" :src="previewImageUrl" :alt="previewTitle" :title="previewImageZoomed ? t('imagePreview.zoomOut') : t('imagePreview.zoomIn')" @click="previewImageZoomed = !previewImageZoomed" />
         </div>
+        <!-- JSON 候选且非编辑态走格式化预览面板（invalid/too-large 时面板内部降级为
+             原始视图 + 提示条）；其余文件与编辑态保持既有 TextPreview。 -->
+        <JsonPreviewPanel v-else-if="!previewEditable && jsonPreviewState.kind !== 'unavailable'" :state="jsonPreviewState" :text="previewText" :file-name="previewTitle" :locale="locale" :appearance="appearance" />
         <TextPreview v-else :text="previewText" :file-name="previewTitle" :appearance="appearance" :editable="previewEditable" @change="previewDraft = $event" />
       </DialogContent>
     </Dialog>
