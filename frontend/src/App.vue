@@ -157,7 +157,7 @@ import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardSta
 import { matchSpecLine, type CompletionLevel, type CompletionRow } from "./lib/completions/spec";
 import { COMPLETION_SPECS } from "./lib/completions/specs";
 import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
-import { clampTransferConcurrency, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
+import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
 import { mergeQuickCommandImport, parseQuickCommandImport } from "./lib/quickCommandImport";
 import { enqueueWatchModified, popWatchModified, registerWatch, watchName, type ModifiedPrompt, type WatchRegistry } from "./lib/watchEdits";
@@ -590,6 +590,8 @@ const DOWNLOAD_CONFLICT_KEY = "ssh-download-conflict-policy";
 // preferences 权威存储，localStorage 仅作同步缓存（语义同下载偏好）。
 const TRANSFER_CONCURRENCY_KEY = "ssh-transfer-concurrency";
 const TRANSFER_MAX_ACTIVE_KEY = "ssh-transfer-max-active";
+// 下载限速（issue #66，KiB/s，0=不限速缺省）：同一偏好链路持久化。
+const TRANSFER_DOWNLOAD_LIMIT_KEY = "ssh-transfer-download-limit-kib";
 const SFTP_COMPAT_MODE_KEY = "ssh-sftp-compat-mode";
 const SFTP_NAME_ENCODING_KEY = "ssh-sftp-name-encoding";
 const TRANSFER_DUPLICATE_KEY = "ssh-transfer-duplicate-policy";
@@ -607,6 +609,8 @@ const transferConcurrencyState = ref(3);
 // M14-B 三键：会话级并发深度（1-8，默认 3）、老旧服务器兼容模式（默认关）、
 // 文件名显示编码（auto/latin-1，默认 auto）。权威态在此，sidecar preferences 同步。
 const transferMaxActiveState = ref(3);
+// 下载限速权威态（KiB/s，0=不限速）；sidecar preferences 同步。
+const transferDownloadLimitState = ref(0);
 const sftpCompatModeState = ref(false);
 const sftpNameEncodingState = ref<SftpNameEncoding>("auto");
 const transferDuplicateState = ref<TransferDuplicatePolicy>("rename");
@@ -1234,6 +1238,8 @@ const transferPrefsAdapter = {
   persistDuplicatePolicy: persistTransferDuplicatePolicy,
   loadMaxActive: loadTransferMaxActive,
   persistMaxActive: persistTransferMaxActive,
+  loadDownloadLimit: loadTransferDownloadLimit,
+  persistDownloadLimit: persistTransferDownloadLimit,
   loadCompatMode: loadSftpCompatMode,
   persistCompatMode: persistSftpCompatMode,
   loadNameEncoding: loadSftpNameEncoding,
@@ -6843,6 +6849,16 @@ function persistTransferMaxActive(value: number) {
   void syncPrefs();
 }
 
+// 下载限速（issue #66）：设置弹窗经适配器读写，权威态在此。
+function loadTransferDownloadLimit(): number {
+  return transferDownloadLimitState.value;
+}
+
+function persistTransferDownloadLimit(value: number) {
+  transferDownloadLimitState.value = clampTransferDownloadLimit(value);
+  void syncPrefs();
+}
+
 function loadSftpCompatMode(): boolean {
   return sftpCompatModeState.value;
 }
@@ -6902,6 +6918,8 @@ function cachePrefs() {
     else window.localStorage.removeItem(TRANSFER_CONCURRENCY_KEY);
     if (transferMaxActiveState.value !== 3) window.localStorage.setItem(TRANSFER_MAX_ACTIVE_KEY, String(transferMaxActiveState.value));
     else window.localStorage.removeItem(TRANSFER_MAX_ACTIVE_KEY);
+    if (transferDownloadLimitState.value !== 0) window.localStorage.setItem(TRANSFER_DOWNLOAD_LIMIT_KEY, String(transferDownloadLimitState.value));
+    else window.localStorage.removeItem(TRANSFER_DOWNLOAD_LIMIT_KEY);
     if (sftpCompatModeState.value) window.localStorage.setItem(SFTP_COMPAT_MODE_KEY, "1");
     else window.localStorage.removeItem(SFTP_COMPAT_MODE_KEY);
     if (sftpNameEncodingState.value !== "auto") window.localStorage.setItem(SFTP_NAME_ENCODING_KEY, sftpNameEncodingState.value);
@@ -6929,6 +6947,7 @@ async function syncPrefs() {
       transfer_concurrency: transferConcurrencyState.value,
       transfer_duplicate_policy: transferDuplicateState.value,
       transfer_max_active: transferMaxActiveState.value,
+      transfer_download_limit_kib: transferDownloadLimitState.value,
       sftp_compat_mode: sftpCompatModeState.value,
       sftp_name_encoding: sftpNameEncodingState.value,
       history_suggestions_enabled: suggestionsEnabledState.value,
@@ -6955,6 +6974,7 @@ async function hydratePrefsOnce() {
     transferConcurrencyState.value = clampTransferConcurrency(window.localStorage.getItem(TRANSFER_CONCURRENCY_KEY) ?? undefined);
     transferDuplicateState.value = sanitizeTransferDuplicatePolicy(window.localStorage.getItem(TRANSFER_DUPLICATE_KEY));
     transferMaxActiveState.value = clampTransferMaxActive(window.localStorage.getItem(TRANSFER_MAX_ACTIVE_KEY) ?? undefined);
+    transferDownloadLimitState.value = clampTransferDownloadLimit(window.localStorage.getItem(TRANSFER_DOWNLOAD_LIMIT_KEY) ?? undefined);
     sftpCompatModeState.value = window.localStorage.getItem(SFTP_COMPAT_MODE_KEY) === "1";
     sftpNameEncodingState.value = sanitizeNameEncoding(window.localStorage.getItem(SFTP_NAME_ENCODING_KEY));
     suggestionsEnabledState.value = window.localStorage.getItem(SUGGESTIONS_ENABLED_KEY) !== "0";
@@ -6978,6 +6998,7 @@ async function hydratePrefsOnce() {
       transfer_concurrency?: unknown;
       transfer_duplicate_policy?: unknown;
       transfer_max_active?: unknown;
+      transfer_download_limit_kib?: unknown;
       sftp_compat_mode?: unknown;
       sftp_name_encoding?: unknown;
       history_suggestions_enabled?: unknown;
@@ -7009,6 +7030,7 @@ async function hydratePrefsOnce() {
     if (prefs.transfer_concurrency !== undefined) transferConcurrencyState.value = clampTransferConcurrency(prefs.transfer_concurrency);
     if (prefs.transfer_duplicate_policy !== undefined) transferDuplicateState.value = sanitizeTransferDuplicatePolicy(prefs.transfer_duplicate_policy);
     if (prefs.transfer_max_active !== undefined) transferMaxActiveState.value = clampTransferMaxActive(prefs.transfer_max_active);
+    if (prefs.transfer_download_limit_kib !== undefined) transferDownloadLimitState.value = clampTransferDownloadLimit(prefs.transfer_download_limit_kib);
     if (prefs.sftp_compat_mode !== undefined) sftpCompatModeState.value = prefs.sftp_compat_mode === true;
     if (prefs.sftp_name_encoding !== undefined) sftpNameEncodingState.value = sanitizeNameEncoding(prefs.sftp_name_encoding);
     if (prefs.history_suggestions_enabled !== undefined) suggestionsEnabledState.value = prefs.history_suggestions_enabled === true;

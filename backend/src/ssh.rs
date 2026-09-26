@@ -56,6 +56,7 @@ use crate::startup_commands;
 use crate::sudo_download;
 use crate::sudo_profiles;
 use crate::transfer_history;
+use crate::transfer_throttle::Throttle;
 use crate::triggers;
 
 /// 绑定的 OTP 库条目（经共享防重放缓存，同窗口码不重复发出）→ 既有
@@ -1481,6 +1482,10 @@ struct DownloadState {
     /// （D-7），一律走高层客户端（字面量语义与列表一致）。树/sudo 任务
     /// 不经此字段分支（树按 `TreeDownloadState.latin1`，sudo 走独立车道）。
     latin1: bool,
+    /// 下载限速（issue #66）：start 时对偏好 `transfer_download_limit_kib`
+    /// 的一次性快照（0=不限速）。整个任务沿用快照值——改动对下一个下载
+    /// 任务生效，进行中的任务不受中途修改影响。sudo 下载车道本期不限速。
+    throttle: Throttle,
 }
 
 /// Live state of one recursive folder download. Files stream through the same
@@ -6014,6 +6019,9 @@ impl SshRuntime {
                     // sudo 下载走独立车道（sudo_download.rs），读侧不经
                     // has_wire_lane 判分支；字面 false 只做字段填充。
                     latin1: false,
+                    // sudo 车道本期不在限速范围（issue #66 收敛在 SFTP
+                    // 下载），字段照常填充但快照取 0（不限速）。
+                    throttle: Throttle::new(0),
                 },
             );
         emitter
@@ -6114,6 +6122,11 @@ impl SshRuntime {
         let sink = self
             .build_download_sink(&task_id, download_dir, conflict)
             .await?;
+        // 限速快照（issue #66）：偏好现值只在任务启动时读一次，整个任务
+        // 沿用——设置改动对下一个下载任务生效，进行中任务节奏不抖动。
+        let throttle = Throttle::new(crate::preferences::transfer_download_limit_kib(
+            &self.data_dir,
+        ));
         self.downloads
             .lock()
             .map_err(|_| "Download registry is poisoned".to_string())?
@@ -6129,6 +6142,7 @@ impl SshRuntime {
                     tree: None,
                     sudo_tmp: None,
                     latin1,
+                    throttle,
                 },
             );
         emitter
@@ -6264,6 +6278,11 @@ impl SshRuntime {
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| root_name.to_string());
         let task_id = Uuid::new_v4().to_string();
+        // 限速快照（issue #66）：树下载与单文件同口径——偏好现值只在启动
+        // 时读一次，逐文件分块循环共用同一限速器。
+        let throttle = Throttle::new(crate::preferences::transfer_download_limit_kib(
+            &self.data_dir,
+        ));
         self.downloads
             .lock()
             .map_err(|_| "Download registry is poisoned".to_string())?
@@ -6291,6 +6310,7 @@ impl SshRuntime {
                     sudo_tmp: None,
                     // 树任务的逐文件读取按 TreeDownloadState.latin1 判分支。
                     latin1: false,
+                    throttle,
                 },
             );
         emitter
@@ -6386,6 +6406,9 @@ impl SshRuntime {
                 continue;
             }
             let requested = remaining.min(TRANSFER_CHUNK_SIZE as u64) as usize;
+            // 限速节奏（issue #66）：树下载逐文件分块循环与单文件同口径——
+            // 块耗时从读开始计量，读毕由 limiter 补足差额；缺省 0 零开销。
+            let chunk_started = download.throttle.enabled().then(std::time::Instant::now);
             let (mut chunk, length) = if tree.latin1 {
                 // latin-1：远端路径是 wire 形式（raw 扫描），高层 open 按
                 // UTF-8 找不到字节名文件——走裸包 READ（download 分片的
@@ -6448,6 +6471,12 @@ impl SshRuntime {
                 continue;
             }
             chunk.truncate(length);
+            // 限速等待读毕即执行（本地写之前），与单文件路径同口径。
+            if download.throttle.enabled() {
+                if let Some(started) = chunk_started {
+                    download.throttle.pace(length, started.elapsed()).await;
+                }
+            }
             // 克隆 Arc 而非借用，写失败的清理路径需要 &mut tree。
             if let Some(sink) = tree.sink.clone() {
                 if let Err(error) = sink.file.lock().await.write_all(&chunk).await {
@@ -6532,6 +6561,10 @@ impl SshRuntime {
         }
         let remaining = download.size.saturating_sub(offset);
         let requested = remaining.min(TRANSFER_CHUNK_SIZE as u64) as usize;
+        // 限速节奏（issue #66）：块耗时从读开始计量（含网络/磁盘），读毕
+        // 由 limiter 补足差额等待。限速关闭时 Throttle::pace 是纯即时调用，
+        // 热路径零开销。
+        let chunk_started = download.throttle.enabled().then(std::time::Instant::now);
         // latin-1 转义路径走裸包 READ（raw 字节打开远端文件）；普通路径
         // 保持高层客户端的 seek+read。车道判定按 start 登记的生效编码
         // （M28-B 修 D-7）：auto 一律走高层——auto 列表 uri 字面 `%` 未
@@ -6566,6 +6599,11 @@ impl SshRuntime {
             chunk.truncate(length);
             chunk
         };
+        // 限速等待在读毕、本地落盘之前：等待本身计入下一块之前的墙钟，
+        // 且不会推迟本地写完成的应答语义（前端循环按块等待）。
+        if let (true, Some(started)) = (download.throttle.enabled(), chunk_started) {
+            download.throttle.pace(chunk.len(), started.elapsed()).await;
+        }
         let length = chunk.len();
         if let Some(sink) = download.sink.as_ref() {
             sink.file
@@ -10753,6 +10791,7 @@ matrix-ed25519";
                 tree: None,
                 sudo_tmp: None,
                 latin1: false,
+                throttle: Throttle::new(0),
             },
         );
         let no_connection = |_: &str| String::new();
@@ -10850,6 +10889,7 @@ matrix-ed25519";
                     tree: None,
                     sudo_tmp: None,
                     latin1: false,
+                    throttle: Throttle::new(0),
                 },
             );
         }

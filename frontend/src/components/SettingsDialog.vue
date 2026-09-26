@@ -373,6 +373,9 @@ const props = defineProps<{
     persistMaxActive(value: number): void;
     persistCompatMode(value: boolean): void;
     persistNameEncoding(value: SftpNameEncoding): void;
+    /** Issue #66：下载限速（KiB/s，0=不限速）。 */
+    loadDownloadLimit(): number;
+    persistDownloadLimit(value: number): void;
   };
   /** 命令输入建议（开关 + 查询长度上下限）的读写适配器，权威态同在 App。 */
   suggestionPrefs: {
@@ -470,6 +473,7 @@ const transferConcurrencyDraft = ref(String(props.transferPrefs.loadConcurrency(
 const transferDuplicateDraft = ref<TransferDuplicatePolicy>(props.transferPrefs.loadDuplicatePolicy());
 // M14-B：会话并发深度（1-8）/ 兼容模式 / 文件名编码草稿。
 const transferMaxActiveDraft = ref(String(props.transferPrefs.loadMaxActive()));
+const transferDownloadLimitDraft = ref(String(props.transferPrefs.loadDownloadLimit()));
 const sftpCompatModeDraft = ref(props.transferPrefs.loadCompatMode());
 const sftpNameEncodingDraft = ref<SftpNameEncoding>(props.transferPrefs.loadNameEncoding());
 const suggestionsEnabledDraft = ref(props.suggestionPrefs.loadEnabled());
@@ -854,6 +858,7 @@ async function reloadSettings() {
   transferConcurrencyDraft.value = String(props.transferPrefs.loadConcurrency());
   transferDuplicateDraft.value = props.transferPrefs.loadDuplicatePolicy();
   transferMaxActiveDraft.value = String(props.transferPrefs.loadMaxActive());
+  transferDownloadLimitDraft.value = String(props.transferPrefs.loadDownloadLimit());
   sftpCompatModeDraft.value = props.transferPrefs.loadCompatMode();
   sftpNameEncodingDraft.value = props.transferPrefs.loadNameEncoding();
   suggestionsEnabledDraft.value = props.suggestionPrefs.loadEnabled();
@@ -1148,6 +1153,7 @@ async function saveSettings() {
     props.transferPrefs.persistConcurrency(Number.parseInt(transferConcurrencyDraft.value, 10) || 3);
     props.transferPrefs.persistDuplicatePolicy(transferDuplicateDraft.value);
     props.transferPrefs.persistMaxActive(Number.parseInt(transferMaxActiveDraft.value, 10) || 3);
+    props.transferPrefs.persistDownloadLimit(Math.max(0, Number.parseInt(transferDownloadLimitDraft.value, 10) || 0));
     props.transferPrefs.persistCompatMode(sftpCompatModeDraft.value);
     props.transferPrefs.persistNameEncoding(sftpNameEncodingDraft.value);
     props.suggestionPrefs.persistEnabled(suggestionsEnabledDraft.value);
@@ -1703,6 +1709,11 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <input v-model="transferMaxActiveDraft" type="number" min="1" max="8" step="1" @change="transferMaxActiveDraft = String(Math.min(8, Math.max(1, Number.parseInt(transferMaxActiveDraft, 10) || 3)))" />
             </label>
             <p class="muted settings-note">{{ t("transferCfg.maxActiveHint") }}</p>
+            <label class="settings-field">
+              <span>{{ t("transferCfg.downloadLimit") }}</span>
+              <input v-model="transferDownloadLimitDraft" type="number" min="0" max="1048576" step="64" @change="transferDownloadLimitDraft = String(Math.min(1048576, Math.max(0, Number.parseInt(transferDownloadLimitDraft, 10) || 0)))" />
+            </label>
+            <p class="muted settings-note">{{ t("transferCfg.downloadLimitHint") }}</p>
             <label class="settings-field settings-switch-row">
               <Switch v-model="sftpCompatModeDraft" size="sm" />
               <span>{{ t("transferCfg.compatMode") }}</span>

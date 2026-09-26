@@ -43,6 +43,7 @@ mod sudo_fs;
 mod sudo_profiles;
 mod telnet_session;
 mod transfer_history;
+mod transfer_throttle;
 mod triggers;
 mod vault;
 mod vnc_session;

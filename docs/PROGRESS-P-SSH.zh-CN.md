@@ -4154,3 +4154,31 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
 - **验证**：`pnpm vitest run` **1107/1107**（113 文件；本 worktree 基线 cd205df4 = 112 文件/1099 用例，+1 文件 +8 用例 `folderUpload.spec.ts`，只增不减；M31-C/D 在 integration 分支、按守卫未并入本分支）/ `vue-tsc --noEmit` 0 错 / `pnpm run build` 成功（ui/ 重生成，integrator 所有）/ `git diff --check` 0。纯前端批次，cargo/(smoke) 不适用。
 - **边界遵守**：未改 `manifest.json`、未新增后端方法/协议条目、未使用真实凭据、未 merge integration、未触发 CI、未关闭/评论 issue。App.vue 改动控制在接线级（编排逻辑全在 lib/）。
 - **已知边界**：①空目录不传（浏览器 File API 天然不产空目录条目，远端不会出现空目录骨架）；②单目录 createDirectory 失败（如权限）不中止整批，受影响文件在上传阶段自然失败计入 failed；③ask 降级与单文件上传的逐个询问语义有差异（批量 MVP 取舍，尾注已说明）；④超大目录（万级文件）为逐文件串行 ensure/exists，无批量 RPC，速度受 RTT 影响——后续可评估后端批量 mkdir/mput。
+
+## M31-B 批次（2026-09-26，issue #66：SFTP 下载限速）
+
+- **动机**：open issue #66「希望 ftp 下载时支持限速功能」——正文明确指向下载方向，范围收敛在
+  SFTP 下载（单文件 + 递归目录）；上传侧与 sudo 下载（独立车道）本期不做，报告里登记边界。
+- **偏好键 `transfer_download_limit_kib`**（`backend/src/preferences.rs`）：白名单新键，u64，
+  `0..=1048576` KiB/s，0=不限速（缺省）；超界钳制、非法回落 0（`sanitize_u64_clamped` 同款语义，
+  set 不报错）。PROTOCOL `local/preferences` 行同步键说明。设置 UI（`SettingsDialog.vue` 传输组
+  数值输入 + `App.vue` 权威态/适配器/localStorage 缓存/sidecar 同步，照既有传输键模式）；
+  文案七语齐套（`transferCfg.downloadLimit`/`downloadLimitHint`，i18n 键集对比测试把关）。
+- **限速实现**（新模块 `backend/src/transfer_throttle.rs`，纯逻辑 + 5 单测）：`Throttle::new(limit_kib)`
+  在下载任务 start（`sftp/download/start`/`tree/start`）时对偏好现值**快照一次**——改动对下一个下载
+  任务生效，进行中任务节奏不抖动；每个分块（256KiB 上限，含 latin-1 raw 车道）从读开始计量耗时，
+  读毕按「理想耗时（bytes / (limit×1024)）− 实际耗时」的差额 sleep（逐块瞬时比较，不跨块累计漂移）。
+  限速 0/缺省时 `pace` 为纯即时调用，热路径零分配零等待；`DownloadState` 新增 `throttle` 字段
+  （sudo 车道字面填充 `Throttle::new(0)` 不受影响），ssh.rs 只做接线。
+- **单测**：`transfer_throttle` 5 例（0 关闭、差额正部、比率缩放、溢出饱和、真实 sleep）+
+  preferences 新键 clamp/非法值回落 1 例；前端 `clampTransferDownloadLimit` spec 1 例。
+- **文档**：PROTOCOL（偏好键 + 「下载限速生效口径」段）；FEATURE_PARITY iShell 对标表补
+  「SFTP 下载限速」行。
+- **验证**（本分支基于 M30 patrol head `cd205df4`，M31-C/D 的 integration 提交不在本线）：
+  cargo test **991/991**（本分支基线 985 + 6 新增：throttle 5 + 偏好 1）/ clippy
+  `-D warnings` 0 / fmt 0 / build OK；vitest **1100/1100**（112 文件，基线 1099 + 1 新增）/
+  vue-tsc 0 / build OK；容器 smoke `smoke_fs_test.py` **83 PASS / 0 SKIP / 0 FAIL**
+  （限速缺省 0 不影响既有时序）。
+- **边界遵守**：未改 `manifest.json`、未使用真实凭据、未关闭 issue、未 merge integration、未触发 CI。
+- **已知边界**：sudo 下载与上传方向不限速（scope 明示排除）；限速按平均速率口径（分块间瞬时
+  等待），非令牌桶毫秒级平滑；`sftp/read` MCP 分片读不受限速（非下载任务链路）。
