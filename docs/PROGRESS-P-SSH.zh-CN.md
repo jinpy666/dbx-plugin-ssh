@@ -3910,3 +3910,4 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **来源**：M22-B 审计登记簿唯一剩余项 R3（M23 批已处置 R1/R2/R4）——`raw_read_chunk` 不经 `normalize_remote_path`，latin-1 车道缺 auto 车道的组件归一（绝对化 + 去 `.`/`..`/空段）。复核修正审计原文：normalize 不做 `~` 展开，差异仅为组件归一。
 - **修复**：`raw_read_chunk` 在 unescape 前对 wire 字符串跑同一 `normalize_remote_path`（转义名还原出字面 `..` 的文件名不受影响——归一只作用于还原前的 wire 字符串组件）。三条调用链（sftp/read latin-1 分发、树下载逐文件、单文件下载转义分支）自动收齐。
 - **验证**：cargo **981/981** / clippy 0 / fmt 0；smoke_fs_test **83/0/0**（latin-1 read、树下载、watcher 全链回归）。审计登记簿四项至此全部闭环。
+- **CI 复验全绿**：run 36212498165 success（SSH container smoke 6m32s）。
