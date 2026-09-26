@@ -139,6 +139,10 @@ AI 把列表返回的 `path` 原样回传即落回服务器原始字节（往返
   转义解释）与 PROTOCOL 文字不完全一致，建议后续在 PROTOCOL 补一句边界说明。
 - **D-2（重复实现）两份 `shell_quote`**：`exec.rs:1217` 与 `sudo_fs.rs:27` 文本等价的单引号转义各有一份
   （历史分层产物）。当前行为一致，仅登记为维护负担；若未来改转义规则需双点同步。
+  **已收编（M27-B）**：核查另发现第三处 `sftp_ext.rs:703`（私有，注释自称与 exec 版逐字节兼容）；
+  三处合并为 `exec.rs` 单一规范实现——`sudo_fs.rs` 改为 `pub(crate) use crate::exec::shell_quote;`
+  再导出（`sudo_download` 导入路径不变）、`sftp_ext.rs` 改为 `use crate::exec::shell_quote;`。
+  纯重构零行为变更，三处原有单测全保留，cargo 984/984、clippy 0、fmt 0、smoke 83/0/0。
 - **D-3（边界登记缺口）home 探测的 lossy 风险**：`sftp/home`（`ssh.rs:3505`）与 `sftp_pwd`（`mcp.rs:2473`）
   走高层 `canonicalize(".")`，返回值经高层客户端按 UTF-8 解码——家目录名本身非 UTF-8 时返回串含
   U+FFFD（字节已丢），以其为基准拼接的后续路径无法命中。M17 段对 shell cwd 回读登记过同类边界

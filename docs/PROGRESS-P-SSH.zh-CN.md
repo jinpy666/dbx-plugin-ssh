@@ -3934,3 +3934,9 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 
 - **M26-A/B 合并后 CI 全绿**：run 36220536854 success（18m50s）。latin-1 字节保真边界矩阵（NAME-ENCODING-BOUNDARY.zh-CN.md，45 入口 38✅/16⚠️/5❌）成为该家族的权威盘点与维护基线；PROTOCOL 失实的「字面量残留点」登记已重写为分层准确口径。
 - **下轮候选（登记簿疑点 D1）**：`sftp/download/start|next` 以 `has_wire_escapes` 判分支，手输字面 `%XX` 文件名会被误按转义还原，与 PROTOCOL「字面 %XX 保持字面量」表述存在张力——属行为语义决策（方案空间：入口区分 wire/显示形态、或明确契约），先核实 wire 域内 `%` 自转义约定再立项。
+
+## M27-B 批次（2026-09-26，疑点 D2 收编：shell_quote 单一实现）
+
+- **动机**：M26-B 矩阵疑点 D2 登记了 `exec.rs:1217` 与 `sudo_fs.rs:27` 两份文本等价的 `shell_quote`（POSIX 单引号转义）；收编前核查另发现第三处——`sftp_ext.rs:703` 私有实现（注释自称 "byte-for-byte compatible with exec::shell_quote"），三处均为同一行 `format!("'{}'", x.replace('\'', r"'\''"))`。三处单测口径一致（exec 1 条；sudo_fs 1 条 4 断言含反斜杠外元字符与换行；sftp_ext 1 条 4 断言），行为完全等价。
+- **处置（最小 diff，纯重构零行为变更）**：`exec.rs` 的 `pub fn shell_quote` 保留为唯一规范实现；`sudo_fs.rs` 删除本地 fn，改为 `#[doc(hidden)] pub(crate) use crate::exec::shell_quote;` 再导出——`sudo_download.rs` 的 `use crate::sudo_fs::{shell_quote, sudo_exec}` 与 sudo 族内部全部调用点（约 20 处）签名与路径零改动；`sftp_ext.rs` 删除本地 fn，加 `use crate::exec::shell_quote;`——模块内约 10 处调用零改动。三处原有单测全部原地保留，测的都是收编后同一函数。
+- **验证**：cargo **984/984**（基线保持，只增不减约束满足）/ clippy `-D warnings` 0 / fmt --check 0；本地容器（dbx-ssh-test）smoke_fs_test **83 PASS / 0 SKIP / 0 FAIL**——sudo 族用例真实走过收编后的 `shell_quote` 路径。疑点 D2 在 AUDIT-PROTOCOL-IMPL.zh-CN.md「后续发现」节与 NAME-ENCODING-BOUNDARY.zh-CN.md D-2 条目同步闭环。

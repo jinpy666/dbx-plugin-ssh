@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+use crate::exec::shell_quote;
 use crate::model::normalize_remote_path;
 use crate::sftp_name::{self, NameEncoding};
 use crate::sftp_raw::{self, RawAttrs};
@@ -697,12 +698,6 @@ fn clean_link_target(target: &str) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // Helpers (pure, unit-testable)
 // ---------------------------------------------------------------------------
-
-/// Single-quote shell escaping for embedding a path in a remote command;
-/// byte-for-byte compatible with `exec::shell_quote`.
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
 
 /// Octal permission string in `0755` style (type bits masked away).
 fn format_mode(value: u32) -> String {
