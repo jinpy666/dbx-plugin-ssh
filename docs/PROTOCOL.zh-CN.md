@@ -43,7 +43,7 @@ Telnet/VNC 的 saved connection 生命周期也走同一入口，但不会进入
 | `mcp/settings/get`、`mcp/settings/set` | MCP SFTP 尺寸限制策略（maxRead/maxUpload/maxDownload，持久化，`--mcp` 同源生效）；`localTransferRoot` 配置 `sftp_upload`/`sftp_download` 本地传输根（绝对路径或空串回落默认根=临时目录+插件数据目录；敏感路径黑名单任何模式叠加生效） |
 | `sftp/chmod` | 修改远端路径权限位（八进制）；`sftp_name_encoding` 为 `latin-1` 时路径整条按 wire 还原走裸包 SETSTAT（M17） |
 | `sftp/diskUsage` | 路径所在挂载的磁盘用量 |
-| `sftp/home`、`sftp/list`、`sftp/read` | 浏览、预览远端文件（`sftp/list` 支持可选 `includeOwner` 附加属主/属组；`sftp/read` 支持可选 `offset` 分片续读，见下文） |
+| `sftp/home`、`sftp/list`、`sftp/read` | 浏览、预览远端文件（`sftp/list` 支持可选 `includeOwner` 附加属主/属组；`sftp/read` 支持可选 `offset` 分片续读，见下文）。`sftp/home` 走高层客户端 `canonicalize(".")`（`ssh.rs:3505`；MCP `sftp_pwd` 同源，`mcp.rs:2473`）——**编码边界（登记，M28-A）**：家目录名非 UTF-8 时返回串已含 U+FFFD（高层 lossy 解码，原始字节不可恢复），以其为基准拼接的后续路径无法命中，与 `sftp/list` 节 M17 段登记的 shell cwd 回读同类不可恢复边界 |
 | `sftp/createDirectory`、`sftp/rename`、`sftp/delete`、`sftp/exists`、`sftp/rename-unique`、`sftp/touch`、`sftp/write`、`sftp/symlink-create/read/update`、`sftp/upload/start/finish`、`sftp/upload-local`、`watch/upload` | SFTP 写操作/预检（`sftp_name_encoding` 为 `latin-1` 时走裸包客户端字节保真，路径来源分工见 `sftp/list` 节 M15-B/M16 段） |
 | `sftp/upload/start`、`finish` | 上传事务生命周期（`resumeTaskId` 断点续传；`finish` 校验后交后台任务推送并立即返回，见「上传两阶段计数与收尾语义」） |
 | `watch/start`、`watch/stop`、`watch/stop-all`、`watch/upload` | 外部编辑器回写 watcher（仅桌面端，见「外部编辑器 watcher（watch/*）」节）：`start` 对 `remote-edit/` 下载目录内的本机文件登记监听并返回 `{watchId}`，内容确认变化后发 `watch/file-modified` 事件；`upload` 把监听文件当前字节按 `sftp/write` 同款原子提交推回远端（latin-1 按所属连接编码走裸包字节保真，M21） |

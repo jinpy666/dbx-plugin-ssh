@@ -3947,3 +3947,12 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **动机**：M26-B 矩阵疑点 D2 登记了 `exec.rs:1217` 与 `sudo_fs.rs:27` 两份文本等价的 `shell_quote`（POSIX 单引号转义）；收编前核查另发现第三处——`sftp_ext.rs:703` 私有实现（注释自称 "byte-for-byte compatible with exec::shell_quote"），三处均为同一行 `format!("'{}'", x.replace('\'', r"'\''"))`。三处单测口径一致（exec 1 条；sudo_fs 1 条 4 断言含反斜杠外元字符与换行；sftp_ext 1 条 4 断言），行为完全等价。
 - **处置（最小 diff，纯重构零行为变更）**：`exec.rs` 的 `pub fn shell_quote` 保留为唯一规范实现；`sudo_fs.rs` 删除本地 fn，改为 `#[doc(hidden)] pub(crate) use crate::exec::shell_quote;` 再导出——`sudo_download.rs` 的 `use crate::sudo_fs::{shell_quote, sudo_exec}` 与 sudo 族内部全部调用点（约 20 处）签名与路径零改动；`sftp_ext.rs` 删除本地 fn，加 `use crate::exec::shell_quote;`——模块内约 10 处调用零改动。三处原有单测全部原地保留，测的都是收编后同一函数。
 - **验证**：cargo **984/984**（基线保持，只增不减约束满足）/ clippy `-D warnings` 0 / fmt --check 0；本地容器（dbx-ssh-test）smoke_fs_test **83 PASS / 0 SKIP / 0 FAIL**——sudo 族用例真实走过收编后的 `shell_quote` 路径。疑点 D2 在 AUDIT-PROTOCOL-IMPL.zh-CN.md「后续发现」节与 NAME-ENCODING-BOUNDARY.zh-CN.md D-2 条目同步闭环。
+
+## M28-A 批次（2026-09-26，纯文档收口：字节边界矩阵疑点 D-3/D-4/D-5/D-6 全部闭环）
+
+- **范围**：NAME-ENCODING-BOUNDARY.zh-CN.md 矩阵疑点节 D-3/D-4/D-5/D-6 四条（D-1/D-2 已在 M27-A/M27-B 闭环，本批不动）；代码零改动。
+- **D-3（home 探测 lossy 边界登记缺口，已闭环）**：`sftp/home`（`ssh.rs:3505`）与 MCP `sftp_pwd`（`mcp.rs:2473`）走高层 `canonicalize(".")`，家目录名非 UTF-8 时返回串含 U+FFFD、字节已丢。落地：PROTOCOL RPC 表 `sftp/home` 行补「编码边界（登记，M28-A）」——与 `sftp/list` 节 M17 段 shell cwd 回读（PROTOCOL 429 行）同类不可恢复边界呼应；BOUNDARY D-3 条目标「已闭环（M28-A）」。
+- **D-4（「字面量发送」措辞，已闭环）**：核查 PROTOCOL 431 行现状——M26-A 已把「仍按字面量发送的残留点」重写为「路径参数已 normalize + shell_quote；shell 参数字节保真不可达」的分层准确表述，原易误读措辞已不存在，PROTOCOL 无需再改；BOUNDARY D-4 条目标「已闭环（M28-A）」并注明 M26-A 重写后措辞已准确。以现状为准，不制造重复表述。
+- **D-5（upload/start 无 latin-1 分支为有意选型，已闭环）**：`sftp/upload/start` 只写本地 spool（`ssh.rs:5359`）、不发远端请求，字节保真由 `finish_upload`（`ssh.rs:5618`）执行。落地：BOUNDARY 矩阵 `sftp/upload/start` 行备注补「有意选型（M28-A）：只写本地 spool，字节保真在 finish 执行（`ssh.rs:5618`），无 latin-1 分支非缺口」；D-5 条目标「已闭环（M28-A）」。
+- **D-6（MCP sftp_download 目录探测选型，已闭环）**：latin-1 分支不单独裸包 STAT 目录，依赖 OPEN 被服务器拒绝后回退高层报「is a directory」（`mcp.rs:2979–2984`），与 auto 报错语义一致。落地：BOUNDARY 矩阵 MCP `sftp_download` 行备注补「目录探测有意选型（M28-A）：不单独裸包 STAT，依赖 OPEN 被拒回退（`mcp.rs:2979–2984`），与 auto 报错语义一致」；D-6 条目标「已闭环（M28-A）」。
+- **验证**：git diff --check 无空白错误；grep 确认 BOUNDARY 疑点节 D-3..D-6 均带「已闭环（M28-A）」、D-7 保持登记待议不动。代码零改动（纯文档批次，cargo/(smoke) 不适用）。

@@ -50,7 +50,7 @@
 | `sftp/copy` | `sftp_copy` | `from`/`toDir`（wire 形式） | ✅（`parse_request` 内 `normalize`，`sftp_copy.rs:157,172`） | ✅ 覆盖预检逐个裸包 LSTAT（`PathForm::WireEscaped` 还原，`sftp_copy.rs:53`）；同目录 move 快路径裸包 RENAME（`sftp_copy.rs:462–480`） | **执行层边界（登记）**：底层远端 `cp -a --`/`mv -f --` 是 shell 拼装（`sftp_copy.rs:217–234`），UTF-8 String 命令串不做字节保真迁移；预检/快路径已收口 | `main.rs:1089` → `sftp_copy.rs:330 run`、`execute_with:367`（预检裸包 407–415） |
 | `sftp/move` | `sftp_move` | 同 `sftp/copy` | ✅ | ✅ 同上（同目录 RENAME 快路径；跨目录回落 shell `mv`——执行层同上边界） | SFTPv3 RENAME 不覆盖已存在目标，撞名回落 shell | `main.rs:1103` → `sftp_copy.rs:330` |
 | `sftp/delete` | `sftp_remove` | `path`（整条 wire） | ✅ | ✅ 整条 `unescape_wire` 后 `raw_delete_path`（LSTAT 判型 → REMOVE/RMDIR/递归树删，symlink 绝不跟随） | 树删 `raw_delete_path` `ssh.rs:8477` | `main.rs:1582` → `ssh.rs:4589`（归一 4597、unescape 4604） |
-| `sftp/upload/start` | — | `remotePath`（wire 前缀 + 显示末段） | ✅（`ssh.rs:5379`） | ✅（落盘阶段） | start 本身只落本地 spool、不发远端请求；字节保真在 finish 执行 | `main.rs:1596` → `ssh.rs:5359` |
+| `sftp/upload/start` | — | `remotePath`（wire 前缀 + 显示末段） | ✅（`ssh.rs:5379`） | ✅（落盘阶段） | start 本身只落本地 spool、不发远端请求；字节保真在 finish 执行。**有意选型（M28-A）**：只写本地 spool，字节保真在 finish 执行（`ssh.rs:5618`），无 latin-1 分支非缺口 | `main.rs:1596` → `ssh.rs:5359` |
 | `sftp/upload/finish` | — | start 登记的 `remotePath` | ✅（承 start） | ✅ latin-1 走 `raw_push_upload_file`：`write_path_bytes` 还原后裸包暂存 + 原子提交 | 裸包建立失败回退高层暂存 | `main.rs:1616` → `ssh.rs:5618`（raw 分支 5673–5681）→ `sftp_ext.rs:895`（write_path_bytes 903） |
 | `sftp/download/start` | — | `remotePath`（整条 wire） | ✅（`ssh.rs:6003`） | ✅ 含转义（`has_wire_escapes`，`sftp_name.rs:122`）时整条 `unescape_wire` 后裸包 STAT 取真实字节数（M21 收口）；下载车道 raw 失败**不回退**（回退只会重演同一错误） | 字面 `%XX` 歧义已裁决：下载车道 wire 形式为排他契约，契约内正确（D-1 闭环，M27-A）；auto/回退列表 uri 未自转义的往返缺口另见 D-7 | `main.rs:1624` → `ssh.rs:5993`（判分支 6018、raw stat 6024） |
 | `sftp/download/tree/start` | — | `remotePath`（整条 wire） | ✅（`ssh.rs:6123`） | ✅ latin-1 整树裸包 READDIR 遍历（`scan_tree_with_raw`，`ssh.rs:8386`），本地根名按原始字节解码显示 | 裸包建立失败回退高层遍历（读安全） | `main.rs:1651` → `ssh.rs:6109`（unescape 6146） |
@@ -113,7 +113,7 @@ AI 把列表返回的 `path` 原样回传即落回服务器原始字节（往返
 | `sftp_copy` / `sftp_move` | `sftp/copy` / `sftp/move` | `from`/`toDir` | ✅（`sftp_copy::parse_request` 内 `normalize`，`sftp_copy.rs:157,172`） | ✅ 裸包车道按 `PathForm::Display` 还原（`sftp_copy.rs:53–54`）：覆盖预检裸包 LSTAT + 同目录 move 裸包 RENAME | **执行层边界同工作台**：远端 `cp`/`mv` exec 层字面量发送（`mcp.rs:2768–2774` 注释登记） | `mcp.rs:2751` → `sftp_copy.rs:363 execute` |
 | `sftp_disk_usage` | `sftp/diskUsage` | `path` | ✅（M25，1631） | ⚠️ `df -kP '<path>'`（拼命令 1633，exec_plain 1636）——与工作台同口径的 shell 车道 | M25 只补归一，不迁移通道（与工作台一致地保持 ⚠️） | `mcp.rs:1628` |
 | `sftp_upload` | `sftp/upload` 族（语义对齐） | `remotePath`（`localPath` 为本地参数不归一） | ✅（M25，2815） | ✅ 裸包直写（M19：`raw_sftp_write_bytes`，2863）；覆盖预检同字节口径；仅客户端建立失败回退 | 本地路径校验/传输根约束先于拨号 | `mcp.rs:1510` → `sftp_upload_tool:2810` → `upload_via_sftp:2840`（latin-1 分支 2858） |
-| `sftp_download` | `sftp/download`（单文件语义） | `remotePath` | ✅（M25，2908） | ✅ 裸包 OPEN(READ)+READ（M19：`raw_sftp_read_file`，2989）；读侧任何失败回退高层重读 | `maxDownloadBytes+1` 探测封顶 | `mcp.rs:1511` → `sftp_download_tool:2902` → `download_via_sftp:2966`（latin-1 分支 2985） |
+| `sftp_download` | `sftp/download`（单文件语义） | `remotePath` | ✅（M25，2908） | ✅ 裸包 OPEN(READ)+READ（M19：`raw_sftp_read_file`，2989）；读侧任何失败回退高层重读 | `maxDownloadBytes+1` 探测封顶；**目录探测有意选型（M28-A）**：不单独裸包 STAT，依赖 OPEN 被拒回退（`mcp.rs:2979–2984`），与 auto 报错语义一致 | `mcp.rs:1511` → `sftp_download_tool:2902` → `download_via_sftp:2966`（latin-1 分支 2985） |
 | `ssh_exec` / `ssh_exec_sudo` / `ssh_multi_exec` / `ssh_terminal_input` | `ssh/exec`、agent | `command` 文本 | — | ❌ 自由命令文本，同工作台 `ssh/exec` 口径 | confirm-gated（`mcp.rs:345–346`） | `mcp.rs:1609–1617` |
 
 小计：**13 个 ✅ + 1 个 ⚠️（sftp_disk_usage）+ 1 个 N/A（sftp_pwd）+ 4 个 ❌（exec 族）**。
@@ -159,15 +159,24 @@ AI 把列表返回的 `path` 原样回传即落回服务器原始字节（往返
   走高层 `canonicalize(".")`，返回值经高层客户端按 UTF-8 解码——家目录名本身非 UTF-8 时返回串含
   U+FFFD（字节已丢），以其为基准拼接的后续路径无法命中。M17 段对 shell cwd 回读登记过同类边界
   （PROTOCOL 429 行），home 探测未明确登记，建议补记。
+  **已闭环（M28-A）**：PROTOCOL RPC 表 `sftp/home` 行已补编码边界登记（家目录名非 UTF-8 时返回串含
+  U+FFFD、原始字节不可恢复，与 M17 段 shell cwd 回读同类不可恢复边界），登记缺口收口；行为本身维持现状（读侧探测，lossy 提示即可）。
 - **D-4（文档措辞）PROTOCOL 431 行「字面量发送」表述**：`sftp/diskUsage` 被列入「仍按字面量发送的残留点」，
   但实现里路径先经 `normalize_remote_path`（`ssh.rs:4691`）——「字面量」指**字节层面**不经编码还原
   （字符级归一仍发生）。措辞易误读为连归一都没有，建议后续修订为「归一后字面量发送」。
+  **已闭环（M28-A）**：M26-A 重写该登记段后现状表述为「路径参数已 normalize + shell_quote；shell 参数
+  字节保真不可达」，措辞已准确、不再产生连归一都没有的误读，PROTOCOL 无需再改；矩阵第 3 节
+  「latin-1 下维持字面量发送」表述与 ❌ 口径一致（指字节层面无编码还原），同样无需调整。
 - **D-5（一致性确认，非缺陷）**：`sftp/upload/start` 自身无 latin-1 分支容易误读为缺口——它只写本地
   spool 文件（`ssh.rs:5359`），不发任何远端请求；字节保真由 `finish_upload`（`ssh.rs:5618`）执行，
   与 M16 登记一致。
+  **已闭环（M28-A）**：确认为有意选型，矩阵 `sftp/upload/start` 行备注已补「有意选型：只写本地 spool，
+  字节保真在 finish 执行（`ssh.rs:5618`）」，缺口认知收口。
 - **D-6（行为差异确认）MCP `sftp_download` 目录探测**：latin-1 裸包分支不单独 STAT 目录，依赖 OPEN 被
   服务器拒绝后回退高层给出「is a directory」错误（`mcp.rs:2979–2984` 注释登记）——与 auto 分支的
   metadata 判目录路径不同但最终报错语义一致，属有意选型。
+  **已闭环（M28-A）**：确认为有意选型，矩阵 MCP `sftp_download` 行备注已补「目录探测依赖 OPEN 被拒回退
+  （`mcp.rs:2979–2984`），与 auto 报错语义一致，有意选型」，行为差异认知收口。
 - **D-7（D-1 裁决分离出的真实边界，登记待议）auto/回退列表产出的字面 `%XX` 名在单文件下载被误还原**：
   单文件下载的 `has_wire_escapes` 判分支（`ssh.rs:6018` size 探测、`ssh.rs:6483` 分块读取）**不区分
   编码**——`auto` 模式与 latin-1 裸包失败回退高层的列表条目（`ssh.rs:4310`/`ssh.rs:4305`）uri 由高层
