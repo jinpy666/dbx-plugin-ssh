@@ -276,6 +276,33 @@ describe("combosUsedByOthers", () => {
   });
 });
 
+describe("quick-select 动作（WT-1，注册表真实派发）", () => {
+  it("默认键位登记 Cmd/Ctrl+Shift+O，两平台默认表均无冲突", () => {
+    expect(defaultTerminalHotkeys(true)["quick-select"]).toEqual(["Meta+Shift+O"]);
+    expect(defaultTerminalHotkeys(false)["quick-select"]).toEqual(["Ctrl+Shift+O"]);
+    expect(findHotkeyConflicts(defaultTerminalHotkeys(true))).toEqual([]);
+    expect(findHotkeyConflicts(defaultTerminalHotkeys(false))).toEqual([]);
+  });
+
+  it("键盘事件经 keyComboFromEvent → matchTerminalHotkey 派发到 quick-select（无内容依赖的可观测量）", () => {
+    // 与 App.vue 接线同一链路：事件 code 折算组合串，再到注册表查动作。
+    const appleCombo = keyComboFromEvent(event("KeyO", { metaKey: true, shiftKey: true }));
+    expect(appleCombo).toBe("Meta+Shift+O");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(true), appleCombo!)).toBe("quick-select");
+    const otherCombo = keyComboFromEvent(event("KeyO", { ctrlKey: true, shiftKey: true }));
+    expect(otherCombo).toBe("Ctrl+Shift+O");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), otherCombo!)).toBe("quick-select");
+    // 无修饰键的裸 O 不派发（留给远端 shell）。
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("KeyO"))!)).toBeNull();
+  });
+
+  it("存量键位数据缺 quick-select 字段时回填平台默认（新增动作不失效）", () => {
+    const legacy = sanitizeTerminalHotkeys({ search: ["Ctrl+Shift+F"] }, false);
+    expect(legacy.search).toEqual(["Ctrl+Shift+F"]);
+    expect(legacy["quick-select"]).toEqual(["Ctrl+Shift+O"]);
+  });
+});
+
 describe("hotkeysEqual", () => {
   it("逐动作逐项比较", () => {
     const a = defaultTerminalHotkeys(true);

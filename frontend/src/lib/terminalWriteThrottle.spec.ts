@@ -141,4 +141,89 @@ describe("createTerminalWriteThrottle", () => {
     scheduler.run();
     expect(delivered).toEqual(["0123456789"]);
   });
+
+  // --- DECSET 2026 帧同步（WT-1）：hold 期缓冲、release 整批提交 ---
+  it("setHold(true) pauses the pending frame; release commits the whole batch merged", () => {
+    const scheduler = manualScheduler();
+    const delivered: string[] = [];
+    const throttle = createTerminalWriteThrottle({
+      sink: (data) => delivered.push(text(data)),
+      schedule: scheduler.schedule,
+      cancel: scheduler.cancel,
+    });
+    throttle.write(bytes("part-1 "));
+    throttle.setHold(true);
+    // hold 前已排队的帧被取消，不会在同步窗内中途上屏。
+    expect(throttle.held).toBe(true);
+    expect(scheduler.cancels()).toBe(1);
+    throttle.write(bytes("part-2 "));
+    // 被取消的 rAF 回调不得触发交付（若误触发会撕裂帧同步窗口）。
+    scheduler.run();
+    throttle.write(bytes("part-3"));
+    expect(delivered).toEqual([]);
+    expect(throttle.pending).toBe(true);
+    throttle.setHold(false);
+    expect(delivered).toEqual(["part-1 part-2 part-3"]);
+    expect(throttle.pending).toBe(false);
+    expect(throttle.held).toBe(false);
+  });
+
+  it("a hold exceeding the byte cap is force-flushed in order and keeps buffering", () => {
+    const scheduler = manualScheduler();
+    const delivered: string[] = [];
+    const throttle = createTerminalWriteThrottle({
+      sink: (data) => delivered.push(text(data)),
+      schedule: scheduler.schedule,
+      cancel: () => undefined,
+      maxBufferBytes: 10,
+    });
+    throttle.write(bytes("aaaaaa"));
+    throttle.setHold(true);
+    throttle.write(bytes("bbbbbb")); // 12 > cap 10：hold 期强制放行积压
+    expect(delivered).toEqual(["aaaaaa"]);
+    throttle.write(bytes("cc"));
+    expect(delivered).toEqual(["aaaaaa"]);
+    throttle.setHold(false);
+    expect(delivered).toEqual(["aaaaaa", "bbbbbbcc"]);
+    expect(throttle.pending).toBe(false);
+  });
+
+  it("setHold is idempotent and an empty release does not call the sink", () => {
+    const scheduler = manualScheduler();
+    let calls = 0;
+    const throttle = createTerminalWriteThrottle({
+      sink: () => {
+        calls += 1;
+      },
+      schedule: scheduler.schedule,
+      cancel: () => undefined,
+    });
+    throttle.setHold(true);
+    throttle.setHold(true);
+    throttle.setHold(false);
+    throttle.setHold(false);
+    expect(calls).toBe(0);
+    expect(throttle.held).toBe(false);
+    expect(throttle.pending).toBe(false);
+  });
+
+  it("writes during hold are not scheduled until release", () => {
+    const scheduler = manualScheduler();
+    let scheduled = 0;
+    const throttle = createTerminalWriteThrottle({
+      sink: () => undefined,
+      schedule: (cb) => {
+        scheduled += 1;
+        return scheduler.schedule(cb);
+      },
+      cancel: () => undefined,
+    });
+    throttle.setHold(true);
+    throttle.write(bytes("a"));
+    throttle.write(bytes("b"));
+    expect(scheduled).toBe(0);
+    throttle.setHold(false);
+    expect(scheduled).toBe(0);
+    expect(throttle.pending).toBe(false);
+  });
 });
