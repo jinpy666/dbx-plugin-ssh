@@ -226,7 +226,7 @@ export function otpDraftError(draft: OtpDraft): "" | "issuer" | "secret" | "coun
 // 会话导入：流式预览与脱敏规范化导出
 // ---------------------------------------------------------------------------
 
-export type ImportKind = "moba" | "xshell" | "windterm" | "securecrt" | "finalshell" | "electerm" | "termius";
+export type ImportKind = "moba" | "xshell" | "windterm" | "securecrt" | "finalshell" | "electerm" | "termius" | "sshconfig";
 
 export const IMPORT_TOTAL_LIMIT = 64 * 1024 * 1024;
 export const IMPORT_CHUNK_LIMIT = 256 * 1024;

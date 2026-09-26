@@ -25,8 +25,10 @@ const SOURCES: ImportSource[] = [
   { kind: "finalshell", labelKey: "importWizard.source.finalshell", accept: ".zip", windtermExtras: false, hintKey: "importWizard.source.finalshellHint" },
   { kind: "electerm", labelKey: "importWizard.source.electerm", accept: ".json", windtermExtras: false },
   { kind: "termius", labelKey: "importWizard.source.termius", accept: ".json", windtermExtras: false },
+  // ~/.ssh/config 没有扩展名，accept 留空表示不限文件类型。
+  { kind: "sshconfig", labelKey: "importWizard.source.sshconfig", accept: "", windtermExtras: false, hintKey: "importWizard.source.sshconfigHint" },
 ];
-const SECRET_NOTE_KEYS: Record<string, string> = { encrypted: "importWizard.note.encrypted", "not-carried": "importWizard.note.notCarried" };
+const SECRET_NOTE_KEYS: Record<string, string> = { encrypted: "importWizard.note.encrypted", "not-carried": "importWizard.note.notCarried", "key-path-only": "importWizard.note.keyPathOnly" };
 const step = ref<1 | 2 | 3>(1);
 const kind = ref<ImportKind>("moba");
 const mainFile = ref<File | null>(null);

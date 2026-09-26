@@ -141,4 +141,23 @@ describe("ImportWizard", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("importWizard.needMasterPassword");
   });
+
+  it("imports an OpenSSH config as the 8th source and maps the key-path note", async () => {
+    const bridge = installBridge({
+      sessions: [{ index: 0, name: "web1", host: "10.0.0.1", port: 2222, username: "deploy", groupPath: "", description: "ProxyJump bastion (needs manual mapping)", authKind: "private-key", hasSecret: false, secretNote: "key-path-only" }],
+      export: { schemaVersion: 1, sourceKind: "sshconfig", sessions: [] },
+    });
+    const wrapper = mount(ImportWizard, { props: { t } });
+    // ~/.ssh/config has no extension, so the sshconfig picker accepts any file.
+    await wrapper.findAll(".import-source").at(7)!.trigger("click");
+    setFiles(wrapper.find<HTMLInputElement>("input[type=file]").element, new File(["Host web1"], "config"));
+    await flushPromises();
+    await wrapper.find(".import-nav .primary-button").trigger("click");
+    await flushPromises();
+    expect(bridge.invoke).toHaveBeenCalledWith("import/preview/start", { kind: "sshconfig", mainSize: 9 });
+    expect(wrapper.text()).toContain("web1");
+    // The new secret-note code resolves to its localized copy, not the raw
+    // code (rendered as the • tooltip).
+    expect(wrapper.find(".import-secret-flag").attributes("title")).toBe("importWizard.note.keyPathOnly");
+  });
 });
