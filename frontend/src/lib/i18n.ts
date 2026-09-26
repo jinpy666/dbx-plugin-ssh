@@ -3215,6 +3215,78 @@ for (const locale of Object.keys(uploadBridgeMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...uploadBridgeMessages[locale] };
 }
 
+// 文件夹批量上传（issue #78，M31-A）的追加文案块：只增不改 —— supplemental
+// 平铺 dotted key 合并，七语键集与占位符完全一致（workbench.spec 键集对比 +
+// i18nKeyReferences 双闸）。ask 策略降级说明放在 skippedNote 里。
+const folderUploadMessages: Record<string, Record<string, string>> = {
+  en: {
+    "folderUpload.action": "Upload folder…",
+    "folderUpload.title": "Folder upload",
+    "folderUpload.progress": "Directories {dirs}/{dirsTotal} · Files {files}/{filesTotal}",
+    "folderUpload.completed": "{count} file(s) uploaded from folder",
+    "folderUpload.completedWithFailures": "Folder upload finished, but {count} of {total} files failed.",
+    "folderUpload.skippedNote": " ({count} existing file(s) skipped)",
+    "folderUpload.empty": "The selected folder contains no uploadable files.",
+  },
+  "zh-CN": {
+    "folderUpload.action": "上传文件夹…",
+    "folderUpload.title": "文件夹上传",
+    "folderUpload.progress": "目录 {dirs}/{dirsTotal} · 文件 {files}/{filesTotal}",
+    "folderUpload.completed": "已从文件夹上传 {count} 个文件",
+    "folderUpload.completedWithFailures": "文件夹上传完成，但 {total} 个文件中有 {count} 个失败。",
+    "folderUpload.skippedNote": "（已跳过 {count} 个已存在文件）",
+    "folderUpload.empty": "所选文件夹中没有可上传的文件。",
+  },
+  "zh-TW": {
+    "folderUpload.action": "上傳資料夾…",
+    "folderUpload.title": "資料夾上傳",
+    "folderUpload.progress": "目錄 {dirs}/{dirsTotal} · 檔案 {files}/{filesTotal}",
+    "folderUpload.completed": "已從資料夾上傳 {count} 個檔案",
+    "folderUpload.completedWithFailures": "資料夾上傳完成，但 {total} 個檔案中有 {count} 個失敗。",
+    "folderUpload.skippedNote": "（已跳過 {count} 個已存在檔案）",
+    "folderUpload.empty": "所選資料夾中沒有可上傳的檔案。",
+  },
+  es: {
+    "folderUpload.action": "Subir carpeta…",
+    "folderUpload.title": "Subida de carpeta",
+    "folderUpload.progress": "Carpetas {dirs}/{dirsTotal} · Archivos {files}/{filesTotal}",
+    "folderUpload.completed": "{count} archivo(s) subidos desde la carpeta",
+    "folderUpload.completedWithFailures": "La subida de la carpeta terminó, pero {count} de {total} archivos fallaron.",
+    "folderUpload.skippedNote": " ({count} archivo(s) existentes omitidos)",
+    "folderUpload.empty": "La carpeta seleccionada no contiene archivos para subir.",
+  },
+  it: {
+    "folderUpload.action": "Carica cartella…",
+    "folderUpload.title": "Caricamento cartella",
+    "folderUpload.progress": "Cartelle {dirs}/{dirsTotal} · File {files}/{filesTotal}",
+    "folderUpload.completed": "{count} file caricati dalla cartella",
+    "folderUpload.completedWithFailures": "Caricamento della cartella completato, ma {count} file su {total} non sono stati caricati.",
+    "folderUpload.skippedNote": " ({count} file esistenti ignorati)",
+    "folderUpload.empty": "La cartella selezionata non contiene file da caricare.",
+  },
+  ja: {
+    "folderUpload.action": "フォルダーをアップロード…",
+    "folderUpload.title": "フォルダー転送",
+    "folderUpload.progress": "ディレクトリ {dirs}/{dirsTotal} · ファイル {files}/{filesTotal}",
+    "folderUpload.completed": "フォルダーから {count} 個のファイルをアップロードしました",
+    "folderUpload.completedWithFailures": "フォルダーのアップロードが完了しましたが、{total} 個中 {count} 個のファイルが失敗しました。",
+    "folderUpload.skippedNote": "（既存ファイル {count} 件をスキップ）",
+    "folderUpload.empty": "選択したフォルダーにアップロードできるファイルがありません。",
+  },
+  "pt-BR": {
+    "folderUpload.action": "Enviar pasta…",
+    "folderUpload.title": "Envio de pasta",
+    "folderUpload.progress": "Diretórios {dirs}/{dirsTotal} · Arquivos {files}/{filesTotal}",
+    "folderUpload.completed": "{count} arquivo(s) enviados da pasta",
+    "folderUpload.completedWithFailures": "O envio da pasta terminou, mas {count} de {total} arquivos falharam.",
+    "folderUpload.skippedNote": " ({count} arquivo(s) existentes ignorados)",
+    "folderUpload.empty": "A pasta selecionada não contém arquivos para enviar.",
+  },
+};
+for (const locale of Object.keys(folderUploadMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...folderUploadMessages[locale] };
+}
+
 // 拖拽上传门禁的拒绝提示（终端/SFTP 面板/宿主级拖入三条链路共用）：未连接、
 // 只读会话或传输协议占用终端时，拒绝要有反馈而不是静默吞掉。
 // terminalDropToPanel 是面板打开时终端拖入的专属指引：面板是可见落点，
