@@ -841,7 +841,7 @@ impl Plugin {
                 let path = required_string(&params, "path")?;
                 let offset = optional_u64(&params, "offset", 0);
                 let max_bytes = bounded_bytes(&params, "maxBytes", 256 * 1024);
-                // latin-1（M16 收口）：path 是整条 wire 形式（列表回传），
+                // latin-1 车道（M19.5 落地）：path 是整条 wire 形式（列表回传），
                 // 还原服务器字节后走裸包 READ（download 分片的 raw_read_chunk
                 // 先例）；多读 1 字节对齐高层的 truncated 语义。auto 走高层。
                 let encoding = self.resolve_sftp_encoding(session_id);
