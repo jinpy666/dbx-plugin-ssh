@@ -16,9 +16,7 @@ import {
   Film,
   Pause,
   Play,
-  Plus,
   ArrowDown,
-  ArrowLeft,
   ArrowLeftRight,
   ArrowUp,
   ArrowUpDown,
@@ -39,18 +37,14 @@ import {
   FolderPlus,
   FolderUp,
   Gauge,
-  Globe,
   ImagePlay,
   History,
   Home,
   Info,
-  KeyRound,
   Link2,
   ListChecks,
   Loader2,
   Lock,
-  MonitorPlay,
-  MonitorUp,
   Network,
   PackageOpen,
   Palette,
@@ -74,7 +68,6 @@ import {
   TextSelect,
   Trash2,
   TriangleAlert,
-  Usb,
   X,
   Zap,
 } from "@lucide/vue";
@@ -159,7 +152,6 @@ import { COMPLETION_SPECS } from "./lib/completions/specs";
 import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
-import { mergeQuickCommandImport, parseQuickCommandImport } from "./lib/quickCommandImport";
 import { enqueueWatchModified, popWatchModified, registerWatch, watchName, type ModifiedPrompt, type WatchRegistry } from "./lib/watchEdits";
 import { batchTargetLabel, deriveBatchCommandName, normalizeBatchTargets, normalizeLocalBatchTargets, quickPickCommandById, selectBatchTargets, summarizeBatchResults, toggleBatchTarget, type BatchSendSummary, type BatchSendTarget } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
@@ -189,11 +181,8 @@ import {
   highlightFillStyle,
   matchesInLine,
   normalizeHighlightRules,
-  sanitizeHighlightRuleInput,
   shouldRebuildHighlightRow,
   toAbsoluteRowRange,
-  HIGHLIGHT_COLOR_DEFAULT,
-  HIGHLIGHT_RULES_LIMIT,
   type HighlightRuleView,
 } from "./lib/keywordHighlight";
 // 动作链接（P1-2，默认关闭）+ 行号/时间戳 gutter（P1-3，默认关闭）。
@@ -306,7 +295,6 @@ import GpuNpuMonitor from "./components/GpuNpuMonitor.vue";
 import FolderPickerDialog from "./components/FolderPickerDialog.vue";
 import SideNavPanel, { type SftpSideQuickPath } from "./components/SideNavPanel.vue";
 import { Switch } from "./components/ui/switch";
-import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "./components/ui/context-menu";
 import { Popover, PopoverAnchor, PopoverContent } from "./components/ui/popover";
@@ -338,7 +326,6 @@ import {
 import VncConnectDialog, { type VncConnectOptions } from "./components/VncConnectDialog.vue";
 import VncSurface from "./components/VncSurface.vue";
 import type { VncInputEvent } from "./lib/vncFrame";
-import { rdpExperimentalEnabled } from "./lib/rdpExperimental";
 // RDP 会话（nyaterm-parity P3-4）：画布与 VNC 同构（同一 44 字节 patch 头，
 // 解码复用 vncFrame），输入走扫描码/unicode 双通道，证书确认走
 // connection/challenge kind=rdp-certificate 分支。
@@ -492,7 +479,20 @@ interface ConnectionSummary {
   color?: string;
   readOnly?: boolean;
   /** 宿主连接表单的 protocol 字段（缺省 ssh）：非 SSH 连接在 openSession 里路由到各自会话。 */
-  protocol?: "ssh" | "telnet" | "vnc";
+  protocol?: "ssh" | "telnet" | "vnc" | "serial" | "rdp";
+  /** 串口连接配置（M32-B，manifest serial_* 字段；缺失时回落连接表单）。 */
+  serialPort?: string;
+  serialBaud?: number;
+  serialDataBits?: "7" | "8";
+  serialParity?: "none" | "even" | "odd";
+  serialStopBits?: "1" | "2";
+  serialBackspace?: "del" | "ctrl_h";
+  /** RDP 连接配置（M32-B，manifest rdp_* 字段）。 */
+  rdpDomain?: string;
+  rdpWidth?: number;
+  rdpHeight?: number;
+  rdpCertificatePolicy?: "prompt" | "strict" | "accept-temporarily";
+  rdpClipboard?: boolean;
 }
 
 interface DownloadInfo {
@@ -631,8 +631,6 @@ const HIGHLIGHT_ENABLED_KEY = "ssh-keyword-highlight";
 const HIGHLIGHT_DECORATION_LIMIT = 400;
 // rAF 节流目标：≤30fps（约 33ms 一帧）。
 const HIGHLIGHT_SCAN_MIN_INTERVAL_MS = 33;
-// 8 色板（新增规则默认色板；自定义 hex 输入并行提供）。
-const HIGHLIGHT_PALETTE = ["#ef4444", "#f59e0b", "#facc15", "#22c55e", "#3b82f6", "#8b5cf6", "#ec4899", "#6b7280"];
 
 type TerminalSearchMatchState = "idle" | "match" | "no-match";
 
@@ -855,20 +853,13 @@ const commandHistoryBackup = ref("");
 // 所有连接/工作台共享；工具栏下拉一键发送到 PTY。
 const quickCommands = ref<QuickCommand[]>(loadQuickCommands());
 const quickMenuOpen = ref(false);
+// M32-A3：管理（新建/编辑/导入）迁入设置·终端（QuickCommandsSection），
+// 工具条弹层只留列表执行；saving/importing 作为在途态传给设置节。
 const quickSaving = ref(false);
-const quickDraft = reactive<{ id?: string; name: string; command: string }>({ name: "", command: "" });
-// Termius Snippets 式面板状态：搜索过滤 / 卡片展开 / 编辑器子视图。
+const quickImportBusy = ref(false);
+// Termius Snippets 式面板状态：搜索过滤 / 卡片展开。
 const quickSearch = ref("");
 const quickExpandedId = ref<string | null>(null);
-const quickEditorOpen = ref(false);
-// 批量导入子视图（对标 Tabby/NetCatty）：粘贴文本或选择 JSON 文件 → 预览
-// （解析 + 同名跳过 + 上限截断）→ 确认逐条走 ssh/quickCommands/save。
-const quickImportOpen = ref(false);
-const quickImportText = ref("");
-const quickImportFileName = ref("");
-const quickImportBusy = ref(false);
-const quickImportPlan = computed(() => parseQuickCommandImport(quickImportText.value));
-const quickImportMerge = computed(() => mergeQuickCommandImport(quickCommands.value, quickImportPlan.value));
 const filteredQuickCommands = computed(() => filterQuickCommands(quickCommands.value, quickSearch.value));
 // 命令输入建议浮层（P1-1）运行时状态：条目/选中项/光标锚点与抑制门锁存。
 // 开关与长度上下限的权威值在上方 suggestions*State（sidecar 偏好）。
@@ -985,53 +976,34 @@ function refreshCompletionMenu() {
   }
 }
 
-function openQuickEditor(item?: QuickCommand) {
-  quickDraft.id = item?.id;
-  quickDraft.name = item?.name ?? "";
-  quickDraft.command = item?.command ?? "";
-  quickEditorOpen.value = true;
-}
+// —— 快速命令数据面（M32-A3）：RPC 全部留在 App，编辑器/导入视图在
+// QuickCommandsSection（设置·终端），经 SettingsDialog 上抛意图。 ——
 
-function closeQuickEditor() {
-  quickEditorOpen.value = false;
-  quickDraft.id = undefined;
-  quickDraft.name = "";
-  quickDraft.command = "";
-}
-
-function openQuickImport() {
-  quickImportText.value = "";
-  quickImportFileName.value = "";
-  quickImportOpen.value = true;
-}
-
-function closeQuickImport() {
-  quickImportOpen.value = false;
-  quickImportText.value = "";
-  quickImportFileName.value = "";
-}
-
-async function onQuickImportFile(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = "";
-  if (!file) return;
+/** 单条保存（新建/编辑共用）：id 为空串表示新建（后端按此区分）。 */
+async function saveQuickCommand(command: { id?: string; name: string; command: string }) {
+  if (quickSaving.value) return;
+  quickSaving.value = true;
   try {
-    quickImportText.value = await file.text();
-    quickImportFileName.value = file.name;
+    const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/save", {
+      id: command.id ?? "",
+      name: command.name,
+      command: command.command,
+    });
+    quickCommands.value = normalizeQuickCommands(response.commands);
   } catch (cause) {
-    showError(cause);
+    showError(cause, "terminal");
+  } finally {
+    quickSaving.value = false;
   }
 }
 
-/** 确认导入：把预览 accepted 条目逐条走既有 ssh/quickCommands/save
+/** 批量导入：预览 accepted 条目逐条走既有 ssh/quickCommands/save
  *  （沿用后端 20 条上限校验），任一条失败即中止并提示已导入进度。 */
-async function confirmQuickImport() {
-  const merge = quickImportMerge.value;
-  if (!merge.accepted.length || quickImportBusy.value) return;
+async function importQuickCommands(items: Array<{ name: string; command: string }>) {
+  if (!items.length || quickImportBusy.value) return;
   quickImportBusy.value = true;
   try {
-    for (const item of merge.accepted) {
+    for (const item of items) {
       const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/save", {
         id: "",
         name: item.name,
@@ -1039,9 +1011,7 @@ async function confirmQuickImport() {
       });
       quickCommands.value = normalizeQuickCommands(response.commands);
     }
-    showNotice(t("quickCommandsImportDone", { count: merge.accepted.length }));
-    closeQuickImport();
-    quickEditorOpen.value = false;
+    showNotice(t("quickCommandsImportDone", { count: items.length }));
   } catch (cause) {
     showError(cause);
   } finally {
@@ -1459,7 +1429,6 @@ const localShellRestored = ref(false);
 // 优先接在既有 localSession 分支前面。
 const telnetSession = ref<{ sessionId: string; host: string; port: number } | null>(null);
 const telnetDialogOpen = ref(false);
-const telnetConfirmOpen = ref(false);
 const telnetState = ref<"idle" | "connecting" | "running" | "closed">("idle");
 const telnetError = ref("");
 const telnetLastSequence = ref(0);
@@ -1474,7 +1443,6 @@ const telnetTarget = computed(() => (telnetSession.value ? `${telnetSession.valu
 // `serial/write` 保留为兼容/降级路径；resize 无协议概念（设计稿 §4）。
 const serialSession = ref<{ sessionId: string; port: string; baudRate: number } | null>(null);
 const serialDialogOpen = ref(false);
-const serialConfirmOpen = ref(false);
 const serialState = ref<"idle" | "running" | "closed">("idle");
 const serialError = ref("");
 const serialLastSequence = ref(0);
@@ -1510,7 +1478,6 @@ const serialUploadStatusLabel = computed(() => {
 // 仍然挂着但被画布盖住），帧从 vnc/frame/{id} 二进制通道解码成 patch。
 const vncSession = ref<{ sessionId: string; host: string; port: number } | null>(null);
 const vncDialogOpen = ref(false);
-const vncConfirmOpen = ref(false);
 const vncState = ref<"idle" | "connecting" | "running" | "closed">("idle");
 const vncError = ref("");
 const vncScaleMode = ref<VncConnectOptions["scaleMode"]>("fit");
@@ -1524,9 +1491,9 @@ const vncTarget = computed(() => (vncSession.value ? `${vncSession.value.host}:$
 // + errorKind），断线重连展示手动 rdp/reconnect 出口。
 const rdpSession = ref<{ sessionId: string; host: string; port: number } | null>(null);
 const rdpDialogOpen = ref(false);
-const rdpConfirmOpen = ref(false);
-// 默认不向普通用户暴露 RDP；仅设置中显式启用实验能力后才显示入口。
-const rdpExperimental = ref(false);
+// RDP 实验门控的权威在后端（rdp/start 前置检查 local/preferences 的
+// rdp_experimental_enabled，直接 RPC 也无法绕过）；M32-A 移除工具条入口后
+// 前端不再持有内存门副本。
 const rdpState = ref<RdpSessionStateView>(initialRdpSessionState());
 const rdpScaleMode = ref<RdpConnectOptions["scaleMode"]>("fit");
 const rdpSurface = ref<InstanceType<typeof RdpSurface> | null>(null);
@@ -1686,8 +1653,11 @@ const runtimeEndpoint = computed<RuntimeEndpoint>(() => {
 });
 const connection = computed<ConnectionSummary>(() => {
   const value = hostContext.value.connection;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  if (!value || typeof value === "object" || Array.isArray(value)) return {} as ConnectionSummary;
   const raw = value as Record<string, unknown>;
+  // serial/rdp 连接配置（M32-B）：manifest select 存的是字符串值，逐项
+  // 白名单归一，非法/缺失回落各 startXXXSession 的默认值。
+  const resolution = typeof raw.rdp_resolution === "string" ? raw.rdp_resolution.match(/^(\d{3,4})x(\d{3,4})$/) : null;
   return {
     name: normalizeConnectionText(raw.name),
     host: normalizeConnectionText(raw.host),
@@ -1695,14 +1665,25 @@ const connection = computed<ConnectionSummary>(() => {
     username: normalizeConnectionText(raw.username),
     color: normalizeConnectionText(raw.color),
     readOnly: raw.readOnly === true,
-    protocol: raw.protocol === "telnet" || raw.protocol === "vnc" ? raw.protocol : "ssh",
+    protocol: raw.protocol === "telnet" || raw.protocol === "vnc" || raw.protocol === "serial" || raw.protocol === "rdp" ? raw.protocol : "ssh",
+    serialPort: normalizeConnectionText(raw.serial_port),
+    serialBaud: [9600, 19200, 38400, 57600, 115200, 230400].includes(Number(raw.serial_baud)) ? Number(raw.serial_baud) : undefined,
+    serialDataBits: raw.serial_data_bits === "7" ? "7" : raw.serial_data_bits === "8" ? "8" : undefined,
+    serialParity: raw.serial_parity === "even" || raw.serial_parity === "odd" ? raw.serial_parity : raw.serial_parity === "none" ? "none" : undefined,
+    serialStopBits: raw.serial_stop_bits === "1" ? "1" : raw.serial_stop_bits === "2" ? "2" : undefined,
+    serialBackspace: raw.serial_backspace === "ctrl_h" ? "ctrl_h" : raw.serial_backspace === "del" ? "del" : undefined,
+    rdpDomain: normalizeConnectionText(raw.rdp_domain),
+    rdpWidth: resolution ? Number(resolution[1]) : undefined,
+    rdpHeight: resolution ? Number(resolution[2]) : undefined,
+    rdpCertificatePolicy: raw.rdp_certificate_policy === "strict" || raw.rdp_certificate_policy === "accept-temporarily" ? raw.rdp_certificate_policy : raw.rdp_certificate_policy === "prompt" ? "prompt" : undefined,
+    rdpClipboard: raw.rdp_clipboard === undefined ? undefined : raw.rdp_clipboard === true || raw.rdp_clipboard === "true",
   };
 });
 // 连接协议（对标 Tabby profile）：宿主连接表单的 protocol 字段，缺省 ssh。
 // 非 SSH 连接由 openSession 路由到各自的会话视图，不建立 SSH 会话。
-const connectionProtocol = computed<"ssh" | "telnet" | "vnc">(() => {
+const connectionProtocol = computed<"ssh" | "telnet" | "vnc" | "serial" | "rdp">(() => {
   const protocol = connection.value.protocol;
-  return protocol === "telnet" || protocol === "vnc" ? protocol : "ssh";
+  return protocol === "telnet" || protocol === "vnc" || protocol === "serial" || protocol === "rdp" ? protocol : "ssh";
 });
 const canWrite = computed(() => !connection.value.readOnly && !connectionReadOnly.value);
 const selectedEntry = computed(() => entries.value.find((entry) => entry.uri === selectedPath.value));
@@ -4197,6 +4178,16 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     if (!(await startVncFromConnection())) vncDialogOpen.value = true;
     return;
   }
+  // M32-B：serial/rdp 连接记录与 telnet/vnc 同模式路由——配置驱动会话启动，
+  // 缺字段/启动失败回落各自连接表单（对话框自带上次参数预填）。
+  if (connectionProtocol.value === "serial") {
+    if (!(await startSerialFromConnection())) serialDialogOpen.value = true;
+    return;
+  }
+  if (connectionProtocol.value === "rdp") {
+    if (!(await startRdpFromConnection())) rdpDialogOpen.value = true;
+    return;
+  }
   window.clearTimeout(reconnectTimer);
   reconnectAttempt = 0;
   // Boot-time tab restore can race the host's plugin activation and fail the
@@ -4615,7 +4606,6 @@ async function closeTelnetSession() {
   telnetState.value = "idle";
   telnetError.value = "";
   telnetPendingFrames.clear();
-  telnetConfirmOpen.value = false;
   if (!sessionId) return;
   await window.dbxPlugin.invoke("telnet/close", { sessionId }).catch(() => undefined);
   terminal?.focus();
@@ -4689,12 +4679,47 @@ async function startVncFromConnection(): Promise<boolean> {
   });
 }
 
+// M32-B：串口连接路由——从连接 config 组装 SerialConnectOptions。设备路径
+// 是唯一硬前提（其余参数有 sidecar 默认值）；startSerialSession 内部吞错并
+// 落 showError，成功与否以 serialSession 挂载为准。
+async function startSerialFromConnection(): Promise<boolean> {
+  const conn = connection.value;
+  if (!conn.serialPort) return false;
+  await startSerialSession({
+    portName: conn.serialPort,
+    baudRate: conn.serialBaud ?? 115200,
+    dataBits: conn.serialDataBits ?? "8",
+    parity: conn.serialParity ?? "none",
+    stopBits: conn.serialStopBits ?? "1",
+    backspaceMode: conn.serialBackspace ?? "del",
+  });
+  return serialSession.value !== null;
+}
+
+// M32-B：RDP 连接路由——host/port 走连接绑定字段，domain/分辨率/证书策略/
+// 剪贴板走 rdp_* config 字段；凭据（密码）不在连接配置内，由 RDP 会话自身的
+// NLA/证书提示流兜底。失败回落 RdpConnectDialog（上次参数预填）。
+async function startRdpFromConnection(): Promise<boolean> {
+  const conn = connection.value;
+  if (!conn.host) return false;
+  return startRdpSession({
+    host: conn.host,
+    port: conn.port && conn.port > 0 ? conn.port : 3389,
+    username: conn.username || "",
+    width: conn.rdpWidth ?? 1280,
+    height: conn.rdpHeight ?? 800,
+    certificatePolicy: conn.rdpCertificatePolicy ?? "prompt",
+    clipboard: conn.rdpClipboard ?? true,
+    scaleMode: "fit",
+    ...(conn.rdpDomain ? { domain: conn.rdpDomain } : {}),
+  });
+}
+
 async function closeVncSession() {
   const sessionId = vncSession.value?.sessionId;
   vncSession.value = null;
   vncState.value = "idle";
   vncError.value = "";
-  vncConfirmOpen.value = false;
   if (!sessionId) return;
   await window.dbxPlugin.invoke("vnc/close", { sessionId }).catch(() => undefined);
   terminal?.focus();
@@ -4711,27 +4736,6 @@ function sendVncClipboard(text: string) {
   if (!sessionId || !text) return;
   void window.dbxPlugin.invoke("vnc/set-clipboard", { sessionId, text }).catch(() => undefined);
   showNotice(t("vnc.clipboardSent"));
-}
-
-// 工具栏 VNC 入口：SSH/本地/Telnet/串口/RDP 占用终端视图时先经确认。
-function requestVnc() {
-  if (isVncMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || serialSession.value || rdpSession.value) {
-    vncConfirmOpen.value = true;
-    return;
-  }
-  vncDialogOpen.value = true;
-}
-
-// 确认后：关掉占用终端视图的会话，再弹 VNC 连接表单。
-async function confirmVncOpen() {
-  vncConfirmOpen.value = false;
-  await closeSession();
-  if (localSession.value) await closeLocalTerminal();
-  if (telnetSession.value) await closeTelnetSession();
-  if (serialSession.value) await closeSerialSession();
-  if (rdpSession.value) await closeRdpSession();
-  vncDialogOpen.value = true;
 }
 
 // —— RDP 会话生命周期（nyaterm-parity P3-4，与 VNC 同款互斥展示）——
@@ -4782,7 +4786,6 @@ async function closeRdpSession() {
   const sessionId = rdpSession.value?.sessionId;
   rdpSession.value = null;
   rdpState.value = initialRdpSessionState();
-  rdpConfirmOpen.value = false;
   dismissRdpCertPrompt();
   rdpClipboardChunks.delete(sessionId ?? "");
   if (!sessionId) return;
@@ -4813,27 +4816,6 @@ async function reconnectRdpSession() {
   } catch (cause) {
     showError(cause, "terminal");
   }
-}
-
-// 工具栏 RDP 入口：SSH/本地/Telnet/串口/VNC 占用终端视图时先经确认。
-function requestRdp() {
-  if (!rdpExperimental.value || isRdpMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || serialSession.value || vncSession.value) {
-    rdpConfirmOpen.value = true;
-    return;
-  }
-  rdpDialogOpen.value = true;
-}
-
-// 确认后：关掉占用终端视图的会话，再弹 RDP 连接表单。
-async function confirmRdpOpen() {
-  rdpConfirmOpen.value = false;
-  await closeSession();
-  if (localSession.value) await closeLocalTerminal();
-  if (telnetSession.value) await closeTelnetSession();
-  if (serialSession.value) await closeSerialSession();
-  if (vncSession.value) await closeVncSession();
-  rdpDialogOpen.value = true;
 }
 
 // —— 串口会话生命周期（P3，与 Telnet 同款互斥展示；无 replay，掉帧仅按
@@ -4942,7 +4924,6 @@ async function closeSerialSession() {
   serialUnknownStreamFrames = 0;
   serialBinaryInput.value = true;
   serialInputQueue.reset();
-  serialConfirmOpen.value = false;
   // 上传挂在会话上：随会话关闭一并终止（sidecar cancel 幂等）。
   if (serialUpload.value.phase !== "idle") {
     serialUploadAbortRequested = true;
@@ -4996,51 +4977,6 @@ function cancelSerialUpload() {
   serialUploadAbortRequested = true;
   if (sessionId) void window.dbxPlugin.invoke("serial/upload/cancel", { sessionId }).catch(() => undefined);
   serialUpload.value = { ...serialUpload.value, phase: "failed", reason: "cancelled" };
-}
-
-// 工具栏串口入口：SSH 会话仍在（或连接中/本地终端/Telnet 占用）时先经确认，
-// 与 Telnet 入口同款流程。
-function requestSerial() {
-  if (isSerialMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || telnetSession.value || vncSession.value || rdpSession.value) {
-    serialConfirmOpen.value = true;
-    return;
-  }
-  serialDialogOpen.value = true;
-}
-
-// 确认后：关掉占用终端视图的 SSH/本地/Telnet/VNC/RDP 会话，再弹串口连接表单。
-async function confirmSerialOpen() {
-  serialConfirmOpen.value = false;
-  await closeSession();
-  if (localSession.value) await closeLocalTerminal();
-  if (telnetSession.value) await closeTelnetSession();
-  if (vncSession.value) await closeVncSession();
-  if (rdpSession.value) await closeRdpSession();
-  serialDialogOpen.value = true;
-}
-
-// 工具栏 Telnet 入口：SSH 会话仍在（或连接中/本地终端占用）时先经确认，
-// 与本地终端入口同款流程。
-function requestTelnet() {
-  if (isTelnetMode.value) return;
-  if (session.value || reconnectPending.value || terminalState.value === "connecting" || localSession.value || vncSession.value || serialSession.value || rdpSession.value) {
-    telnetConfirmOpen.value = true;
-    return;
-  }
-  telnetDialogOpen.value = true;
-}
-
-// 确认后：关掉占用终端视图的 SSH/本地/VNC/串口/RDP 会话，再弹 Telnet 连接表单。
-// 串口与 requestTelnet 的占用判定同链：漏关会留下孤儿串口会话占用 sidecar PTY。
-async function confirmTelnetOpen() {
-  telnetConfirmOpen.value = false;
-  await closeSession();
-  if (localSession.value) await closeLocalTerminal();
-  if (vncSession.value) await closeVncSession();
-  if (serialSession.value) await closeSerialSession();
-  if (rdpSession.value) await closeRdpSession();
-  telnetDialogOpen.value = true;
 }
 
 // HOST_PLUGIN_UI_SPEC §8.3/§7.4 workbench/close 两段式关闭：宿主拆除 panel/tab webview
@@ -5753,18 +5689,9 @@ async function copySuggestions() {
 // rAF 节流（≤30fps）视口行扫描，per-row Map 维护 decoration，全局上限 400。
 // ---------------------------------------------------------------------------
 const highlightRules = ref<HighlightRuleView[]>([]);
-const highlightMenuOpen = ref(false);
+// 编辑器草稿/弹层状态已迁 HighlightRulesSection（设置·终端，M32-A2）；
+// App 只留权威规则表与在途态（经 SettingsDialog props 下发）。
 const highlightSaving = ref(false);
-const highlightDraftError = ref("");
-const highlightDraft = reactive({ id: undefined as string | undefined, pattern: "", color: HIGHLIGHT_COLOR_DEFAULT, isRegex: false, caseSensitive: false });
-// ToggleGroup（multiple）以字符串数组建模；这里桥接到 draft 的两个布尔标志位。
-const highlightFlagValues = computed<string[]>({
-  get: () => [highlightDraft.isRegex ? "regex" : "", highlightDraft.caseSensitive ? "case" : ""].filter(Boolean),
-  set: (values) => {
-    highlightDraft.isRegex = values.includes("regex");
-    highlightDraft.caseSensitive = values.includes("case");
-  },
-});
 const compiledHighlightRules = computed(() => compileRules(highlightRules.value));
 
 function loadHighlightEnabled(): boolean {
@@ -5775,23 +5702,9 @@ function loadHighlightEnabled(): boolean {
   }
 }
 
-// 总开关：关闭时摘掉 onRender 挂子并全量清理 decoration（零挂钩子语义）。
+// 总开关（pluginStore 持久化，渲染引擎读取；M32-A2 后设置内无全局开关——
+// 规则逐条带 enabled，按条启停即可）。
 const highlightEnabled = ref(loadHighlightEnabled());
-
-function toggleHighlightEnabled() {
-  highlightEnabled.value = !highlightEnabled.value;
-  try {
-    pluginStore.setItem(HIGHLIGHT_ENABLED_KEY, highlightEnabled.value ? "true" : "false");
-  } catch {
-    // 存储不可用时仅当前会话生效。
-  }
-  if (highlightEnabled.value) {
-    attachHighlightRender();
-    rescanHighlightViewport();
-  } else {
-    detachHighlightRender();
-  }
-}
 
 async function hydrateHighlightRules() {
   try {
@@ -5803,49 +5716,25 @@ async function hydrateHighlightRules() {
   }
 }
 
-function resetHighlightDraft() {
-  highlightDraft.id = undefined;
-  highlightDraft.pattern = "";
-  highlightDraft.color = HIGHLIGHT_COLOR_DEFAULT;
-  highlightDraft.isRegex = false;
-  highlightDraft.caseSensitive = false;
-  highlightDraftError.value = "";
-}
-
-async function saveHighlightRule() {
+// 数据面（M32-A2）：RPC 留在 App，编辑器视图在 HighlightRulesSection
+// （设置·终端）。入参已经组件内 sanitize，这里只负责落库与刷新权威态。
+async function saveHighlightRule(rule: { id?: string; pattern: string; color: string; isRegex: boolean; caseSensitive: boolean }) {
   if (highlightSaving.value) return;
-  const sanitized = sanitizeHighlightRuleInput({ pattern: highlightDraft.pattern, color: highlightDraft.color, isRegex: highlightDraft.isRegex, caseSensitive: highlightDraft.caseSensitive });
-  if (sanitized.error || !sanitized.value) {
-    highlightDraftError.value = t(sanitized.error ?? "highlightRules.invalidPattern");
-    return;
-  }
-  if (!highlightDraft.id && highlightRules.value.length >= HIGHLIGHT_RULES_LIMIT) return;
   highlightSaving.value = true;
-  highlightDraftError.value = "";
   try {
     const response = await window.dbxPlugin.invoke<{ rules: unknown }>("ssh/highlightRules/save", {
-      id: highlightDraft.id ?? "",
-      pattern: sanitized.value.pattern,
-      isRegex: sanitized.value.isRegex,
-      color: sanitized.value.color,
-      caseSensitive: sanitized.value.caseSensitive,
+      id: rule.id ?? "",
+      pattern: rule.pattern,
+      isRegex: rule.isRegex,
+      color: rule.color,
+      caseSensitive: rule.caseSensitive,
     });
     highlightRules.value = normalizeHighlightRules(response.rules);
-    resetHighlightDraft();
   } catch (cause) {
-    highlightDraftError.value = settingsErrorOf(cause);
+    showError(cause, "terminal");
   } finally {
     highlightSaving.value = false;
   }
-}
-
-function editHighlightRule(item: HighlightRuleView) {
-  highlightDraft.id = item.id;
-  highlightDraft.pattern = item.pattern;
-  highlightDraft.color = item.color;
-  highlightDraft.isRegex = item.isRegex;
-  highlightDraft.caseSensitive = item.caseSensitive;
-  highlightDraftError.value = "";
 }
 
 async function toggleHighlightRule(item: HighlightRuleView) {
@@ -5868,18 +5757,9 @@ async function deleteHighlightRule(id: string) {
   try {
     const response = await window.dbxPlugin.invoke<{ rules: unknown }>("ssh/highlightRules/delete", { id });
     highlightRules.value = normalizeHighlightRules(response.rules);
-    if (highlightDraft.id === id) resetHighlightDraft();
   } catch (cause) {
     showError(cause, "terminal");
   }
-}
-
-// 规则弹层开关（互斥族统一走 closeToolbarPopovers 收口）。
-function toggleHighlightMenu() {
-  const next = !highlightMenuOpen.value;
-  closeToolbarPopovers();
-  highlightMenuOpen.value = next;
-  if (next) resetHighlightDraft();
 }
 
 // ---- decoration 引擎 ----
@@ -7041,7 +6921,6 @@ async function hydratePrefsOnce() {
     // 背景图偏好：键缺省保持内存默认（关 / 45%）。
     if (typeof prefs.wallpaper_enabled === "boolean") wallpaperEnabled.value = prefs.wallpaper_enabled;
     if (prefs.wallpaper_opacity !== undefined) wallpaperOpacity.value = Math.min(90, Math.max(10, Math.round(Number(prefs.wallpaper_opacity) || 45)));
-    rdpExperimental.value = rdpExperimentalEnabled(prefs.rdp_experimental_enabled);
     cachePrefs();
   } catch {
     // 旧 sidecar：保留 localStorage 种子或默认。
@@ -9473,35 +9352,8 @@ async function hydrateQuickCommands() {
   }
 }
 
-async function addQuickCommand() {
-  const command = quickDraft.command.trim();
-  if (!command || quickSaving.value) return;
-  if (!quickDraft.id && quickCommands.value.length >= 20) return;
-  quickSaving.value = true;
-  try {
-    const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/save", {
-      id: quickDraft.id ?? "",
-      name: quickDraft.name.trim(),
-      command,
-    });
-    quickCommands.value = normalizeQuickCommands(response.commands);
-    closeQuickEditor();
-  } catch (cause) {
-    showError(cause, "terminal");
-  } finally {
-    quickSaving.value = false;
-  }
-}
-
-// 点击卡片的编辑按钮：编辑器子视图载入草稿（携带 id 即更新语义）。
-function editQuickCommand(item: QuickCommand) {
-  openQuickEditor(item);
-}
-
 async function deleteQuickCommand(id: string) {
-  const target = quickCommands.value.find((item) => item.id === id);
-  // 删除是不可逆操作：先确认（与重命名覆盖/强杀进程同一 confirm 语义）。
-  if (target && !window.confirm(t("quickCommandDeleteConfirm", { name: target.name || target.command }))) return;
+  // 删除确认在 QuickCommandsSection 内完成（管理视图专属交互）。
   try {
     const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/delete", { id });
     quickCommands.value = normalizeQuickCommands(response.commands);
@@ -9788,11 +9640,9 @@ function toggleQuickMenu() {
   closeToolbarPopovers();
   quickMenuOpen.value = next;
   if (next) {
-    // 每次打开回到列表态：清空搜索/展开/编辑器与导入子视图。
+    // 每次打开回到列表态：清空搜索/展开（M32-A3 后弹层只剩列表执行）。
     quickSearch.value = "";
     quickExpandedId.value = null;
-    quickEditorOpen.value = false;
-    quickImportOpen.value = false;
   }
 }
 
@@ -10665,10 +10515,6 @@ function openSettings() {
   void probeLocalCapabilities();
 }
 
-function openProfilesManager() {
-  profilesOpen.value = true;
-}
-
 async function confirmChmod() {
   const entry = chmodTarget.value;
   const mode = chmodDraft.value.trim();
@@ -10785,7 +10631,6 @@ function closeToolbarPopovers() {
   quickMenuOpen.value = false;
   connectionInfoOpen.value = false;
   agentModeOpen.value = false;
-  highlightMenuOpen.value = false;
   bookmarkSaveOpen.value = false;
   batchTargetsOpen.value = false;
   localMenuOpen.value = false;
@@ -10854,14 +10699,10 @@ function trackStableFocus(event: FocusEvent) {
 // 计数变化驱动聚焦/归还；同层互斥由交互保证。
 const modalOpenStates = computed(() => [
   localOpenConfirmOpen.value,
-  telnetConfirmOpen.value,
   telnetDialogOpen.value,
-  serialConfirmOpen.value,
   serialDialogOpen.value,
   serialUploadDialogOpen.value,
-  vncConfirmOpen.value,
   vncDialogOpen.value,
-  rdpConfirmOpen.value,
   rdpDialogOpen.value,
   rdpCertPrompt.value !== null,
   folderPickerTarget.value !== null,
@@ -11459,14 +11300,8 @@ onBeforeUnmount(() => {
         <button class="icon-button" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><SquarePlus /></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('copySessionTab')" :disabled="!connectionId || !connected" @click="openCopiedSessionTab"><Copy /></button>
-        <!-- Telnet 明文会话入口（P2-3）：与 SSH/本地终端互斥，占用终态先经确认。 -->
-        <button v-if="!localUiMode" class="icon-button icon-amber" :title="t('telnet.open')" @click="requestTelnet"><Globe /></button>
-        <!-- VNC 远程桌面入口（nyaterm-parity P2 2d）：与其它会话互斥，占用先经确认。 -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('vnc.open')" @click="requestVnc"><MonitorPlay /></button>
-        <!-- RDP 默认不向普通用户开放：仅设置中显式启用实验能力后显示。 -->
-        <button v-if="!localUiMode && rdpExperimental" class="icon-button icon-emerald" :title="t('rdp.open')" @click="requestRdp"><MonitorUp /></button>
-        <!-- 串口会话入口（P3）：与 SSH/本地/Telnet 互斥，占用终态先经确认。 -->
-        <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('serial.open')" @click="requestSerial"><Usb /></button>
+        <!-- Telnet/VNC/RDP/串口不再从工具条直开（M32-A）：连接记录统一走宿主
+             连接管理 → openSession 路由（B2），表单兜底仍走各 ConnectDialog。 -->
         <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
         <button v-if="isSerialMode" class="icon-button icon-emerald" :title="t('serial.upload.open')" :disabled="serialUploadBusy" @click="serialUploadDialogOpen = true"><FileUp /></button>
         <!-- 本地终端：sidecar 所在机器的登录 shell。与 SSH 会话互斥展示，
@@ -11543,7 +11378,8 @@ onBeforeUnmount(() => {
         <!-- 一键 sudo -v：向当前 PTY 写入命令刷新 sudo 凭据缓存；quick sudo 自动应答
              是否启用由连接设置决定（设置弹窗），工作台不再提供开关。 -->
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('sudoRefresh.title')" :disabled="!connected" @click="sendSudoRefresh"><ShieldCheck /></button>
-        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('profilesTitle')" @click="openProfilesManager"><KeyRound /></button>
+        <!-- quick sudo profiles 管理入口（M32-A）已归位设置·sudo：工具条不再放
+             管理类按钮，sudoRefresh 保留为会话内即时动作。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :disabled="!session" @click="forwardsOpen = true"><Network /></button>
@@ -11560,77 +11396,34 @@ onBeforeUnmount(() => {
               <button class="icon-button icon-amber" :title="t('quickCommands')" :disabled="!connected" @click.stop="toggleQuickMenu"><Zap /></button>
             </PopoverAnchor>
             <PopoverContent class="popover quick-commands-popover" align="end" :side-offset="5">
-            <!-- Termius Snippets 式结构：列表态（搜索 + 卡片 + 整宽新建按钮）、
-                 编辑器子视图与导入子视图（粘贴/文件 → 预览 → 确认）三个视图切换。 -->
-            <template v-if="quickImportOpen">
-              <header class="quick-editor-head">
-                <button class="icon-button compact" :title="t('cancel')" @click="closeQuickImport"><ArrowLeft /></button>
-                <h3>{{ t("quickCommandsImport") }}</h3>
-              </header>
-              <div class="quick-command-editor">
-                <label class="quick-import-file">
-                  <FileUp />
-                  <span>{{ quickImportFileName || t("quickCommandsImportFile") }}</span>
-                  <input type="file" accept=".json,application/json,text/plain" @change="onQuickImportFile" />
-                </label>
-                <textarea v-model="quickImportText" class="mono" rows="6" :placeholder="t('quickCommandsImportPlaceholder')" spellcheck="false" />
-                <p v-if="quickImportText.trim()" class="muted quick-import-summary">
-                  <template v-if="quickImportPlan.invalid < 0">{{ t("quickCommandsImportInvalid") }}</template>
-                  <template v-else>{{ t("quickCommandsImportSummary", { accepted: quickImportMerge.accepted.length, skipped: quickImportMerge.skippedExisting, dup: quickImportPlan.duplicates, invalid: quickImportPlan.invalid, overflow: quickImportMerge.overflow }) }}</template>
-                </p>
-                <div class="quick-command-editor-actions">
-                  <button class="primary-button" :disabled="quickImportBusy || !quickImportMerge.accepted.length" @click="confirmQuickImport">{{ t("quickCommandsImportConfirm", { count: quickImportMerge.accepted.length }) }}</button>
-                  <button @click="closeQuickImport">{{ t("cancel") }}</button>
-                </div>
-                <p class="muted quick-import-note">{{ t("quickCommandsImportPolicy") }}</p>
+            <!-- M32-A3 后工具条只留"列表 + 搜索 + 执行"（Termius Snippets 式）：
+                 新建/编辑/导入管理归位设置·终端（QuickCommandsSection）。 -->
+            <h3>{{ t("quickCommands") }}</h3>
+            <p class="quick-command-global-hint">{{ t("quickCommandsGlobalHint") }}</p>
+            <div v-if="quickCommands.length" class="quick-search">
+              <Search />
+              <input v-model="quickSearch" :placeholder="t('quickCommandsSearch')" spellcheck="false" />
+            </div>
+            <div v-if="!quickCommands.length" class="empty compact">{{ t("quickCommandsEmpty") }}</div>
+            <div v-else-if="!filteredQuickCommands.length" class="empty compact">{{ t("quickCommandsNoMatch") }}</div>
+            <div v-for="item in filteredQuickCommands" :key="item.id" class="quick-command-row quick-card" :class="{ expanded: quickExpandedId === item.id }">
+              <button class="quick-card-main" :title="item.command" @click="toggleQuickExpand(item.id)">
+                <Braces class="quick-card-icon" />
+                <span class="quick-card-text">
+                  <strong>{{ item.name }}</strong>
+                  <span class="mono">{{ item.command }}</span>
+                </span>
+              </button>
+              <div class="quick-card-actions">
+                <button class="quick-action" :disabled="!connected" @click="sendQuickCommand(item)">{{ t("quickCommandRun") }}</button>
+                <button class="quick-action" :disabled="!connected" @click="pasteQuickCommand(item)">{{ t("quickCommandPaste") }}</button>
               </div>
-            </template>
-            <template v-else-if="!quickEditorOpen">
-              <h3>{{ t("quickCommands") }}</h3>
-              <p class="quick-command-global-hint">{{ t("quickCommandsGlobalHint") }}</p>
-              <div v-if="quickCommands.length" class="quick-search">
-                <Search />
-                <input v-model="quickSearch" :placeholder="t('quickCommandsSearch')" spellcheck="false" />
-              </div>
-              <div v-if="!quickCommands.length" class="empty compact">{{ t("quickCommandsEmpty") }}</div>
-              <div v-else-if="!filteredQuickCommands.length" class="empty compact">{{ t("quickCommandsNoMatch") }}</div>
-              <div v-for="item in filteredQuickCommands" :key="item.id" class="quick-command-row quick-card" :class="{ expanded: quickExpandedId === item.id }">
-                <button class="quick-card-main" :title="item.command" @click="toggleQuickExpand(item.id)">
-                  <Braces class="quick-card-icon" />
-                  <span class="quick-card-text">
-                    <strong>{{ item.name }}</strong>
-                    <span class="mono">{{ item.command }}</span>
-                  </span>
-                </button>
-                <div class="quick-card-actions">
-                  <button class="quick-action" :disabled="!connected" @click="sendQuickCommand(item)">{{ t("quickCommandRun") }}</button>
-                  <button class="quick-action" :disabled="!connected" @click="pasteQuickCommand(item)">{{ t("quickCommandPaste") }}</button>
-                  <button class="icon-button compact" :title="t('quickCommandsEdit')" @click="editQuickCommand(item)"><Pencil /></button>
-                  <button class="icon-button compact" :title="t('delete')" @click="deleteQuickCommand(item.id)"><Trash2 /></button>
-                </div>
-                <div v-if="quickExpandedId === item.id" class="quick-card-full mono">{{ item.command }}</div>
-              </div>
-              <footer class="quick-command-footer">
-                <button class="quick-new-btn" :disabled="quickCommands.length >= 20" @click="openQuickEditor()"><Plus />{{ t("quickCommandsNew") }}</button>
-                <button class="quick-new-btn quick-import-btn" :disabled="quickCommands.length >= 20" @click="openQuickImport()"><FileUp />{{ t("quickCommandsImport") }}</button>
-                <span class="quick-command-limit">{{ t("quickCommandsLimit", { count: quickCommands.length, limit: 20 }) }}</span>
-              </footer>
-            </template>
-            <template v-else>
-              <header class="quick-editor-head">
-                <button class="icon-button compact" :title="t('cancel')" @click="closeQuickEditor"><ArrowLeft /></button>
-                <h3>{{ quickDraft.id ? t("quickCommandsEdit") : t("quickCommandsNew") }}</h3>
-              </header>
-              <footer class="quick-command-editor">
-                <input v-model="quickDraft.name" :placeholder="t('quickCommandsName')" :maxlength="60" autofocus />
-                <textarea v-model="quickDraft.command" class="mono" rows="4" :placeholder="t('quickCommandsCommand')" :maxlength="500" @keydown.ctrl.enter="addQuickCommand" />
-                <div class="quick-command-editor-actions">
-                  <button class="primary-button" :disabled="quickSaving || !quickDraft.command.trim() || (!quickDraft.id && quickCommands.length >= 20)" @click="addQuickCommand">{{ quickDraft.id ? t("save") : t("quickCommandsAdd") }}</button>
-                  <button @click="closeQuickEditor">{{ t("cancel") }}</button>
-                  <span class="quick-command-limit">{{ t("quickCommandsLimit", { count: quickCommands.length, limit: 20 }) }}</span>
-                </div>
-              </footer>
-            </template>
+              <div v-if="quickExpandedId === item.id" class="quick-card-full mono">{{ item.command }}</div>
+            </div>
+            <footer class="quick-command-footer quick-command-footer--readonly">
+              <span class="quick-command-limit">{{ t("quickCommandsLimit", { count: quickCommands.length, limit: 20 }) }}</span>
+              <span class="quick-command-manage-hint">{{ t("quickCommands.manageHint") }}</span>
+            </footer>
             </PopoverContent>
           </Popover>
         </div>
@@ -11649,55 +11442,8 @@ onBeforeUnmount(() => {
             </PopoverContent>
           </Popover>
         </div>
-        <div>
-          <Popover :open="highlightMenuOpen" @update:open="(open) => { if (!open) highlightMenuOpen = false; }">
-            <PopoverAnchor as-child>
-              <button class="icon-button icon-violet" :class="{ 'is-active': highlightMenuOpen }" :title="t('highlightRules.title')" :aria-pressed="highlightMenuOpen" @click.stop="toggleHighlightMenu"><Palette /></button>
-            </PopoverAnchor>
-            <PopoverContent class="popover highlight-rules-popover" align="end" :side-offset="5">
-            <h3>{{ t("highlightRules.title") }}</h3>
-            <div v-if="!highlightRules.length" class="empty compact">{{ t("highlightRules.empty") }}</div>
-            <div v-else class="highlight-rule-list">
-              <div v-for="item in highlightRules" :key="item.id" class="highlight-rule-row">
-              <span class="highlight-color-dot" :style="{ backgroundColor: item.color }" />
-              <div class="highlight-rule-main">
-                <span class="highlight-rule-pattern mono" :class="{ disabled: !item.enabled }" :title="item.pattern">{{ item.pattern }}</span>
-                <span class="highlight-rule-badges">
-                  <span v-if="item.isRegex">regex</span>
-                  <span v-if="item.caseSensitive">Aa</span>
-                </span>
-              </div>
-              <span class="highlight-rule-actions">
-                <label class="highlight-switch-control" :title="t('highlightRules.enabled')">
-                  <input type="checkbox" :checked="item.enabled" @change="toggleHighlightRule(item)" />
-                </label>
-                <button class="icon-button" :title="t('quickCommandsEdit')" @click="editHighlightRule(item)"><Pencil /></button>
-                <button class="icon-button" :title="t('delete')" @click="deleteHighlightRule(item.id)"><Trash2 /></button>
-              </span>
-            </div>
-            </div>
-            <footer class="highlight-editor">
-              <div class="highlight-editor-inputs">
-                <input v-model="highlightDraft.pattern" :placeholder="t('highlightRules.patternPlaceholder')" :maxlength="200" spellcheck="false" @keydown.enter="saveHighlightRule" />
-                <ToggleGroup v-model="highlightFlagValues" type="multiple" class="highlight-editor-flags">
-                  <ToggleGroupItem value="regex" class="highlight-editor-flag-item" :title="t('highlightRules.regex')">.*</ToggleGroupItem>
-                  <ToggleGroupItem value="case" class="highlight-editor-flag-item" :title="t('highlightRules.caseSensitive')">Aa</ToggleGroupItem>
-                </ToggleGroup>
-              </div>
-              <div class="highlight-palette">
-                <button v-for="swatch in HIGHLIGHT_PALETTE" :key="swatch" type="button" class="highlight-palette-swatch" :class="{ selected: highlightDraft.color.toLowerCase() === swatch }" :style="{ backgroundColor: swatch }" :aria-label="swatch" @click="highlightDraft.color = swatch" />
-                <input v-model="highlightDraft.color" class="highlight-hex-input mono" :title="t('highlightRules.color')" :maxlength="7" spellcheck="false" />
-              </div>
-              <div class="highlight-editor-actions">
-                <span class="highlight-rule-limit">{{ t("highlightRules.limit", { count: highlightRules.length, limit: HIGHLIGHT_RULES_LIMIT }) }}</span>
-                <button v-if="highlightDraft.id" @click="resetHighlightDraft">{{ t("cancel") }}</button>
-                <button class="primary-button" :disabled="highlightSaving || !highlightDraft.pattern.trim() || (!highlightDraft.id && highlightRules.length >= HIGHLIGHT_RULES_LIMIT)" @click="saveHighlightRule">{{ highlightDraft.id ? t("save") : t("highlightRules.add") }}</button>
-              </div>
-              <p v-if="highlightDraftError" class="task-error">{{ highlightDraftError }}</p>
-            </footer>
-            </PopoverContent>
-          </Popover>
-        </div>
+        <!-- 高亮规则管理（M32-A2）已归位设置·终端（HighlightRulesSection）：
+             工具条不再放配置编辑器，渲染扫描（compiledHighlightRules）仍在。 -->
         <button class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
         <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!connected" @click="toggleRecording"><Disc /></button>
         <button class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
@@ -12946,12 +12692,22 @@ onBeforeUnmount(() => {
       :download-prefs="downloadPrefsAdapter"
       :transfer-prefs="transferPrefsAdapter"
       :suggestion-prefs="suggestionPrefsAdapter"
+      :highlight-rules="highlightRules"
+      :highlight-saving="highlightSaving"
+      :quick-commands="quickCommands"
+      :quick-saving="quickSaving"
+      :quick-importing="quickImportBusy"
       :t="t"
       @notice="showNotice"
       @error="showError"
+      @save-highlight-rule="saveHighlightRule"
+      @delete-highlight-rule="deleteHighlightRule"
+      @toggle-highlight-rule="toggleHighlightRule"
+      @save-quick-command="saveQuickCommand"
+      @delete-quick-command="deleteQuickCommand"
+      @import-quick-commands="importQuickCommands"
       @browse-download-dir="folderPickerTarget = 'settings'"
       @update:webgl="setWebglEnabled"
-      @update:rdp-experimental="(enabled) => (rdpExperimental = enabled)"
       @update-behavior="updateTerminalBehavior"
       @update-hotkeys="updateTerminalHotkeys"
       @update:action-links="updateActionLinksSettings"
@@ -13204,65 +12960,9 @@ onBeforeUnmount(() => {
     <!-- RDP 连接表单（P3-4）：host/port/NLA 凭据/分辨率/证书策略。 -->
     <RdpConnectDialog :locale="locale" :open="rdpDialogOpen" @update:open="(open) => (rdpDialogOpen = open)" @connect="startRdpSession" />
 
-    <!-- RDP 确认：SSH/本地/Telnet/串口/VNC 会话仍占用终端视图时先关闭再弹连接表单 -->
-    <Dialog :open="rdpConfirmOpen" @update:open="(open) => { if (!open) rdpConfirmOpen = false; }">
-      <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header>
-          <DialogTitle>{{ t("rdp.openConfirmTitle") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="rdpConfirmOpen = false"><X /></button>
-        </header>
-        <p class="muted">{{ t("rdp.openConfirm") }}</p>
-        <footer>
-          <button @click="rdpConfirmOpen = false">{{ t("cancel") }}</button>
-          <button class="primary-button" @click="confirmRdpOpen">{{ t("rdp.open") }}</button>
-        </footer>
-      </DialogContent>
-    </Dialog>
-
-    <!-- VNC 确认：SSH/本地/Telnet/串口会话仍占用终端视图时先关闭再弹连接表单 -->
-    <Dialog :open="vncConfirmOpen" @update:open="(open) => { if (!open) vncConfirmOpen = false; }">
-      <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header>
-          <DialogTitle>{{ t("vnc.openConfirmTitle") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="vncConfirmOpen = false"><X /></button>
-        </header>
-        <p class="muted">{{ t("vnc.openConfirm") }}</p>
-        <footer>
-          <button @click="vncConfirmOpen = false">{{ t("cancel") }}</button>
-          <button class="primary-button" @click="confirmVncOpen">{{ t("vnc.open") }}</button>
-        </footer>
-      </DialogContent>
-    </Dialog>
-
-    <!-- Telnet 确认：SSH 会话仍连着（或本地终端占用）时先关闭再弹连接表单 -->
-    <Dialog :open="telnetConfirmOpen" @update:open="(open) => { if (!open) telnetConfirmOpen = false; }">
-      <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header>
-          <DialogTitle>{{ t("telnet.openConfirmTitle") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="telnetConfirmOpen = false"><X /></button>
-        </header>
-        <p class="muted">{{ t("telnet.openConfirm") }}</p>
-        <footer>
-          <button @click="telnetConfirmOpen = false">{{ t("cancel") }}</button>
-          <button class="primary-button" @click="confirmTelnetOpen">{{ t("telnet.open") }}</button>
-        </footer>
-      </DialogContent>
-    </Dialog>
-
-    <!-- 串口确认：SSH/本地/Telnet 会话仍占用终端视图时先关闭再弹连接表单 -->
-    <Dialog :open="serialConfirmOpen" @update:open="(open) => { if (!open) serialConfirmOpen = false; }">
-      <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header>
-          <DialogTitle>{{ t("serial.openConfirmTitle") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="serialConfirmOpen = false"><X /></button>
-        </header>
-        <p class="muted">{{ t("serial.openConfirm") }}</p>
-        <footer>
-          <button @click="serialConfirmOpen = false">{{ t("cancel") }}</button>
-          <button class="primary-button" @click="confirmSerialOpen">{{ t("serial.open") }}</button>
-        </footer>
-      </DialogContent>
-    </Dialog>
+    <!-- RDP 确认/VNC 确认/Telnet 确认/串口确认（M32-A 移除）：工具条协议直开
+         入口下线后，表单兜底从连接路由失败路径直接弹 ConnectDialog，不再有
+         "占用终态先确认替换" 的流程。 -->
 
     <!-- 本地终端确认：SSH 会话仍连着时先关闭再进入本地模式 -->
     <Dialog :open="localOpenConfirmOpen" @update:open="(open) => { if (!open) localOpenConfirmOpen = false; }">
@@ -13354,7 +13054,8 @@ onBeforeUnmount(() => {
 .command-history-item { display: block; width: 100%; overflow: hidden; border: 1px solid transparent; border-radius: 4px; padding: 4px 8px; background: transparent; color: var(--foreground); font-size: 11px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .command-history-item:hover { background: var(--accent); border-color: var(--border); }
 
-/* 快速命令栏（工具栏下拉）：发送 / 编辑 / 删除 + 底部新增编辑器（根规则见 style.css 全局） */
+/* 快速命令栏（工具栏下拉）：M32-A3 后只剩"列表 + 搜索 + 执行"；
+   新建/编辑/导入样式随管理视图迁入 QuickCommandsSection。 */
 .quick-commands-popover h3 { margin: 2px 4px 6px; font-size: 12px; }
 /* 搜索行：图标 + 无边框输入（容器边框即输入框）。 */
 .quick-search { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 4px; padding: 0 8px; background: var(--background); }
@@ -13377,31 +13078,11 @@ onBeforeUnmount(() => {
 .quick-action { height: 22px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 8px; background: var(--background); color: var(--foreground); font-size: 10px; cursor: pointer; }
 .quick-action:hover:not(:disabled) { background: var(--accent); }
 .quick-card-full { flex: 1 1 100%; margin: 2px 4px 4px 27px; color: var(--foreground); font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 只读 footer：限额 + "管理入口在设置" 指引，不再有编辑动作。 */
 .quick-command-footer { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; }
-/* 导入按钮与新建按钮同排：新建占主宽，导入窄一档。 */
-.quick-command-footer .quick-import-btn { flex: 0 0 auto; padding: 0 10px; }
-.quick-import-file { display: flex; align-items: center; gap: 6px; height: 26px; border: 1px dashed var(--border); border-radius: var(--radius); padding: 0 8px; font-size: 11px; color: var(--muted-foreground); cursor: pointer; }
-.quick-import-file:hover { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); background: var(--accent); }
-.quick-import-file svg { width: 13px; height: 13px; flex: none; }
-.quick-import-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.quick-import-file input[type="file"] { display: none; }
-.quick-import-summary { margin: 0; font-size: 10px; line-height: 1.5; }
-.quick-import-note { margin: 0; font-size: 10px; line-height: 1.5; }
-.quick-new-btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex: 1; height: 26px; border: 1px dashed var(--border); border-radius: var(--radius); background: transparent; color: var(--foreground); font-size: 11px; cursor: pointer; }
-.quick-new-btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); background: var(--accent); }
-.quick-new-btn:disabled { cursor: default; opacity: .42; }
-.quick-new-btn svg { width: 13px; height: 13px; }
-.quick-editor-head { display: flex; align-items: center; gap: 6px; }
-.quick-editor-head h3 { flex: 1; margin: 0; }
-/* 编辑器子视图（新建/编辑共用）：名称 + 多行命令 + 保存/取消。 */
-.quick-command-editor { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
-.quick-command-editor input { width: 100%; height: 26px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 8px; background: var(--background); color: var(--foreground); font-size: 12px; }
-.quick-command-editor textarea { width: 100%; resize: vertical; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; background: var(--background); color: var(--foreground); font-size: 12px; line-height: 1.5; }
-.quick-command-editor input:focus, .quick-command-editor textarea:focus { border-color: color-mix(in srgb, var(--primary) 70%, var(--border)); outline: none; }
-.quick-command-editor-actions { display: flex; align-items: center; gap: 6px; }
-.quick-command-editor-actions .quick-command-limit { flex: 1; overflow: hidden; color: var(--muted-foreground); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-.quick-command-editor-actions button { height: 24px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 8px; background: var(--background); color: var(--foreground); font-size: 11px; cursor: pointer; }
-.quick-command-editor-actions .primary-button { background: var(--primary); color: var(--primary-foreground); }
+.quick-command-footer--readonly { justify-content: space-between; }
+.quick-command-limit { color: var(--muted-foreground); font-size: 10px; white-space: nowrap; }
+.quick-command-manage-hint { min-width: 0; overflow: hidden; color: var(--muted-foreground); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 连接信息面板（工具栏下拉，只读；根规则见 style.css 全局） */
 .connection-info-popover h3 { margin: 4px 0 8px; font-size: 12px; }

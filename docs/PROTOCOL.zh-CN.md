@@ -4,7 +4,7 @@
 
 Sidecar 是插件级共享进程，所有状态都必须以 `connectionId`、`sessionId` 或 `taskId` 为键。`connection/connect` 只接收并缓存宿主注入的连接配置；`connection/disconnect` 会关闭该连接下的终端、SFTP 子系统和传输任务。工作台不会接收密码字段。
 
-Telnet/VNC 的 saved connection 生命周期也走同一入口，但不会进入 SSH 连接池：`connection/connect` 对 `external_config.protocol: "telnet"|"vnc"` 返回成功，`connection/test` 对宿主给出的 `runtime.host:runtime.port` 做 10 秒 TCP 可达性探测，`connection/disconnect` 按 `connection.id` 清理其 Telnet/VNC 会话。逻辑端点始终来自 `connection.host:connection.port`，用于界面显示和身份；实际 TCP 拨号只使用 `runtime.host:runtime.port`（缺省时回退逻辑端点）。
+Telnet/VNC/Serial/RDP 的 saved connection 生命周期也走同一入口，但不会进入 SSH 连接池：`connection/connect` 对 `external_config.protocol: "telnet"|"vnc"|"serial"|"rdp"` 返回成功，`connection/test` 对宿主给出的 `runtime.host:runtime.port` 做 10 秒 TCP 可达性探测（Serial 无 TCP 语义，直接返回成功并提示可达性在真实打开连接时校验），`connection/disconnect` 按 `connection.id` 清理其 Telnet/VNC 会话。逻辑端点始终来自 `connection.host:connection.port`，用于界面显示和身份；实际 TCP 拨号只使用 `runtime.host:runtime.port`（缺省时回退逻辑端点）。serial/rdp 连接的会话启动由前端 `openSession` 路由（M32-B）：读取连接的 `serial_*`/`rdp_*` config 字段组装各自的连接参数，失败回落对应连接表单。
 
 工作台的“新建会话”保持独立 transport 语义，会重新完成 SSH 认证（堡垒机可再次要求 MFA）；“复制会话（免再次验证）”则向 `ssh/session/open` 传 `reuseAuthenticatedTransport: true` 和当前 `reuseAuthenticatedSessionId`，在用户所点窗口当前存活且已认证的 transport 上新开独立 PTY channel。复制会话拥有独立 `sessionId`、`workbenchId`、回放缓冲和终端任务，不复制或缓存 OTP。打开复制 channel 前会先预占共享 transport 引用，因此源会话在 channel/PTY/shell 建立期间关闭也不会提前释放跳板链；关闭任一复制会话只关闭自己的 channel，最后一个共享引用释放后才断开跳板链。每个复制会话都会额外占用一个 SSH channel，数量受服务端 `MaxSessions` 限制（OpenSSH 常见默认值为 10）；超过限制时 `open` 返回 channel 建立失败。
 

@@ -306,7 +306,18 @@ impl Plugin {
             }
             "connection/test" => {
                 let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
-                if endpoint.protocol == "telnet" || endpoint.protocol == "vnc" {
+                // 串口无 TCP 语义（M32-B）：本地设备的可达性只能真开串口时校验，
+                // 测试阶段直接放行提示；rdp 与 telnet/vnc 同走 TCP probe。
+                if endpoint.protocol == "serial" {
+                    return Ok(json!({
+                        "success": true,
+                        "message": "serial device: reachability is validated when the connection opens",
+                    }));
+                }
+                if endpoint.protocol == "telnet"
+                    || endpoint.protocol == "vnc"
+                    || endpoint.protocol == "rdp"
+                {
                     let reachable = self
                         .runtime
                         .block_on(tcp_probe(&endpoint.runtime_host, endpoint.runtime_port));
@@ -340,7 +351,9 @@ impl Plugin {
             }
             "connection/connect" => {
                 let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
-                if endpoint.protocol == "telnet" || endpoint.protocol == "vnc" {
+                // 非 SSH 会话协议（telnet/vnc/serial/rdp）不走 SSH 连接存储：
+                // 会话生命周期由各自的 * / start 方法族与前端路由驱动。
+                if endpoint.protocol != "ssh" {
                     return Ok(json!({ "success": true }));
                 }
                 let connection = StoredConnection::from_lifecycle_params(&params)?;

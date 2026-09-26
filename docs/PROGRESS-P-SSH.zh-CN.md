@@ -4215,3 +4215,48 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
 - **边界遵守**：纯文档轮（FEATURE_PARITY + 本节），未动代码/manifest/`ui/`，
   未关闭任何 issue，未触发 CI；`docs/M32-IMPL-PLAN.zh-CN.md` 为另一工作线的
   未跟踪设计稿，本轮不代为提交。
+
+## M32 终端工具条职责归位 + 连接类型补全（2026-09-26，M32-A/B）
+
+- **实施依据**：`docs/M32-IMPL-PLAN.zh-CN.md`（基线 integration `9ed6cce2`，M31 收口后）。
+  原则：终端工具条 = 会话内即时操作；连接管理 = 宿主职责；配置管理 = 设置窗口。
+- **M32-A（纯前端，App.vue + SettingsDialog + 两个新组件）**：
+  - A1 移除 4 个协议直开图标（telnet/vnc/rdp/serial）及其 `request*` 函数、
+    4 组"占用终态先确认"弹层与状态 ref（modalOpenStates 同步收敛）——协议连接
+    统一走宿主连接管理 → openSession 路由；`serial.upload.open` 等会话内动作保留。
+  - A2 关键词高亮管理迁「设置 → 终端」：新增 `HighlightRulesSection.vue`
+    （草稿/校验在组件，RPC 数据面留 App；保存成功以 rules 引用替换感知并复位草稿），
+    删除工具栏 Palette 弹层与 App 侧草稿状态；渲染链（compiledHighlightRules +
+    decoration 引擎）不动。
+  - A3 快速命令拆分：工具条 Zap 弹层只留列表+搜索+执行（Run/Paste），footer 增
+    `quickCommands.manageHint` 七语指路说明；编辑器+导入迁 `QuickCommandsSection.vue`
+    （设置·终端），`addQuickCommand/confirmQuickImport` 重构为载荷式
+    `saveQuickCommand/importQuickCommands`，删除确认移入管理视图。
+  - A4 quick sudo profiles 管理入口（KeyRound）移除——设置·sudo 内联管理
+    （`profilesManage`）已覆盖；`openProfilesManager` 删除，`profilesOpen`
+    独立弹窗管道保留（组件面契约未动）。
+  - 附带清理：rdpExperimental 前端内存门副本删除（后端 `rdp_start_gate` 为权威门，
+    `update:rdpExperimental` emit 链下线）；结构守卫测试
+    `workbench.spec.ts` 弹层清单同步（highlightMenuOpen/toggleHighlightMenu 退役）。
+- **M32-B（manifest + 路由 + 后端两分支）**：
+  - B1 manifest `protocol` options 追加 `serial`/`rdp`，description 去旧表述
+    （七语同步）；serial 组 6 字段（serial_port/baud/data_bits/parity/stop_bits/
+    backspace）+ rdp 组 4 字段（rdp_domain/resolution/certificate_policy/clipboard）
+    全带 `visible_when` 门控；host/port 改为 TCP 四协议共用（serial 隐藏），
+    username 扩至 ssh/telnet/rdp；`verify.mjs` 新增 M32 协议门控矩阵断言
+    （603 组合全过），七语 label/options 契约全覆盖。
+  - B2 前端 `openSession` 补 serial/rdp 路由：`startSerialFromConnection`
+    （config → SerialConnectOptions，缺设备路径回落表单）与
+    `startRdpFromConnection`（host/port/username + rdp_* config；失败回落
+    RdpConnectDialog）；后端 `connection/test` serial 跳过 probe（提示连接时校验）、
+    rdp 并入 TCP probe，`connection/connect` 非 SSH 协议一律直通，
+    `RuntimeEndpoint`/`StoredConnection` 协议归一白名单扩展；
+    model.rs 契约测试字段清单同步（44 字段）。
+- **验证**：vue-tsc 0 错；vitest 117 文件/1139 用例（基线 1133 + 新增 6，
+  含 HighlightRulesSection/QuickCommandsSection 组件测试 6 例）；`pnpm build` 成功；
+  cargo test 1000/1000；clippy -D warnings / fmt --check 0；validate_repo.py PASS；
+  vendor lockstep/integrity PASS；`smoke_ui_mock.mjs` 全绿（新增 5 条协议图标移除
+  守卫 + 设置内管理链路走查，删除链路改走设置）；`smoke_ui_settings.mjs` 全绿。
+  容器 smoke 见 test.sh 记录。
+- **边界**：`serial_port` 未设必填（设备可后插，连接时校验）；RDP 仍为实验能力
+  （`rdp_experimental_enabled` 后端门不变）；`profilesOpen` 独立弹窗管道保留未删。

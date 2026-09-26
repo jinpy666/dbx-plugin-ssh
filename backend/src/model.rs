@@ -145,7 +145,9 @@ impl RuntimeEndpoint {
         Ok(Self {
             connection_id,
             protocol: match protocol.as_str() {
-                "telnet" | "vnc" => protocol,
+                // M32-B：serial/rdp 连接记录与 telnet/vnc 同走非 SSH 生命周期
+                // （test 探测 / connect 直通），不进 SSH 凭据解析。
+                "telnet" | "vnc" | "serial" | "rdp" => protocol,
                 _ => "ssh".to_string(),
             },
             host: host.clone(),
@@ -436,7 +438,7 @@ impl StoredConnection {
             "protocol",
         );
         let protocol = match protocol.as_str() {
-            "telnet" | "vnc" => protocol,
+            "telnet" | "vnc" | "serial" | "rdp" => protocol,
             _ => "ssh".to_string(),
         };
         let mut password = connection
@@ -1162,6 +1164,18 @@ mod tests {
             "trigger_answer_2",
             "passphrase_command",
             "remote_command",
+            // M32-B：serial/rdp 连接类型字段（协议门控见各字段 visible_when；
+            // 解析面只消费 external_config.protocol，其余字段由前端路由读取）。
+            "serial_port",
+            "serial_baud",
+            "serial_data_bits",
+            "serial_parity",
+            "serial_stop_bits",
+            "serial_backspace",
+            "rdp_domain",
+            "rdp_resolution",
+            "rdp_certificate_policy",
+            "rdp_clipboard",
         ];
         assert_eq!(keys, expected, "manifest field list drifted from parsing");
 
@@ -2963,6 +2977,18 @@ mod manifest_contract_tests {
             "auth_flow_mode",
             "password_prompt_hint",
             "totp_prompt_hint",
+            // M32-B：serial/rdp 连接配置由前端 openSession 路由读取（不进
+            // StoredConnection 凭据解析），但同为 external_config 键面。
+            "serial_port",
+            "serial_baud",
+            "serial_data_bits",
+            "serial_parity",
+            "serial_stop_bits",
+            "serial_backspace",
+            "rdp_domain",
+            "rdp_resolution",
+            "rdp_certificate_policy",
+            "rdp_clipboard",
         ];
         let mut seen_secret: Vec<String> = Vec::new();
         let mut seen_config: Vec<String> = Vec::new();

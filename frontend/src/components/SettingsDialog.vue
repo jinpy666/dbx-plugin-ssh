@@ -15,6 +15,10 @@ import { Switch } from "./ui/switch";
 import TerminalAppearancePreview from "./TerminalAppearancePreview.vue";
 import TerminalSchemePicker from "./TerminalSchemePicker.vue";
 import TerminalHotkeyEditor from "./TerminalHotkeyEditor.vue";
+import HighlightRulesSection from "./HighlightRulesSection.vue";
+import QuickCommandsSection from "./QuickCommandsSection.vue";
+import { HIGHLIGHT_RULES_LIMIT, type HighlightRuleView } from "../lib/keywordHighlight";
+import { QUICK_COMMANDS_LIMIT, type QuickCommand } from "../lib/quickCommands";
 import { AGENT_MODES, sanitizeRememberedCommands } from "../lib/agentTerminal";
 import { clampFontSize, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
@@ -231,8 +235,9 @@ async function loadRdpExperimentalPreference() {
 async function setRdpExperimentalEnabled(next: boolean) {
   rdpExperimentalEnabled.value = next;
   try {
+    // 开关持久化到 sidecar 偏好即可生效（后端 rdp/start 前置检查）；
+    // App 不再持有内存门副本（M32-A 后工具条无 RDP 入口）。
     await window.dbxPlugin?.invoke("local/preferences/set", { rdp_experimental_enabled: next });
-    emit("update:rdpExperimental", next);
   } catch {
     rdpExperimentalEnabled.value = !next;
   }
@@ -386,6 +391,13 @@ const props = defineProps<{
     persistMinChars(value: number): void;
     persistMaxChars(value: number): void;
   };
+  /** 关键词高亮规则（M32-A2：权威态 + RPC 在 App，本组件只读 + 上抛增量）。 */
+  highlightRules: HighlightRuleView[];
+  highlightSaving: boolean;
+  /** 快速命令（M32-A3：权威态 + RPC 在 App，本组件只读 + 上抛增量）。 */
+  quickCommands: QuickCommand[];
+  quickSaving: boolean;
+  quickImporting: boolean;
   t: (key: string, values?: Record<string, string | number>) => string;
 }>();
 
@@ -396,8 +408,6 @@ const emit = defineEmits<{
   (e: "error", cause: unknown): void;
   (e: "browse-download-dir"): void;
   (e: "update:webgl", value: boolean): void;
-  /** RDP 是实验能力：App 仅同步工具栏入口的内存门。 */
-  (e: "update:rdpExperimental", value: boolean): void;
   /** 行内 ghost 自动建议开关（组件自治持久化 pluginStore，App 只同步内存态）。 */
   (e: "update:ghostSuggest", value: boolean): void;
   /** 行为设置局部增量：App 侧会归一化 + 持久化 + 即时落地到 xterm 选项。 */
@@ -422,6 +432,14 @@ const emit = defineEmits<{
   (e: "delete-theme", id: string): void;
   (e: "add-schemes", schemes: Array<Omit<TerminalColorScheme, "id" | "source">>): void;
   (e: "remove-scheme", id: string): void;
+  /** 高亮规则增量（M32-A2）：数据面 RPC 留在 App，这里只转发 section 的意图。 */
+  (e: "save-highlight-rule", rule: { id?: string; pattern: string; color: string; isRegex: boolean; caseSensitive: boolean }): void;
+  (e: "delete-highlight-rule", id: string): void;
+  (e: "toggle-highlight-rule", item: HighlightRuleView): void;
+  /** 快速命令增量（M32-A3）：同上，import 由 App 循环逐条 save。 */
+  (e: "save-quick-command", command: { id?: string; name: string; command: string }): void;
+  (e: "delete-quick-command", id: string): void;
+  (e: "import-quick-commands", items: Array<{ name: string; command: string }>): void;
 }>();
 
 const t = props.t;
@@ -1978,6 +1996,33 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <span>{{ t("terminalGhost.label") }}</span>
             </label>
             <p class="muted settings-note">{{ t("terminalGhost.hint") }}</p>
+
+            <!-- 关键词高亮规则（M32-A2）：从工具条弹层迁入，规则增删改/启停在此管理，
+                 终端渲染效果实时生效（数据面 RPC 与权威态在 App）。 -->
+            <h3 class="settings-section-title">{{ t("highlightRules.title") }}</h3>
+            <HighlightRulesSection
+              :rules="highlightRules"
+              :saving="highlightSaving"
+              :limit="HIGHLIGHT_RULES_LIMIT"
+              :t="t"
+              @save="(rule) => emit('save-highlight-rule', rule)"
+              @delete="(id) => emit('delete-highlight-rule', id)"
+              @toggle="(item) => emit('toggle-highlight-rule', item)"
+            />
+
+            <!-- 快速命令（M32-A3）：执行留在工具条弹层（高频），新建/编辑/导入在此管理。 -->
+            <h3 class="settings-section-title">{{ t("quickCommands") }}</h3>
+            <QuickCommandsSection
+              :commands="quickCommands"
+              :saving="quickSaving"
+              :importing="quickImporting"
+              :limit="QUICK_COMMANDS_LIMIT"
+              :t="t"
+              @save="(command) => emit('save-quick-command', command)"
+              @delete="(id) => emit('delete-quick-command', id)"
+              @import="(items) => emit('import-quick-commands', items)"
+              @error="(cause) => emit('error', cause)"
+            />
             </div>
 
             <!-- 快捷键（对标 Tabby「Hotkeys」页）：注册表编辑器，逐动作增删改 + 冲突提示 + 单项/整体复位。 -->

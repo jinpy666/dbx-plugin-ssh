@@ -599,5 +599,49 @@ for (const junk of [undefined, false, 0, "true"]) {
   assert.equal(reopened.query_timeout_secs, 8, "per-connection value must survive hydrate");
 }
 
+// ---------------------------------------------------------------------------
+// M32-B1：serial/rdp 连接类型。协议门控矩阵——host/port 对 TCP 四协议共用
+// （serial 隐藏），SSH 专属凭据簇对 serial/rdp 整体隐藏，serial/rdp 各自的
+// 协议字段互不串扰、且不得出现在其他协议下。
+// ---------------------------------------------------------------------------
+const TCP_PROTOCOLS = ["ssh", "telnet", "vnc", "rdp"];
+assert.deepEqual(byKey.host.visible_when, { field: "protocol", one_of: TCP_PROTOCOLS },
+  "host must stay visible for every TCP protocol and hide for serial");
+assert.deepEqual(byKey.port.visible_when, { field: "protocol", one_of: TCP_PROTOCOLS },
+  "port must stay visible for every TCP protocol and hide for serial");
+assert.deepEqual(byKey.username.visible_when, { field: "protocol", one_of: ["ssh", "telnet", "rdp"] },
+  "username must serve ssh/telnet/rdp (NLA) and hide for vnc/serial");
+for (const key of ["serial_port", "serial_baud", "serial_data_bits", "serial_parity", "serial_stop_bits", "serial_backspace"]) {
+  assert.deepEqual(byKey[key].visible_when, { field: "protocol", one_of: ["serial"] },
+    `${key} must show only for serial connections`);
+}
+for (const key of ["rdp_domain", "rdp_resolution", "rdp_certificate_policy", "rdp_clipboard"]) {
+  assert.deepEqual(byKey[key].visible_when, { field: "protocol", one_of: ["rdp"] },
+    `${key} must show only for rdp connections`);
+}
+// serial_port 不设必填：设备可能尚未插上（后端连接时校验，表单不拦）。
+assert.equal(byKey.serial_port.required, undefined, "serial_port must not be form-required (device may be attached later)");
+assert.deepEqual(options("protocol"), ["ssh", "telnet", "vnc", "serial", "rdp"], "protocol options must list every routed protocol");
+for (const protocol of options("protocol")) {
+  const current = state({ protocol });
+  current.visible("display_name", true);
+  current.visible("host", TCP_PROTOCOLS.includes(protocol));
+  current.visible("port", TCP_PROTOCOLS.includes(protocol));
+  current.visible("username", ["ssh", "telnet", "rdp"].includes(protocol));
+  // SSH 凭据/调优字段只属于 ssh；serial/rdp 表单不得残留 SSH 行。
+  current.visible("sudo_source", protocol === "ssh");
+  current.visible("advanced_options", protocol === "ssh");
+  current.visible("serial_port", protocol === "serial");
+  current.visible("serial_baud", protocol === "serial");
+  current.visible("serial_data_bits", protocol === "serial");
+  current.visible("serial_parity", protocol === "serial");
+  current.visible("serial_stop_bits", protocol === "serial");
+  current.visible("serial_backspace", protocol === "serial");
+  current.visible("rdp_domain", protocol === "rdp");
+  current.visible("rdp_resolution", protocol === "rdp");
+  current.visible("rdp_certificate_policy", protocol === "rdp");
+  current.visible("rdp_clipboard", protocol === "rdp");
+}
+
 console.log(`PASS SSH connection form: ${scenarios} combinations; field ordering and seven-language labels/options`);
 console.log(`PASS SSH timeout scope contract: ${timeoutScenarios} cases; global/per-connection sentinels survive save+reopen (issue #20, host-side fix tracked separately)`);

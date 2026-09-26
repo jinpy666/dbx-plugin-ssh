@@ -159,19 +159,40 @@ try {
   await page.screenshot({ path: `${SHOT_DIR}/01-workbench.png`, fullPage: false });
   console.log(`  screenshot: docs/screenshots-ui-mock/01-workbench.png`);
 
-  // --- global quick commands: add via the toolbar popover -----------------
-  console.log("==> quick commands: global store add");
+  // --- global quick commands: manage in Settings, execute in toolbar -------
+  console.log("==> quick commands: settings-managed global store add");
+  // M32-A 回归守卫：协议直开图标（Telnet/VNC/RDP/Serial）与 quick sudo
+  // profiles 管理入口已从工具条移除（连接统一走宿主连接管理；管理归设置）。
+  for (const goneTitle of ["New Telnet session", "New VNC session", "New RDP session", "New Serial session", "Global Quick Sudo profiles"]) {
+    const count = await page.locator(`button[title="${goneTitle}"]`).count();
+    check(`protocol direct-open removed ("${goneTitle}")`, count === 0, `found ${count}`);
+  }
   // 自定义 tooltip 系统（App.vue 全局接管）：首次 hover 后 title 会挪到
   // data-tooltip，此后 button[title=...] 选择器不再命中，两处点击都要兼容。
   const QUICK_BTN = 'button[title="Quick commands"], button[data-tooltip="Quick commands"]';
   await page.click(QUICK_BTN);
   await expect(page, ".quick-commands-popover", "quick commands popover");
   await expectText(page, ".quick-command-global-hint", "Stored globally", "global-store hint");
-  // 编辑器已改为子视图：先点"新建"按钮，名称 input + 命令 textarea。
-  await page.click(".quick-new-btn");
+  // M32-A3：工具条弹层只剩列表执行，"新建/导入"迁入设置·终端，footer 留指路说明。
+  await expectText(page, ".quick-command-manage-hint", "Settings → Terminal", "manage-in-settings hint");
+  const newInPopover = await page.locator(".quick-new-btn").count();
+  check("editor entry removed from popover", newInPopover === 0, `found ${newInPopover}`);
+  await page.keyboard.press("Escape");
+
+  // 管理路径：设置 → 终端 → 快速命令 → 新建（数据面 RPC 不变，全局共享）。
+  await page.evaluate(() => document.querySelector('button svg[class*="lucide-settings"]').closest("button").click());
+  await page.locator(".settings-nav-item").first().waitFor({ state: "visible", timeout: 15_000 });
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+  await page.locator(".quick-manage-actions .link-button", { hasText: "New snippet" }).click();
   await page.fill(".quick-command-editor input", "ui-mock cmd");
   await page.fill(".quick-command-editor textarea", "echo ui-mock-batch");
-  await page.click(".quick-command-editor .primary-button");
+  await page.click(".quick-command-editor-actions .primary-button");
+  await expectText(page, ".quick-manage-list li", "ui-mock cmd", "quick command settings row");
+  await page.locator(".settings-modal header button.icon-button").first().click();
+  await page.locator(".settings-nav-item").first().waitFor({ state: "hidden", timeout: 10_000 });
+
+  // 回到工具条弹层：全局清单同步可见（同一 App 权威态）。
+  await page.click(QUICK_BTN);
   await expectText(page, ".quick-command-row strong", "ui-mock cmd", "quick command row");
   await page.screenshot({ path: `${SHOT_DIR}/02-quick-commands.png`, fullPage: false });
   console.log(`  screenshot: docs/screenshots-ui-mock/02-quick-commands.png`);
@@ -235,12 +256,16 @@ try {
 
   // --- global quick commands: delete --------------------------------------
   console.log("==> quick commands: delete");
-  await page.click(QUICK_BTN);
-  // 动作按钮 hover 浮现（opacity 0 → 1），先悬停卡片再点删除；
+  // M32-A3：删除动作随管理视图在设置·终端（工具条卡片只剩执行）。
+  await page.evaluate(() => document.querySelector('button svg[class*="lucide-settings"]').closest("button").click());
+  await page.locator(".settings-nav-item").first().waitFor({ state: "visible", timeout: 15_000 });
+  await page.getByRole("tab", { name: "Terminal", exact: true }).click();
   // 删除有 window.confirm 确认（不可逆操作），自动接受。
-  await page.hover(".quick-command-row");
   page.once("dialog", (dialog) => void dialog.accept());
-  await page.click(".quick-command-row button.icon-button:last-child");
+  await page.click('.quick-manage-list li button[title="Delete"]');
+  await page.locator(".settings-modal header button.icon-button").first().click();
+  await page.locator(".settings-nav-item").first().waitFor({ state: "hidden", timeout: 10_000 });
+  await page.click(QUICK_BTN);
   await expectText(page, ".quick-commands-popover .empty.compact", "No quick commands yet", "quick commands empty after delete");
 
   // --- PR-A4 local-terminal anchors (written against the TARGET contract) ---

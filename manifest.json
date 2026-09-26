@@ -66,9 +66,17 @@
             {
               "label": "VNC",
               "value": "vnc"
+            },
+            {
+              "label": "Serial",
+              "value": "serial"
+            },
+            {
+              "label": "RDP (experimental)",
+              "value": "rdp"
             }
           ],
-          "description": "Session protocol carried by this connection. Telnet and VNC connections open their own session view in the workbench (per-protocol options live there); experimental RDP is disabled by default and is not offered as a connection profile."
+          "description": "Session protocol carried by this connection. Telnet, VNC and RDP connections open their own session view in the workbench (per-protocol options live there); serial connections talk to a local device and skip TCP host fields. RDP is experimental."
         },
         {
           "key": "host",
@@ -76,7 +84,11 @@
           "type": "text",
           "binding": "host",
           "required": true,
-          "default": "127.0.0.1"
+          "default": "127.0.0.1",
+          "visible_when": {
+            "field": "protocol",
+            "one_of": ["ssh", "telnet", "vnc", "rdp"]
+          }
         },
         {
           "key": "port",
@@ -85,7 +97,11 @@
           "binding": "port",
           "required": true,
           "default": 22,
-          "description": "TCP port, 1-65535. Defaults per protocol: SSH 22, Telnet 23, VNC 5900."
+          "description": "TCP port, 1-65535. Defaults per protocol: SSH 22, Telnet 23, VNC 5900, RDP 3389.",
+          "visible_when": {
+            "field": "protocol",
+            "one_of": ["ssh", "telnet", "vnc", "rdp"]
+          }
         },
         {
           "key": "username",
@@ -98,7 +114,8 @@
             "field": "protocol",
             "one_of": [
               "ssh",
-              "telnet"
+              "telnet",
+              "rdp"
             ]
           }
         },
@@ -872,6 +889,252 @@
               }
             ]
           }
+        },
+        {
+          "key": "serial_port",
+          "label": "Serial device",
+          "type": "text",
+          "binding": "config",
+          "default": "",
+          "description": "Local serial device path, e.g. /dev/ttyUSB0 (Linux/macOS) or COM3 (Windows).",
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "serial"
+            ]
+          }
+        },
+        {
+          "key": "serial_baud",
+          "label": "Baud rate",
+          "type": "select",
+          "binding": "config",
+          "default": "115200",
+          "options": [
+            {
+              "label": "9600",
+              "value": "9600"
+            },
+            {
+              "label": "19200",
+              "value": "19200"
+            },
+            {
+              "label": "38400",
+              "value": "38400"
+            },
+            {
+              "label": "57600",
+              "value": "57600"
+            },
+            {
+              "label": "115200",
+              "value": "115200"
+            },
+            {
+              "label": "230400",
+              "value": "230400"
+            }
+          ],
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "serial"
+            ]
+          }
+        },
+        {
+          "key": "serial_data_bits",
+          "label": "Data bits",
+          "type": "select",
+          "binding": "config",
+          "default": "8",
+          "options": [
+            {
+              "label": "7",
+              "value": "7"
+            },
+            {
+              "label": "8",
+              "value": "8"
+            }
+          ],
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "serial"
+            ]
+          }
+        },
+        {
+          "key": "serial_parity",
+          "label": "Parity",
+          "type": "select",
+          "binding": "config",
+          "default": "none",
+          "options": [
+            {
+              "label": "None",
+              "value": "none"
+            },
+            {
+              "label": "Even",
+              "value": "even"
+            },
+            {
+              "label": "Odd",
+              "value": "odd"
+            }
+          ],
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "serial"
+            ]
+          }
+        },
+        {
+          "key": "serial_stop_bits",
+          "label": "Stop bits",
+          "type": "select",
+          "binding": "config",
+          "default": "1",
+          "options": [
+            {
+              "label": "1",
+              "value": "1"
+            },
+            {
+              "label": "2",
+              "value": "2"
+            }
+          ],
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "serial"
+            ]
+          }
+        },
+        {
+          "key": "serial_backspace",
+          "label": "Backspace sends",
+          "type": "select",
+          "binding": "config",
+          "default": "del",
+          "options": [
+            {
+              "label": "DEL (0x7F)",
+              "value": "del"
+            },
+            {
+              "label": "Ctrl+H (0x08)",
+              "value": "ctrl_h"
+            }
+          ],
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "serial"
+            ]
+          }
+        },
+        {
+          "key": "rdp_domain",
+          "label": "Domain",
+          "type": "text",
+          "binding": "config",
+          "default": "",
+          "description": "Windows domain for NLA (optional).",
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "rdp"
+            ]
+          }
+        },
+        {
+          "key": "rdp_resolution",
+          "label": "Resolution",
+          "type": "select",
+          "binding": "config",
+          "default": "1280x800",
+          "options": [
+            {
+              "label": "1024×768",
+              "value": "1024x768"
+            },
+            {
+              "label": "1280×720",
+              "value": "1280x720"
+            },
+            {
+              "label": "1280×800",
+              "value": "1280x800"
+            },
+            {
+              "label": "1366×768",
+              "value": "1366x768"
+            },
+            {
+              "label": "1600×900",
+              "value": "1600x900"
+            },
+            {
+              "label": "1920×1080",
+              "value": "1920x1080"
+            },
+            {
+              "label": "2560×1440",
+              "value": "2560x1440"
+            }
+          ],
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "rdp"
+            ]
+          }
+        },
+        {
+          "key": "rdp_certificate_policy",
+          "label": "Certificate policy",
+          "type": "select",
+          "binding": "config",
+          "default": "prompt",
+          "options": [
+            {
+              "label": "Ask on mismatch",
+              "value": "prompt"
+            },
+            {
+              "label": "Strict (reject mismatch)",
+              "value": "strict"
+            },
+            {
+              "label": "Accept temporarily",
+              "value": "accept-temporarily"
+            }
+          ],
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "rdp"
+            ]
+          }
+        },
+        {
+          "key": "rdp_clipboard",
+          "label": "Share clipboard",
+          "type": "boolean",
+          "binding": "config",
+          "default": true,
+          "visible_when": {
+            "field": "protocol",
+            "one_of": [
+              "rdp"
+            ]
+          }
         }
       ],
       "workbench": "io.dbx.ssh.workbench",
@@ -997,9 +1260,82 @@
               "options": {
                 "ssh": "SSH",
                 "telnet": "Telnet",
-                "vnc": "VNC"
+                "vnc": "VNC",
+                "serial": "Serie",
+                "rdp": "RDP (experimental)"
               },
-              "description": "Protocolo de sesión de esta conexión. Las conexiones Telnet y VNC abren su propia vista de sesión en el espacio de trabajo (las opciones por protocolo están ahí); RDP experimental está desactivado de forma predeterminada y no se ofrece como perfil de conexión."
+              "description": "Protocolo de sesión de esta conexión. Las conexiones Telnet, VNC y RDP abren su propia vista de sesión en el espacio de trabajo (las opciones por protocolo están ahí); las conexiones serie usan un dispositivo local y omiten los campos TCP. RDP es experimental."
+            },
+            "serial_port": {
+              "label": "Dispositivo serie",
+              "description": "Ruta del dispositivo serie local, p. ej. /dev/ttyUSB0 (Linux/macOS) o COM3 (Windows)."
+            },
+            "serial_baud": {
+              "label": "Baudios",
+              "options": {
+                "9600": "9600",
+                "19200": "19200",
+                "38400": "38400",
+                "57600": "57600",
+                "115200": "115200",
+                "230400": "230400"
+              }
+            },
+            "serial_data_bits": {
+              "label": "Bits de datos",
+              "options": {
+                "7": "7",
+                "8": "8"
+              }
+            },
+            "serial_parity": {
+              "label": "Paridad",
+              "options": {
+                "none": "Ninguna",
+                "even": "Par",
+                "odd": "Impar"
+              }
+            },
+            "serial_stop_bits": {
+              "label": "Bits de parada",
+              "options": {
+                "1": "1",
+                "2": "2"
+              }
+            },
+            "serial_backspace": {
+              "label": "Retroceso envía",
+              "options": {
+                "del": "DEL (0x7F)",
+                "ctrl_h": "Ctrl+H (0x08)"
+              }
+            },
+            "rdp_domain": {
+              "label": "Dominio",
+              "description": "Dominio de Windows para NLA (opcional)."
+            },
+            "rdp_resolution": {
+              "label": "Resolución",
+              "options": {
+                "1024x768": "1024×768",
+                "1280x720": "1280×720",
+                "1280x800": "1280×800",
+                "1366x768": "1366×768",
+                "1600x900": "1600×900",
+                "1920x1080": "1920×1080",
+                "2560x1440": "2560×1440"
+              }
+            },
+            "rdp_certificate_policy": {
+              "label": "Política de certificados",
+              "options": {
+                "prompt": "Preguntar si no coincide",
+                "strict": "Estricto (rechazar sin coincidencia)",
+                "accept-temporarily": "Aceptar temporalmente"
+              }
+            },
+            "rdp_clipboard": {
+              "label": "Compartir portapapeles"
             },
             "host": {
               "label": "Host"
@@ -1195,9 +1531,82 @@
               "options": {
                 "ssh": "SSH",
                 "telnet": "Telnet",
-                "vnc": "VNC"
+                "vnc": "VNC",
+                "serial": "Seriale",
+                "rdp": "RDP (sperimentale)"
               },
-              "description": "Protocollo di sessione di questa connessione. Le connessioni Telnet e VNC aprono la propria vista sessione nel workbench (le opzioni per protocollo si trovano lì); RDP sperimentale è disabilitato per impostazione predefinita e non è disponibile come profilo di connessione."
+              "description": "Protocollo di sessione di questa connessione. Le connessioni Telnet, VNC e RDP aprono la propria vista di sessione nel workbench (le opzioni per protocollo si configurano lì); le connessioni seriali usano un dispositivo locale e omettono i campi TCP. RDP è sperimentale."
+            },
+            "serial_port": {
+              "label": "Dispositivo seriale",
+              "description": "Percorso del dispositivo seriale locale, es. /dev/ttyUSB0 (Linux/macOS) o COM3 (Windows)."
+            },
+            "serial_baud": {
+              "label": "Baud",
+              "options": {
+                "9600": "9600",
+                "19200": "19200",
+                "38400": "38400",
+                "57600": "57600",
+                "115200": "115200",
+                "230400": "230400"
+              }
+            },
+            "serial_data_bits": {
+              "label": "Bit di dati",
+              "options": {
+                "7": "7",
+                "8": "8"
+              }
+            },
+            "serial_parity": {
+              "label": "Parità",
+              "options": {
+                "none": "Nessuna",
+                "even": "Pari",
+                "odd": "Dispari"
+              }
+            },
+            "serial_stop_bits": {
+              "label": "Bit di stop",
+              "options": {
+                "1": "1",
+                "2": "2"
+              }
+            },
+            "serial_backspace": {
+              "label": "Il backspace invia",
+              "options": {
+                "del": "DEL (0x7F)",
+                "ctrl_h": "Ctrl+H (0x08)"
+              }
+            },
+            "rdp_domain": {
+              "label": "Dominio",
+              "description": "Dominio Windows per NLA (facoltativo)."
+            },
+            "rdp_resolution": {
+              "label": "Risoluzione",
+              "options": {
+                "1024x768": "1024×768",
+                "1280x720": "1280×720",
+                "1280x800": "1280×800",
+                "1366x768": "1366×768",
+                "1600x900": "1600×900",
+                "1920x1080": "1920×1080",
+                "2560x1440": "2560×1440"
+              }
+            },
+            "rdp_certificate_policy": {
+              "label": "Politica dei certificati",
+              "options": {
+                "prompt": "Chiedi se non corrisponde",
+                "strict": "Rigoroso (rifiuta se non corrisponde)",
+                "accept-temporarily": "Accetta temporaneamente"
+              }
+            },
+            "rdp_clipboard": {
+              "label": "Condividi appunti"
             },
             "host": {
               "label": "Host"
@@ -1393,9 +1802,82 @@
               "options": {
                 "ssh": "SSH",
                 "telnet": "Telnet",
-                "vnc": "VNC"
+                "vnc": "VNC",
+                "serial": "シリアル",
+                "rdp": "RDP（実験的）"
               },
-              "description": "この接続が扱うセッションプロトコル。Telnet と VNC 接続はワークベンチ内で各自のセッションビューを開きます（プロトコル固有の設定もそこにあります）。実験的な RDP は既定で無効であり、接続プロファイルでは提供しません。"
+              "description": "この接続が扱うセッションプロトコル。Telnet・VNC・RDP 接続はワークベンチ内で各自のセッションビューを開きます（プロトコル固有の設定もそこにあります）。シリアル接続はローカルデバイスを直接使用し、TCP ホスト欄は不要です。RDP は実験的機能です。"
+            },
+            "serial_port": {
+              "label": "シリアルデバイス",
+              "description": "ローカルシリアルデバイスのパス。例: /dev/ttyUSB0（Linux/macOS）や COM3（Windows）。"
+            },
+            "serial_baud": {
+              "label": "ボーレート",
+              "options": {
+                "9600": "9600",
+                "19200": "19200",
+                "38400": "38400",
+                "57600": "57600",
+                "115200": "115200",
+                "230400": "230400"
+              }
+            },
+            "serial_data_bits": {
+              "label": "データビット",
+              "options": {
+                "7": "7",
+                "8": "8"
+              }
+            },
+            "serial_parity": {
+              "label": "パリティ",
+              "options": {
+                "none": "なし",
+                "even": "偶数",
+                "odd": "奇数"
+              }
+            },
+            "serial_stop_bits": {
+              "label": "ストップビット",
+              "options": {
+                "1": "1",
+                "2": "2"
+              }
+            },
+            "serial_backspace": {
+              "label": "Backspace が送信する文字",
+              "options": {
+                "del": "DEL (0x7F)",
+                "ctrl_h": "Ctrl+H (0x08)"
+              }
+            },
+            "rdp_domain": {
+              "label": "ドメイン",
+              "description": "NLA 用の Windows ドメイン（任意）。"
+            },
+            "rdp_resolution": {
+              "label": "解像度",
+              "options": {
+                "1024x768": "1024×768",
+                "1280x720": "1280×720",
+                "1280x800": "1280×800",
+                "1366x768": "1366×768",
+                "1600x900": "1600×900",
+                "1920x1080": "1920×1080",
+                "2560x1440": "2560×1440"
+              }
+            },
+            "rdp_certificate_policy": {
+              "label": "証明書ポリシー",
+              "options": {
+                "prompt": "不一致なら確認",
+                "strict": "厳格（不一致は拒否）",
+                "accept-temporarily": "一時的に受け入れる"
+              }
+            },
+            "rdp_clipboard": {
+              "label": "クリップボード共有"
             },
             "host": {
               "label": "ホスト"
@@ -1591,9 +2073,82 @@
               "options": {
                 "ssh": "SSH",
                 "telnet": "Telnet",
-                "vnc": "VNC"
+                "vnc": "VNC",
+                "serial": "Serial",
+                "rdp": "RDP (experimental)"
               },
-              "description": "Protocolo de sessão desta conexão. Conexões Telnet e VNC abrem sua própria visualização de sessão no workbench (as opções por protocolo ficam lá); o RDP experimental fica desativado por padrão e não é oferecido como perfil de conexão."
+              "description": "Protocolo de sessão desta conexão. Conexões Telnet, VNC e RDP abrem sua própria visualização de sessão no workbench (as opções por protocolo ficam lá); conexões seriais usam um dispositivo local e dispensam os campos TCP. RDP é experimental."
+            },
+            "serial_port": {
+              "label": "Dispositivo serial",
+              "description": "Caminho do dispositivo serial local, ex.: /dev/ttyUSB0 (Linux/macOS) ou COM3 (Windows)."
+            },
+            "serial_baud": {
+              "label": "Baud rate",
+              "options": {
+                "9600": "9600",
+                "19200": "19200",
+                "38400": "38400",
+                "57600": "57600",
+                "115200": "115200",
+                "230400": "230400"
+              }
+            },
+            "serial_data_bits": {
+              "label": "Bits de dados",
+              "options": {
+                "7": "7",
+                "8": "8"
+              }
+            },
+            "serial_parity": {
+              "label": "Paridade",
+              "options": {
+                "none": "Nenhuma",
+                "even": "Par",
+                "odd": "Ímpar"
+              }
+            },
+            "serial_stop_bits": {
+              "label": "Bits de parada",
+              "options": {
+                "1": "1",
+                "2": "2"
+              }
+            },
+            "serial_backspace": {
+              "label": "O que o Backspace envia",
+              "options": {
+                "del": "DEL (0x7F)",
+                "ctrl_h": "Ctrl+H (0x08)"
+              }
+            },
+            "rdp_domain": {
+              "label": "Domínio",
+              "description": "Domínio do Windows para NLA (opcional)."
+            },
+            "rdp_resolution": {
+              "label": "Resolução",
+              "options": {
+                "1024x768": "1024×768",
+                "1280x720": "1280×720",
+                "1280x800": "1280×800",
+                "1366x768": "1366×768",
+                "1600x900": "1600×900",
+                "1920x1080": "1920×1080",
+                "2560x1440": "2560×1440"
+              }
+            },
+            "rdp_certificate_policy": {
+              "label": "Política de certificado",
+              "options": {
+                "prompt": "Perguntar em caso de divergência",
+                "strict": "Rígido (rejeitar divergência)",
+                "accept-temporarily": "Aceitar temporariamente"
+              }
+            },
+            "rdp_clipboard": {
+              "label": "Compartilhar área de transferência"
             },
             "host": {
               "label": "Host"
@@ -1789,9 +2344,82 @@
               "options": {
                 "ssh": "SSH",
                 "telnet": "Telnet",
-                "vnc": "VNC"
+                "vnc": "VNC",
+                "serial": "串口",
+                "rdp": "RDP（实验性）"
               },
-              "description": "此连接承载的会话协议。Telnet 与 VNC 连接会在工作台内打开各自的会话视图（协议选项在工作台内设置）；实验性 RDP 默认关闭，且不作为连接配置提供。"
+              "description": "此连接承载的会话协议。Telnet、VNC 与 RDP 连接会在工作台内打开各自的会话视图（协议选项在工作台内设置）；串口连接直接使用本地设备，无需 TCP 主机字段。RDP 为实验能力。"
+            },
+            "serial_port": {
+              "label": "串口设备",
+              "description": "本地串口设备路径，如 /dev/ttyUSB0（Linux/macOS）或 COM3（Windows）。"
+            },
+            "serial_baud": {
+              "label": "波特率",
+              "options": {
+                "9600": "9600",
+                "19200": "19200",
+                "38400": "38400",
+                "57600": "57600",
+                "115200": "115200",
+                "230400": "230400"
+              }
+            },
+            "serial_data_bits": {
+              "label": "数据位",
+              "options": {
+                "7": "7",
+                "8": "8"
+              }
+            },
+            "serial_parity": {
+              "label": "校验位",
+              "options": {
+                "none": "无",
+                "even": "偶校验",
+                "odd": "奇校验"
+              }
+            },
+            "serial_stop_bits": {
+              "label": "停止位",
+              "options": {
+                "1": "1",
+                "2": "2"
+              }
+            },
+            "serial_backspace": {
+              "label": "退格键发送",
+              "options": {
+                "del": "DEL (0x7F)",
+                "ctrl_h": "Ctrl+H (0x08)"
+              }
+            },
+            "rdp_domain": {
+              "label": "域",
+              "description": "Windows NLA 域（可选）。"
+            },
+            "rdp_resolution": {
+              "label": "分辨率",
+              "options": {
+                "1024x768": "1024×768",
+                "1280x720": "1280×720",
+                "1280x800": "1280×800",
+                "1366x768": "1366×768",
+                "1600x900": "1600×900",
+                "1920x1080": "1920×1080",
+                "2560x1440": "2560×1440"
+              }
+            },
+            "rdp_certificate_policy": {
+              "label": "证书策略",
+              "options": {
+                "prompt": "不匹配时询问",
+                "strict": "严格（不匹配即拒绝）",
+                "accept-temporarily": "临时接受"
+              }
+            },
+            "rdp_clipboard": {
+              "label": "共享剪贴板"
             },
             "host": {
               "label": "主机"
@@ -1987,9 +2615,82 @@
               "options": {
                 "ssh": "SSH",
                 "telnet": "Telnet",
-                "vnc": "VNC"
+                "vnc": "VNC",
+                "serial": "串列埠",
+                "rdp": "RDP（實驗性）"
               },
-              "description": "此連線承載的會話協議。Telnet 與 VNC 連線會在工作台內開啟各自的會話檢視（協議選項在工作台內設定）；實驗性 RDP 預設關閉，且不作為連線設定提供。"
+              "description": "此連線承載的會話協議。Telnet、VNC 與 RDP 連線會在工作台內開啟各自的會話檢視（協議選項在工作台內設定）；串列埠連線直接使用本機裝置，無需 TCP 主機欄位。RDP 為實驗能力。"
+            },
+            "serial_port": {
+              "label": "串列埠裝置",
+              "description": "本機串列埠裝置路徑，如 /dev/ttyUSB0（Linux/macOS）或 COM3（Windows）。"
+            },
+            "serial_baud": {
+              "label": "鮑率",
+              "options": {
+                "9600": "9600",
+                "19200": "19200",
+                "38400": "38400",
+                "57600": "57600",
+                "115200": "115200",
+                "230400": "230400"
+              }
+            },
+            "serial_data_bits": {
+              "label": "資料位",
+              "options": {
+                "7": "7",
+                "8": "8"
+              }
+            },
+            "serial_parity": {
+              "label": "同位位元",
+              "options": {
+                "none": "無",
+                "even": "偶同位",
+                "odd": "奇同位"
+              }
+            },
+            "serial_stop_bits": {
+              "label": "停止位元",
+              "options": {
+                "1": "1",
+                "2": "2"
+              }
+            },
+            "serial_backspace": {
+              "label": "退格鍵送出",
+              "options": {
+                "del": "DEL (0x7F)",
+                "ctrl_h": "Ctrl+H (0x08)"
+              }
+            },
+            "rdp_domain": {
+              "label": "網域",
+              "description": "Windows NLA 網域（可選）。"
+            },
+            "rdp_resolution": {
+              "label": "解析度",
+              "options": {
+                "1024x768": "1024×768",
+                "1280x720": "1280×720",
+                "1280x800": "1280×800",
+                "1366x768": "1366×768",
+                "1600x900": "1600×900",
+                "1920x1080": "1920×1080",
+                "2560x1440": "2560×1440"
+              }
+            },
+            "rdp_certificate_policy": {
+              "label": "憑證策略",
+              "options": {
+                "prompt": "不符時詢問",
+                "strict": "嚴格（不符即拒絕）",
+                "accept-temporarily": "暫時接受"
+              }
+            },
+            "rdp_clipboard": {
+              "label": "共用剪貼簿"
             },
             "host": {
               "label": "主機"
