@@ -92,7 +92,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 
 ## 会话导入：流式预览与脱敏规范化导出
 
-`import/preview/start` 参数为 `{ kind, mainSize, userConfigSize?, masterPassword? }`：`kind` 为 `moba`、`xshell`、`windterm`、`securecrt`、`finalshell`、`electerm` 或 `termius`；主文件与仅 WindTerm 可用的 `userConfigSize` 共用 **64 MiB** 总预算。返回 `{ taskId, chunkSize }`，当前 `chunkSize` 为 256 KiB，刻意保持在 SDK 8 MiB JSON 上限以下。
+`import/preview/start` 参数为 `{ kind, mainSize, userConfigSize?, masterPassword? }`：`kind` 为 `moba`、`xshell`、`windterm`、`securecrt`、`finalshell`、`electerm`、`termius` 或 `sshconfig`；主文件与仅 WindTerm 可用的 `userConfigSize` 共用 **64 MiB** 总预算。返回 `{ taskId, chunkSize }`，当前 `chunkSize` 为 256 KiB，刻意保持在 SDK 8 MiB JSON 上限以下。`sshconfig` 为第 8 种来源（OpenSSH config，WT-3）：支持 Host 通配、Hostname/User/Port、IdentityFile（仅映射路径、不读密钥材料，原因码 `key-path-only`）、UserKnownHostsFile、`Match host/user` 受限支持；Include 按「未跟随」标注降级（管线只收上传字节，sidecar 不做磁盘递归读取）；ProxyCommand/ProxyJump 仅在描述中标注「需手动映射」，绝不执行外部命令（与 tssh Expect 同款「密文/外部命令不自动执行」信任模型）。
 
 文件内容不经 JSON/base64 RPC 传输。前端按 SFTP 上传同款发送二进制通道 `import/preview/<taskId>/main`；WindTerm 可选文件使用 `import/preview/<taskId>/user-config`。每帧是 `[u64 BE offset][raw bytes]`，必须连续、从 offset 0 开始，单块至多 `chunkSize`。sidecar 成功接收后发 `import/preview/ack { taskId, part, nextOffset }`；前端等待 ACK 再发下一块。协议错误会发 `import/preview/error { taskId, part, error }`，并立即清理该任务。
 

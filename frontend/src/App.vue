@@ -10906,6 +10906,7 @@ const modalOpenStates = computed(() => [
   alertTriageOpen.value,
   hostKeyPrompt.value,
   agentPromptHead.value,
+  spawnSessionDialogOpen.value,
 ]);
 const modalOpenCount = computed(() => modalOpenStates.value.filter(Boolean).length);
 

@@ -254,7 +254,7 @@ try {
   console.log("==> 快捷键 pane: editor surface");
   await openCategory(3);
   const hotkeyRows = page.locator(".settings-pane:visible .hotkey-row");
-  check("ten bindable actions", (await hotkeyRows.count()) === 10, String(await hotkeyRows.count()));
+  check("eleven bindable actions (incl. quick-select since WT-1)", (await hotkeyRows.count()) === 11, String(await hotkeyRows.count()));
   const groupTitles = await page.locator(".settings-pane:visible .hotkey-group .settings-section-title").allTextContents();
   check("actions grouped clipboard / view / navigation", groupTitles.map((t) => t.trim()).join("|") === "Clipboard|View|Navigation", JSON.stringify(groupTitles));
   const searchRow = hotkeyRows.filter({ hasText: "Find in terminal" });

@@ -564,15 +564,15 @@ PATH 导出，否则 `spawn pnpm ENOENT`。
 | Sixel + iTerm2 OSC 1337 内联图形 | ✅ 已有（更完整） | `ImageAddon` 固定开启、32 MiB 像素上限；WezTerm 自认 sixel「preliminary and incomplete」（上游 #217），kitty 图形协议双方均不支持 |
 | kitty 键盘协议 `CSI ? u` | ✅ 已有（更保守） | 补答 flags=0 保持 legacy 编码（`terminalModeQueries.ts`）；WezTerm 以 `enable_kitty_keyboard` 可选启用，应用面暂无刚需 |
 | OSC 52 剪贴板 | ✅ 设计一致 | 双方均只写不读；写方向 1 MiB 防御上限，读查询故意吞掉防隐私泄漏 |
-| DECSET 2026 同步渲染 | ❌ 差距（WT-1 立项） | WezTerm 支持并做帧合并；本插件 DECRQM 故意回「不支持」防应用重试循环（`terminalModeQueries.ts`）。改为应答支持 + 复用 `terminalWriteThrottle.ts` rAF 合帧实现帧提交，`cat` 大文件与 vim 重绘的撕裂闪烁可显著收敛 |
-| 转义序列应答矩阵文档化 | ⚠️ 差距（WT-2 立项） | WezTerm 把 DA/DSR/OSC 的应答、忽略、故意不支持逐项写成活文档。本插件 XTVERSION/kitty `CSI ? u`/DECRQM 2026 已补答（d1ecaeba 等），但 DSR 5/6、Primary DA、SGR 冒号形式在自研 decoration/关键词高亮路径的行为、OSC 忽略白名单（9/777/1337 SetUserVar）均未成文核对 |
-| OSC 1337 SetUserVar / OSC 9·777 通知 | ❌ 未接（WT-2 立项） | WezTerm 以 `user-var-changed` 事件消费 shell 集成元数据；本插件目录跟随靠提示符注入猜测，SetUserVar 可带来更精确的 cwd/命令元数据通道（纯前端 onParser 层，零 sidecar 协议） |
+| DECSET 2026 同步渲染 | ✅ 已有（WT-1 落地） | WezTerm 支持并做帧合并。`terminalModeQueries.ts` DECRQM 2026 已改答「支持」，`terminalWriteThrottle.ts` rAF 合帧实现「同步窗内缓冲、结束时整批提交」（`setHold`/`held`，字节上限防异常驻留）；`cat` 大文件与 vim 重绘的撕裂闪烁显著收敛 |
+| 转义序列应答矩阵文档化 | ✅ 已有（WT-2 落地成文） | WezTerm 把 DA/DSR/OSC 的应答、忽略、故意不支持逐项写成活文档。本插件 `TEST_MATRIX.zh-CN.md` 已新增「WT-2 终端应答矩阵」节，DSR 5/6、Primary DA、SGR 冒号形式以真实 xterm 内核 parser 单测做实测锚点（`terminalProtocolMatrix.spec.ts`），内核行为漂移先红防文档失真 |
+| OSC 1337 SetUserVar / OSC 9·777 通知 | ✅ 已有（WT-2 落地） | `registerOscHandler(9/777/1337)`：OSC 9/777 → 工作台通知（压行/截断防刷屏），OSC 1337 SetUserVar（base64）→ cwd 元数据优先通道驱动目录跟随，提示符注入猜测降为回落（`terminalOscChannels.ts` 纯函数 + 防御上限）；OSC 7 回落循环接入「更晚事件为准」裁决 |
 | tmux control mode（DCS 1000）桥接 | ⚠️ 双方均不完整 | WezTerm 自认 incomplete（上游 #336）；本插件不做（终端内正常使用 tmux，control-mode 桥接需 mux 底座） |
 | SSH 客户端算法与认证面 | ✅ 同水位 | russh 现代套件优先 + legacy 尾部兼容（SHA-1 MAC/DH GEX/AES-CBC/3DES 堡垒机），认证密码/密钥/agent/TOTP/keyboard-interactive 齐全；WezTerm `ssh_backend` 可选 libssh，ServerAliveInterval 走 IGNORE 包——本插件另有终端活动保活绕 TMOUT/堡垒机审计，领先 |
-| **`~/.ssh/config` 兼容解析/导入** | ❌ 差距（WT-3 立项） | WezTerm 解析 `~/.ssh/config`（Host 通配/Hostname/User/Port/IdentityFile/IdentityAgent/ProxyCommand/UserKnownHostsFile/Include/部分 Match）。本插件 `connection_import.rs` 已有 7 种第三方客户端格式导入管线，OpenSSH config 可作第 8 种来源接入，用户上手摩擦最大的一刀 |
-| SSH 会话多路复用（新 tab 开新 channel 免重认证） | ✅ 等价（「复制会话」） | `sessionTransportReuse.ts` 复用已认证 transport；差一项 WezTerm `spawn` 语义——同 transport 指定命令新开 channel（WT-4 候选）。WezTerm 声明 SSH 会话**不持久**，本插件重连阶梯 + reattach + boot 恢复在 SSH 场景更实用 |
+| **`~/.ssh/config` 兼容解析/导入** | ✅ 已有（WT-3 落地，含降级） | `connection_import.rs` 第 8 来源 `sshconfig`：Host 通配/Hostname/User/Port/IdentityFile（仅路径映射不读密钥材料，`key-path-only`）/UserKnownHostsFile/Match host/user 受限支持；Include 按「未跟随标注」降级（管线只收上传字节，不引入 sidecar 磁盘读取），ProxyCommand/ProxyJump 仅标注「需手动映射」绝不执行（同 tssh Expect 信任模型） |
+| SSH 会话多路复用（新 tab 开新 channel 免重认证） | ✅ 等价 + spawn（WT-4 落地） | `sessionTransportReuse.ts` 复用已认证 transport；WezTerm `spawn` 语义已补齐——同 transport 指定命令新开 channel（`ssh/session/open` 可选 `spawnCommand`，独立 PTY，共享引用预占与跳板链生命周期同「复制会话」，MaxSessions 失败可见）。WezTerm 声明 SSH 会话**不持久**，本插件重连阶梯 + reattach + boot 恢复在 SSH 场景更实用 |
 | 分屏/panes/workspaces/PaneSelect | ❌ 刻意不做 | 宿主工作台承担标签与分屏（「不重复宿主」原则）；WezTerm 的 mux server 持久会话需自研服务端组件，插件形态下立项不成立 |
-| Quick Select Mode / vi Copy Mode | ❌ 差距（WT-1 立项 Quick Select） | 正则抽取屏幕上 URL/路径/IP/hash 一键复制，纯前端可依 SearchAddon buffer 实现，运维场景价值极高；vi Copy Mode 与 xterm.js 交互模型冲突大，不做 |
+| Quick Select Mode / vi Copy Mode | ✅ 已有（WT-1 落地 Quick Select）；vi Copy Mode 刻意不做 | Quick Select：buffer 逻辑行拼接 + URL/路径/IPv4/hash 正则抽取（容量上限/去重/折行定位），`Cmd/Ctrl+Shift+O` 经快捷键注册表登记可改键，overlay 逐项一键复制（`quickSelect.ts` + `TerminalQuickSelectPanel.vue`）；vi Copy Mode 与 xterm.js 交互模型冲突大，维持不做 |
 | 命令面板/启动器/字符选择器 | ⚠️ 宿主承担 | DBX 工作台已有命令入口体系（快速命令/批量发送/命令历史），不重复 |
 | Lua 配置 + 插件系统、桌面级渲染（背景图/毛玻璃/WebGPU） | ❌ 不做 | 宿主负责设置与主题（沿用 Tabby 主题轮的「默认跟随宿主」守卫）；沙箱 iframe 限制连字已不可达，桌面渲染无对应物 |
 
@@ -582,7 +582,13 @@ PATH 导出，否则 `spawn pnpm ENOENT`。
 > PROGRESS M26-A），与并行推进的字节边界矩阵 / issue 分诊工作线在 PROGRESS 中
 > 已占用的 M27–M31 撞号（PROGRESS 的 M27–M31 指的是 shell_quote 收编、下载编码
 > 修复、issue 分诊、文件夹上传/限速等另一系列批次）。为免混淆改为独立前缀
-> **WT-1–WT-4**，内容与验收口径不变，六项均未实施。
+> **WT-1–WT-4**，内容与验收口径不变。
+>
+> **收口（2026-09-27）**：WT-1–WT-4 全部实施落地（分支 `codex/ssh/parity-wt{1..4}-*-2026`，
+> 集成于 `codex/ssh/parity-wt-integration-2026`，基线 `f837d28d`）。上表能力行状态已同步
+> 更新。降级/未实施项：Include 递归跟随（管线只收上传字节，按「未跟随标注」降级）、
+> vi Copy Mode（维持不做）、GBK 堡垒机 8 位 C1 真机实测（TEST_MATRIX 已记设计立场，
+> 待真机补充）、Quick Select 全缓冲档开关（已实现未默认开）。
 
 | 批次 | 内容 | 改动面 | 验收口径 |
 | --- | --- | --- | --- |

@@ -4260,3 +4260,48 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
   容器 smoke 见 test.sh 记录。
 - **边界**：`serial_port` 未设必填（设备可后插，连接时校验）；RDP 仍为实验能力
   （`rdp_experimental_enabled` 后端门不变）；`profilesOpen` 独立弹窗管道保留未删。
+
+## WezTerm 对标实施收口 WT-1–WT-4（2026-09-27，四批并发实施 + 集成收口）
+
+- **实施方式**：四条独立 agent 工作线各自 worktree 并行实施（一个 checkout 一个 agent），
+  分支 `codex/ssh/parity-wt{1..4}-*-2026` 均基于集成分线基线 `f837d28d`，各自目标级验证
+  绿后合入集成线 `codex/ssh/parity-wt-integration-2026`（四批 merge **零冲突**），随后统一
+  跑全量测试基线。**未使用 M 编号**（遵守 2026-09-26 重编号决定）。
+- **WT-1 终端交互批（纯前端，`d8122a06`）**：Quick Select Mode（`quickSelect.ts` 逻辑行
+  拼接 + URL/路径/IPv4/hash 抽取，容量上限/去重/折行定位；`TerminalQuickSelectPanel.vue`
+  overlay 逐项复制；快捷键注册表新动作 `quick-select` 默认 `Cmd/Ctrl+Shift+O` 可改）；
+  DECSET 2026 应答翻转（DECRQM 2026 改答「支持」，`terminalWriteThrottle.ts` 新增
+  `setHold`/`held` 实现「同步窗内缓冲、结束整批提交」）。
+- **WT-2 协议应答矩阵批（前端为主，`a87d31b0`）**：OSC 9/777 → 工作台通知、OSC 1337
+  SetUserVar → parser 层 cwd 元数据优先通道（`terminalOscChannels.ts`，提示符猜测降为
+  回落）；`TEST_MATRIX.zh-CN.md` 新增「WT-2 终端应答矩阵」节（DSR 5/6、Primary DA、
+  SGR 冒号形式以真实 xterm 内核 parser 单测 `terminalProtocolMatrix.spec.ts` 做实测锚点；
+  GBK 堡垒机 8 位 C1 诚实标注「设计立场 + 待真机实测」，未编造数据）。
+- **WT-3 OpenSSH config 导入批（后端 + 前端，`e78ba5b2` + `103a41f1`）**：
+  `connection_import.rs` 第 8 来源 `sshconfig`（Host 通配/Hostname/User/Port/IdentityFile
+  仅路径映射不读密钥材料 `key-path-only`/UserKnownHostsFile/Match host/user 受限支持；
+  Include 按「未跟随」标注降级；ProxyCommand/ProxyJump 仅标注不执行）；main.rs 零改动
+  （kind 注册集中在 connection_import.rs）；导入向导第 8 来源 + 七语；
+  `smoke_ssh_config_import.py`（免容器、含脱敏断言）。
+- **WT-4 同 transport 命令会话批（后端 + 前端，`77bcb5d5` + `a5ca5cd8`）**：
+  PROTOCOL 新节契约先行；`ssh/session/open` 可选 `spawnCommand`（独立 PTY channel 执行
+  指定命令，`sh -c` 单引号转义复用 `exec::shell_quote`，显式请求覆盖连接级
+  remote_command，命令会话跳过 startup_commands 注入）；复制会话共享引用预占与跳板链
+  生命周期复用，MaxSessions 失败可见；前端「命令会话」入口 + 七语；
+  `smoke_spawn_session_test.py`（spawn 开合 + 共享引用并发关闭，容器实跑 PASS）。
+- **集成期修复（2 处，均为跨文件护栏只在全量跑时暴露）**：① WT-4 的
+  `spawnSessionDialogOpen` 未进 App.vue `modalOpenStates` 焦点表（workbench.spec
+  结构护栏 2 断言红）→ 已补入；② `smoke_ui_settings.mjs` 硬编码「10 个可绑定动作」
+  → WT-1 新增后为 11，断言已更新并注明来源。
+- **测试基线（集成线实测，较上轮收口值全部上行）**：cargo test **1021 passed / 0 failed**
+  （上轮 1000）；clippy `-D warnings` 0、fmt 0；vitest **121 文件 / 1202 用例** 全绿
+  （上轮 115 文件 / 1133 用例）；vue-tsc 0；`validate_repo.py`、`connection-forms/verify.mjs`
+  PASS；`smoke_ui_mock.mjs`、`smoke_ui_settings.mjs` 全绿；容器 smoke 家族对本轮
+  debug sidecar 全量复跑（含新增 `smoke_ssh_config_import.py`、`smoke_spawn_session_test.py`）。
+- **降级/未实施项（随收口沉淀）**：Include 递归跟随（管线只收上传字节，不做 sidecar
+  磁盘递归，防引入文件读取攻击面）；vi Copy Mode（维持不做）；GBK 堡垒机 8 位 C1
+  真机实测（待环境）；Quick Select 全缓冲档（已实现，默认 viewport 档）；spawn 会话
+  的 App.vue 新按钮无 UI 自动化用例（以容器 smoke 覆盖）。
+- **边界**：`ui/`、`dist/`、`Cargo.lock`、manifest 未动；未 push、未建 PR、未 merge
+  到集成分线；认证/协议语义改动（WT-3 信任模型、WT-4 spawnCommand 覆盖优先级）已在
+  PROTOCOL 成文，PR 需人工 review。
