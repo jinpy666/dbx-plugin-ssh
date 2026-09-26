@@ -259,6 +259,7 @@ import {
   type TerminalAppearanceState,
 } from "./lib/terminalAppearance";
 import { schemeIdFromName, schemeTone, uniqueSchemeId, type TerminalColorScheme, type TerminalThemeLike } from "./lib/terminalScheme";
+import { sanitizeTerminalBackground } from "./lib/terminalBackground";
 import {
   isLinkModifierSatisfied,
   loadTerminalBehavior,
@@ -2034,11 +2035,17 @@ function showError(cause: unknown, target: "terminal" | "sftp" = "sftp", retry?:
 // ANSI。作为「跟随宿主」基底，也是设置页预览的基准。
 function hostTerminalTheme(): TerminalThemeLike {
   const colors = appearance.value.colors;
+  // issue #73：宿主设了背景图片时下发的底色常是 transparent 或
+  // var()/color-mix() 这类需级联求值的形态，xterm 的 ITheme 颜色解析拿不到值
+  // 就静默回退内建默认底 #000（另有 alpha=0 被压成不透明黑）。进 xterm 前净化
+  // 一次；净化只覆盖终端底色（含同源的 --ssh-terminal-background 变量），
+  // --background 等 UI 变量仍用宿主原值。
+  const terminalBackground = sanitizeTerminalBackground(colors.background, appearance.value.colorScheme);
   return {
-    background: colors.background,
+    background: terminalBackground,
     foreground: colors.foreground,
     cursor: colors.foreground,
-    cursorAccent: colors.background,
+    cursorAccent: terminalBackground,
     selectionBackground: appearance.value.colorScheme === "dark" ? "#5f6f8a88" : "#93b4e088",
     ...TERMINAL_ANSI[appearance.value.colorScheme],
   };
