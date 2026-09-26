@@ -3904,3 +3904,9 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **M22-A**（parity-np22-ci-mcp-smoke c0581681）：ssh-smoke job 追加 smoke_mcp.py 在线段（MCP stdio 独立进程真容器全链；密码走步骤 env DBX_SSH_SMOKE_PASSWORD 注入）——M17-M19 的 MCP 工具面由此获得独立 stdio 进程口径的 CI 覆盖。
 - **M22-B**（parity-np22-protocol-audit e168c41f）：协议-实现对账审计（报告 docs/AUDIT-PROTOCOL-IMPL.zh-CN.md）——12 条差异修文档 8 处（watch/* 族补协议专节、递归下载 latin-1 段批次标注、FEATURE_PARITY 方法数重清点 68→182 等）；实现层仅登记 4 条待人工确认，最重要 R1：工作台与 MCP 两个 sftp/exists 面对 LSTAT 错误的语义不一致（M18「权限错误绝不误报 false」契约只覆盖 MCP 面）。
 - **M22 合并后 CI 全绿**：run 36174063661 success（31m49s，SSH container smoke 3m23s 含 MCP stdio 在线段首跑）。至此 M19.5→M22 全批次 CI 口径收口；可自动化 backlog 清零，剩余 R1（exists 双面语义拉齐，实现变更）等审计登记项待人工决策。
+
+## M24 批次（2026-09-26，审计登记簿 R3 拉齐收口：raw_read_chunk 补 normalize）
+
+- **来源**：M22-B 审计登记簿唯一剩余项 R3（M23 批已处置 R1/R2/R4）——`raw_read_chunk` 不经 `normalize_remote_path`，latin-1 车道缺 auto 车道的组件归一（绝对化 + 去 `.`/`..`/空段）。复核修正审计原文：normalize 不做 `~` 展开，差异仅为组件归一。
+- **修复**：`raw_read_chunk` 在 unescape 前对 wire 字符串跑同一 `normalize_remote_path`（转义名还原出字面 `..` 的文件名不受影响——归一只作用于还原前的 wire 字符串组件）。三条调用链（sftp/read latin-1 分发、树下载逐文件、单文件下载转义分支）自动收齐。
+- **验证**：cargo **981/981** / clippy 0 / fmt 0；smoke_fs_test **83/0/0**（latin-1 read、树下载、watcher 全链回归）。审计登记簿四项至此全部闭环。

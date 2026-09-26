@@ -4426,8 +4426,11 @@ impl SshRuntime {
         sftp_raw::RawSftp::init(channel.into_stream()).await
     }
 
-    /// 裸包读一个下载分片（转义路径专用）：`%XX` 转义的 wire 路径先还原为
-    /// 服务器原始字节再交给 SFTP READ。requested=0 直接回空（EOF 语义）。
+    /// 裸包读一个下载分片（转义路径专用）：wire 路径先在字符串域归一
+    /// （绝对化 + 去 `.`/`..`/空段，与 auto 车道的 normalize_remote_path 同一
+    /// 口径——M24-R3 拉齐；`%2E%2E` 这类转义名还原出字面 `..` 的场景不受
+    /// 影响，归一只作用于还原前的 wire 字符串组件），再还原为服务器原始
+    /// 字节交给 SFTP READ。requested=0 直接回空（EOF 语义）。
     pub(crate) async fn raw_read_chunk(
         &self,
         session_id: &str,
@@ -4438,7 +4441,8 @@ impl SshRuntime {
         if requested == 0 {
             return Ok(Vec::new());
         }
-        let raw_path = sftp_name::unescape_wire(remote_path);
+        let normalized = normalize_remote_path(remote_path)?;
+        let raw_path = sftp_name::unescape_wire(&normalized);
         let mut client = self.raw_sftp_client(session_id).await?;
         client.read_chunk(&raw_path, offset, requested).await
     }

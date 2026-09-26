@@ -39,7 +39,7 @@
 | --- | --- | --- | --- | --- |
 | R1 | `sftp_ext.rs::exists`（工作台 RPC `sftp/exists`）vs `mcp.rs::raw_sftp_exists`（MCP 工具 `sftp_exists`） | **两个 exists 面的错误语义不一致**：MCP 面 latin-1 裸包分支只把 `SSH_FX_NO_SUCH_FILE` 映射为「不存在」、其余错误如实上抛（PROTOCOL M18 段声明的「权限错误绝不误报 exists:false」契约）；工作台 RPC 的 exists 无论 auto（`symlink_metadata(...).is_ok()`）还是 latin-1 裸包分支都把**任何** LSTAT 错误（含权限拒绝、通道异常）映射为 `exists: false`。PROTOCOL `sftp/exists` 节只写了「路径不存在不算错误」，未声明权限错误下的表现。拉齐方向（工作台面对齐 NO_SUCH_FILE-only）属实现行为变更，本批不动 | 中 | **已处理（M23 批）**：工作台面 auto 与 latin-1 两分支均对齐 NO_SUCH_FILE-only（`sftp_ext.rs::exists`），前端三个预检调用方按既有「无法判定、不阻断」惯例消化新错误路径；PROTOCOL `sftp/exists` 节补权限错误语义 |
 | R2 | `backend/src/main.rs` `sftp/read` 分发臂注释 | 代码注释写「latin-1（M16 收口）」，实际车道 M19.5 落地（同 F1）。注释漂移不影响行为，但会误导后续考古；随下次代码改动顺带修正即可 | 低 | **已修（M23 批）**：改为「latin-1 车道（M19.5 落地）」 |
-| R3 | `sftp/read` latin-1 车道 | `raw_read_chunk` 不经 `normalize_remote_path`（auto 车道经），`~` 展开/相对路径归一在 latin-1 下不发生。wire 契约下前端恒传列表回传的绝对路径，实际风险低；若要统一属实现变更 | 低 | 仅登记 |
+| R3 | `sftp/read` latin-1 车道 | `raw_read_chunk` 不经 `normalize_remote_path`（auto 车道经），相对路径/`.`/`..` 组件归一在 latin-1 下不发生（注：`normalize_remote_path` 实际不做 `~` 展开，M24 复核修正）。wire 契约下前端恒传列表回传的绝对路径，实际风险低 | 低 | **已修（M24 批）**：`raw_read_chunk` 在 unescape 前对 wire 字符串跑同一 normalize（转义名还原出字面 `..` 的场景不受影响）；cargo 981/clippy 0/fmt 0，smoke 83/0/0 |
 | R4 | FEATURE_PARITY MCP 工具数口径 | 「29 工具齐（0.4.61）」「29→31（NetCatty 批）」均为带日期的历史口径，当前 `tool_definitions()` 实际注册 **33 个工具**（含 `docker_action`/`docker_list`）。行为描述未错，建议后续收口轮统一为「当前 33」口径 | 低 | **已补注（M23 批）**：两处历史口径保留出处、补注当前实际 33（含 `docker_action`/`docker_list`） |
 
 ## 核对通过、无需处理的代表项
