@@ -1475,6 +1475,12 @@ struct DownloadState {
     /// remote staging temp file that must be removed on finish, cancel,
     /// error and session close (`sudo_download::discard_tmp`).
     sudo_tmp: Option<String>,
+    /// 单文件下载生效编码为 latin-1（M28-B）：size 探测与分块读取按
+    /// `has_wire_lane` 判裸包车道——latin-1 的 wire 域字面 `%` 已自转义，
+    /// `%XX` 唯一解读是转义还原；auto 车道列表 uri 字面 `%` 未自转义
+    /// （D-7），一律走高层客户端（字面量语义与列表一致）。树/sudo 任务
+    /// 不经此字段分支（树按 `TreeDownloadState.latin1`，sudo 走独立车道）。
+    latin1: bool,
 }
 
 /// Live state of one recursive folder download. Files stream through the same
@@ -5967,6 +5973,9 @@ impl SshRuntime {
                     sink,
                     tree: None,
                     sudo_tmp: Some(staged.tmp_path.clone()),
+                    // sudo 下载走独立车道（sudo_download.rs），读侧不经
+                    // has_wire_lane 判分支；字面 false 只做字段填充。
+                    latin1: false,
                 },
             );
         emitter
@@ -5998,6 +6007,7 @@ impl SshRuntime {
         save_to_local: bool,
         download_dir: Option<&str>,
         conflict: Option<&str>,
+        encoding: NameEncoding,
         emitter: &PluginEmitter,
     ) -> Result<Value, String> {
         let remote_path = normalize_remote_path(remote_path)?;
@@ -6012,10 +6022,14 @@ impl SshRuntime {
         if save_to_local && offset > 0 {
             return Err("Local save downloads cannot resume from an offset".to_string());
         }
-        // 传输路径含 `%XX` 转义（latin-1 列表产出的非 UTF-8 名字）时，走
-        // 裸包 STAT 取真实字节数——高层客户端会把转义串按字面量发出去，
-        // 命中不了远端文件（M14-B：传输用服务器原始字节）。
-        let size = if sftp_name::has_wire_escapes(&remote_path) {
+        // latin-1 生效且 wire 含 `%XX` 转义（latin-1 列表产出的非 UTF-8
+        // 名字）时，走裸包 STAT 取真实字节数——高层客户端会把转义串按字
+        // 面量发出去，命中不了远端文件（M14-B：传输用服务器原始字节）。
+        // auto 一律走高层（M28-B 修 D-7）：auto 列表 uri 字面 `%` 未经
+        // `%25` 自转义，wire 串里的 `%XX` 是文件名字面量而非转义，不能
+        // 还原；车道判定统一收口在 `has_wire_lane`。
+        let latin1 = encoding == NameEncoding::Latin1;
+        let size = if sftp_name::has_wire_lane(&remote_path, encoding) {
             let mut client = self.raw_sftp_client(session_id).await?;
             // 整条 wire 还原为服务器字节再 LSTAT——探测点曾漏掉这一步（把
             // 字面 "%XX" 字节当路径，转义名单文件下载 start 即 NO_SUCH_FILE；
@@ -6076,6 +6090,7 @@ impl SshRuntime {
                     sink,
                     tree: None,
                     sudo_tmp: None,
+                    latin1,
                 },
             );
         emitter
@@ -6236,6 +6251,8 @@ impl SshRuntime {
                         latin1: encoding == NameEncoding::Latin1,
                     }),
                     sudo_tmp: None,
+                    // 树任务的逐文件读取按 TreeDownloadState.latin1 判分支。
+                    latin1: false,
                 },
             );
         emitter
@@ -6477,10 +6494,13 @@ impl SshRuntime {
         }
         let remaining = download.size.saturating_sub(offset);
         let requested = remaining.min(TRANSFER_CHUNK_SIZE as u64) as usize;
-        // 转义路径走裸包 READ（raw 字节打开远端文件）；普通路径保持高层
-        // 客户端的 seek+read。每 chunk 独立 open/close：转义名是极少数派，
-        // 简单性优先。raw EOF 回空 chunk，与高层路径的 eof 语义一致。
-        let chunk = if sftp_name::has_wire_escapes(&download.remote_path) {
+        // latin-1 转义路径走裸包 READ（raw 字节打开远端文件）；普通路径
+        // 保持高层客户端的 seek+read。车道判定按 start 登记的生效编码
+        // （M28-B 修 D-7）：auto 一律走高层——auto 列表 uri 字面 `%` 未
+        // 未经 `%25` 自转义，wire 串里的 `%XX` 是文件名字面量，不能还原。
+        // 每 chunk 独立 open/close：转义名是极少数派，简单性优先。raw EOF
+        // 回空 chunk，与高层路径的 eof 语义一致。
+        let chunk = if download.latin1 && sftp_name::has_wire_escapes(&download.remote_path) {
             self.raw_read_chunk(
                 &download.session_id,
                 &download.remote_path,
@@ -10694,6 +10714,7 @@ matrix-ed25519";
                 sink: None,
                 tree: None,
                 sudo_tmp: None,
+                latin1: false,
             },
         );
         let no_connection = |_: &str| String::new();
@@ -10790,6 +10811,7 @@ matrix-ed25519";
                     sink: None,
                     tree: None,
                     sudo_tmp: None,
+                    latin1: false,
                 },
             );
         }

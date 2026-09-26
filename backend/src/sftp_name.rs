@@ -127,6 +127,17 @@ pub fn has_wire_escapes(wire: &str) -> bool {
         .any(|(index, &byte)| byte == b'%' && is_hex_pair(&bytes[index + 1..]))
 }
 
+/// 单文件传输判车道（M28-B）：latin-1 生效且 wire 含 `%XX` 转义时走裸包
+/// raw 车道（转义名按原始字节打开），否则走高层客户端。auto 编码一律
+/// `false`——auto 列表 uri 由高层 `sftp_uri` 产出、字面 `%` 未经 `%25`
+/// 自转义（D-7），wire 字符串里的 `%XX` 是文件名字面量而非转义，整条
+/// `unescape_wire` 会还原成错误字节路径命中不了远端文件；auto 以字面量
+/// 语义与列表一致（列表回传什么名就按什么名打开）。状态取自下载登记
+/// 表的生效编码，不受编码判定时机影响。
+pub fn has_wire_lane(remote_path: &str, encoding: NameEncoding) -> bool {
+    encoding == NameEncoding::Latin1 && has_wire_escapes(remote_path)
+}
+
 /// wire 字符串 → 原始路径字节：`%XX` 还原为字节，其余字符按 UTF-8 编码。
 /// 非转义位置的 `%`（后跟不足两个十六进制位）保持字面量。
 pub fn unescape_wire(wire: &str) -> Vec<u8> {
@@ -337,6 +348,23 @@ mod tests {
         assert!(!has_wire_escapes("%2G"));
         assert!(!has_wire_escapes("%2"));
         assert!(!has_wire_escapes(""));
+    }
+
+    /// M28-B 回归（D-7）：单文件传输车道按生效编码判定——latin-1 的
+    /// wire 域字面 `%` 已自转义，`%XX` 唯一解读是转义；auto 列表 uri 字面
+    /// `%` 未自转义，wire 串里的 `%XX` 是文件名字面量，绝不能还原。
+    #[test]
+    fn has_wire_lane_branches_on_effective_encoding() {
+        // latin-1：转义名走裸包 raw 车道（现状保持）。
+        assert!(has_wire_lane("caf%E9.txt", NameEncoding::Latin1));
+        assert!(has_wire_lane("/tmp/a%ff.bin", NameEncoding::Latin1));
+        // latin-1：无转义名保持高层车道。
+        assert!(!has_wire_lane("café.txt", NameEncoding::Latin1));
+        // auto：含字面 %XX 的合法 UTF-8 名（auto 列表原样透传）一律走
+        // 高层客户端——修复前会被误判转义并还原成错误字节路径。
+        assert!(!has_wire_lane("caf%E9.txt", NameEncoding::Auto));
+        assert!(!has_wire_lane("100%.txt", NameEncoding::Auto));
+        assert!(!has_wire_lane("café.txt", NameEncoding::Auto));
     }
 
     #[test]

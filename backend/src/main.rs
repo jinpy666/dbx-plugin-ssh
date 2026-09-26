@@ -1634,6 +1634,12 @@ impl Plugin {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let conflict = params.get("conflict").and_then(Value::as_str);
+                // 判定走连接级优先级（M16）：连接覆盖 > 全局偏好 > 缺省
+                // auto。M28-B 修 D-7：单文件下载判分支按生效编码区分——
+                // auto 一律走高层客户端（auto 列表 uri 字面 `%` 未自转义，
+                // wire 串里的 `%XX` 是文件名字面量），latin-1 维持
+                // has_wire_escapes 判裸包车道。
+                let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(self.ssh.start_download(
                     session_id,
                     remote_path,
@@ -1641,6 +1647,7 @@ impl Plugin {
                     save_to_local,
                     download_dir.as_deref(),
                     conflict,
+                    encoding,
                     emitter,
                 ))
             }

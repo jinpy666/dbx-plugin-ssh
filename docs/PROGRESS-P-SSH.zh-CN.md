@@ -3956,3 +3956,11 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **D-5（upload/start 无 latin-1 分支为有意选型，已闭环）**：`sftp/upload/start` 只写本地 spool（`ssh.rs:5359`）、不发远端请求，字节保真由 `finish_upload`（`ssh.rs:5618`）执行。落地：BOUNDARY 矩阵 `sftp/upload/start` 行备注补「有意选型（M28-A）：只写本地 spool，字节保真在 finish 执行（`ssh.rs:5618`），无 latin-1 分支非缺口」；D-5 条目标「已闭环（M28-A）」。
 - **D-6（MCP sftp_download 目录探测选型，已闭环）**：latin-1 分支不单独裸包 STAT 目录，依赖 OPEN 被服务器拒绝后回退高层报「is a directory」（`mcp.rs:2979–2984`），与 auto 报错语义一致。落地：BOUNDARY 矩阵 MCP `sftp_download` 行备注补「目录探测有意选型（M28-A）：不单独裸包 STAT，依赖 OPEN 被拒回退（`mcp.rs:2979–2984`），与 auto 报错语义一致」；D-6 条目标「已闭环（M28-A）」。
 - **验证**：git diff --check 无空白错误；grep 确认 BOUNDARY 疑点节 D-3..D-6 均带「已闭环（M28-A）」、D-7 保持登记待议不动。代码零改动（纯文档批次，cargo/(smoke) 不适用）。
+
+## M28-B 批次（2026-09-26，疑点 D-7 修复：单文件下载判分支按生效编码区分）
+
+- **动机**：M27-A 裁决 D1（latin-1 下载车道 wire 契约内正确）时分离登记的真实往返缺口 D-7——单文件下载的 `has_wire_escapes` 判分支（原 `ssh.rs:6018` size 探测、原 `ssh.rs:6483` 分块读取）不区分编码：auto/latin-1 回退列表 uri 由高层 `sftp_uri(&entry.path())` 产出（`ssh.rs:4367`），字面 `%` 未经 `%25` 自转义，含字面 `%XX` 十六进制对的合法 UTF-8 文件名回传下载会被误判转义、`unescape_wire` 还原成错误字节路径命中不了远端文件。latin-1 车道不受影响（列表 uri 经 `escape_wire`，字面 `%` 已是 `%25`）。
+- **方案（按生效编码区分车道，最小 diff）**：`main.rs` `sftp/download/start` 分发臂 resolve 编码（`resolve_sftp_encoding`，连接覆盖 > 全局偏好 > 缺省 auto，与 `sftp/download/tree/start` 同先例）传入 `start_download`；`DownloadState` 新增 `latin1: bool` 字段（参照 `TreeDownloadState.latin1` 先例），start 登记、`download_chunk` 从登记表读取；车道判定统一收口为 `sftp_name.rs` 新增纯函数 `has_wire_lane(remote_path, encoding)`——latin-1 维持现状（`has_wire_escapes` → raw 车道，D-1 契约不动），**auto 一律走高层客户端**（auto 车道本就以字面量语义与列表一致：列表回传什么名就按什么名打开，这正是修复目标）。树下载按 `tree.latin1` 判（M21）、sudo 下载走独立车道（sudo_download.rs，`DownloadState.latin1` 仅做字段填充），均不在本修复范围；`normalize_remote_path`/`escape_wire`/`unescape_wire` 语义零改动。
+- **单测回归**：`sftp_name.rs` 新增 `has_wire_lane_branches_on_effective_encoding`——latin-1 转义名走 raw、latin-1 无转义名与 auto 全形态（含字面 `%XX`、字面 `%`、纯 UTF-8）一律高层。
+- **文档落地**：NAME-ENCODING-BOUNDARY 矩阵 `sftp/download/start`/`next` 两行按编码区分口径改写、D-7 条目标「已修（M28-B）」含修复描述与验证数；PROTOCOL RPC 表 `sftp/download/start|next|finish` 行与 `sftp/list` 节各补一句「车道判定按生效编码区分（M28-B）」。
+- **验证**：cargo **985/985**（基线 984 + 1，只增不减）/ clippy `-D warnings` 0 / fmt --check 0 / build 通过；本地容器（dbx-ssh-test）smoke_fs_test **83 PASS / 0 SKIP / 0 FAIL**——smoke 的 latin-1 下载与树下载用例是本修复的直接回归。
