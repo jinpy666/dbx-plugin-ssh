@@ -1847,6 +1847,13 @@ impl SshRuntime {
         operation_id: &str,
         emitter: PluginEmitter,
     ) -> Result<Value, String> {
+        // WT-4 (WezTerm `spawn` parity): resolve the optional command-session
+        // request BEFORE any dial or transport lease, so a malformed command
+        // fails closed without touching the shared transport at all. The
+        // normalized command is wrapped as `sh -c '<escaped>'` here so the
+        // exec branch stays a single `Some`/`None` decision.
+        let spawn_exec = normalized_spawn_command(request.spawn_command.as_deref())?
+            .map(|command| spawn_exec_payload(&command));
         let connection_id = request.connection_id.as_str();
         let workbench_id = request.workbench_id.as_str();
         let reuse_authenticated_transport = request.reuse_authenticated_transport;
@@ -1981,7 +1988,16 @@ impl SshRuntime {
                     Err(error) => eprintln!("[x11] cannot arm the forwarding gate: {error}"),
                 }
             }
-            if connection.remote_command.is_empty() {
+            if let Some(command) = spawn_exec.as_deref() {
+                // WT-4 (command session): exec `sh -c '<escaped command>'`
+                // instead of a shell — see docs/PROTOCOL.zh-CN.md「同
+                // transport 命令会话」. Explicit per-open request wins over
+                // the connection-level remote_command.
+                channel
+                    .exec(true, command.as_bytes())
+                    .await
+                    .map_err(|error| format!("Failed to start remote command: {error}"))?;
+            } else if connection.remote_command.is_empty() {
                 channel
                     .request_shell(true)
                     .await
@@ -2081,11 +2097,11 @@ impl SshRuntime {
         // Startup commands (Tabby "Login scripts" parity, M7 P0-4): after the
         // shell is up, type the connection's pre-configured command sequence
         // through the same input channel the keepalive uses. Only for real
-        // shell sessions — a RemoteCommand exec replaces the shell, so typing
-        // into it is a semantic conflict (documented in PROTOCOL.zh-CN.md).
-        // The event reports only the count and completion: command contents
-        // can carry secrets and never reach logs or events.
-        if startup_commands::executes_for(&connection.remote_command) {
+        // shell sessions — a RemoteCommand or WT-4 spawn exec replaces the
+        // shell, so typing into it is a semantic conflict (documented in
+        // PROTOCOL.zh-CN.md). The event reports only the count and completion:
+        // command contents can carry secrets and never reach logs or events.
+        if spawn_exec.is_none() && startup_commands::executes_for(&connection.remote_command) {
             let plan = startup_commands::load_plan(&self.data_dir, &connection.id);
             if !plan.is_empty() {
                 let terminal_tx = entry.terminal_tx.clone();
@@ -9129,6 +9145,45 @@ fn valid_requested_session_id(id: &str) -> bool {
     !id.is_empty() && !id.contains('/') && id.len() <= 128
 }
 
+/// WT-4 (command session) command size cap, same magnitude as the per-command
+/// cap of startup commands (`startup_commands::MAX_COMMAND_BYTES`).
+const SPAWN_COMMAND_MAX_BYTES: usize = 4 * 1024;
+
+/// Normalizes the WT-4 `spawnCommand` request into the exec payload, or `None`
+/// when the caller did not ask for a command session (absent or blank keeps
+/// the ordinary shell / connection `remote_command` semantics). Fails closed
+/// on NUL bytes (exec strings cannot carry them) and over-cap commands
+/// instead of silently truncating. Pure so tests can exercise the contract
+/// without a server.
+fn normalized_spawn_command(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.contains('\0') {
+        return Err("spawnCommand must not contain NUL bytes".to_string());
+    }
+    if trimmed.len() > SPAWN_COMMAND_MAX_BYTES {
+        return Err(format!(
+            "spawnCommand exceeds the {SPAWN_COMMAND_MAX_BYTES} byte limit"
+        ));
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// Wraps a normalized command session command as the exec payload:
+/// `sh -c '<single-quote escaped command>'` (repo hard rule: remote commands
+/// are single-quote escaped). The outer login shell receives exactly one safe
+/// argument so metacharacters cannot escape the quoting, while the inner
+/// `sh -c` keeps full shell semantics (pipes/redirects work as typed).
+/// Reuses the existing `exec::shell_quote` escaper.
+fn spawn_exec_payload(command: &str) -> String {
+    format!("sh -c {}", exec::shell_quote(command))
+}
+
 async fn detect_remote_shell(handle: &Handle<SshClient>) -> RemoteShell {
     remote_shell_or_timeout(
         detect_remote_shell_inner(handle),
@@ -9209,6 +9264,71 @@ fn plugin_error(error: PluginError) -> String {
 mod tests {
     use super::*;
     use russh::{cipher, kex, mac};
+
+    #[test]
+    fn normalized_spawn_command_treats_absent_and_blank_as_no_command() {
+        assert_eq!(normalized_spawn_command(None).unwrap(), None);
+        assert_eq!(normalized_spawn_command(Some("")).unwrap(), None);
+        assert_eq!(normalized_spawn_command(Some("   ")).unwrap(), None);
+        assert_eq!(normalized_spawn_command(Some(" \t\r\n ")).unwrap(), None);
+    }
+
+    #[test]
+    fn normalized_spawn_command_trims_and_keeps_inner_whitespace() {
+        assert_eq!(
+            normalized_spawn_command(Some("  htop  "))
+                .unwrap()
+                .as_deref(),
+            Some("htop")
+        );
+        assert_eq!(
+            normalized_spawn_command(Some("tail -f /var/log/syslog"))
+                .unwrap()
+                .as_deref(),
+            Some("tail -f /var/log/syslog")
+        );
+    }
+
+    #[test]
+    fn normalized_spawn_command_fails_closed_on_nul_and_oversize() {
+        let nul_error = normalized_spawn_command(Some("echo a\0b")).unwrap_err();
+        assert_eq!(nul_error, "spawnCommand must not contain NUL bytes");
+
+        let oversized = "x".repeat(SPAWN_COMMAND_MAX_BYTES + 1);
+        let error = normalized_spawn_command(Some(&oversized)).unwrap_err();
+        assert_eq!(
+            error,
+            format!("spawnCommand exceeds the {SPAWN_COMMAND_MAX_BYTES} byte limit")
+        );
+        // At-cap commands are accepted; the cap counts UTF-8 bytes.
+        let at_cap = "x".repeat(SPAWN_COMMAND_MAX_BYTES);
+        assert!(normalized_spawn_command(Some(&at_cap)).unwrap().is_some());
+        let at_cap_multibyte = "中".repeat(SPAWN_COMMAND_MAX_BYTES / 3);
+        assert!(normalized_spawn_command(Some(&at_cap_multibyte))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn spawn_exec_payload_single_quote_escapes_and_preserves_shell_semantics() {
+        // Repo hard rule: remote commands are single-quote escaped. The
+        // payload is one `sh -c '<escaped>'` argument for the outer shell;
+        // the inner sh keeps pipes and redirects intact.
+        assert_eq!(spawn_exec_payload("htop"), "sh -c 'htop'");
+        assert_eq!(
+            spawn_exec_payload("it's"),
+            "sh -c 'it'\\''s'",
+            "embedded single quotes use the '\\'' escape (exec::shell_quote)"
+        );
+        assert_eq!(
+            spawn_exec_payload("echo a && cat /etc/passwd | wc -l > /tmp/x; rm -rf '$(pwd)'"),
+            "sh -c 'echo a && cat /etc/passwd | wc -l > /tmp/x; rm -rf '\\''$(pwd)'\\'''"
+        );
+        // The metacharacters stay inside the quoted payload: nothing outside
+        // the single quotes except the fixed `sh -c ` prefix.
+        let payload = spawn_exec_payload("a; b | c & d");
+        assert!(payload.starts_with("sh -c '") && payload.ends_with("'"));
+    }
 
     #[test]
     fn upload_progress_payload_marks_the_phase() {
@@ -11057,6 +11177,7 @@ matrix-ed25519";
             instruction: &'static str,
             prompt: &'static str,
             answers: Arc<Mutex<Vec<String>>>,
+            exec_seen: Arc<Mutex<Vec<String>>>,
         }
 
         impl MockKoko {
@@ -11066,6 +11187,7 @@ matrix-ed25519";
                     instruction,
                     prompt,
                     answers: Arc::new(Mutex::new(Vec::new())),
+                    exec_seen: Arc::new(Mutex::new(Vec::new())),
                 }
             }
         }
@@ -11075,6 +11197,7 @@ matrix-ed25519";
             instruction: &'static str,
             prompt: &'static str,
             answers: Arc<Mutex<Vec<String>>>,
+            exec_seen: Arc<Mutex<Vec<String>>>,
             ki_round: usize,
         }
 
@@ -11094,9 +11217,13 @@ matrix-ed25519";
             async fn exec_request(
                 &mut self,
                 channel: ChannelId,
-                _data: &[u8],
+                data: &[u8],
                 session: &mut Session,
             ) -> Result<(), Self::Error> {
+                self.exec_seen
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(data).into_owned());
                 session.channel_success(channel)?;
                 session.data(channel, b"/bin/bash".to_vec())?;
                 session.eof(channel)?;
@@ -11231,6 +11358,7 @@ matrix-ed25519";
                     instruction: self.instruction,
                     prompt: self.prompt,
                     answers: self.answers.clone(),
+                    exec_seen: self.exec_seen.clone(),
                     ki_round: 0,
                 }
             }
@@ -11240,7 +11368,12 @@ matrix-ed25519";
             shape: Shape,
             instruction: &'static str,
             prompt: &'static str,
-        ) -> (u16, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+        ) -> (
+            u16,
+            Arc<Mutex<Vec<String>>>,
+            Arc<Mutex<Vec<String>>>,
+            tokio::task::JoinHandle<()>,
+        ) {
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
                 .await
                 .expect("bind mock koko");
@@ -11259,10 +11392,11 @@ matrix-ed25519";
             });
             let mut server = MockKoko::new(shape, instruction, prompt);
             let answers = server.answers.clone();
+            let exec_seen = server.exec_seen.clone();
             let task = tokio::spawn(async move {
                 let _ = server.run_on_socket(config, &listener).await;
             });
-            (port, answers, task)
+            (port, answers, exec_seen, task)
         }
 
         fn koko_connection(port: u16, secrets: Value, external: Value) -> StoredConnection {
@@ -11339,7 +11473,7 @@ matrix-ed25519";
 
         #[tokio::test]
         async fn unknown_chinese_mfa_prompt_requests_current_code_from_user() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::PasswordThenMfa, "请输入6位数字。", "[MFA认证]：").await;
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
@@ -11381,7 +11515,7 @@ matrix-ed25519";
 
         #[tokio::test]
         async fn configured_totp_keeps_login_automatic_without_user_prompt() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let gateway = Arc::new(ManualOtpGateway::submitting("should-not-be-used"));
             let mut runtime = test_runtime();
@@ -11408,7 +11542,7 @@ matrix-ed25519";
 
         #[tokio::test]
         async fn cancelling_manual_mfa_prompt_fails_closed() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::PasswordThenMfa, "请输入6位数字。", "[MFA认证]：").await;
             let gateway = Arc::new(ManualOtpGateway::cancelling());
             let mut runtime = test_runtime();
@@ -11438,7 +11572,7 @@ matrix-ed25519";
 
         #[tokio::test]
         async fn second_terminal_session_reuses_authenticated_transport() {
-            let (port, answers, server) = spawn_mock_koko(
+            let (port, answers, _exec, server) = spawn_mock_koko(
                 Shape::PasswordThenMfa,
                 "Please enter 6 digits.",
                 "[MFA auth]:",
@@ -11465,6 +11599,7 @@ matrix-ed25519";
                         reuse_authenticated_transport: false,
                         reuse_authenticated_session_id: None,
                         requested_session_id: None,
+                        spawn_command: None,
                         cols: 80,
                         rows: 24,
                     },
@@ -11483,6 +11618,7 @@ matrix-ed25519";
                             .as_str()
                             .map(str::to_string),
                         requested_session_id: None,
+                        spawn_command: None,
                         cols: 80,
                         rows: 24,
                     },
@@ -11506,6 +11642,114 @@ matrix-ed25519";
             for opened in [first, second] {
                 let session_id = opened["sessionId"].as_str().unwrap();
                 runtime.close_session(session_id).await.unwrap();
+            }
+            server.abort();
+        }
+
+        #[tokio::test]
+        async fn spawn_command_session_runs_on_shared_transport_with_escaped_exec() {
+            // WT-4 contract: a spawnCommand open on the reused transport must
+            // NOT re-authenticate (bastion MFA is answered exactly once) and
+            // must exec the single-quote-wrapped `sh -c '...'` payload.
+            let (port, answers, exec_seen, server) = spawn_mock_koko(
+                Shape::PasswordThenMfa,
+                "Please enter 6 digits.",
+                "[MFA auth]:",
+            )
+            .await;
+            let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
+            let mut runtime = test_runtime();
+            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            let connection = koko_connection(
+                port,
+                json!({}),
+                json!({
+                    "authentication": "password",
+                    "auth_flow_mode": "off",
+                }),
+            );
+            runtime.store_connection(connection).unwrap();
+
+            let base = runtime
+                .open_session(
+                    &SessionOpenRequest {
+                        connection_id: "koko-login".into(),
+                        workbench_id: "workbench-1".into(),
+                        reuse_authenticated_transport: false,
+                        reuse_authenticated_session_id: None,
+                        requested_session_id: None,
+                        spawn_command: None,
+                        cols: 80,
+                        rows: 24,
+                    },
+                    "open-base",
+                    test_emitter(),
+                )
+                .await
+                .expect("base shell session");
+            let spawned = runtime
+                .open_session(
+                    &SessionOpenRequest {
+                        connection_id: "koko-login".into(),
+                        workbench_id: "workbench-2".into(),
+                        reuse_authenticated_transport: true,
+                        reuse_authenticated_session_id: base["sessionId"]
+                            .as_str()
+                            .map(str::to_string),
+                        requested_session_id: None,
+                        spawn_command: Some("htop --tree".into()),
+                        cols: 80,
+                        rows: 24,
+                    },
+                    "open-spawn",
+                    test_emitter(),
+                )
+                .await
+                .expect("spawn command session on the shared transport");
+
+            assert_ne!(
+                spawned["sessionId"].as_str().unwrap(),
+                base["sessionId"].as_str().unwrap(),
+                "the command session owns its own sessionId"
+            );
+            assert_eq!(
+                gateway.prompts_seen.lock().unwrap().len(),
+                1,
+                "a command session on the shared transport must not ask for MFA again"
+            );
+            assert_eq!(
+                answers.lock().unwrap().as_slice(),
+                [MFA_CODE.to_string()],
+                "the bastion must authenticate only the first SSH transport"
+            );
+            // russh 0.62 channel requests are fire-and-forget: `exec` only
+            // queues the message, so the mock server may not have handled it
+            // by the time `open_session` returns. Poll briefly instead of
+            // asserting immediately.
+            let exec_payload = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let seen = exec_seen.lock().unwrap().clone();
+                    if !seen.is_empty() {
+                        break seen;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the mock server must receive the exec request");
+            assert_eq!(
+                exec_payload.as_slice(),
+                ["sh -c 'htop --tree'"],
+                "the command is wrapped as one single-quoted sh -c argument"
+            );
+
+            for opened in [base, spawned] {
+                let session_id = opened["sessionId"].as_str().unwrap();
+                // The mock exec handler closes the channel right after the
+                // reply, so the spawned session's read loop may already have
+                // reaped it ("SSH session was not found") — that self-cleanup
+                // on command exit is the expected command-session behavior.
+                let _ = runtime.close_session(session_id).await;
             }
             server.abort();
         }
@@ -11551,6 +11795,7 @@ matrix-ed25519";
                         reuse_authenticated_transport: true,
                         reuse_authenticated_session_id: Some("missing-session".into()),
                         requested_session_id: None,
+                        spawn_command: None,
                         cols: 80,
                         rows: 24,
                     },
@@ -11566,7 +11811,7 @@ matrix-ed25519";
 
         #[tokio::test]
         async fn mfa_code_is_answered_after_partial_success_password() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let connection = koko_connection(
@@ -11588,7 +11833,7 @@ matrix-ed25519";
         /// 用户照屏幕抄进 OTP 提示词的就是这句话（issue #17 的 martin-bian）。
         #[tokio::test]
         async fn mfa_is_answered_from_challenge_instructions() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, "Code: ").await;
             let runtime = test_runtime();
             let connection = koko_connection(
@@ -11609,7 +11854,7 @@ matrix-ed25519";
         /// 完全自定义的提问文案靠用户提示词命中（无内置模式可依赖）。
         #[tokio::test]
         async fn mfa_is_answered_from_user_hint() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::PasswordThenMfa, "", "Enter verification token: ").await;
             let runtime = test_runtime();
             let connection = koko_connection(
@@ -11631,7 +11876,7 @@ matrix-ed25519";
         /// 保护仍然生效——不回码，且失败信息点名服务器提问与配置入口。
         #[tokio::test]
         async fn bare_mfa_prompt_stays_unanswered_before_the_password() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::KiMfaOnly, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let connection = koko_connection(
@@ -11659,7 +11904,7 @@ matrix-ed25519";
         /// 同一形态改配「密码 + OTP 合并」：反问顺序主机应能登录（表单选型指引）。
         #[tokio::test]
         async fn bare_mfa_prompt_is_answered_in_combined_mode() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::KiMfaOnly, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let connection = koko_connection(
@@ -11677,7 +11922,7 @@ matrix-ed25519";
         /// 单独的 sudo 口令（凭据混用只会认证失败，还把特权口令送给主机）。
         #[tokio::test]
         async fn login_password_prompt_gets_the_login_password() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::KiPasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let connection = koko_connection(
@@ -11698,7 +11943,7 @@ matrix-ed25519";
         /// 合并提问（一条应答同时要密码与验证码）：+合并模式拼接后通过。
         #[tokio::test]
         async fn combined_prompt_gets_password_and_code() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::KiCombined, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let connection = koko_connection(
@@ -11720,7 +11965,7 @@ matrix-ed25519";
         /// 合并提问的应答内容）。
         #[tokio::test]
         async fn combined_prompt_gets_password_and_code_in_password_then_otp() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::KiCombined, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let connection = koko_connection(
@@ -11741,7 +11986,7 @@ matrix-ed25519";
         /// MFA 也必须能读到该配置的 TOTP 与流程模式。
         #[tokio::test]
         async fn global_profile_supplies_login_mfa_credentials() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let mut store = sudo_profiles::SudoProfileStore::default();
@@ -11781,7 +12026,7 @@ matrix-ed25519";
         /// `scripts/smoke_login_mfa_test.py`（paramiko 会如实置位）。
         #[tokio::test]
         async fn publickey_partial_success_is_reported_by_russh_server_as_reject() {
-            let (port, answers, server) =
+            let (port, answers, _exec, server) =
                 spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let runtime = test_runtime();
             let key_text = test_key(2)

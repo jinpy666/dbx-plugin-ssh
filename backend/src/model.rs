@@ -921,6 +921,12 @@ pub struct SessionOpenRequest {
     /// before the long-running open RPC returns. Older callers keep server UUIDs.
     #[serde(default)]
     pub requested_session_id: Option<String>,
+    /// WT-4 (WezTerm `spawn` parity): run this command on the new channel
+    /// (independent PTY) instead of a shell. One-shot open parameter — the
+    /// contract lives in docs/PROTOCOL.zh-CN.md「同 transport 命令会话」;
+    /// absent/blank keeps the ordinary shell or connection `remote_command`.
+    #[serde(default)]
+    pub spawn_command: Option<String>,
     #[serde(default = "default_cols")]
     pub cols: u32,
     #[serde(default = "default_rows")]
@@ -1025,6 +1031,7 @@ mod tests {
         assert!(request.requested_session_id.is_none());
         assert_eq!(request.cols, 120);
         assert_eq!(request.rows, 32);
+        assert!(request.spawn_command.is_none());
     }
 
     #[test]
@@ -1040,6 +1047,19 @@ mod tests {
         assert_eq!(request.requested_session_id.as_deref(), Some("session-1"));
         assert_eq!(request.cols, 80);
         assert_eq!(request.rows, 24);
+    }
+
+    #[test]
+    fn session_open_request_accepts_spawn_command() {
+        let request: SessionOpenRequest = serde_json::from_value(serde_json::json!({
+            "connectionId": "conn",
+            "reuseAuthenticatedTransport": true,
+            "reuseAuthenticatedSessionId": "source",
+            "spawnCommand": "htop"
+        }))
+        .unwrap();
+        assert_eq!(request.spawn_command.as_deref(), Some("htop"));
+        assert!(request.reuse_authenticated_transport);
     }
 
     #[test]
