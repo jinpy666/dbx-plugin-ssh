@@ -4189,3 +4189,29 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
 - **里程碑**：cargo **1000/1000**（M19.5 起点 950 → +50）、vitest **115 文件/1133**、smoke 83/0/0 保持。
 - **四特性交付**：#78 文件夹上传（纯前端编排复用既有 upload 管线 + 聚合进度卡）、#66 下载限速（transfer_download_limit_kib 偏好 + 逐块补差限速器，缺省零开销）、#96 JSON 预览（pretty + 字段树 + 三级复制）、#90 sz 反馈（ZMODEM 触发检测抑制乱码 + 七语通知）；#95 取证闭环定性非插件缺陷（PTY 帧字节级完好）。
 - **四波 CI 验证节奏**（用户指示不逐轮 CI 后采用分波）：C+D 先行一波（局部回归），A+B 齐后全量一波（四特性组合回归）——两波均一次通过。
+
+## WezTerm 对标登记与排期重编号（2026-09-26，WT-1–WT-4）
+
+- **登记轮 `129f636f`**：FEATURE_PARITY 新增「WezTerm 对标补充」节——15 行能力对照
+  （同水位/差距/刻意不做三类；SFTP、录制回放、协议广度等本插件领先项不在差距之列）
+  + 四批次实施排期。登记时编号 M27–M30（拟接续当时的 M26-A）。
+- **撞号发现与重编号**：并行工作线在同一分支把 M27–M31 占用为另一系列（PROGRESS 的
+  M27-A/B = latin-1 疑点裁决 + shell_quote 收编、M28-A/B = 下载编码修复、M29 = 冒烟
+  预算、M30-A/B = main 并线 + 20 条 issue 分诊、M31-A/B/C/D = 四特性批次），与本节
+  排期互不知情。本轮把 WezTerm 排期重编号为独立前缀 **WT-1–WT-4**（内容与验收口径
+  不变），FEATURE_PARITY 内 12 处 M 引用全部改写并在排期标题下保留撞号说明。
+- **六项排期均未实施**（本轮代码级核实，防止「排期即交付」误读）：
+  - **WT-1** 终端交互批（纯前端）：Quick Select Mode（frontend 零命中）+ DECSET 2026
+    应答翻转（`terminalModeQueries.ts` 仍回 unsupported）。
+  - **WT-2** 协议应答矩阵审计批：DSR 5/6、Primary DA、SGR 冒号形式核对成文 +
+    OSC 1337 SetUserVar / OSC 9·777 接入（frontend 零命中）+ TEST_MATRIX 新节。
+  - **WT-3** OpenSSH config 导入批：`connection_import.rs` 仍为 7 种第三方来源，
+    其中的 `ssh_config` 命中仅是 Termius 格式内部键。
+  - **WT-4** 同 transport 命令会话批：spawn 语义未实现（`main.rs` spawn 命中均为
+    `thread::spawn`）。
+- **明确不做**（随登记轮沉淀）：vi Copy Mode、tmux control-mode 桥接、Lua/插件化配置、
+  SSH 持久 mux server、WezTerm 私有 SGR 6、8 位 C1 控制码（GBK 堡垒机行为纳入 WT-2
+  实测记录）。
+- **边界遵守**：纯文档轮（FEATURE_PARITY + 本节），未动代码/manifest/`ui/`，
+  未关闭任何 issue，未触发 CI；`docs/M32-IMPL-PLAN.zh-CN.md` 为另一工作线的
+  未跟踪设计稿，本轮不代为提交。
