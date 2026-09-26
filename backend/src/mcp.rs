@@ -29,7 +29,9 @@ use crate::docker;
 use crate::exec::{self, AuthFlowMode, Hints, SudoAuth};
 use crate::host_key::HostKeyVerifier;
 use crate::mcp_safety::{self, CommandRisk};
-use crate::model::{AuthenticationMethod, JumpHost, StoredConnection, SudoSource};
+use crate::model::{
+    normalize_remote_path, AuthenticationMethod, JumpHost, StoredConnection, SudoSource,
+};
 use crate::multi_exec;
 use crate::preferences;
 use crate::sftp_copy;
@@ -1624,9 +1626,11 @@ impl McpState {
                         Ok(metrics)
                     }
                     "sftp_disk_usage" => {
-                        let path = required_str(arguments, "path")?;
+                        // M25：与工作台 sftp_disk_usage 同口径——远端路径
+                        // 组件归一后再进 shell 命令（df -kP）。
+                        let path = normalize_remote_path(required_str(arguments, "path")?)?;
                         let connection = self.connection(arguments).await?;
-                        let command = format!("df -kP {}", exec::shell_quote(path));
+                        let command = format!("df -kP {}", exec::shell_quote(&path));
                         // Plugin-internal plumbing: no client setEnv, keeping
                         // the df output parseable regardless of locale overrides.
                         let outcome =
@@ -2336,7 +2340,10 @@ impl McpState {
         let encoding = mcp_sftp_encoding(&self.runtime.data_dir(), arguments);
         match name {
             "sftp_list_dir" => {
-                let path = required_str(arguments, "path")?;
+                // M25：与工作台车道同口径——组件归一（绝对化 + 去 ./../空段）。
+                // latin-1 显示域内的 clean 名不受影响；这是纯字符级清洗，
+                // 归一在编码还原之前完成。
+                let path = normalize_remote_path(required_str(arguments, "path")?)?;
                 if encoding == sftp_name::NameEncoding::Latin1 {
                     // latin-1（M17）：裸包 READDIR 保原始字节，名字口径为显示
                     // 形式（latin-1 解码忠实可逆，AI 回传同一路径即落回原始
@@ -2344,13 +2351,13 @@ impl McpState {
                     // 工作台 sftp_list_path 同策略）。
                     match entry.raw_sftp().await {
                         Ok(mut client) => match client
-                            .readdir(&sftp_name::latin1_encode_display(path))
+                            .readdir(&sftp_name::latin1_encode_display(&path))
                             .await
                         {
                             Ok(raw_entries) => {
                                 return Ok(json!({
                                     "path": path,
-                                    "entries": raw_list_items(path, raw_entries),
+                                    "entries": raw_list_items(&path, raw_entries),
                                 }));
                             }
                             Err(error) => {
@@ -2367,7 +2374,12 @@ impl McpState {
                     }
                 }
                 let sftp = entry.sftp().await?;
-                let entries = sftp.lock().await.read_dir(path).await.map_err(sftp_error)?;
+                let entries = sftp
+                    .lock()
+                    .await
+                    .read_dir(&path)
+                    .await
+                    .map_err(sftp_error)?;
                 let items: Vec<Value> = entries
                     .map(|entry| {
                         let metadata = entry.metadata();
@@ -2388,7 +2400,8 @@ impl McpState {
                 Ok(json!({ "path": path, "entries": items }))
             }
             "sftp_stat" => {
-                let path = required_str(arguments, "path")?;
+                // M25：组件归一，与工作台 sftp/stat 同口径。
+                let path = normalize_remote_path(required_str(arguments, "path")?)?;
                 if encoding == sftp_name::NameEncoding::Latin1 {
                     // latin-1（M18）：显示路径还原字节后走裸包 LSTAT（不跟随
                     // 符号链接，与工作台 sftp/stat M17 同口径）。裸包 v3
@@ -2398,10 +2411,10 @@ impl McpState {
                     match entry.raw_sftp().await {
                         Ok(mut client) => {
                             let attrs = client
-                                .lstat(&sftp_name::latin1_encode_display(path))
+                                .lstat(&sftp_name::latin1_encode_display(&path))
                                 .await?;
-                            let (uid, gid) = lookup_remote_uid_gid(&entry.handle, path).await;
-                            return Ok(raw_stat_json(path, attrs, uid, gid));
+                            let (uid, gid) = lookup_remote_uid_gid(&entry.handle, &path).await;
+                            return Ok(raw_stat_json(&path, attrs, uid, gid));
                         }
                         Err(error) => {
                             eprintln!(
@@ -2411,7 +2424,12 @@ impl McpState {
                     }
                 }
                 let sftp = entry.sftp().await?;
-                let metadata = sftp.lock().await.metadata(path).await.map_err(sftp_error)?;
+                let metadata = sftp
+                    .lock()
+                    .await
+                    .metadata(&path)
+                    .await
+                    .map_err(sftp_error)?;
                 Ok(json!({
                     "path": path,
                     "size": metadata.size,
@@ -2423,14 +2441,15 @@ impl McpState {
                 }))
             }
             "sftp_exists" => {
-                let path = required_str(arguments, "path")?;
+                // M25：组件归一，与工作台 sftp/exists 同口径。
+                let path = normalize_remote_path(required_str(arguments, "path")?)?;
                 if encoding == sftp_name::NameEncoding::Latin1 {
                     // latin-1（M18）：裸包 LSTAT，只认 NO_SUCH_FILE 为
                     // 「不存在」，其余错误如实上抛。仅裸包客户端建立失败回退
                     // 高层（M17-B 写工具同策略）。
                     match entry.raw_sftp().await {
                         Ok(mut client) => {
-                            let exists = raw_sftp_exists(&mut client, path).await?;
+                            let exists = raw_sftp_exists(&mut client, &path).await?;
                             return Ok(json!({ "path": path, "exists": exists }));
                         }
                         Err(error) => {
@@ -2444,7 +2463,7 @@ impl McpState {
                 // Only "no such file" means absent: a permission error or a
                 // dead channel must surface as an error, never as a
                 // misleading `exists: false`.
-                let exists = match sftp.lock().await.metadata(path).await {
+                let exists = match sftp.lock().await.metadata(&path).await {
                     Ok(_) => true,
                     Err(error) if is_no_such_file_error(&error) => false,
                     Err(error) => return Err(sftp_error(error)),
@@ -2462,7 +2481,8 @@ impl McpState {
                 Ok(json!({ "home": home }))
             }
             "sftp_read_file" => {
-                let path = required_str(arguments, "path")?;
+                // M25：组件归一，与工作台读取族同口径。
+                let path = normalize_remote_path(required_str(arguments, "path")?)?;
                 // Settings move the default and the ceiling (down freely, up
                 // within the soft caps); the clamp itself stays as the
                 // defensive hard limit against oversized requests.
@@ -2480,10 +2500,10 @@ impl McpState {
                     // 失败回退高层重读。
                     match entry.raw_sftp().await {
                         Ok(mut client) => {
-                            match raw_sftp_read_file(&mut client, path, offset, max_bytes).await {
+                            match raw_sftp_read_file(&mut client, &path, offset, max_bytes).await {
                                 Ok((data, truncated)) => {
                                     return Ok(read_file_response(
-                                        path, &data, truncated, as_base64,
+                                        &path, &data, truncated, as_base64,
                                     ));
                                 }
                                 Err(error) => {
@@ -2501,7 +2521,7 @@ impl McpState {
                     }
                 }
                 let sftp = entry.sftp().await?;
-                let mut file = sftp.lock().await.open(path).await.map_err(sftp_error)?;
+                let mut file = sftp.lock().await.open(&path).await.map_err(sftp_error)?;
                 if offset > 0 {
                     use tokio::io::AsyncSeekExt;
                     // SeekFrom::Start only moves the local read cursor; an
@@ -2517,10 +2537,11 @@ impl McpState {
                     .map_err(|error| format!("SFTP read failed: {error}"))?;
                 let truncated = data.len() as u64 > max_bytes;
                 data.truncate(max_bytes as usize);
-                Ok(read_file_response(path, &data, truncated, as_base64))
+                Ok(read_file_response(&path, &data, truncated, as_base64))
             }
             "sftp_write_file" => {
-                let path = required_str(arguments, "path")?;
+                // M25：远端路径组件归一（content 是本地文本参数，不归一）。
+                let path = normalize_remote_path(required_str(arguments, "path")?)?;
                 let content = required_str(arguments, "content")?;
                 let upload_limit = self.size_limits().max_upload_bytes;
                 if content.len() as u64 > upload_limit {
@@ -2542,7 +2563,7 @@ impl McpState {
                         Ok(mut client) => {
                             return raw_sftp_write_file(
                                 &mut client,
-                                path,
+                                &path,
                                 content.as_bytes(),
                                 overwrite,
                             )
@@ -2556,12 +2577,12 @@ impl McpState {
                     }
                 }
                 let sftp = entry.sftp().await?;
-                if !overwrite && sftp.lock().await.metadata(path).await.is_ok() {
+                if !overwrite && sftp.lock().await.metadata(&path).await.is_ok() {
                     return Err(format!(
                         "Remote path already exists: {path} (pass overwrite=true to replace)"
                     ));
                 }
-                let mut file = sftp.lock().await.create(path).await.map_err(sftp_error)?;
+                let mut file = sftp.lock().await.create(&path).await.map_err(sftp_error)?;
                 tokio::io::AsyncWriteExt::write_all(&mut file, content.as_bytes())
                     .await
                     .map_err(|error| format!("SFTP write failed: {error}"))?;
@@ -2571,7 +2592,8 @@ impl McpState {
                 Ok(json!({ "path": path, "bytes": content.len() }))
             }
             "sftp_mkdir" => {
-                let path = required_str(arguments, "path")?;
+                // M25：组件归一，与工作台 sftp_create_directory 同口径。
+                let path = normalize_remote_path(required_str(arguments, "path")?)?;
                 if encoding == sftp_name::NameEncoding::Latin1 {
                     // latin-1（M17）：显示路径整条按 latin1_encode_display 还原
                     // 字节后走裸包 MKDIR。仅裸包通道建立失败回退高层（建立阶段
@@ -2580,7 +2602,7 @@ impl McpState {
                     match entry.raw_sftp().await {
                         Ok(mut client) => {
                             client
-                                .mkdir(&sftp_name::latin1_encode_display(path))
+                                .mkdir(&sftp_name::latin1_encode_display(&path))
                                 .await?;
                             return Ok(json!({ "path": path, "created": true }));
                         }
@@ -2594,13 +2616,14 @@ impl McpState {
                 let sftp = entry.sftp().await?;
                 sftp.lock()
                     .await
-                    .create_dir(path)
+                    .create_dir(&path)
                     .await
                     .map_err(sftp_error)?;
                 Ok(json!({ "path": path, "created": true }))
             }
             "sftp_remove" => {
-                let path = required_str(arguments, "path")?;
+                // M25：组件归一，与工作台删除族同口径。
+                let path = normalize_remote_path(required_str(arguments, "path")?)?;
                 let recursive = arg_bool(arguments, "recursive")?.unwrap_or(false);
                 if encoding == sftp_name::NameEncoding::Latin1 {
                     // latin-1（M17）：显示路径还原字节后走裸包删除。LSTAT 判型
@@ -2608,7 +2631,7 @@ impl McpState {
                     // 非递归目录报错），符号链接绝不跟随。回退策略同 mkdir。
                     match entry.raw_sftp().await {
                         Ok(mut client) => {
-                            let raw_path = sftp_name::latin1_encode_display(path);
+                            let raw_path = sftp_name::latin1_encode_display(&path);
                             let attrs = client.lstat(&raw_path).await?;
                             if classify_raw_kind(attrs.permissions) == "directory" {
                                 if !recursive {
@@ -2633,25 +2656,27 @@ impl McpState {
                 let metadata = sftp
                     .lock()
                     .await
-                    .symlink_metadata(path)
+                    .symlink_metadata(&path)
                     .await
                     .map_err(sftp_error)?;
                 if metadata.is_symlink() || !metadata.is_dir() {
                     sftp.lock()
                         .await
-                        .remove_file(path)
+                        .remove_file(&path)
                         .await
                         .map_err(sftp_error)?;
                 } else if recursive {
-                    remove_tree(&sftp, path.to_string()).await?;
+                    remove_tree(&sftp, path.clone()).await?;
                 } else {
                     return Err(format!("{path} is a directory; pass recursive=true"));
                 }
                 Ok(json!({ "path": path, "removed": true }))
             }
             "sftp_rename" => {
-                let source = required_str(arguments, "sourcePath")?;
-                let target = required_str(arguments, "targetPath")?;
+                // M25：源与目标都是远端路径，都要组件归一（M24 前例：
+                // raw_read_chunk 同期在两条车道拉齐了同一口径）。
+                let source = normalize_remote_path(required_str(arguments, "sourcePath")?)?;
+                let target = normalize_remote_path(required_str(arguments, "targetPath")?)?;
                 if encoding == sftp_name::NameEncoding::Latin1 {
                     // latin-1（M17）：源是列表回传的显示路径（latin1_encode_
                     // display 精确逆变换还原字节），目标是 AI 新输入/组合的
@@ -2662,8 +2687,8 @@ impl McpState {
                         Ok(mut client) => {
                             client
                                 .rename(
-                                    &sftp_name::latin1_encode_display(source),
-                                    &sftp_name::latin1_encode_display(target),
+                                    &sftp_name::latin1_encode_display(&source),
+                                    &sftp_name::latin1_encode_display(&target),
                                 )
                                 .await?;
                             return Ok(json!({
@@ -2682,13 +2707,14 @@ impl McpState {
                 let sftp = entry.sftp().await?;
                 sftp.lock()
                     .await
-                    .rename(source, target)
+                    .rename(&source, &target)
                     .await
                     .map_err(sftp_error)?;
                 Ok(json!({ "sourcePath": source, "targetPath": target, "renamed": true }))
             }
             "sftp_chmod" => {
-                let path = required_str(arguments, "path")?;
+                // M25：组件归一，与工作台 chmod 同口径。
+                let path = normalize_remote_path(required_str(arguments, "path")?)?;
                 let mode = arguments.get("mode").ok_or_else(|| {
                     "Missing or invalid parameter: mode (expected an octal value up to 7777, \
                      e.g. \"644\" or 0644)"
@@ -2701,7 +2727,7 @@ impl McpState {
                     // 错误原样上抛（与 M17-B 写工具同策略）。
                     match entry.raw_sftp().await {
                         Ok(mut client) => {
-                            return raw_sftp_chmod(&mut client, path, mode).await;
+                            return raw_sftp_chmod(&mut client, &path, mode).await;
                         }
                         Err(error) => {
                             eprintln!(
@@ -2717,7 +2743,7 @@ impl McpState {
                 };
                 sftp.lock()
                     .await
-                    .set_metadata(path, metadata)
+                    .set_metadata(&path, metadata)
                     .await
                     .map_err(sftp_error)?;
                 Ok(json!({ "path": path, "mode": format!("{mode:04o}") }))
@@ -2785,7 +2811,8 @@ impl McpState {
         // Both gaps named in one error (round 6 enumeration contract).
         missing_required(arguments, &["localPath", "remotePath"])?;
         let local_path = required_str(arguments, "localPath")?;
-        let remote_path = required_str(arguments, "remotePath")?;
+        // M25：远端路径组件归一（localPath 是本地文件参数，不归一）。
+        let remote_path = normalize_remote_path(required_str(arguments, "remotePath")?)?;
         let overwrite = arg_bool(arguments, "overwrite")?.unwrap_or(false);
         let local_source = std::fs::canonicalize(local_path)
             .map_err(|error| format!("Cannot read local file {local_path}: {error}"))?;
@@ -2802,7 +2829,7 @@ impl McpState {
             ));
         }
         let outcome = self
-            .upload_via_sftp(arguments, local_path, remote_path, &data, overwrite)
+            .upload_via_sftp(arguments, local_path, &remote_path, &data, overwrite)
             .await;
         if outcome.is_err() {
             self.drop_connection(arguments).await;
@@ -2877,7 +2904,8 @@ impl McpState {
         // the schema's required order (remotePath before localPath).
         missing_required(arguments, &["remotePath", "localPath"])?;
         let local_path = required_str(arguments, "localPath")?;
-        let remote_path = required_str(arguments, "remotePath")?;
+        // M25：远端路径组件归一（localPath 是本地文件参数，不归一）。
+        let remote_path = normalize_remote_path(required_str(arguments, "remotePath")?)?;
         // Local-write hygiene before anything else: remote content must not
         // land on shell bootstrap / scheduled-execution paths.
         if is_sensitive_local_path(local_path) {
@@ -2927,7 +2955,7 @@ impl McpState {
         // connection untouched (same contract as the other local checks).
         self.ensure_local_transfer_allowed(&local_target)?;
         let outcome = self
-            .download_via_sftp(arguments, remote_path, local_path, &local_target)
+            .download_via_sftp(arguments, &remote_path, local_path, &local_target)
             .await;
         if outcome.is_err() {
             self.drop_connection(arguments).await;
@@ -8915,6 +8943,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["isError"], false);
+    }
+
+    // —— M25：MCP 面远端路径组件归一（与工作台车道同口径）——
+
+    #[test]
+    fn mcp_remote_path_normalization_contract() {
+        // M25 契约：所有接受远端路径的 MCP SFTP 工具分发臂（list_dir /
+        // stat / exists / read / write / mkdir / remove / rename /
+        // chmod / disk_usage / upload / download）在拿到路径后立即
+        // `normalize_remote_path`，再进 latin-1 编码还原或 auto 直用。
+        // 归一 = 绝对化 + 去 ./../ 空段，不做 ~ 展开（工作台同口径）。
+        assert_eq!(normalize_remote_path("/a//b/../c").unwrap(), "/a/c");
+        assert_eq!(normalize_remote_path("a/b/").unwrap(), "/a/b");
+        assert_eq!(normalize_remote_path("/x/./y").unwrap(), "/x/y");
+        assert_eq!(normalize_remote_path("../etc").unwrap(), "/etc");
+        assert_eq!(normalize_remote_path("/").unwrap(), "/");
+    }
+
+    #[test]
+    fn mcp_remote_path_normalization_rejects_empty_and_nul() {
+        // 空路径与含 NUL 的路径在进入任何 SFTP 操作前被拒绝，
+        // 与工作台车道的拒绝语义一致。
+        assert!(normalize_remote_path("").is_err());
+        assert!(normalize_remote_path("/a/\0b").is_err());
+    }
+
+    #[test]
+    fn mcp_latin1_encoding_unchanged_by_normalization_for_clean_names() {
+        // 归一是纯字符级清洗：latin-1 显示域内的 clean 名经过
+        // normalize_remote_path 后字节还原结果不变（AI 回传列表路径的
+        // 往返闭环不被 M25 破坏）。
+        let display = "/data/caf\u{e9}.txt";
+        assert_eq!(
+            sftp_name::latin1_encode_display(&normalize_remote_path(display).unwrap()),
+            sftp_name::latin1_encode_display(display)
+        );
     }
 }
 
