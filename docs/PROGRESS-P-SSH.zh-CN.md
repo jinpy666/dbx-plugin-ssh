@@ -4095,3 +4095,18 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
 - **main 3 提交已并入**（#116 fileTransfer ArrayBuffer 修复 + 目录跟随偏好 + panel 图标禁用），且 integration 独有的 transcript 导出第 4 处 fileTransfer.write 站点按同模式补齐（4/4 归一）——宿主桥 transfer 缺陷在两条线全部堵上。
 - **open issue 分诊完成**（ISSUE-TRIAGE.zh-CN.md）：20 条定性完毕，#77 UUID 守卫与 #73 终端底色净化本轮落地（13 新增前端用例）；14 条需人工（需补料 #23/#25/#103/#100、宿主侧 #72、未立项 #90/#96/#78/#66、需复现 #95 等），关闭候选建议见报告——**未关闭任何 issue**（人工决定）。
 - **登记转人工**：`codex/host-capability-form` 分支（f42d6354，动 manifest.json 199 行 + engines 版本要求，2026-09-17 旧分支，patch-id 未命中 main/integration）——按守卫（不改 manifest.json）不自动合并，需人工评估是否还有效。
+
+## M31-C 批次（2026-09-26，issue #96：JSON 格式化预览 + 字段/整篇复制，纯前端）
+
+- **动机**：#96 要求文件预览对 JSON 数据提供格式化预览，并支持复制单个字段/值与整篇文本。M30-B 分诊时定性为"中等改动未立项"，本轮按纯前端方案落地（预览链路已有：`openEntry` 经 `sftp/read`（maxBytes 1 MiB，超限 truncated）解码出 `previewText`，无需后端改动）。
+- **纯函数层 `frontend/src/lib/jsonPreview.ts`**（新建）：
+  - **检测口径（双条件命中其一）**：扩展名直判 `.json`/`.geojson`；或无扩展名文件内容嗅探（首个非空白字符为 `{`/`[`，改名 config 仍可命中）。`.jsonl`/`.ndjson` 显式排除（行分片文档整篇 pretty 会把 N 个独立对象拼成非法 JSON，误导用户——取舍：保持原始预览）；有扩展名的非 JSON 文件不做嗅探（结构化日志 `.log` 开头即 `{`，不被劫持成 JSON 视图）。
+  - **降级链**：候选 → 截断或字节量 >1 MiB → `too-large`（仅原文）；`JSON.parse` 失败 → `invalid`（仅原文 + 提示条）；成功 → `ok`（2 空格 pretty + 字段树）。任何失败都不抛错。
+  - **字段树**：展平为 `[{path, key, value, fullValue, type}]`，JSONPath 风格路径（`$.a.b[0]["weird key"]`）；仅叶子标量与空容器（`{}`/`[]`）产出行，复合子树复制由 pretty 文本选区承担（避免逐节点 stringify 的 O(n²)）；字符串展示截断 200 字符而 `fullValue` 全量可复制；行数 2000 / 递归深度 128 双上限。
+- **组件 `frontend/src/components/JsonPreviewPanel.vue`**（新建）：工具栏「格式化/原始」切换（reka ToggleGroup wrapper）+ 字段搜索框（纯前端 filter，大小写不敏感匹配路径/值，`{matched}/{total}` 计数）+「复制整篇文本」（格式化视图取 pretty、原始视图取原文）；格式化视图 = pretty `<pre>` + 300px 字段列表（每行「复制值」「复制路径」，复制走 `lib/clipboardBridge` 三级降级：宿主桥 → `navigator.clipboard` → execCommand，结果按钮内联反馈"已复制/复制失败"，不依赖 App 错误条）。`invalid`/`too-large` 状态下组件退化为提示条 + 只读 `TextPreview`（保留既有语法高亮）。换文件自动清空搜索词。
+- **App.vue 接线（最小化）**：新增 `jsonPreviewState` computed（`buildJsonPreview(previewTitle, previewText, {truncated})`）与模板一处条件分支——非编辑态且非 `unavailable` 时渲染 `JsonPreviewPanel`，其余（非 JSON 文件、编辑/保存态、加载失败信息）回落既有 `TextPreview`，编辑保存路径零改动。
+- **i18n**：`jsonPreview.*` 12 键 × 七语全补（en/zh-CN/zh-TW/es/it/ja/pt-BR，supplemental 平铺 dotted key 模式）。
+- **测试**：`jsonPreview.spec.ts` 16 用例（检测/降级链/路径正确性/数组索引/非标识符键引用/截断展示 vs 全量复制/空容器/标量根/数组根/行数与深度上限/过滤）+ `JsonPreviewPanel.spec.ts` 9 用例（渲染/搜索/复制值/复制路径/整篇复制随视图切换/原始视图/invalid/too-large/搜索随文件切换重置，CodeMirror 以 stub 替换）。无新协议方法 → 无 smoke 增量（同 2026-08-30 交互轮口径）。
+- **验证**：`pnpm vitest run` **1124/1124 通过（114 文件）**（基线 1099/112，+25 用例 +2 文件，只增不减）/ `vue-tsc --noEmit` 0 错误 / `pnpm run build` 通过（`ui/` 重生成，integrator 所有权）。`git diff --check` 干净。
+- **边界遵守**：未改 `manifest.json`、后端零改动（无协议/权限/能力变化）、未关闭 issue #96（关闭由人工决定）、未 merge integration、未触发 CI；未使用真实凭据。
+- **已知边界**：① `truncated`（>1 MiB 只加载头部）不提供格式化视图——半截 JSON 无法可靠 parse；② `.jsonl` 按设计不做整篇 pretty；③ `.json` 扩展名但内容为 JSON-lines 的文件会落入 `invalid` 提示 + 原文视图；④ 编辑态切回 `TextPreview`（可编辑 CodeMirror），保存后按新文本重新检测。

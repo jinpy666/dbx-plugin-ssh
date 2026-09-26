@@ -47,7 +47,7 @@ profile 分组、全局外观）不重复实现。
 | 小文件直写 WriteFile（非传输槽） | WriteFile | ✅ 已有（第一批，实测通过）（第一批） | P0 |
 | 归档打包（多路径→tar/zip 远端打包） | Archive | ✅ 已有（第一批，实测通过）（第一批）；2026-08-30 起右键对单文件同样提供压缩 | P1 |
 | 解压（tar/zip→目录，可覆盖） | Extract | ✅ 已有（第一批，实测通过）（第一批） | P1 |
-| 文件管理器交互（双击预览、二进制不打开、大文件确认、预览内编辑保存） | Sftp 界面（文本预览/编辑/压缩） | ✅ 已有（2026-08-30 交互轮，见下文专节） | P1 |
+| 文件管理器交互（双击预览、二进制不打开、大文件确认、预览内编辑保存） | Sftp 界面（文本预览/编辑/压缩） | ✅ 已有（2026-08-30 交互轮，见下文专节）；2026-09-26 补 JSON 格式化预览（issue #96）：`.json`/`.geojson` 或无后缀嗅探命中时提供格式化/原始切换、字段列表搜索与复制值/复制路径、复制整篇文本（`.jsonl` 除外，截断/>1 MiB 或解析失败降级原文视图） | P1 |
 | **Sudo 文件操作族**（无 root 登录下管理 root 文件） | ListDirSudo/ReadFileSudo/WriteFileSudo/MkdirSudo/RemoveSudo/RemoveAllSudo/ChmodSudo/RenameSudo/StatSudo/**DownloadSudo** | ✅ 已有（sudo/stat…sudo/rename 共 11 方法，实测通过）；**DownloadSudo 已实现（M14-C）**——`sudo/download/start|cancel`：源文件 sudo 暂存进同目录 0600 临时件（chown 登录用户），`sftp/download/next`/`finish`/进度事件/传输面板全复用，finally 语义清理（完成/失败/取消/会话关闭），详见 PROTOCOL「sudo 下载（DownloadSudo）」节 | **P0 核心** |
 | 终端缓冲区查询（增量 seq） | GetTerminalBuffer | ✅ ssh/terminal/replay | — |
 | 命令中止 | AbortCommand | ✅ ssh/exec/cancel | — |
