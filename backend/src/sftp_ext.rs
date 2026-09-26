@@ -118,6 +118,12 @@ pub async fn stat(
 
 /// `sftp/exists` — `true` when the path is statable (dangling symlinks count).
 ///
+/// 错误语义（M23/R1，对齐 MCP 面 `mcp.rs::raw_sftp_exists` 的 M18 契约）：
+/// 只把 SSH_FX_NO_SUCH_FILE 判「不存在」，其余 LSTAT 失败（权限拒绝、通道
+/// 异常等）如实上抛——绝不误报 `exists: false`。既有调用方（前端 rename
+/// 覆盖预检、粘贴预检、上传撞名预检）对预检报错均按「无法判定、不阻断，
+/// 交由后续执行时报错」的既有惯例处理，预检无法判定时报错优于误判。
+///
 /// 路径来源分工（M16，M17 补全）：调用方分两类——
 /// - rename 覆盖预检、上传撞名预检：`whole_wire = false`，路径是「wire 目录
 ///   前缀 + 用户新输入的显示末段」，latin-1 模式按 [`sftp_name::
@@ -145,7 +151,7 @@ pub async fn exists(
                 } else {
                     sftp_name::write_path_bytes(&path)
                 };
-                return Ok(client.lstat(&raw_path).await.is_ok());
+                return raw_exists_decision(client.lstat(&raw_path).await);
             }
             Err(error) => {
                 eprintln!("[ssh-sftp-plugin] raw byte exists unavailable, falling back: {error}");
@@ -153,8 +159,40 @@ pub async fn exists(
         }
     }
     let sftp = runtime.sftp(session_id).await?;
-    let exists = sftp.lock().await.symlink_metadata(path).await.is_ok();
-    Ok(exists)
+    let outcome = sftp.lock().await.symlink_metadata(path).await;
+    match outcome {
+        Ok(_) => Ok(true),
+        Err(error) => high_level_exists_decision(&error),
+    }
+}
+
+/// Decision core of the latin-1 raw exists probe: only SSH_FX_NO_SUCH_FILE
+/// counts as absent, every other LSTAT failure surfaces as an error
+/// (M23/R1, same contract as `mcp.rs::raw_sftp_exists` — a permission error
+/// must never masquerade as `exists: false`).
+fn raw_exists_decision(result: Result<RawAttrs, String>) -> Result<bool, String> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(error) => match sftp_raw::error_status(&error) {
+            Some(sftp_raw::SSH_FX_NO_SUCH_FILE) => Ok(false),
+            _ => Err(error),
+        },
+    }
+}
+
+/// Decision core of the auto (high-level) exists probe: same
+/// NO_SUCH_FILE-only contract as [`raw_exists_decision`] and the MCP auto
+/// branch (mirror of `mcp.rs::is_no_such_file_error`).
+fn high_level_exists_decision(error: &russh_sftp::client::error::Error) -> Result<bool, String> {
+    if matches!(
+        error,
+        russh_sftp::client::error::Error::Status(status)
+            if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile
+    ) {
+        Ok(false)
+    } else {
+        Err(sftp_error(error))
+    }
 }
 
 /// Upper bound for `name(1)..name(999)` collision probing in
@@ -1569,6 +1607,48 @@ mod tests {
         // emptiness and NUL are protocol-level junk.
         assert!(clean_link_target("").is_err());
         assert!(clean_link_target("a\0b").is_err());
+    }
+
+    // —— M23（R1）exists 错误语义：两分支都只认 NO_SUCH_FILE —— //
+
+    #[test]
+    fn raw_exists_decision_maps_no_such_file_only() {
+        // 可 stat 到：存在。
+        assert!(raw_exists_decision(Ok(RawAttrs::default())).unwrap());
+        // SSH_FX_NO_SUCH_FILE：不存在（不算错误）。
+        assert!(
+            !raw_exists_decision(Err("SFTP raw lstat failed with status 2".to_string())).unwrap()
+        );
+        // 权限拒绝（status 3）：如实上抛，绝不误报 exists:false。
+        let error = raw_exists_decision(Err("SFTP raw lstat failed with status 3".to_string()))
+            .unwrap_err();
+        assert!(error.contains("status 3"), "{error}");
+        // 无码错误（死通道等）：同样上抛。
+        assert!(raw_exists_decision(Err("SFTP raw lstat failed: early eof".to_string())).is_err());
+    }
+
+    #[test]
+    fn high_level_exists_decision_maps_no_such_file_only() {
+        use russh_sftp::client::error::Error as SftpError;
+        use russh_sftp::protocol::{Status, StatusCode};
+        let no_such = SftpError::Status(Status {
+            id: 1,
+            status_code: StatusCode::NoSuchFile,
+            error_message: "no such file".to_string(),
+            language_tag: String::new(),
+        });
+        assert!(!high_level_exists_decision(&no_such).unwrap());
+        // 权限拒绝：上抛（错误串保留服务器消息），绝不误报 exists:false。
+        let denied = high_level_exists_decision(&SftpError::Status(Status {
+            id: 2,
+            status_code: StatusCode::PermissionDenied,
+            error_message: "permission denied".to_string(),
+            language_tag: String::new(),
+        }))
+        .unwrap_err();
+        assert!(denied.contains("permission denied"), "{denied}");
+        // 通道/协议类错误：同样上抛。
+        assert!(high_level_exists_decision(&SftpError::UnexpectedPacket).is_err());
     }
 
     // —— M16 latin-1 裸包写路径的纯逻辑 —— //
