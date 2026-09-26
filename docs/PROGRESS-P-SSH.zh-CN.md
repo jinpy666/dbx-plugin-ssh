@@ -4297,7 +4297,11 @@ transferable type.`，传输历史全部"已取消"，sidecar 与接口无异常
   （上轮 1000）；clippy `-D warnings` 0、fmt 0；vitest **121 文件 / 1202 用例** 全绿
   （上轮 115 文件 / 1133 用例）；vue-tsc 0；`validate_repo.py`、`connection-forms/verify.mjs`
   PASS；`smoke_ui_mock.mjs`、`smoke_ui_settings.mjs` 全绿；容器 smoke 家族对本轮
-  debug sidecar 全量复跑（含新增 `smoke_ssh_config_import.py`、`smoke_spawn_session_test.py`）。
+  debug sidecar 全量复跑 **17/17 全绿**（含新增 `smoke_ssh_config_import.py`、
+  `smoke_spawn_session_test.py`）。其中 `smoke_forward_test.py` 首轮失败经干净基线
+  （`f837d28d`）对照复跑同点失败，证实为测试容器 `AllowTcpForwarding no` 配置漂移
+  （初建时未按 SKILL.md 开启转发），容器内改为 `yes` 并重启后复绿、基线与集成线
+  均通过——非本轮回归。
 - **降级/未实施项（随收口沉淀）**：Include 递归跟随（管线只收上传字节，不做 sidecar
   磁盘递归，防引入文件读取攻击面）；vi Copy Mode（维持不做）；GBK 堡垒机 8 位 C1
   真机实测（待环境）；Quick Select 全缓冲档（已实现，默认 viewport 档）；spawn 会话
