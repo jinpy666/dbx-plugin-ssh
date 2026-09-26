@@ -24,9 +24,12 @@ const WRITE_CHUNK_BYTES: usize = 96 * 1024;
 
 /// Wraps a path in single quotes for safe shell interpolation, replacing any
 /// embedded quote with the POSIX `'\''` escape (tiny-rdm's shQuoted).
-pub(crate) fn shell_quote(path: &str) -> String {
-    format!("'{}'", path.replace('\'', r"'\''"))
-}
+///
+/// Canonical implementation lives in [`crate::exec::shell_quote`]; re-exported
+/// here so the sudo family keeps its local name and `sudo_download`'s import
+/// path is unchanged.
+#[doc(hidden)]
+pub(crate) use crate::exec::shell_quote;
 
 /// Runs one command with Quick Sudo and returns its output, failing on a
 /// non-zero exit code (mirrors tiny-rdm's execSudoResultMap handling).
