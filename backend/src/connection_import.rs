@@ -27,6 +27,19 @@
 //!   `identities` / `keys` under an optional `data` wrapper. Secret fields
 //!   that arrive as encrypted sync blobs (`BA…` base64) are dropped, never
 //!   decrypted; plaintext passwords and PEM private keys are carried over.
+//! - **OpenSSH config** (`~/.ssh/config`, WT-3, the 8th source): plain text.
+//!   `Host` (wildcard patterns carry defaults only and never become entries),
+//!   `Hostname`, `User`, `Port`, `IdentityFile` (the path is mapped, never
+//!   read — no key material can enter the preview model), `UserKnownHostsFile`
+//!   and `Match host/user` (all criteria must be `host`/`user`) are supported;
+//!   first-value-wins semantics apply across blocks. The pipeline receives
+//!   uploaded bytes only, so `Include` cannot be followed: the directive is
+//!   annotated "(not followed)" instead of reading further files (there is no
+//!   recursion, hence no cycle risk). `ProxyCommand` / `ProxyJump` are only
+//!   recognized and annotated "needs manual mapping" — external commands are
+//!   never executed, mirroring the tssh Expect trust model (ciphertext and
+//!   external commands are not run automatically). `Match` blocks with other
+//!   criteria degrade to a skipped-with-reason note on every imported row.
 //!
 //! Parsed secrets exist only for the duration of one preview request. The
 //! streaming transport retains source bytes only until `import/preview/finish`
@@ -73,12 +86,31 @@ const LEGACY_STORE_FILE: &str = "imported-connections.json";
 /// switch on in `user.config`) but the caller did not supply the password.
 pub const WINDTERM_MASTER_PASSWORD_REQUIRED: &str = "WindTerm master password is required";
 
+// OpenSSH config caps (WT-3): hostile configs degrade instead of blowing up.
+/// Line budget for one config file; a bigger file fails closed.
+pub const MAX_SSH_CONFIG_LINES: usize = 100_000;
+/// Per-directive argument budget; oversized arguments degrade (directive
+/// skipped) so giant values cannot flow into annotations.
+pub const MAX_SSH_CONFIG_ARG_BYTES: usize = 4096;
+/// Distinct unsupported-`Match` reasons carried into row descriptions.
+pub const MAX_SSH_CONFIG_NOTES: usize = 3;
+/// Byte-op budget for pattern matching across one parse: the two-pointer glob
+/// is O(pattern × candidate), so the budget bounds star-heavy hostile inputs
+/// without ever exceeding a fraction of a second of CPU.
+pub const MAX_SSH_MATCH_WORK: u64 = 64 * 1024 * 1024;
+/// Error returned when the pattern-matching budget is exhausted.
+pub const SSH_CONFIG_MATCH_WORK_EXCEEDED: &str =
+    "OpenSSH config pattern matching exceeds the complexity limit";
+
 /// Preview secret-note codes: why an imported session has no credential
 /// material despite password semantics. The frontend maps them to localized
 /// copy (see `importWizard.note.*` in `lib/i18n.ts`); no import output is
 /// persisted.
 pub const SECRET_NOTE_ENCRYPTED: &str = "encrypted";
 pub const SECRET_NOTE_NOT_CARRIED: &str = "not-carried";
+/// OpenSSH config `IdentityFile`: only the key file path was mapped, the key
+/// itself is never read or carried (WT-3).
+pub const SECRET_NOTE_KEY_PATH_ONLY: &str = "key-path-only";
 
 /// WindTerm KDF parameters: PBKDF2-HMAC-SHA3-512 over the master password,
 /// salted with the raw `application.fingerprint` bytes, producing 48 bytes
@@ -1842,6 +1874,417 @@ fn is_termius_encrypted_blob(value: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// OpenSSH config (~/.ssh/config) — the 8th source (WT-3)
+// ---------------------------------------------------------------------------
+
+/// One top-level section of an OpenSSH config: the global preamble (before
+/// the first `Host`/`Match` line), a `Host` pattern block or a `Match`
+/// conditional block.
+#[derive(Debug, Default)]
+struct SshConfigBlock {
+    /// `Host` patterns; `None` for the global preamble and `Match` blocks.
+    host_patterns: Option<Vec<String>>,
+    /// `Match` criteria as (lowercased keyword, value) pairs; `None` outside
+    /// `Match` blocks. No-argument criteria (`all`/`final`/`canonical`) get an
+    /// empty value.
+    match_criteria: Option<Vec<(String, String)>>,
+    directives: Vec<(String, String)>,
+}
+
+/// `Match` criteria that take no argument. They are recognized for parsing
+/// but never supported for import (anything beyond `host`/`user` degrades to
+/// a skipped-with-reason note).
+const SSH_MATCH_NO_ARG_CRITERIA: [&str; 3] = ["all", "final", "canonical"];
+
+/// Parses an OpenSSH config file into imported sessions, one per concrete
+/// (non-wildcard) `Host` pattern. Wildcard-only patterns carry defaults for
+/// matching entries instead. Resolution follows OpenSSH first-value-wins
+/// semantics across every applicable block (global preamble, `Host` blocks
+/// whose pattern list matches the candidate, and `Match` blocks restricted to
+/// `host`/`user` criteria).
+///
+/// Trust model (same as the tssh Expect importer): the pipeline only ever
+/// receives the uploaded file's bytes, so `Include` is never followed and
+/// `ProxyCommand` / `ProxyJump` are never executed — both are surfaced as
+/// annotations on the affected rows. `IdentityFile` maps the path only; the
+/// key file is never read, so no key material can enter the preview model.
+pub fn parse_ssh_config(text: &str) -> Result<Vec<ImportedSession>, String> {
+    let blocks = ssh_config_blocks(text)?;
+    let candidates = ssh_config_candidates(&blocks)?;
+    let mut degraded: Vec<String> = Vec::new();
+    let mut work: u64 = 0;
+    let mut sessions = Vec::new();
+    for candidate in &candidates {
+        if let Some(session) = resolve_ssh_candidate(candidate, &blocks, &mut degraded, &mut work)?
+        {
+            push_preview_session(&mut sessions, session)?;
+        }
+    }
+    // Unsupported `Match` criteria apply to no row we can identify, so the
+    // reason is reported once per parse on every imported row (bounded by
+    // MAX_SSH_CONFIG_NOTES distinct reasons) — skipped, but not silently.
+    if !degraded.is_empty() {
+        let note = degraded.join("; ");
+        for session in &mut sessions {
+            session.description = if session.description.is_empty() {
+                note.clone()
+            } else {
+                format!("{}; {}", session.description, note)
+            };
+        }
+    }
+    Ok(sessions)
+}
+
+/// Splits one config line into (lowercased keyword, argument). The keyword is
+/// separated from the argument by whitespace or `=`; a double-quoted argument
+/// keeps inner spaces. `None` for comments, blank lines and malformed lines
+/// (an unterminated quote degrades to a skipped line, never a panic).
+fn split_ssh_config_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let split_at = trimmed.find(|byte: char| byte.is_whitespace() || byte == '=')?;
+    let keyword = trimmed.get(..split_at)?.to_ascii_lowercase();
+    if keyword.is_empty() {
+        return None;
+    }
+    let mut rest = trimmed.get(split_at..)?.trim_start();
+    if let Some(after_eq) = rest.strip_prefix('=') {
+        rest = after_eq.trim_start();
+    }
+    if let Some(unquoted) = rest.strip_prefix('"') {
+        let close = unquoted.find('"')?;
+        return Some((keyword, unquoted.get(..close)?.to_string()));
+    }
+    Some((keyword, rest.to_string()))
+}
+
+/// Tokenizes the config into top-level blocks. Directives before the first
+/// `Host`/`Match` line land in the implicit global preamble; a `Host` line
+/// with no pattern degrades to an empty block that matches nothing.
+fn ssh_config_blocks(text: &str) -> Result<Vec<SshConfigBlock>, String> {
+    let mut blocks: Vec<SshConfigBlock> = vec![SshConfigBlock::default()];
+    let mut lines = 0usize;
+    for line in text.lines() {
+        lines += 1;
+        if lines > MAX_SSH_CONFIG_LINES {
+            return Err(format!(
+                "OpenSSH config exceeds the {MAX_SSH_CONFIG_LINES} line limit"
+            ));
+        }
+        let Some((keyword, argument)) = split_ssh_config_line(line) else {
+            continue;
+        };
+        match keyword.as_str() {
+            "host" => blocks.push(SshConfigBlock {
+                host_patterns: Some(argument.split_whitespace().map(str::to_string).collect()),
+                match_criteria: None,
+                directives: Vec::new(),
+            }),
+            "match" => blocks.push(SshConfigBlock {
+                host_patterns: None,
+                match_criteria: Some(parse_ssh_match_criteria(&argument)),
+                directives: Vec::new(),
+            }),
+            _ => {
+                if argument.len() > MAX_SSH_CONFIG_ARG_BYTES {
+                    // Hostile giant value: degrade the directive, keep parsing.
+                    continue;
+                }
+                if let Some(block) = blocks.last_mut() {
+                    block.directives.push((keyword, argument));
+                }
+            }
+        }
+    }
+    Ok(blocks)
+}
+
+/// Parses `Match` criteria into (keyword, value) pairs. No-argument criteria
+/// get an empty value; a trailing keyword without its argument yields an empty
+/// value too (degrade, never panic).
+fn parse_ssh_match_criteria(argument: &str) -> Vec<(String, String)> {
+    let tokens: Vec<&str> = argument.split_whitespace().collect();
+    let mut criteria = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let keyword = tokens[index].to_ascii_lowercase();
+        index += 1;
+        let value = if SSH_MATCH_NO_ARG_CRITERIA.contains(&keyword.as_str()) {
+            String::new()
+        } else {
+            let value = tokens.get(index).copied().unwrap_or_default().to_string();
+            index += 1;
+            value
+        };
+        criteria.push((keyword, value));
+    }
+    criteria
+}
+
+/// Only `host`/`user` criteria are evaluated at import time.
+fn ssh_match_supported(criteria: &[(String, String)]) -> bool {
+    criteria
+        .iter()
+        .all(|(keyword, _)| matches!(keyword.as_str(), "host" | "user"))
+}
+
+/// Compact reason for an unsupported `Match` block, e.g.
+/// `Match exec/localuser: settings not imported`.
+fn ssh_match_unsupported_reason(criteria: &[(String, String)]) -> String {
+    let keywords = criteria
+        .iter()
+        .map(|(keyword, _)| keyword.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("Match {keywords}: settings not imported")
+}
+
+/// OpenSSH single-pattern glob: `*` any sequence, `?` any single byte,
+/// ASCII-case-insensitive (multibyte sequences compare byte-exact). Iterative
+/// two-pointer scan so hostile star-heavy patterns stay O(pattern × text)
+/// instead of exploding exponentially.
+fn ssh_glob_match(pattern: &str, text: &str) -> bool {
+    let (pattern, text) = (pattern.as_bytes(), text.as_bytes());
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_pi, mut star_ti) = (usize::MAX, 0usize);
+    while ti < text.len() {
+        if pi < pattern.len()
+            && (pattern[pi] == b'?' || pattern[pi].eq_ignore_ascii_case(&text[ti]))
+        {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+/// OpenSSH pattern list: comma-separated patterns; a `!`-prefixed pattern
+/// vetoes the whole list, otherwise any positive match passes. Charges the
+/// O(pattern × candidate) cost to `work`; `None` means the budget is
+/// exhausted and the caller must fail closed.
+fn ssh_pattern_list_matches(list: &str, candidate: &str, work: &mut u64) -> Option<bool> {
+    let mut positive = false;
+    for pattern in list.split(',') {
+        let (negated, body) = match pattern.trim().strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, pattern.trim()),
+        };
+        *work = work.saturating_add((body.len().saturating_mul(candidate.len().max(1))) as u64);
+        if *work > MAX_SSH_MATCH_WORK {
+            return None;
+        }
+        if ssh_glob_match(body, candidate) {
+            if negated {
+                return Some(false);
+            }
+            positive = true;
+        }
+    }
+    Some(positive)
+}
+
+/// A `Host` pattern becomes a connection candidate only when it is concrete:
+/// wildcard (`*`/`?`) and negated patterns never name a single machine.
+fn ssh_concrete_pattern(pattern: &str) -> bool {
+    !pattern.is_empty() && !pattern.starts_with('!') && !pattern.contains(['*', '?'])
+}
+
+/// Collects the deduped concrete patterns across all `Host` blocks.
+fn ssh_config_candidates(blocks: &[SshConfigBlock]) -> Result<Vec<String>, String> {
+    let mut candidates: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for block in blocks {
+        let Some(patterns) = &block.host_patterns else {
+            continue;
+        };
+        for pattern in patterns {
+            if !ssh_concrete_pattern(pattern) || !seen.insert(pattern.clone()) {
+                continue;
+            }
+            if candidates.len() >= MAX_PREVIEW_SESSIONS {
+                return Err(format!(
+                    "Import exceeds the {MAX_PREVIEW_SESSIONS} session limit"
+                ));
+            }
+            candidates.push(pattern.clone());
+        }
+    }
+    Ok(candidates)
+}
+
+/// Evaluates the supported `Match` criteria against the candidate's state
+/// resolved so far. `Match host` compares against the resolved `Hostname`
+/// (falling back to the candidate alias), `Match user` against the resolved
+/// `User`; a user that is not set only matches a `*` pattern. `None` = the
+/// pattern budget is exhausted.
+fn ssh_match_criteria_hit(
+    criteria: &[(String, String)],
+    candidate: &str,
+    hostname: Option<&str>,
+    username: Option<&str>,
+    work: &mut u64,
+) -> Option<bool> {
+    for (keyword, value) in criteria {
+        let hit = match keyword.as_str() {
+            "host" => ssh_pattern_list_matches(value, hostname.unwrap_or(candidate), work)?,
+            "user" => match username {
+                Some(user) => ssh_pattern_list_matches(value, user, work)?,
+                None => value == "*",
+            },
+            // Unreachable: support is checked before evaluation.
+            _ => true,
+        };
+        if !hit {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
+/// IdentityFile path mapping: `~`/`$(HomeDir)` prefixes and the `%d` token
+/// (home) expand against the local home directory; every other token stays
+/// verbatim. Only the PATH is mapped — the key file is never read, so no key
+/// material can enter the preview model.
+fn expand_ssh_identity_path(path: &str) -> String {
+    let expanded = match home_dir() {
+        Some(home) => path.replacen("%d", &home, 1),
+        None => path.to_string(),
+    };
+    expand_home_prefix(&expanded)
+}
+
+/// Resolves one concrete candidate through every applicable block with
+/// OpenSSH first-value-wins semantics and builds the imported session.
+fn resolve_ssh_candidate(
+    candidate: &str,
+    blocks: &[SshConfigBlock],
+    degraded: &mut Vec<String>,
+    work: &mut u64,
+) -> Result<Option<ImportedSession>, String> {
+    let mut hostname: Option<String> = None;
+    let mut username: Option<String> = None;
+    let mut port: Option<u16> = None;
+    let mut port_seen = false;
+    let mut identity: Option<String> = None;
+    let mut annotations: Vec<String> = Vec::new();
+    let mut annotated = std::collections::HashSet::new();
+    for block in blocks {
+        let applies = if let Some(patterns) = &block.host_patterns {
+            let mut hit = false;
+            for list in patterns {
+                match ssh_pattern_list_matches(list, candidate, work) {
+                    Some(matched) if matched => {
+                        hit = true;
+                        break;
+                    }
+                    Some(_) => {}
+                    None => return Err(SSH_CONFIG_MATCH_WORK_EXCEEDED.to_string()),
+                }
+            }
+            hit
+        } else if let Some(criteria) = &block.match_criteria {
+            if !ssh_match_supported(criteria) {
+                let reason = ssh_match_unsupported_reason(criteria);
+                if degraded.len() < MAX_SSH_CONFIG_NOTES && !degraded.contains(&reason) {
+                    degraded.push(reason);
+                }
+                false
+            } else {
+                match ssh_match_criteria_hit(
+                    criteria,
+                    candidate,
+                    hostname.as_deref(),
+                    username.as_deref(),
+                    work,
+                ) {
+                    Some(hit) => hit,
+                    None => return Err(SSH_CONFIG_MATCH_WORK_EXCEEDED.to_string()),
+                }
+            }
+        } else {
+            true // global preamble applies everywhere
+        };
+        if !applies {
+            continue;
+        }
+        for (keyword, value) in &block.directives {
+            match keyword.as_str() {
+                "hostname" if hostname.is_none() => {
+                    // %h expands to the alias the block matched on.
+                    let expanded = value.replacen("%h", candidate, 1);
+                    let trimmed = expanded.trim();
+                    if !trimmed.is_empty() {
+                        hostname = Some(trimmed.to_string());
+                    }
+                }
+                "user" if username.is_none() => {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        username = Some(trimmed.to_string());
+                    }
+                }
+                "port" if !port_seen => {
+                    port_seen = true;
+                    port = value.trim().parse::<u16>().ok().filter(|port| *port > 0);
+                }
+                "identityfile" if identity.is_none() => {
+                    identity = Some(expand_ssh_identity_path(value.trim()));
+                }
+                "proxyjump" if annotated.insert("proxyjump") => {
+                    annotations.push(format!("ProxyJump {} (needs manual mapping)", value.trim()));
+                }
+                "proxycommand" if annotated.insert("proxycommand") => {
+                    annotations.push(format!(
+                        "ProxyCommand {} (not executed, needs manual mapping)",
+                        value.trim()
+                    ));
+                }
+                "include" if annotated.insert("include") => {
+                    annotations.push(format!("Include {} (not followed)", value.trim()));
+                }
+                "userknownhostsfile" if annotated.insert("userknownhostsfile") => {
+                    annotations.push(format!("UserKnownHostsFile {} (not carried)", value.trim()));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut session = ImportedSession::new(
+        candidate.to_string(),
+        hostname.unwrap_or_else(|| candidate.to_string()),
+        port.unwrap_or(22),
+        username
+            .filter(|user| !user.is_empty())
+            .unwrap_or_else(|| "root".to_string()),
+    );
+    session.description = annotations.join("; ");
+    if let Some(path) = identity {
+        session.auth = ImportedAuth::PrivateKey {
+            path: Some(path),
+            has_secret: false,
+        };
+        session.secret_note = SECRET_NOTE_KEY_PATH_ONLY.to_string();
+    }
+    Ok(Some(session))
+}
+
+// ---------------------------------------------------------------------------
 // Streaming preview protocol
 // ---------------------------------------------------------------------------
 
@@ -2120,9 +2563,8 @@ fn required_size(params: &Value, field: &str) -> Result<u64, String> {
 
 fn validate_kind(kind: &str) -> Result<(), String> {
     match kind {
-        "moba" | "xshell" | "windterm" | "securecrt" | "finalshell" | "electerm" | "termius" => {
-            Ok(())
-        }
+        "moba" | "xshell" | "windterm" | "securecrt" | "finalshell" | "electerm" | "termius"
+        | "sshconfig" => Ok(()),
         _ => Err(format!("Unknown import kind: {kind}")),
     }
 }
@@ -2145,6 +2587,9 @@ fn parse_uploaded(
         "finalshell" => parse_finalshell(file),
         "electerm" => parse_electerm(file),
         "termius" => parse_termius(file),
+        "sshconfig" => parse_ssh_config(
+            std::str::from_utf8(file).map_err(|_| "OpenSSH config file is not valid UTF-8")?,
+        ),
         _ => Err(format!("Unknown import kind: {kind}")),
     }
 }
@@ -3137,6 +3582,428 @@ mod tests {
             "BAAAAAAA012345678901234567890123456789012345678!"
         ));
         assert!(!is_termius_encrypted_blob("plain password"));
+    }
+
+    // -- OpenSSH config ------------------------------------------------------
+
+    #[test]
+    fn sshconfig_parses_host_blocks_with_defaults_and_first_value_wins() {
+        let config = concat!(
+            "# global defaults\n",
+            "Port 2222\n",
+            "\n",
+            "Host web1\n",
+            "  Hostname 10.0.0.1\n",
+            "  User deploy\n",
+            "  Port 2223\n",
+            "  IdentityFile ~/.ssh/id_ed25519\n",
+            "\n",
+            "Host db1\n",
+            "  hostName 10.0.0.2\n",
+            "  USER ops\n",
+            "  port = 2224\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(sessions.len(), 2);
+        // The global Port (first value) wins over the per-host one; the
+        // alias, Hostname, User and IdentityFile map through.
+        assert_eq!(sessions[0].name, "web1");
+        assert_eq!(sessions[0].host, "10.0.0.1");
+        assert_eq!(sessions[0].port, 2222);
+        assert_eq!(sessions[0].username, "deploy");
+        assert!(sessions[0].group_path.is_empty());
+        match &sessions[0].auth {
+            ImportedAuth::PrivateKey { path, has_secret } => {
+                let path = path.as_deref().unwrap();
+                assert!(path.ends_with(".ssh/id_ed25519"), "unexpected path: {path}");
+                assert!(!has_secret, "a key path alone is not a secret");
+            }
+            other => panic!("expected private key auth, got {other:?}"),
+        }
+        assert_eq!(sessions[0].secret_note, SECRET_NOTE_KEY_PATH_ONLY);
+        // Keyword case and the `=` separator both parse.
+        assert_eq!(sessions[1].host, "10.0.0.2");
+        assert_eq!(sessions[1].username, "ops");
+        assert_eq!(sessions[1].port, 2222);
+        // No IdentityFile: no auth, no note.
+        assert_eq!(sessions[1].auth, ImportedAuth::None);
+        assert_eq!(sessions[1].secret_note, "");
+    }
+
+    #[test]
+    fn sshconfig_wildcards_carry_defaults_without_becoming_entries() {
+        let config = concat!(
+            "Host *.prod.example.com\n",
+            "  User admin\n",
+            "  ProxyJump bastion\n",
+            "Host *\n",
+            "  User fallback\n",
+            "  ServerAliveInterval 60\n",
+            "\n",
+            "Host web1.prod.example.com\n",
+            "  Hostname 10.1.0.1\n",
+            "\n",
+            "Host plain\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        // `*.prod.example.com` and `*` are skipped as entries but their
+        // defaults apply to the concrete candidates.
+        assert_eq!(sessions.len(), 2);
+        let web = &sessions[0];
+        assert_eq!(web.name, "web1.prod.example.com");
+        assert_eq!(web.host, "10.1.0.1");
+        // First value wins: the narrower wildcard block beats `Host *`.
+        assert_eq!(web.username, "admin");
+        assert_eq!(web.port, 22);
+        // ProxyJump from the wildcard block is annotated for manual mapping.
+        assert_eq!(web.description, "ProxyJump bastion (needs manual mapping)");
+        // A candidate matching nothing but `Host *` takes its defaults.
+        assert_eq!(sessions[1].name, "plain");
+        assert_eq!(sessions[1].host, "plain");
+        assert_eq!(sessions[1].username, "fallback");
+        assert!(sessions[1].description.is_empty());
+    }
+
+    #[test]
+    fn sshconfig_multi_pattern_host_line_splits_into_entries() {
+        let config = "Host web1 db1 *.prod !hidden\n  User ops\n";
+        let sessions = parse_ssh_config(config).unwrap();
+        // Only the concrete patterns become entries; `*.prod` and `!hidden`
+        // never name a machine.
+        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["web1", "db1"]);
+        assert_eq!(sessions[0].username, "ops");
+    }
+
+    #[test]
+    fn sshconfig_hostname_tokens_and_negation_patterns() {
+        let config = concat!(
+            "Host tunnel\n",
+            "  Hostname %h.example.net\n",
+            "  Port 2200\n",
+            "Host !web2 *\n",
+            "  User noc\n",
+            "Host backup\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(sessions.len(), 2);
+        // %h in Hostname expands to the matched alias.
+        assert_eq!(sessions[0].host, "tunnel.example.net");
+        assert_eq!(sessions[0].port, 2200);
+        // A negation-only pattern list has no concrete candidate, but `*`
+        // still carries the default user to every entry.
+        assert_eq!(sessions[1].name, "backup");
+        assert_eq!(sessions[1].username, "noc");
+    }
+
+    #[test]
+    fn sshconfig_include_and_known_hosts_are_annotated_not_followed() {
+        // The pipeline receives uploaded bytes only, so Include is never
+        // followed (no recursion, hence no cycle to detect) and both
+        // directives degrade to visible annotations.
+        let config = concat!(
+            "Host web1\n",
+            "  Include ~/.ssh/config.d/*.conf\n",
+            "  Include ~/.ssh/config.d/*.conf\n",
+            "  UserKnownHostsFile /etc/ssh/ssh_known_hosts\n",
+            "  User deploy\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].description,
+            concat!(
+                "Include ~/.ssh/config.d/*.conf (not followed); ",
+                "UserKnownHostsFile /etc/ssh/ssh_known_hosts (not carried)"
+            )
+        );
+    }
+
+    #[test]
+    fn sshconfig_proxy_command_is_annotated_and_never_executed() {
+        let config = concat!(
+            "Host jump\n",
+            "  ProxyCommand nc -X connect -x proxy.internal:3128 %h %p\n",
+            "  Hostname 10.2.0.1\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].description,
+            "ProxyCommand nc -X connect -x proxy.internal:3128 %h %p (not executed, needs manual mapping)"
+        );
+    }
+
+    #[test]
+    fn sshconfig_match_host_user_applies_conditionally() {
+        let config = concat!(
+            "Host web1\n",
+            "  Hostname 10.0.0.1\n",
+            "  User deploy\n",
+            "Host web2\n",
+            "  Hostname 10.0.0.2\n",
+            "\n",
+            "Match user deploy host 10.0.0.*\n",
+            "  ForwardAgent yes\n",
+            "  Port 2222\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(sessions.len(), 2);
+        // web1 (deploy@10.0.0.1) satisfies both criteria, web2 does not.
+        assert_eq!(sessions[0].port, 2222);
+        assert_eq!(sessions[1].port, 22);
+    }
+
+    #[test]
+    fn sshconfig_unsupported_match_degrades_with_reason() {
+        let config = concat!(
+            "Host web1\n",
+            "  Hostname 10.0.0.1\n",
+            "Match exec /usr/bin/check\n",
+            "  Port 9999\n",
+            "Match localuser root\n",
+            "  Port 8888\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(sessions.len(), 1);
+        // The unsupported blocks are skipped and the reasons surface on the
+        // imported row; their settings are not applied.
+        assert_eq!(
+            sessions[0].description,
+            concat!(
+                "Match exec: settings not imported; ",
+                "Match localuser: settings not imported"
+            )
+        );
+        assert_eq!(sessions[0].port, 22);
+        // The reason list is capped.
+        let config = concat!(
+            "Host web1\n",
+            "Match exec a\nMatch localuser b\nMatch final\nMatch all\nMatch canonical\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(
+            sessions[0]
+                .description
+                .matches("settings not imported")
+                .count(),
+            MAX_SSH_CONFIG_NOTES
+        );
+    }
+
+    #[test]
+    fn sshconfig_identityfile_paths_map_without_reading_keys() {
+        let config = concat!(
+            "Host a\n",
+            "  IdentityFile ~/.ssh/id_rsa\n",
+            "Host b\n",
+            "  IdentityFile %d/keys/id_ed25519\n",
+            "Host c\n",
+            "  IdentityFile /opt/keys/custom\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(sessions.len(), 3);
+        for (index, expected_suffix) in [".ssh/id_rsa", "keys/id_ed25519", "custom"]
+            .into_iter()
+            .enumerate()
+        {
+            match &sessions[index].auth {
+                ImportedAuth::PrivateKey { path, has_secret } => {
+                    let path = path.as_deref().unwrap();
+                    assert!(path.ends_with(expected_suffix), "unexpected path: {path}");
+                    assert!(!has_secret, "no key material may be represented");
+                }
+                other => panic!("expected private key auth, got {other:?}"),
+            }
+            assert_eq!(sessions[index].secret_note, SECRET_NOTE_KEY_PATH_ONLY);
+        }
+        // `~` and %d expand against the same home directory.
+        match &sessions[0].auth {
+            ImportedAuth::PrivateKey {
+                path: Some(home_1), ..
+            } => match &sessions[1].auth {
+                ImportedAuth::PrivateKey {
+                    path: Some(home_2), ..
+                } => {
+                    let home_1 = home_1.trim_end_matches(".ssh/id_rsa");
+                    let home_2 = home_2.trim_end_matches("keys/id_ed25519");
+                    assert_eq!(home_1, home_2, "both prefixes expand to HOME");
+                }
+                other => panic!("expected private key auth, got {other:?}"),
+            },
+            other => panic!("expected private key auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sshconfig_hostile_input_degrades_without_panicking() {
+        // No Host lines at all: empty result, not an error.
+        assert!(parse_ssh_config("").unwrap().is_empty());
+        assert!(parse_ssh_config("only comments\n# and blanks\n\n")
+            .unwrap()
+            .is_empty());
+        // Unterminated quote, keyword-only lines and giant values degrade to
+        // skipped lines / directives.
+        let config = concat!(
+            "Host \"unterminated\n",
+            "Host\n",
+            "  Port\n",
+            "  Port not-a-port\n",
+            "  Hostname \n",
+            "Host ok\n",
+        );
+        let sessions = parse_ssh_config(config).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "ok");
+        assert_eq!(sessions[0].port, 22);
+        assert_eq!(sessions[0].host, "ok");
+        // An argument beyond the per-directive budget is dropped silently.
+        let giant = format!(
+            "Host g\n  Hostname {}\n",
+            "x".repeat(MAX_SSH_CONFIG_ARG_BYTES + 1)
+        );
+        let sessions = parse_ssh_config(&giant).unwrap();
+        assert_eq!(sessions[0].host, "g");
+        // Empty and negated-only pattern lists match nothing.
+        let config = "Host !only-negated\n  User x\n";
+        assert!(parse_ssh_config(config).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sshconfig_line_and_session_caps_fail_closed() {
+        let mut config = String::new();
+        for _ in 0..=MAX_SSH_CONFIG_LINES {
+            config.push_str("# line\n");
+        }
+        let error = parse_ssh_config(&config).expect_err("line budget must fail closed");
+        assert!(error.contains("line limit"), "{error}");
+        let mut config = String::new();
+        for index in 0..=MAX_PREVIEW_SESSIONS {
+            config.push_str(&format!("Host host-{index}\n"));
+        }
+        let error = parse_ssh_config(&config).expect_err("session budget must fail closed");
+        assert!(error.contains("session limit"), "{error}");
+    }
+
+    #[test]
+    fn sshconfig_pattern_budget_fails_closed_on_hostile_globs() {
+        // 200 wildcard blocks with long star-heavy patterns matched against
+        // 500 candidates: the O(pattern × candidate) budget trips long before
+        // any pathological CPU burn.
+        let mut config = String::new();
+        for _ in 0..200 {
+            config.push_str(&format!("Host {}{}\n", "*a".repeat(100), "*"));
+        }
+        for index in 0..500 {
+            config.push_str(&format!("Host candidate-{index:04}-of-500\n"));
+        }
+        let error = parse_ssh_config(&config).expect_err("pattern budget must fail closed");
+        assert_eq!(error, SSH_CONFIG_MATCH_WORK_EXCEEDED);
+    }
+
+    #[test]
+    fn sshconfig_glob_and_pattern_list_semantics() {
+        // Single patterns: `*`, `?`, case-insensitive, byte-exact multibyte.
+        assert!(ssh_glob_match("*.prod", "web1.prod"));
+        assert!(!ssh_glob_match("*.prod", "web1.prod.example"));
+        assert!(ssh_glob_match("web?", "web1"));
+        assert!(!ssh_glob_match("web?", "web12"));
+        assert!(ssh_glob_match("WEB1", "web1"));
+        assert!(ssh_glob_match("主机*", "主机01"));
+        assert!(!ssh_glob_match("", "x"));
+        assert!(ssh_glob_match("", ""));
+        // Pattern lists: comma separation, `!` veto beats positives.
+        let mut work = 0u64;
+        assert_eq!(
+            ssh_pattern_list_matches("web1,*.prod", "web1", &mut work),
+            Some(true)
+        );
+        assert_eq!(
+            ssh_pattern_list_matches("*.prod,!web1.prod", "web1.prod", &mut work),
+            Some(false)
+        );
+        assert_eq!(
+            ssh_pattern_list_matches("!*,web1", "web1", &mut work),
+            Some(false)
+        );
+        // The budget reports exhaustion instead of burning CPU.
+        let mut work = MAX_SSH_MATCH_WORK;
+        assert_eq!(ssh_pattern_list_matches("*", "web1", &mut work), None);
+    }
+
+    #[test]
+    fn sshconfig_streaming_preview_roundtrips_sanitized() {
+        let text = concat!(
+            "Host web1\n",
+            "  Hostname 10.7.0.1\n",
+            "  User deploy\n",
+            "  Port 2222\n",
+            "  IdentityFile ~/.ssh/id_rsa\n",
+            "  ProxyJump bastion\n",
+        );
+        let stream = ImportStream::default();
+        let started = stream
+            .start(&json!({ "kind": "sshconfig", "mainSize": text.len() }))
+            .unwrap();
+        let task_id = started["taskId"].as_str().unwrap();
+        let mut frame = 0u64.to_be_bytes().to_vec();
+        frame.extend_from_slice(text.as_bytes());
+        assert_eq!(
+            stream.append(task_id, "main", &frame).unwrap(),
+            text.len() as u64
+        );
+        let preview = stream.finish(task_id).unwrap();
+        assert_eq!(preview["sourceKind"], "sshconfig");
+        assert_eq!(preview["sessions"][0]["name"], "web1");
+        assert_eq!(preview["sessions"][0]["port"], 2222);
+        assert_eq!(preview["sessions"][0]["authKind"], "private-key");
+        assert_eq!(
+            preview["sessions"][0]["secretNote"],
+            SECRET_NOTE_KEY_PATH_ONLY
+        );
+        // The sanitized export keeps the key path but never any key material
+        // or password fields (the no-credential invariant for the new source).
+        let exported = preview["export"].to_string();
+        assert!(exported.contains("keyPath"), "{exported}");
+        assert!(!exported.contains("\"privateKey\""), "{exported}");
+        assert!(!exported.contains("\"password\""), "{exported}");
+        assert!(!exported.contains("\"passphrase\""), "{exported}");
+        assert!(stream.finish(task_id).is_err());
+    }
+
+    #[test]
+    fn sshconfig_line_splitting_edge_cases() {
+        // Comments, blanks and quoted arguments.
+        assert_eq!(split_ssh_config_line("# comment"), None);
+        assert_eq!(split_ssh_config_line("   "), None);
+        let (keyword, argument) = split_ssh_config_line("Host \"a b\"").unwrap();
+        assert_eq!(keyword, "host");
+        assert_eq!(argument, "a b");
+        // `=` separators with and without spaces.
+        assert_eq!(
+            split_ssh_config_line("HostName=x.example"),
+            Some(("hostname".to_string(), "x.example".to_string()))
+        );
+        assert_eq!(
+            split_ssh_config_line("Port = 22"),
+            Some(("port".to_string(), "22".to_string()))
+        );
+        // An unterminated quote degrades to a skipped line.
+        assert_eq!(split_ssh_config_line("IdentityFile \"no-close"), None);
+        // Match criteria parsing: no-arg criteria get empty values.
+        let criteria = parse_ssh_match_criteria("host *.prod user deploy");
+        assert_eq!(
+            criteria,
+            vec![
+                ("host".to_string(), "*.prod".to_string()),
+                ("user".to_string(), "deploy".to_string()),
+            ]
+        );
+        let criteria = parse_ssh_match_criteria("all");
+        assert_eq!(criteria, vec![("all".to_string(), String::new())]);
+        // A trailing keyword without its value degrades to an empty value.
+        let criteria = parse_ssh_match_criteria("exec");
+        assert_eq!(criteria, vec![("exec".to_string(), String::new())]);
     }
 
     // -- Sanitized export ----------------------------------------------------
