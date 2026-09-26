@@ -43,8 +43,11 @@ export function registerTerminalModeQueryHandlers(terminal: CsiTerminal): () => 
   );
 
   disposables.push(
-    terminal.parser.registerCsiHandler({ prefix: ">", intermediates: "q", final: "q" }, () => {
-      // XTVERSION is only ever a query.
+    // XTVERSION is `CSI > 0 q`: the "q" is the final byte, never an intermediate
+    // (xterm rejects intermediates outside 0x20..0x2f at registration).
+    terminal.parser.registerCsiHandler({ prefix: ">", final: "q" }, (params) => {
+      // XTVERSION is only ever a query; `CSI > 4 q` (XTQMODKEY) falls through.
+      if (params.length > 0 && params[0] !== 0) return false;
       terminal.input("\x1bP>|dbx 1.0\x1b\\", false);
       return true;
     }),
