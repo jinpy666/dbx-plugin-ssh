@@ -43,13 +43,10 @@ export function registerTerminalModeQueryHandlers(terminal: CsiTerminal): () => 
   );
 
   disposables.push(
-    // XTVERSION wire form is `CSI > Ps q`: ">" is the prefix, Ps a parameter
-    // and "q" the final byte — there is NO intermediate. Passing "q" as an
-    // intermediate made xterm's parser._identifier throw at registration time
-    // (intermediates must be 0x20..0x2f), which killed the whole workbench
-    // boot before any session could attach.
+    // XTVERSION is `CSI > 0 q`: the "q" is the final byte, never an intermediate
+    // (xterm rejects intermediates outside 0x20..0x2f at registration).
     terminal.parser.registerCsiHandler({ prefix: ">", final: "q" }, (params) => {
-      // Only the query form (Ps omitted or 0) gets the DCS reply.
+      // XTVERSION is only ever a query; `CSI > 4 q` (XTQMODKEY) falls through.
       if (params.length > 0 && params[0] !== 0) return false;
       terminal.input("\x1bP>|dbx 1.0\x1b\\", false);
       return true;
