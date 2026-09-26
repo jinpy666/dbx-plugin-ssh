@@ -90,6 +90,13 @@ import {
 import { Osc7DirectoryParser } from "./lib/terminalDirectoryTracking";
 import { handleOsc52ClipboardWrite, handleTerminalColorQuery } from "./lib/terminalOsc";
 import {
+  cwdFromUserVar,
+  parseOsc1337SetUserVar,
+  parseOsc777Notify,
+  parseOsc9Notification,
+  shouldOsc7FollowOverrideUserVarCwd,
+} from "./lib/terminalOscChannels";
+import {
   createTerminalCopyCache,
   resolveTerminalPasteText,
   sanitizeSearchOptions,
@@ -1318,6 +1325,12 @@ let searchAddon: SearchAddon | undefined;
 // 时重挂，终端销毁时统一释放；OSC 52 只在 createTerminal 挂一次。
 let oscColorQueryDisposables: { dispose(): void }[] = [];
 let osc52Disposable: { dispose(): void } | undefined;
+// WT-2：OSC 通知/SetUserVar 白名单通道（OSC 9 / 777 / 1337）的 disposable：
+// createTerminal 挂一次，终端销毁统一释放。解析与防御上限在 lib/terminalOscChannels.ts。
+let oscFeedDisposables: { dispose(): void }[] = [];
+// SetUserVar cwd 元数据（优先通道）的最新上报；null 表示通道未启用，OSC 7
+// 提示符通道照旧跟随（回落语义不变）。裁决规则见 shouldOsc7FollowOverrideUserVarCwd。
+let userVarCwdEvent: { path: string; at: number } | null = null;
 // CSI 能力查询应答（kitty 键盘协议 / XTVERSION / DECRQM）：claude code 等
 // TUI 启动时探测并等待应答；xterm 内核对 `CSI ? u` 静默吞掉不回、XTVERSION
 // 无 handler，TUI 卡在 raw-mode 初始化——表现为"卡住、键盘没反应"。
@@ -2370,6 +2383,46 @@ function createTerminal() {
       return writeClipboardText(text, clipboardDeps());
     }),
   );
+  // WT-2（WezTerm 对标）：OSC 通知与 SetUserVar 白名单通道。xterm 内核对未知
+  // OSC 静默吞掉不渲染不回显（terminalProtocolMatrix.spec.ts 实测锚点），要
+  // 消费必须在 parser 层挂 handler。xterm 6 对同一 OSC id 的多 handler 按
+  // 「后注册先执行」派发、true 即截停：本组 handler 只对白名单 payload 返回
+  // true，其余返回 false 落回 ImageAddon（OSC 1337 内联图像）等既有通道。
+  const showTerminalOscNotice = (title: string, body: string) => {
+    // 通知来自远端会话，正文原样透出（已截断/压行）；无标题时补七语来源标题，
+    // 与 SFTP/下载等同面通知区分开。
+    showNotice(`${title || t("terminalOsc.defaultTitle")}: ${body}`);
+  };
+  oscFeedDisposables = [
+    // OSC 9（iTerm2 growl 风格）：payload 即正文。
+    terminal.parser.registerOscHandler(9, (data) => {
+      const notice = parseOsc9Notification(data);
+      if (notice) showTerminalOscNotice(notice.title, notice.body);
+      return notice !== null;
+    }),
+    // OSC 777：仅消费 `notify;TITLE;BODY` 类（kitty/urxvt 约定），其余种类不认识
+    // 不消费（白名单语义）。
+    terminal.parser.registerOscHandler(777, (data) => {
+      const notice = parseOsc777Notify(data);
+      if (notice) showTerminalOscNotice(notice.title, notice.body);
+      return notice !== null;
+    }),
+    // OSC 1337 SetUserVar（iTerm2 shell 集成）：cwd 元数据走目录跟随优先通道，
+    // cd 即刻跟随、不等提示符时刻的 OSC 7；其余 user-var 只确认消费不动作
+    // （WezTerm user-var-changed 事件的等价消费面，后续可在此扩展）。
+    terminal.parser.registerOscHandler(1337, (data) => {
+      const userVar = parseOsc1337SetUserVar(data);
+      if (!userVar) return false;
+      const cwd = cwdFromUserVar(userVar.name, userVar.value);
+      if (cwd) {
+        userVarCwdEvent = { path: cwd, at: Date.now() };
+        terminalCwd.value = cwd;
+        // 本地终端模式没有远端 SFTP 可跟随（loadDirectory 作用于 SSH 会话）。
+        if (followDirectory.value && !isLocalMode.value) void loadDirectory(cwd, true);
+      }
+      return true;
+    }),
+  ];
   terminal.attachCustomKeyEventHandler(handleTerminalKey);
   searchAddon.onDidChangeResults(({ resultCount, resultIndex }) => {
     if (!searchOpen.value) return;
@@ -3144,6 +3197,9 @@ function startCommandMarkerTick(startedAt: number) {
 function resetCommandMarker() {
   commandMarkerParser.reset();
   stopCommandMarkerTick();
+  // 会话切换/断开连带复位 SetUserVar cwd 优先通道：不把上一会话的目录裁决
+  // 带进新会话（OSC 7 回落立即恢复权威）。
+  userVarCwdEvent = null;
   commandMarker.installed = false;
   commandMarker.active = false;
   commandMarker.command = "";
@@ -3208,7 +3264,11 @@ function applyCommandMarker(updates: Osc633StreamUpdates) {
 }
 
 function writeTerminalOutput(data: Uint8Array) {
+  const now = Date.now();
   for (const path of directoryParser.push(data)) {
+    // WT-2：SetUserVar cwd 优先通道在位且刚更新时，提示符 OSC 7 的旧值不回踩
+    // （裁决见 shouldOsc7FollowOverrideUserVarCwd；无该通道时行为与从前一致）。
+    if (!shouldOsc7FollowOverrideUserVarCwd(userVarCwdEvent, path, now)) continue;
     terminalCwd.value = path;
     if (followDirectory.value) void loadDirectory(path, true);
   }
@@ -11231,6 +11291,8 @@ onBeforeUnmount(() => {
   modeQueryDisposables = [];
   osc52Disposable?.dispose();
   osc52Disposable = undefined;
+  for (const disposable of oscFeedDisposables) disposable.dispose();
+  oscFeedDisposables = [];
   disposeInput?.dispose();
   disposeWebkitInputFallback?.();
   disposeWebkitInputFallback = undefined;

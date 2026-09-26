@@ -7745,3 +7745,19 @@ const jsonPreviewMessages: Record<string, Record<string, string>> = {
 for (const locale of Object.keys(jsonPreviewMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...jsonPreviewMessages[locale] };
 }
+
+// —— 终端 OSC 通知/SetUserVar 白名单通道（WT-2，App.vue createTerminal 接线）：
+// 远端经 OSC 9 / OSC 777 发来的通知在无标题时以此来源标题兜底，与 SFTP/下载
+// 等同面通知区分开。七语齐套，缺一即被 workbenchMessageTable 的键集对比测试拦下。——
+const terminalOscMessages: Record<string, Record<string, string>> = {
+  en: { "terminalOsc.defaultTitle": "Terminal" },
+  "zh-CN": { "terminalOsc.defaultTitle": "终端" },
+  "zh-TW": { "terminalOsc.defaultTitle": "終端" },
+  es: { "terminalOsc.defaultTitle": "Terminal" },
+  it: { "terminalOsc.defaultTitle": "Terminale" },
+  ja: { "terminalOsc.defaultTitle": "ターミナル" },
+  "pt-BR": { "terminalOsc.defaultTitle": "Terminal" },
+};
+for (const locale of Object.keys(terminalOscMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...terminalOscMessages[locale] };
+}

@@ -216,3 +216,63 @@ smoke_fs_test.py +1 用例（PASS **83** / SKIP 0 / FAIL 0）：latin-1 连接�
 单测：cargo **963/963** / clippy 0 / fmt 0（修复为 ssh.rs 一处探测调用 + 注释）。
 
 仍保持未验收（依赖真机/人工）：watcher 工作台 GUI 手测、既有真机门不变。
+
+
+## WT-2 终端应答矩阵（2026-09-27，协议应答矩阵审计批）
+
+> WezTerm 把 DA/DSR/OSC 的应答、忽略、故意不支持逐项写成活文档；本节为同水位成文。
+> 实测方法：`frontend/src/lib/terminalProtocolMatrix.spec.ts` 用真实 xterm 内核
+> （`@xterm/xterm` **6.1.0-beta.304**，package.json 锁定）驱动 parser——内核行为一变
+> 该 spec 先红，文档不至于悄悄失真。插件层应答在 `terminalModeQueries.ts`（CSI 查询）、
+> `terminalOsc.ts`（OSC 10/11/52）、`terminalOscChannels.ts`（OSC 9/777/1337 白名单，
+> WT-2 新增）。「应答」的应答字节均以 spec 断言锁定。
+
+### CSI 查询（DSR / DA / DECRQM）
+
+| 序列 | 行为 | 应答字节 / 理由 | 落点 |
+| --- | --- | --- | --- |
+| DSR 5（`CSI 5n`，状态报告） | **应答**（内核已答） | `ESC[0n`（无故障）。vim/tmux 等以它探活终端 | xterm 内核 |
+| DSR 6（`CSI 6n`，光标位置） | **应答**（内核已答） | `ESC[<row>;<col>R`（1 起真实行列，实测 `ESC[3;5H` 后答 `ESC[3;5R`） | xterm 内核 |
+| Primary DA（`CSI c` / `CSI 0c`） | **应答**（内核已答） | `ESC[?1;2c`（VT100+AVO）。WezTerm 答 `?6c`（VT102）——两者同属「基础 VT 级」，无应用据此分流功能，不补 | xterm 内核 |
+| Secondary DA（`CSI >c`） | **应答**（内核已答） | `ESC[>0;<version>;0c`（版本号随内核演进，spec 锁形状不锁值） | xterm 内核 |
+| Tertiary DA（`CSI =c`，DECRPTUI） | **忽略**（内核静默） | 仅 VT 级单元识别用，应用面无消费方 | xterm 内核 |
+| kitty 键盘协议（`CSI ?u`） | **应答**（内核吞、插件补） | `ESC[?0u`：声明「协议在、flags 0」，调用方维持 legacy 编码。内核对 `?u` 静默（实测锚点），不补则 claude code/neovim 卡 raw-mode 初始化 | 插件 `terminalModeQueries.ts`；set/pop 形态交回内核 |
+| XTVERSION（`CSI >0q`） | **应答**（内核无、插件补） | DCS `>|dbx 1.0`。串保持通用，不诱导调用方启用本终端不支持的私有 escape | 插件 `terminalModeQueries.ts` |
+| DECRQM（`CSI ?<mode>$p`） | **应答**（插件统一答） | `ESC[?<mode>;2$y`（2=不支持）。**2026（同步渲染）自 WT-1 落地后为支持**：应答翻转为「1=支持」并配批次内缓冲/整体提交的帧同步语义（并行分支实施中，以该分支为准）；其余私模式维持「不支持」，防调用方重试循环 | 插件 `terminalModeQueries.ts`（WT-1 翻转 2026） |
+
+### OSC 白名单
+
+| 序列 | 行为 | 理由 / 语义 | 落点 |
+| --- | --- | --- | --- |
+| OSC 10/11（前景/背景色查询 `?`） | **应答**（内核吞、插件补） | 按生效主题色答 `rgb:rr/gg/bb`；设置分支不拦截交回内核 | 插件 `terminalOsc.ts` |
+| OSC 52（剪贴板） | **写支持 / 读不响应**（故意） | 写方向 1 MiB 防御上限；读查询（`?`）与清空静默吞掉——回传用户剪贴板属隐私泄漏，主流终端同样默认不回应 | 插件 `terminalOsc.ts` |
+| OSC 7（cwd 上报） | **消费**（目录跟随回落通道） | 后端经提示符注入安装；与 SetUserVar cwd 并存时按「更晚事件为准」裁决（见下） | 插件 `terminalDirectoryTracking.ts` + App.vue |
+| OSC 9（通知，iTerm2 growl 风格） | **消费**（WT-2 起接工作台通知；此前内核静默忽略） | payload 即正文；空正文不弹。正文压单行、超 600 字符截断 | 插件 `terminalOscChannels.ts` + App.vue（`registerOscHandler(9)`） |
+| OSC 777（通知，kitty/urxvt 约定） | **仅消费 `notify;TITLE;BODY` 类**；其余类（进度上报等）不消费 | 白名单语义：不认识的种类返回 false 交回内核忽略，不误弹 | 插件 `terminalOscChannels.ts` + App.vue（`registerOscHandler(777)`） |
+| OSC 1337 `File=…`（内联图像） | **消费**（既有能力） | iTerm2 内联图像 + sixel 同走 ImageAddon，32 MiB 像素上限 | `@xterm/addon-image` |
+| OSC 1337 `SetUserVar=name=<base64>` | **消费**（WT-2 起接；此前内核静默忽略） | WezTerm `user-var-changed` 等价消费面：`cwd`/`CurrentDir` 名下的 cwd 元数据接目录跟随**优先通道**（cd 即刻跟随，不等提示符时刻的 OSC 7；分歧时以更晚事件为准，OSC 7 回落保留、行为不变）；坏 base64/超名限（64）/超载限（base64 16 KiB、解码后 8 KiB）降级忽略。xterm parser 本身对单条 OSC 有 10 MB 载荷上限，超限直接丢弃 | 插件 `terminalOscChannels.ts` + App.vue（`registerOscHandler(1337)`） |
+| OSC 1337 其余 payload（`CurrentDir=…` 直通等） | **忽略** | 非白名单形态返回 false；多 handler 按注册逆序派发（xterm 6 实测语义），SetUserVar handler 先执行、false 落回 ImageAddon，互不抢占 | xterm 内核静默 |
+| OSC 633（VS Code shell 集成命令标记） | **消费** | 命令/退出码/时长/cwd 标记；未知 payload 原样留在可见输出（同 tiny-rdm） | 插件 `terminalCommandMarkers.ts` |
+| 未挂 handler 的 OSC（9/777/1337 等） | **忽略**（内核静默） | 实测锚点：无 handler 时 `ESC]9;…` / `ESC]777;…` / `ESC]1337;…` 不渲染、不回显、不产生 onData | xterm 内核 |
+
+### SGR 冒号形式与自研绘制路径
+
+| 形式 | 行为 | 实测结论 |
+| --- | --- | --- |
+| `SGR 4:3`（curly 下划线） | 内核入属性 | 字节入 cell 下划线属性（`4:` 系冒号子参同路），**零宽不占列**；`translateToString` 纯文本不含任何残留 |
+| `SGR 38:2::r:g:b`（ITU 冒号真彩，含 colorspace 空段） | 内核入属性 | 与 legacy `38;2;r;g;b` 存进同一种 RGB 单元属性（getFgColor 打包值一致、色彩模式一致），零宽不占列 |
+| 与自研 decoration（关键词高亮 / 动作链接 / gutter）的交互 | **无相互作用** | 自研绘制路径按 `buffer.getLine(row).translateToString()` 的纯文本列偏移定位（`keywordHighlight.ts` 的 `matchesInLine` / `toAbsoluteRowRange`），SGR 已被内核在 parse 阶段消费为 cell 属性，冒号形式不改变文本列——装饰 `registerDecoration({ x, width })` 的偏移天然对齐；着色为装饰层半透明填充画在文字层上方，与内核画的下划线/真彩字色叠加显示，互不覆写。前提「冒号 SGR 零宽」一旦被内核破坏会整体错位，已锁进 spec |
+| 与命令标记路径（`terminalCommandMarkers.ts` OSC 633 解析）的交互 | **无相互作用** | 633 解析只识别自己的帧（`ESC]633;…`），SGR 冒号序列原样透传内核；流中夹带的 SGR 不影响 carry/帧边界判定 |
+
+### 8 位 C1 控制码（GBK 堡垒机场景）
+
+- **设计立场：UTF-8-only，不启用 8 位 C1**（与「排期外明确不做」清单一致，维持现状）。
+- 实测（本仓内核口径，非真机）：裸 `0x9B` 字节在 UTF-8 模式下被 xterm 内核按 **C1-CSI 引导** 解释——`A <0x9B> 4m B` 渲染为 `AB` 且 B 带下划线（`4m` 被整段吞掉），即内核对 C1 区间字节不做 UTF-8 非法字节回退。对 GBK 堡垒机的推论：GBK 双字节首字节落在 0x81–0x9F 的字符，在未转码直入本终端时存在被误读为 C1 控制码、吞掉后续字节的风险面（表现为乱码形态异常，而非纯 mojibake）。
+- **待真机补充实测**：无真实 GBK 堡垒机环境，本行不落真机数据；后续有环境时补「GBK 流直入 / sidecar 转码后直入」两口径的渲染对照。
+
+### WT-2 批次验证记录（2026-09-27）
+
+- 新增 spec：`terminalOscChannels.spec.ts`（15 用例：通知解析/白名单、SetUserVar 解析与防御上限、cwd 元数据接受集、OSC 7 优先级裁决）+ `terminalProtocolMatrix.spec.ts`（10 用例：上表全部实测锚点）。
+- 回归：两新 spec 25/25 过；i18n 护栏 `workbench.spec.ts` + `i18nKeyReferences.spec.ts` **68/68** 过（新增 `terminalOsc.defaultTitle` 七语对齐且被 App.vue 真实引用）；相关既有 spec（`terminalModeQueries` / `terminalOsc` 等）44/44 过。
+- `pnpm vue-tsc --noEmit` 0 错误。
+
