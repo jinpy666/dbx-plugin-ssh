@@ -288,6 +288,15 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 - `triggers/validate`（sidecar RPC）：复用同一 parser 做 JSON/tssh 语法检测，返回 `valid`、`enabled`、`format`（`empty`/`json`/`tssh`）和阶段数；失败只返回定位错误，不回显 secret、解密结果或 TOTP key。连接表单若不能调用该 RPC，`connection/test` 仍在启用时执行同一最终校验。
 - **安全声明**：①恶意服务器可伪造匹配提示骗取回发内容（含密文槽位的值）——`pattern` 只应指向明确可信的提示序列，密文仅用于该连接上明确配置的场景；②`sendCommand` / `password_command` / `passphrase_command` 以当前用户权限在本地执行，命令完全来自用户自己的连接配置（插件不提供任何默认命令，MCP 工具描述不推广命令执行面）；③密文 / 凭据内容绝不进日志、事件或错误信息，命令输出用后 zeroize。
 
+## ZMODEM 触发检测（`ssh/zmodem`，#90）
+
+远端 `sz` 通过在 PTY 上发送 ZRQINIT 头开启 ZMODEM 下载会话；本插件不实现 ZMODEM 接收（下载请走 SFTP 面板），此前该序列要么灌进终端渲染乱码、要么被前端 sentry 静默 deny，用户得不到任何反馈。SSH PTY 会话（仅 stdout 流）在输出泵上挂了一个纯状态机检测器（`backend/src/zmodem_detect.rs`）：
+
+- **识别序列**：ZMODEM 帧起始哨兵 `2A 2A 18` + 帧类型字节（`'B'`=ZHEX/`'A'`=ZBIN/`'C'`=ZBIN32，lrzsz 命名与 spec 相反处见模块注释），帧类型为 ZRQINIT（0x00；hex 帧为 ASCII `"00"`）即命中——lrzsz `sz` 的上线与重试都是 `zshhdr` hex 帧 `**\x18B00…\r\x8a\x11`。
+- **命中行为**：①该帧及其后 40s 窗口内的同类头被抑制（跨 binary 帧切割安全：哨兵与 hex 负载可分帧携带）；②首次命中发出 `ssh/zmodem` 事件 `{ sessionId, kind: "zrqinit" }`（重试不重复发）；③窗口过后自动回透传。
+- **不受影响**：ZRINIT（0x01，远端 `rz` 上传）与其它帧类型原样透传——前端 zmodem.js sentry 的 rz 上传流程依赖看到它们；普通文本（含字面 `**`）也不受影响。
+- **明确不做**：不实现 ZMODEM 协议本身（不应答 ZRINIT、不收发文件）；`kind` 预留扩展。本地终端 / 串口 / telnet 通路未接检测器（远端 sz 场景仅 SSH PTY，后续按需复用）。
+
 ## Sudo 文件操作
 
 `sudo/*` 方法族在不以 root 登录的前提下管理远端 root 文件，覆盖完整的 Sudo 文件操作族（`StatSudo` / `ListDirSudo` / `ReadFileSudo` / `WriteFileSudo` / `MkdirSudo` / `RemoveSudo` / `RemoveAllSudo` / `ChmodSudo` / `RenameSudo`）。全部方法复用 `ssh/exec` 的 Quick Sudo 编排（密码 / TOTP 自动应答、`auth_flow_mode`、提示词、`sudo -nv` 保活），在远端以 sudo 权限执行命令并解析输出：stat 走 `stat -c`，list 走 `ls -la --time-style=+%s`，read 走 `dd` / `base64`，write 走 `dd of=`。

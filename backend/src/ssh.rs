@@ -2121,13 +2121,27 @@ impl SshRuntime {
         tokio::spawn(async move {
             let mut directory_filter = DirectoryHandshakeFilter::default();
             let mut directory_tracking_enabled = false;
+            // #90：ZMODEM 触发检测（远端 sz 发起的 ZRQINIT）。状态随会话存续，
+            // 抑制窗口超时后自动回到透传（详见 zmodem_detect 模块注释）。
+            let mut zmodem_detector = crate::zmodem_detect::Detector::new();
             let mut directory_timeout = tokio::time::interval(Duration::from_millis(250));
             directory_timeout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _ = directory_timeout.tick() => {
                         if let Some(data) = directory_filter.flush_if_timed_out() {
-                            publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                            // 与主数据路径同一检测器：标记握手窗口里冲刷的
+                            // 字节同样不能绕过 ZMODEM 触发检测（#90）。
+                            let outcome = zmodem_detector.feed(&data, unix_now_ms());
+                            if outcome.detected {
+                                let _ = emitter.event(
+                                    "ssh/zmodem",
+                                    json!({ "sessionId": task_id, "kind": "zrqinit" }),
+                                );
+                            }
+                            if !outcome.clean.is_empty() {
+                                publish_terminal(&task_id, TerminalStream::Stdout, outcome.clean, &replay, &emitter).await;
+                            }
                         }
                         if directory_filter.take_failed() {
                             directory_tracking_enabled = false;
@@ -2320,17 +2334,41 @@ impl SshRuntime {
                             }
                         }
                         let Some(data) = directory_filter.filter(&data) else { continue; };
-                        // Session recording capture: everything the terminal
-                        // shows (stdout + stderr, post-filter) lands in the
-                        // cast file when a recording is active.
-                        if stream != TerminalStream::State {
-                            if let Ok(mut slot) = entry.session_recorder.lock() {
-                                if let Some(recorder) = slot.as_mut() {
-                                    recorder.observe(&data);
+                        // #90 ZMODEM 触发检测：远端 `sz` 用 ZRQINIT 开启下载会
+                        // 话，本插件不实现 ZMODEM 接收——帧若照发，前端 sentry
+                        // 只会静默 deny（issue #90 的"没有任何反馈"），拦截后
+                        // 改发 ssh/zmodem 事件由前端给出可见提示。检测器只吃
+                        // Stdout（sz 的协议帧走 stdout；stderr 原样直通），且
+                        // 必须在录制/发布之前：终端展示与录制文件都不该混入
+                        // 协议乱码。ZRINIT（rz 上传）不触发，前端上传流程不受
+                        // 影响；抑制窗口超时后自动复位。
+                        let mut zmodem_detected = false;
+                        let data = if stream == TerminalStream::Stdout {
+                            let outcome = zmodem_detector.feed(&data, unix_now_ms());
+                            zmodem_detected = outcome.detected;
+                            outcome.clean
+                        } else {
+                            data
+                        };
+                        if zmodem_detected {
+                            let _ = emitter.event(
+                                "ssh/zmodem",
+                                json!({ "sessionId": task_id, "kind": "zrqinit" }),
+                            );
+                        }
+                        if !data.is_empty() {
+                            // Session recording capture: everything the terminal
+                            // shows (stdout + stderr, post-filter) lands in the
+                            // cast file when a recording is active.
+                            if stream != TerminalStream::State {
+                                if let Ok(mut slot) = entry.session_recorder.lock() {
+                                    if let Some(recorder) = slot.as_mut() {
+                                        recorder.observe(&data);
+                                    }
                                 }
                             }
+                            publish_terminal(&task_id, stream, data, &replay, &emitter).await;
                         }
-                        publish_terminal(&task_id, stream, data, &replay, &emitter).await;
                         if directory_filter.take_failed() {
                             directory_tracking_enabled = false;
                             publish_terminal(
