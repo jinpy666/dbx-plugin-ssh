@@ -9852,6 +9852,7 @@ function toggleColumnsMenu() {
 function toggleTransferPanel() {
   const next = !transferPanelOpen.value;
   closeToolbarPopovers();
+  if (next) closeMetrics();
   transferPanelOpen.value = next;
 }
 
@@ -9951,11 +9952,13 @@ async function refreshMetrics() {
 }
 
 // 悬浮指标卡：打开即刷新并启动 5s 轮询；不阻塞终端/SFTP 操作，随时开关。
+// 与 SFTP transfers 抽屉同位渲染，二者互斥，避免内容叠字（mock 页实测）。
 function toggleMetrics() {
   if (metricsOpen.value) {
     closeMetrics();
     return;
   }
+  transferPanelOpen.value = false;
   metricsOpen.value = true;
   void backfillMetricsHistory();
   void refreshMetrics();
@@ -11476,6 +11479,8 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
         <button class="icon-button" :title="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
         <button class="icon-button" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
+        <!-- 工具条语义分组：视图 / 会话 / 运维 / 命令 / 记录与设置 / SFTP 工具（分隔线避开 local 模式两侧皆隐藏的位置） -->
+        <span class="toolbar-separator" aria-hidden="true" />
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><SquarePlus /></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('copySessionTab')" :disabled="!connectionId || !connected" @click="openCopiedSessionTab"><Copy /></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('spawnSessionTab')" :disabled="!connectionId || !connected" @click="openCommandSessionTab"><TerminalIcon /></button>
@@ -11623,11 +11628,13 @@ onBeforeUnmount(() => {
         </div>
         <!-- 高亮规则管理（M32-A2）已归位设置·终端（HighlightRulesSection）：
              工具条不再放配置编辑器，渲染扫描（compiledHighlightRules）仍在。 -->
+        <span class="toolbar-separator" aria-hidden="true" />
         <button class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
         <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!connected" @click="toggleRecording"><Disc /></button>
         <button class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
         <button class="icon-button icon-violet" :title="t('settings')" :disabled="!connected" @click="openSettings"><Settings /></button>
         <button class="icon-button icon-amber" :title="t('auditLog.title')" @click="openAuditLog"><FileText /></button>
+        <span class="toolbar-separator" aria-hidden="true" />
         <div>
           <Popover :open="columnsOpen" @update:open="(open) => { if (!open) columnsOpen = false; }">
             <PopoverAnchor as-child>
@@ -12039,7 +12046,7 @@ onBeforeUnmount(() => {
               </div>
               <GpuNpuMonitor :locale="locale" :gpu="metrics.gpu" :npu="metrics.npu" />
               <div v-if="metrics.processes?.length">
-                <h3 class="settings-section-title"><span>{{ t("metricsProc") }}</span><button class="link-button" @click="toggleProcessPanel">{{ t(processesOpen ? "procCollapse" : "procManage") }}</button></h3>
+                <h3 class="settings-section-title metrics-proc-title"><span>{{ t("metricsProc") }}</span><button class="link-button" @click="toggleProcessPanel">{{ t(processesOpen ? "procCollapse" : "procManage") }}</button></h3>
                 <div class="file-header" :style="metricsProcGridStyle">
                   <span>{{ t("metricsProcPid") }}</span>
                   <span>{{ t("metricsProcUser") }}</span>
@@ -12317,7 +12324,8 @@ onBeforeUnmount(() => {
             />
             <nav v-show="!pathBarEditing" class="path-crumbs" tabindex="0" @click="beginPathBarEdit" @keydown.enter.self.prevent="beginPathBarEdit">
               <template v-for="(crumb, index) in pathCrumbs" :key="crumb.path">
-                <span v-if="index" class="path-crumb-sep" aria-hidden="true">/</span>
+                <!-- 根段本身显示为 "/"，其后不再渲染分隔符，避免「// home」双斜杠 -->
+                <span v-if="index && pathCrumbs[index - 1].name !== '/'" class="path-crumb-sep" aria-hidden="true">/</span>
                 <button v-if="index < pathCrumbs.length - 1" class="path-crumb mono" :title="crumb.path" @click.stop="goToPath(crumb.path)">{{ crumb.name }}</button>
                 <span v-else class="path-crumb current mono" :title="crumb.path" aria-current="location">{{ crumb.name }}</span>
               </template>

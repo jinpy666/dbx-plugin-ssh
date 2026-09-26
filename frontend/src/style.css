@@ -925,8 +925,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .highlight-switch-control input { accent-color: var(--primary); }
 
 /* ---- metrics sparkline + 发行版徽标（IMPL_PLAN_NETCATTY_PARITY §3-B2）---- */
-/* 网络区头部两枚 60×18 SVG 曲线（rx=primary / tx=success），零资产纯内联。 */
-.metrics-net-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* 网络区头部两枚 60×18 SVG 曲线（rx=primary / tx=success），零资产纯内联。
+   Processes 标题与 Manage 链接共用同款两端对齐，避免「(top CPU)Manage」挤行。 */
+.metrics-net-title, .metrics-proc-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .metrics-sparkline-group { display: inline-flex; align-items: center; gap: 6px; }
 .metrics-sparkline { display: block; }
 /* 发行版 monogram 徽标：圆角方块 + 首字母，纯 CSS，无图片/SVG 资产。 */
