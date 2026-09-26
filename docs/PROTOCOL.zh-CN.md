@@ -458,6 +458,8 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 参数同 `sftp/stat`（`sessionId`、`path`），另有可选 `form: "wire"`（M17）：粘贴预检传来的是整条 wire 路径，带该参数时 latin-1 模式整条按 `%XX` 还原字节探测；缺省按「wire 前缀 + 显示末段」分工（见 `sftp/list` 节 M17 段）。返回 `{ exists: bool }`，路径不存在不算错误。
 
+错误语义（M23/R1，两面对齐后口径统一）：只有 SSH_FX_NO_SUCH_FILE 判「不存在」，其余 LSTAT 失败（权限拒绝、通道异常等）如实报错——权限错误绝不误报 `exists: false`（与 MCP 工具 `sftp_exists` 的 M18 契约一致，工作台 RPC 面同一口径）。工作台预检调用方（rename 覆盖预检、粘贴预检、上传撞名预检）对预检报错均按「无法判定、不阻断，交由后续执行时报错」的既有惯例处理——预检无法判定时报错优于误判。
+
 ### sftp/read
 
 小文件直读（非传输槽，支持 `offset` 偏移分片语义）。
