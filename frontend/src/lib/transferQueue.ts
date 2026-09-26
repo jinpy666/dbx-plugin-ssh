@@ -63,6 +63,18 @@ export function clampTransferMaxActive(value: unknown, fallback = 3): number {
 }
 
 /**
+ * 下载限速（issue #66）：0..1048576 KiB/s（0=不限速，缺省），非法值回落 0。
+ * 与 sidecar preferences 的 sanitize_transfer_download_limit_kib 同向钳制。
+ */
+export const TRANSFER_DOWNLOAD_LIMIT_KIB_MAX = 1_048_576;
+
+export function clampTransferDownloadLimit(value: unknown, fallback = 0): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.min(TRANSFER_DOWNLOAD_LIMIT_KIB_MAX, Math.floor(parsed));
+}
+
+/**
  * 下一个可派发的排队项；没有空槽或没有可跑项时返回 null。
  * 全局槽位用 `runningCount` 传入（running + paused 之和），方向均衡只在
  * 有多个方向可跑时影响取件顺序，不改变全局上限。

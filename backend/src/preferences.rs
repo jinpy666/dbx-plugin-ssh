@@ -155,6 +155,24 @@ pub fn sanitize_transfer_max_active(value: &Value) -> u64 {
     )
 }
 
+/// 下载限速（issue #66）：0=不限速（缺省），上限 1 GiB/s。超界钳制、
+/// 非法（负数/非数值/超出 u64）回落 0（=不限速），语义与既有数值键同向。
+pub const TRANSFER_DOWNLOAD_LIMIT_KIB_MAX: u64 = 1_048_576;
+
+pub fn sanitize_transfer_download_limit_kib(value: &Value) -> u64 {
+    sanitize_u64_clamped(value, 0, TRANSFER_DOWNLOAD_LIMIT_KIB_MAX, 0)
+}
+
+/// 读取限速偏好（缺省 0 = 不限速）。下载任务 start 时快照一次现值，
+/// 之后整个任务沿用——改动对下一个下载任务生效，进行中的任务不受
+/// 中途修改影响（避免节奏漂移）。
+pub fn transfer_download_limit_kib(data_dir: &Path) -> u64 {
+    load_preferences(data_dir)
+        .get("transfer_download_limit_kib")
+        .map(sanitize_transfer_download_limit_kib)
+        .unwrap_or(0)
+}
+
 /// 读取并发深度（缺省回默认值）。sidecar 每次任务启动时现读现用——
 /// 改动即时生效，进行中的任务按原深度自然完成。
 pub fn transfer_max_active(data_dir: &Path) -> u64 {
@@ -348,6 +366,15 @@ pub fn load_preferences(data_dir: &Path) -> Value {
         prefs.insert(
             "transfer_max_active".to_string(),
             Value::from(sanitize_transfer_max_active(&map["transfer_max_active"])),
+        );
+    }
+    // 下载限速（issue #66）：0=不限速（缺省），1..=1048576 KiB/s。
+    if map.contains_key("transfer_download_limit_kib") {
+        prefs.insert(
+            "transfer_download_limit_kib".to_string(),
+            Value::from(sanitize_transfer_download_limit_kib(
+                &map["transfer_download_limit_kib"],
+            )),
         );
     }
     if let Some(enabled) = map.get("sftp_compat_mode").and_then(Value::as_bool) {
@@ -561,6 +588,16 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
         map.insert(
             "transfer_max_active".to_string(),
             Value::from(sanitize_transfer_max_active(&params["transfer_max_active"])),
+        );
+    }
+    // 下载限速（issue #66）：数值一律钳制到 0..=1048576 KiB/s（0=不限速），
+    // 非法回落 0，不报错——与 transfer_concurrency 等数值键同向。
+    if params.get("transfer_download_limit_kib").is_some() {
+        map.insert(
+            "transfer_download_limit_kib".to_string(),
+            Value::from(sanitize_transfer_download_limit_kib(
+                &params["transfer_download_limit_kib"],
+            )),
         );
     }
     if let Some(value) = params.get("sftp_compat_mode") {
@@ -1068,6 +1105,48 @@ mod tests {
         assert_eq!(prefs["transfer_max_active"], 8);
         assert_eq!(prefs["sftp_compat_mode"], false);
         assert_eq!(prefs["sftp_name_encoding"], "auto");
+    }
+
+    #[test]
+    fn transfer_download_limit_kib_clamps_and_defaults_to_unlimited() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // 空偏好：键不出现（=不限速），读取器回 0。
+        assert!(load_preferences(data_dir.path())
+            .get("transfer_download_limit_kib")
+            .is_none());
+        assert_eq!(transfer_download_limit_kib(data_dir.path()), 0);
+        // 写入 + 读回；超界钳制到 1 GiB/s，负数/字符串数字容错同既有数值键。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "transfer_download_limit_kib": 2_000_000 }),
+        )
+        .expect("save oversized");
+        assert_eq!(
+            transfer_download_limit_kib(data_dir.path()),
+            TRANSFER_DOWNLOAD_LIMIT_KIB_MAX
+        );
+        save_preferences(
+            data_dir.path(),
+            &json!({ "transfer_download_limit_kib": 512 }),
+        )
+        .expect("save 512");
+        assert_eq!(transfer_download_limit_kib(data_dir.path()), 512);
+        // 回落 0 = 重新不限速。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "transfer_download_limit_kib": 0 }),
+        )
+        .expect("save 0");
+        assert_eq!(transfer_download_limit_kib(data_dir.path()), 0);
+        // 纯函数直测：非法形状（非数值）回落 0，边界值夹紧。
+        assert_eq!(sanitize_transfer_download_limit_kib(&json!("abc")), 0);
+        assert_eq!(sanitize_transfer_download_limit_kib(&json!(-5)), 0);
+        assert_eq!(sanitize_transfer_download_limit_kib(&json!(true)), 0);
+        assert_eq!(sanitize_transfer_download_limit_kib(&json!(1)), 1);
+        assert_eq!(
+            sanitize_transfer_download_limit_kib(&json!(TRANSFER_DOWNLOAD_LIMIT_KIB_MAX + 1)),
+            TRANSFER_DOWNLOAD_LIMIT_KIB_MAX
+        );
     }
 
     #[test]

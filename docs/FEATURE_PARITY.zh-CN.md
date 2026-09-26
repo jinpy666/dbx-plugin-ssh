@@ -198,6 +198,7 @@ RDP 已收官（2026-09-25，vendored IronRDP 链 RDP-1/2/3，真机 server 联�
 | 进程管理（列表 + SIGTERM/SIGKILL 终止需确认） | ✅ 已有 | `ssh/processes/list`（500 行 CPU 序）+ `ssh/processes/kill`（pid 0/1 拒绝、signal 白名单 1/2/9/15、前端 confirm 门禁）；iShell 的句柄数/监听端口维度未做 |
 | 会话录制回放 + GIF 导出 | ✅ 已有（同批新增） | `ssh/recording/*` 五方法：asciicast v2 `.cast` 落盘（会话关闭自动收尾）、`ssh/recording/get` 分页回放（xterm 重放、0.5–4× 倍速、进度条 seek）、GIF 导出（离屏 xterm 逐事件重放 + 500ms 抽帧 + 零依赖 GIF89a 编码器，封顶 120 帧）。iShell 的暂停/快进/水印/帧率质量参数未做 |
 | GPU 监控、大文件扫描、主机巡检报告 | ⏸ 未做（候选） | GPU 依赖远端 nvidia-smi 等工具可用性；大文件扫描与巡检报告维持"另有对标项"候选结论 |
+| SFTP 下载限速 | ✅ 已有（2026-09-26，issue #66 / M31-B） | 偏好 `transfer_download_limit_kib`（设置 → 传输数值输入，KiB/s，0=不限速缺省，上限 1 GiB/s）：sidecar 在下载任务启动时快照现值，单文件与递归目录下载的分块循环按「理想耗时 − 实际耗时」逐块补等待，限速 0 时零开销；改动对下一个下载任务生效，sudo 下载（独立车道）本期不限速。协议见 PROTOCOL「下载限速生效口径」段 |
 | 终端 WebGL GPU 加速渲染 | ✅ 已有（2026-09-13 落地） | `@xterm/addon-webgl`（0.18.0，配 xterm 5.5）：主终端默认挂 GPU renderer（localStorage 偏好 `ssh-terminal-webgl`，设置弹窗「终端渲染」开关即时切换）；WebGL 不可用（headless/无 context/驱动限制）构造即回退 DOM 渲染器，context loss（GPU 重置）自动 dispose 回退；回放弹窗与 GIF 导出的离屏终端刻意保持 2d canvas（导出依赖 drawImage 稳定路径、且浏览器 WebGL context 总数有限）。纯逻辑（偏好/挂载/回退/切换）独立模块 `terminalWebgl.ts` + 单测 7 |
 
 ## NetCatty 对标补充（2026-09-11 立项，2026-09-13 收口）

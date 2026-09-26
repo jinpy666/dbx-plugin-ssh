@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   clampTransferConcurrency,
+  clampTransferDownloadLimit,
   clampTransferMaxActive,
   nextRunnable,
   runTransfers,
@@ -108,6 +109,19 @@ describe("clampTransferMaxActive", () => {
     expect(clampTransferMaxActive(Number.NaN)).toBe(3);
     expect(clampTransferMaxActive(2.9)).toBe(2);
     expect(clampTransferMaxActive("4")).toBe(4);
+  });
+});
+
+describe("clampTransferDownloadLimit (issue #66)", () => {
+  it("keeps 0 = unlimited as the fallback and clamps into 0..1048576", () => {
+    expect(clampTransferDownloadLimit(0)).toBe(0);
+    expect(clampTransferDownloadLimit(undefined)).toBe(0);
+    expect(clampTransferDownloadLimit(Number.NaN)).toBe(0);
+    expect(clampTransferDownloadLimit("abc")).toBe(0);
+    expect(clampTransferDownloadLimit(-5)).toBe(0);
+    expect(clampTransferDownloadLimit(1.9)).toBe(1);
+    expect(clampTransferDownloadLimit(512)).toBe(512);
+    expect(clampTransferDownloadLimit(2_000_000)).toBe(1_048_576);
   });
 });
 
