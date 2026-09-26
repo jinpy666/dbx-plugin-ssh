@@ -3929,3 +3929,8 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **修正点**：PROTOCOL 该登记段由失实的「仍按字面量发送、由远端报错」改写为分层表述——路径参数**已 normalize + shell_quote**（穿越/注入安全），但 **shell 参数字节保真不可达**（SSH exec 命令串是 UTF-8 String，latin-1 字节名经该边界按 UTF-8 重编码，远端按 locale 解释，与服务器原始字节不一致）；核实结论为**无完全字面量裸拼的残留入口**，真正不可变的只有 exec 命令串的 UTF-8 字节边界本身（与 copy/move 执行层、`stat -c` 属主查询边界同源）；sudo 族补充「无 wire 名字来源、latin-1 裸包车道不适用」的原状说明。
 - **交叉核对**：FEATURE_PARITY.zh-CN.md grep 字面量/字节不可控/shell 相关行——无同类失实表述（M22-B 审计已对账）；MCP.zh-CN.md 的 copy/move「执行层按字面量发送」表述与实现一致，不改。
 - **验证**：git diff --check 无空白错误；grep 确认修正后 PROTOCOL 不再有「仍按字面量发送的残留点」失实表述。代码零改动（cargo/(smoke) 口径沿 M25：不适用于纯文档批次）。
+
+## M26 收口巡检补记（2026-09-26）
+
+- **M26-A/B 合并后 CI 全绿**：run 36220536854 success（18m50s）。latin-1 字节保真边界矩阵（NAME-ENCODING-BOUNDARY.zh-CN.md，45 入口 38✅/16⚠️/5❌）成为该家族的权威盘点与维护基线；PROTOCOL 失实的「字面量残留点」登记已重写为分层准确口径。
+- **下轮候选（登记簿疑点 D1）**：`sftp/download/start|next` 以 `has_wire_escapes` 判分支，手输字面 `%XX` 文件名会被误按转义还原，与 PROTOCOL「字面 %XX 保持字面量」表述存在张力——属行为语义决策（方案空间：入口区分 wire/显示形态、或明确契约），先核实 wire 域内 `%` 自转义约定再立项。
