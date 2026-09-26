@@ -2,10 +2,10 @@
   "$schema": "https://raw.githubusercontent.com/t8y2/dbx/main/plugins/manifest.schema.json",
   "manifest_version": 1,
   "id": "io.dbx.ssh",
-  "name": "SSH Terminal",
+  "name": "Terminal",
   "version": "0.7.1-beta.3",
   "publisher": "jinpy",
-  "description": "A secure SSH terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
+  "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
   "source": "https://github.com/jinpy666/dbx-plugin-ssh",
   "homepage": "https://github.com/jinpy666/dbx-plugin-ssh",
   "icon": "assets/plugin.svg",
@@ -596,8 +596,8 @@
     {
       "type": "workbench",
       "id": "io.dbx.ssh.workbench",
-      "label": "SSH Terminal",
-      "description": "SSH terminal, SFTP file manager, and remote operations workspace.",
+      "label": "Terminal",
+      "description": "Terminal, SFTP file manager, and remote operations workspace.",
       "icon": "assets/plugin.svg"
     },
     {
@@ -620,8 +620,8 @@
     {
       "type": "command",
       "id": "open-local-terminal",
-      "label": "Local terminal",
-      "description": "Open a local terminal on this machine.",
+      "label": "Terminal",
+      "description": "Open a terminal on this machine.",
       "icon": "assets/local-terminal.svg",
       "action": {
         "type": "open-workbench",
@@ -661,19 +661,19 @@
   ],
   "localizations": {
     "en": {
-      "name": "DBX SSH Terminal",
-      "description": "A secure SSH terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
+      "name": "Terminal",
+      "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
       "contributions": {
         "io.dbx.ssh.connection": {},
         "io.dbx.ssh.open-local-terminal": {
-          "label": "Local terminal",
-          "description": "Open a local terminal on this machine."
+          "label": "Terminal",
+          "description": "Open a terminal on this machine."
         },
         "io.dbx.ssh.local-terminal-entrypoints": {}
       }
     },
     "es": {
-      "name": "DBX SSH Terminal",
+      "name": "Terminal",
       "description": "Terminal SSH, gestor SFTP y operaciones remotas en DBX.",
       "contributions": {
         "io.dbx.ssh.connection": {
@@ -846,22 +846,22 @@
           }
         },
         "io.dbx.ssh.workbench": {
-          "label": "Terminal SSH",
-          "description": "Terminal SSH, gestor SFTP y operaciones remotas."
+          "label": "Terminal",
+          "description": "Terminal, gestor SFTP y operaciones remotas."
         },
         "io.dbx.ssh.files": {
           "label": "Archivos SFTP",
           "description": "Sistema de archivos remoto mediante SFTP."
         },
         "io.dbx.ssh.open-local-terminal": {
-          "label": "Terminal local",
-          "description": "Abrir una terminal local en esta máquina."
+          "label": "Terminal",
+          "description": "Abrir una terminal en esta máquina."
         },
         "io.dbx.ssh.local-terminal-entrypoints": {}
       }
     },
     "it": {
-      "name": "DBX SSH Terminal",
+      "name": "Terminal",
       "description": "Terminale SSH, gestore SFTP e operazioni remote in DBX.",
       "contributions": {
         "io.dbx.ssh.connection": {
@@ -1034,22 +1034,22 @@
           }
         },
         "io.dbx.ssh.workbench": {
-          "label": "Terminale SSH",
-          "description": "Terminale SSH, gestore SFTP e operazioni remote."
+          "label": "Terminale",
+          "description": "Terminale, gestore SFTP e operazioni remote."
         },
         "io.dbx.ssh.files": {
           "label": "File SFTP",
           "description": "File system remoto tramite SFTP."
         },
         "io.dbx.ssh.open-local-terminal": {
-          "label": "Terminale locale",
-          "description": "Apri un terminale locale su questa macchina."
+          "label": "Terminale",
+          "description": "Apri un terminale su questa macchina."
         },
         "io.dbx.ssh.local-terminal-entrypoints": {}
       }
     },
     "ja": {
-      "name": "DBX SSH Terminal",
+      "name": "Terminal",
       "description": "SSH ターミナル、SFTP ファイル管理、リモート運用をまとめた DBX プラグイン。",
       "contributions": {
         "io.dbx.ssh.connection": {
@@ -1222,22 +1222,22 @@
           }
         },
         "io.dbx.ssh.workbench": {
-          "label": "SSH ターミナル",
-          "description": "SSH ターミナル、SFTP ファイル管理、リモート運用。"
+          "label": "ターミナル",
+          "description": "ターミナル、SFTP ファイル管理、リモート運用。"
         },
         "io.dbx.ssh.files": {
           "label": "SFTP ファイル",
           "description": "SFTP 経由のリモートファイルシステム。"
         },
         "io.dbx.ssh.open-local-terminal": {
-          "label": "ローカルターミナル",
-          "description": "このマシンでローカルターミナルを開きます。"
+          "label": "ターミナル",
+          "description": "このマシンでターミナルを開きます。"
         },
         "io.dbx.ssh.local-terminal-entrypoints": {}
       }
     },
     "pt-BR": {
-      "name": "DBX SSH Terminal",
+      "name": "Terminal",
       "description": "Terminal SSH, gestor SFTP e operações remotas no DBX.",
       "contributions": {
         "io.dbx.ssh.connection": {
@@ -1410,23 +1410,23 @@
           }
         },
         "io.dbx.ssh.workbench": {
-          "label": "Terminal SSH",
-          "description": "Terminal SSH, gestor SFTP e operações remotas."
+          "label": "Terminal",
+          "description": "Terminal, gestor SFTP e operações remotas."
         },
         "io.dbx.ssh.files": {
           "label": "Arquivos SFTP",
           "description": "Sistema de arquivos remoto via SFTP."
         },
         "io.dbx.ssh.open-local-terminal": {
-          "label": "Terminal local",
-          "description": "Abrir um terminal local nesta máquina."
+          "label": "Terminal",
+          "description": "Abrir um terminal nesta máquina."
         },
         "io.dbx.ssh.local-terminal-entrypoints": {}
       }
     },
     "zh-CN": {
-      "name": "DBX SSH 终端",
-      "description": "面向服务器运维的 SSH 终端：交互式会话、SFTP 文件传输、远程命令和受控运维操作集中在一个界面。",
+      "name": "终端",
+      "description": "面向服务器运维的终端：交互式会话、SFTP 文件传输、远程命令和受控运维操作集中在一个界面。",
       "contributions": {
         "io.dbx.ssh.connection": {
           "label": "SSH 服务器",
@@ -1598,23 +1598,23 @@
           }
         },
         "io.dbx.ssh.workbench": {
-          "label": "SSH 终端",
-          "description": "SSH 终端、SFTP 文件管理与远程运维。"
+          "label": "终端",
+          "description": "终端、SFTP 文件管理与远程运维。"
         },
         "io.dbx.ssh.files": {
           "label": "SFTP 文件",
           "description": "通过 SFTP 访问远程文件系统。"
         },
         "io.dbx.ssh.open-local-terminal": {
-          "label": "本地终端",
-          "description": "在本机打开一个本地终端。"
+          "label": "终端",
+          "description": "在本机打开一个终端。"
         },
         "io.dbx.ssh.local-terminal-entrypoints": {}
       }
     },
     "zh-TW": {
-      "name": "DBX SSH 終端",
-      "description": "為 DBX 提供 SSH 終端、SFTP 檔案傳輸與受控遠端維運工作流程。",
+      "name": "終端",
+      "description": "為 DBX 提供終端、SFTP 檔案傳輸與受控遠端維運工作流程。",
       "contributions": {
         "io.dbx.ssh.connection": {
           "label": "SSH 伺服器",
@@ -1786,16 +1786,16 @@
           }
         },
         "io.dbx.ssh.workbench": {
-          "label": "SSH 終端",
-          "description": "SSH 終端、SFTP 檔案管理與遠端維運。"
+          "label": "終端",
+          "description": "終端、SFTP 檔案管理與遠端維運。"
         },
         "io.dbx.ssh.files": {
           "label": "SFTP 檔案",
           "description": "透過 SFTP 存取遠端檔案系統。"
         },
         "io.dbx.ssh.open-local-terminal": {
-          "label": "本機終端",
-          "description": "在本機開啟一個本機終端。"
+          "label": "終端",
+          "description": "在本機開啟一個終端。"
         },
         "io.dbx.ssh.local-terminal-entrypoints": {}
       }

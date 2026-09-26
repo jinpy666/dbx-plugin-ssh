@@ -588,7 +588,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .terminal-pane.batch-bar-open.marker-visible .terminal-host { inset: 0 0 66px 0; }
 .terminal-pane.batch-bar-open .terminal-command-marker,
 .terminal-pane.batch-bar-open .zmodem-status { bottom: 50px; }
-/* 命令标记状态条可见时，传输横幅上移避免叠压（SSH 终端同样装了 633 标记） */
+/* 命令标记状态条可见时，传输横幅上移避免叠压（终端同样装了 633 标记） */
 .terminal-pane.marker-visible .zmodem-status { bottom: 28px; }
 .terminal-pane.batch-bar-open.marker-visible .zmodem-status { bottom: 70px; }
 .batch-bar { position: absolute; z-index: 5; right: 0; bottom: 0; left: 0; display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--border); padding: 4px 8px; background: var(--background); }

@@ -1,15 +1,15 @@
-# DBX SSH 终端
+# 终端
 
 [![CI](https://github.com/jinpy666/dbx-plugin-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/jinpy666/dbx-plugin-ssh/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/jinpy666/dbx-plugin-ssh?display_name=tag)](https://github.com/jinpy666/dbx-plugin-ssh/releases)
 
 [English](README.en.md) · [产品宣传页](docs/MEDIA.zh-CN.md) · [特性与竞品对比](docs/COMPARISON.zh-CN.md) · [独立仓库迁移说明](docs/REPOSITORY_SPLIT.zh-CN.md)
 
-DBX SSH 终端（DBX SSH Terminal）是面向现代运维团队的服务器终端：打开一个连接，就能完成终端操作、
+终端（Terminal）是面向现代运维团队的服务器终端：打开一个连接，就能完成终端操作、
 文件传输、跳板访问、受控提权和 MCP 自动化。它把“登录服务器之后的下一小时”压缩成
 一个连贯、可审计、可复用的工作流。
 
-> SSH Terminal · SFTP · Remote Operations：终端、文件、自动化和受控运维操作集中在一个 DBX 终端面板中。
+> Terminal · SFTP · Remote Operations：终端、文件、自动化和受控运维操作集中在一个 DBX 终端面板中。
 
 ## 先看效果
 

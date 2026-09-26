@@ -1,5 +1,5 @@
 /**
- * 危险命令检测：粘贴进 SSH 终端前触发红色危险二次确认。
+ * 危险命令检测：粘贴进终端前触发红色危险二次确认。
  * 规则对齐 tiny-rdm `frontend/src/modules/ssh/dangerous-commands.js`：尽量精确，
  * 避免误杀正常命令（如 `rm foo.tmp`），仅命中带破坏性参数或目标的形态。
  * `label` 是语言无关的命令片段，直接展示在确认弹窗中。

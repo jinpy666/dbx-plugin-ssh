@@ -63,12 +63,12 @@ and cross-device config sync. DBX SSH & SFTP differs on the server operations ch
 
 | Plugin | Primary object | Best for |
 | --- | --- | --- |
-| DBX SSH Terminal | SSH hosts, terminals, SFTP, remote operations | Log in, run commands, browse and transfer files |
+| Terminal | SSH hosts, terminals, SFTP, remote operations | Log in, run commands, browse and transfer files |
 | DBX Files | File systems and object storage | Browse, upload/download, archive, and organize storage |
 | DBX LDAP | LDAP directories | Search, aggregate, and edit directory entries |
 | DBX Kafka | Kafka clusters | Topics, messages, consumer groups, and schemas |
 
-SSH Terminal does not duplicate the dedicated Files, LDAP, or Kafka protocols. It focuses on
+Terminal does not duplicate the dedicated Files, LDAP, or Kafka protocols. It focuses on
 terminal and SFTP operations after reaching a host over SSH, while reusing DBX connection,
 secret, and workbench boundaries.
 

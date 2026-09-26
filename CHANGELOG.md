@@ -1,8 +1,8 @@
 # Changelog
 
-本文件记录 DBX SSH Terminal 的面向用户的版本变更。除非另有说明，版本日期以 GitHub Release 发布日为准。
+本文件记录终端（Terminal）的面向用户的版本变更。除非另有说明，版本日期以 GitHub Release 发布日为准。
 
-This file records user-facing changes for DBX SSH Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
+This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
 ## [0.6.0] — 2026-09-22
 

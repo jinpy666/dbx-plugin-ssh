@@ -286,7 +286,7 @@ try {
     // 覆盖层（"已退出 + 重新打开"）可见。
     const restoredStarts = await restoredPage.evaluate(() => window.__a4LocalStartCalls || 0);
     check("restored tab issues zero local/terminal/start calls", restoredStarts === 0, `calls=${restoredStarts}`);
-    await expectText(restoredPage, ".terminal-overlay", "Local terminal has exited", "restored exit-shell overlay");
+    await expectText(restoredPage, ".terminal-overlay", "Terminal has exited", "restored exit-shell overlay");
     await expect(restoredPage, ".terminal-overlay button.primary-button", "restored reopen button");
     await restoredPage.close();
 

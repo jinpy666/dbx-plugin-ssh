@@ -1,5 +1,5 @@
 <!-- Local terminal command icon (PR-A4 open-local-terminal). Licensed under the repository Apache-2.0 license. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Local terminal">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Terminal">
   <rect x="6" y="10" width="52" height="44" rx="8" fill="none" stroke="#0ea5e9" stroke-width="6"/>
   <path d="M18 26 28 36 18 46" fill="none" stroke="#0ea5e9" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M34 46h12" fill="none" stroke="#0ea5e9" stroke-width="6" stroke-linecap="round"/>
