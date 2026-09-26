@@ -22,6 +22,7 @@ export const TERMINAL_HOTKEYS_KEY = "ssh-terminal-hotkeys";
 
 export type TerminalHotkeyActionId =
   | "search"
+  | "quick-select"
   | "copy"
   | "paste"
   | "select-all"
@@ -51,6 +52,10 @@ export interface TerminalHotkeyAction {
 
 export const TERMINAL_HOTKEY_ACTIONS: readonly TerminalHotkeyAction[] = [
   { id: "search", labelKey: "terminalHotkeys.actionSearch", group: "view", apple: ["Meta+F"], other: ["Ctrl+Shift+F"] },
+  // Quick Select（WT-1，对标 WezTerm）：正则抽取屏幕上的 URL/路径/IPv4/hash 一键复制。
+  // Shift+O 与既有默认键位零冲突；与用户自定义键相撞时由编辑器 findHotkeyConflicts
+  // 标注（不拦截派发，动作表顺序先者生效）。
+  { id: "quick-select", labelKey: "terminalHotkeys.actionQuickSelect", group: "view", apple: ["Meta+Shift+O"], other: ["Ctrl+Shift+O"] },
   { id: "copy", labelKey: "terminalHotkeys.actionCopy", group: "clipboard", apple: ["Meta+C"], other: ["Ctrl+Shift+C"] },
   { id: "paste", labelKey: "terminalHotkeys.actionPaste", group: "clipboard", apple: ["Meta+V"], other: ["Ctrl+V", "Ctrl+Shift+V"], nativeEvent: true },
   { id: "select-all", labelKey: "terminalHotkeys.actionSelectAll", group: "clipboard", apple: ["Meta+A"], other: ["Ctrl+Shift+A"] },

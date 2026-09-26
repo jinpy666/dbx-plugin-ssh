@@ -167,7 +167,7 @@ import { advanceBatchProgress, batchProgressPercent, createBatchProgress, type B
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
 import { sanitizeCommandOutput } from "./lib/terminalOutputText";
 import { normalizeTerminalInputBytes } from "./lib/terminalInput";
-import { registerTerminalModeQueryHandlers } from "./lib/terminalModeQueries";
+import { registerTerminalModeQueryHandlers, type TerminalSyncOutput } from "./lib/terminalModeQueries";
 import { installMacWebkitInputFallback } from "./lib/terminalWebkitInput";
 import { looksBinary } from "./lib/textSniff";
 import { formatBytes, formatRate } from "./lib/format";
@@ -287,6 +287,8 @@ import TextPreview from "./components/TextPreview.vue";
 import JsonPreviewPanel from "./components/JsonPreviewPanel.vue";
 import { buildJsonPreview, type JsonPreviewState } from "./lib/jsonPreview";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
+import TerminalQuickSelectPanel from "./components/TerminalQuickSelectPanel.vue";
+import { collectQuickSelectHits, type QuickSelectHit } from "./lib/quickSelect";
 import TerminalGutter from "./components/TerminalGutter.vue";
 import CommandSuggestions from "./components/CommandSuggestions.vue";
 import CompletionMenu from "./components/CompletionMenu.vue";
@@ -1140,6 +1142,12 @@ const searchSeedOptions = ref<TerminalSearchOptions>(sanitizeSearchOptions(null)
 const searchMatchState = ref<TerminalSearchMatchState>("idle");
 const searchResultIndex = ref(0);
 const searchResultCount = ref(0);
+// Quick Select Mode（WT-1，对标 WezTerm）：注册表动作 quick-select 唤起，
+// collectQuickSelectHits 抽取可视区 URL/路径/IPv4/hash，浮层逐项复制。
+// 焦点不离开终端：Esc/↑↓/Enter 由 handleTerminalKey 的浮层分支统一消费。
+const quickSelectOpen = ref(false);
+const quickSelectHits = ref<QuickSelectHit[]>([]);
+const quickSelectActive = ref(0);
 const pasteConfirm = ref<PasteConfirmation>();
 // 终端拖入文件的落点询问：null 表示取消；"cwd" 用解析后的 shell/SFTP 当前
 // 目录（resolveDropTargetDir：终端 cwd 跟随 → SFTP home → 面板当前目录），
@@ -1574,6 +1582,15 @@ const terminalWriteThrottle: TerminalWriteThrottle = createTerminalWriteThrottle
     }
   },
 });
+// DECSET 2026 同步渲染（WT-1，对标 WezTerm 帧合并）：`CSI ? 2026 h` 期间挂起
+// 合帧通道的定时提交、写入持续入队，`CSI ? 2026 l` 把积压整批合并一次提交——
+// vim 重绘 / cat 大文件在同步窗内的中间帧不再逐帧上屏，撕裂闪烁随之收敛。
+// 积压仍受合帧通道 1MiB 字节上限约束：应用异常驻留同步态时强制放行渲染，
+// 不会无限膨胀内存（防卡死优先于帧完整）。
+const terminalSyncOutput: TerminalSyncOutput = {
+  begin: () => terminalWriteThrottle.setHold(true),
+  end: () => terminalWriteThrottle.setHold(false),
+};
 // #33/#71 快速输入丢字母的分层计数：keys(onData 实际路由到 PTY 的按键)、
 // sends(提交给宿主桥的帧)、acks(sidecar 确认收到的帧)、errors(桥拒绝)、
 // swallowed(被 zmodem/trzsz 路由吞掉的按键)。宿主开启 localStorage 的
@@ -2264,11 +2281,16 @@ function registerOscColorQueryHandlers() {
 }
 
 // CSI 能力查询应答只在终端创建时挂一次：应答与主题无关，无需随外观重挂。
+// DECSET 2026 拦截驱动合帧通道的 hold/release；DECRQM 2026 按实时同步态回
+// set/reset（其余私有模式维持 reset，不回 0 打扰探测其它模式的 TUI）。
 function registerModeQueryHandlers() {
   for (const disposable of modeQueryDisposables) disposable.dispose();
   modeQueryDisposables = [];
   if (!terminal) return;
-  const dispose = registerTerminalModeQueryHandlers(terminal);
+  const dispose = registerTerminalModeQueryHandlers(terminal, {
+    syncOutput: terminalSyncOutput,
+    decRqmState: (mode) => (mode === 2026 ? (terminalWriteThrottle.held ? 1 : 2) : 2),
+  });
   modeQueryDisposables.push({ dispose });
 }
 
@@ -2513,11 +2535,18 @@ function handleTerminalKey(event: KeyboardEvent) {
     closeTerminalSearch();
     return consume();
   }
+  // Quick Select 浮层按键（WT-1）：↑↓ 移动、Enter 复制当前项、Esc 关闭。
+  // 浮层是被动的（焦点留在终端、不接管键盘），未命中的按键原样放行远端 shell。
+  if (quickSelectOpen.value && handleQuickSelectKey(event)) return consume();
   const combo = keyComboFromEvent(event);
   if (!combo) return true;
   switch (matchTerminalHotkey(terminalHotkeys.value, combo)) {
     case "search":
       openTerminalSearch();
+      return consume();
+    case "quick-select":
+      if (quickSelectOpen.value) closeQuickSelect();
+      else openQuickSelect();
       return consume();
     case "copy":
       // 无选区时不消费：裸 Ctrl+C 仍要作为 SIGINT 发给远端。
@@ -2745,8 +2774,69 @@ function clearTerminalSearch() {
 
 function resetSearchResults() {
   searchMatchState.value = "idle";
-  searchResultCount.value = 0;
   searchResultIndex.value = 0;
+  searchResultCount.value = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Quick Select Mode（WT-1，对标 WezTerm Quick Select）：注册表动作唤起浮层，
+// 纯逻辑模块抽取可视区命中（正则/容量/去重见 lib/quickSelect.ts），这里只做
+// 状态与复制接线。复制链与选中复制一致（插件视图副本 + 剪贴板桥逐级降级）。
+// ---------------------------------------------------------------------------
+function openQuickSelect() {
+  if (!terminal) return;
+  terminalMenuOpen.value = false;
+  quickSelectHits.value = collectQuickSelectHits(terminal.buffer.active, terminal.rows);
+  quickSelectActive.value = 0;
+  quickSelectOpen.value = true;
+}
+
+function closeQuickSelect() {
+  if (!quickSelectOpen.value) return;
+  quickSelectOpen.value = false;
+  quickSelectHits.value = [];
+  quickSelectActive.value = 0;
+  terminal?.focus();
+}
+
+function moveQuickSelectActive(delta: number) {
+  const count = quickSelectHits.value.length;
+  if (!count) return;
+  quickSelectActive.value = (quickSelectActive.value + delta + count) % count;
+}
+
+async function copyQuickSelectHit(hit: QuickSelectHit) {
+  terminalCopyCache.set(hit.text);
+  try {
+    await writeClipboardText(hit.text, clipboardDeps());
+    showNotice(t("quickSelect.copied"));
+    // 与 WezTerm 同语义：选取完成即收浮层、焦点交还终端。
+    closeQuickSelect();
+  } catch {
+    showError(new Error(t("terminalCopyUnavailable")), "terminal");
+  }
+}
+
+/** Quick Select 浮层的按键消费：命中返回 true（由调用方吞键），未命中放行。 */
+function handleQuickSelectKey(event: KeyboardEvent): boolean {
+  if (event.key === "Escape") {
+    closeQuickSelect();
+    return true;
+  }
+  if (event.key === "ArrowDown") {
+    moveQuickSelectActive(1);
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    moveQuickSelectActive(-1);
+    return true;
+  }
+  if (event.key === "Enter") {
+    const hit = quickSelectHits.value[quickSelectActive.value];
+    if (hit) void copyQuickSelectHit(hit);
+    return true;
+  }
+  return false;
 }
 
 function runTerminalSearch(query: string, options: { caseSensitive: boolean; regex: boolean; wholeWord: boolean }, direction: "next" | "prev") {
@@ -11635,6 +11725,17 @@ onBeforeUnmount(() => {
           @find-previous="(query, options) => runTerminalSearch(query, options, 'prev')"
           @clear="clearTerminalSearch"
           @close="closeTerminalSearch"
+        />
+        <!-- Quick Select Mode（WT-1）：注册表 quick-select 动作唤起，逐项复制命中；
+             Esc/↑↓/Enter 由 handleTerminalKey 的浮层分支消费，焦点不离开终端。 -->
+        <TerminalQuickSelectPanel
+          v-if="quickSelectOpen"
+          :locale="locale"
+          :hits="quickSelectHits"
+          :active-index="quickSelectActive"
+          @activate="(index) => (quickSelectActive = index)"
+          @copy="copyQuickSelectHit"
+          @close="closeQuickSelect"
         />
         <div v-if="reconnectPending" class="reconnect-banner" role="status">
           <Loader2 class="spinning" />

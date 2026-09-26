@@ -8,6 +8,12 @@
  * and hands xterm a single merged write per animation frame, preserving
  * chunk order exactly. A byte cap flushes synchronously once the queued
  * payload grows past it, so a sustained burst cannot balloon the buffer.
+ *
+ * `setHold` 是 DECSET 2026 同步渲染（synchronized output）的帧提交闸门：
+ * hold 期间取消 rAF 定帧、写入继续入队但不定调度，release（setHold(false)）
+ * 时把积压整批合并成一次提交——应用在 `CSI ? 2026 h`…`CSI ? 2026 l` 之间的
+ * 中间帧不再逐帧上屏，撕裂与闪烁由此收敛。hold 也受同一字节上限约束：
+ * 异常驻留同步态的应用在超限时被强制放行，内存不会无限膨胀。
  */
 
 export interface TerminalWriteThrottleOptions {
@@ -26,8 +32,16 @@ export interface TerminalWriteThrottle {
   write(data: Uint8Array): void;
   /** Cancel the pending frame and deliver queued bytes now. */
   flush(): void;
+  /**
+   * DECSET 2026 frame sync: `true` pauses scheduled flushes (queued writes
+   * keep accumulating), `false` commits everything buffered so far in one
+   * merged call. Idempotent; repeated values are no-ops.
+   */
+  setHold(hold: boolean): void;
   /** Flush and stop scheduling; safe to call repeatedly. */
   dispose(): void;
+  /** Whether frame sync is currently holding writes back. */
+  readonly held: boolean;
   readonly pendingBytes: number;
   readonly pending: boolean;
 }
@@ -59,6 +73,7 @@ export function createTerminalWriteThrottle(options: TerminalWriteThrottleOption
   let queuedBytes = 0;
   let handle: unknown = null;
   let emitting = false;
+  let held = false;
 
   function emit() {
     handle = null;
@@ -78,11 +93,13 @@ export function createTerminalWriteThrottle(options: TerminalWriteThrottleOption
     write(data: Uint8Array) {
       if (!data.byteLength) return;
       // A burst pushing the queue past the cap flushes synchronously first:
-      // memory stays bounded and chunk order is preserved.
-      if (handle !== null && queuedBytes + data.byteLength > maxBufferBytes) emit();
+      // memory stays bounded and chunk order is preserved. The cap also bites
+      // while held (no scheduled frame then), so a stuck sync mode degrades to
+      // rendering instead of buffering without bound.
+      if ((handle !== null || held) && queuedBytes + data.byteLength > maxBufferBytes) emit();
       queue.push(data);
       queuedBytes += data.byteLength;
-      if (handle === null) handle = schedule(emit);
+      if (handle === null && !held) handle = schedule(emit);
     },
     flush() {
       if (handle !== null) {
@@ -91,8 +108,24 @@ export function createTerminalWriteThrottle(options: TerminalWriteThrottleOption
       }
       emit();
     },
+    setHold(next: boolean) {
+      if (held === next) return;
+      held = next;
+      if (next) {
+        // Pause the pending frame; queued writes wait for the release commit.
+        if (handle !== null) {
+          cancel(handle);
+          handle = null;
+        }
+      } else {
+        this.flush();
+      }
+    },
     dispose() {
       this.flush();
+    },
+    get held() {
+      return held;
     },
     get pendingBytes() {
       return queuedBytes;
