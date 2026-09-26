@@ -1382,9 +1382,12 @@ def protocol_robustness_section(args: argparse.Namespace) -> None:
             "params": {"name": "ssh_alert_triage", "arguments": {"payload": giant}},
         })
         started = time.monotonic()
-        message = _recv_id(proc, next_id[0], timeout=60)
+        # 预算 120s：8 MiB 行的解析回包在慢 CI runner（darwin-x64 实测）可能
+        # 超过原 60s 预算——该用例验证的是"不 panic 不 hang"而非耗时上限，
+        # 预算放宽只影响最慢平台的通过率，不影响功能覆盖。
+        message = _recv_id(proc, next_id[0], timeout=120)
         elapsed = time.monotonic() - started
-        assert elapsed < 60, f"8 MiB line took {elapsed:.1f}s"
+        assert elapsed < 120, f"8 MiB line took {elapsed:.1f}s"
         assert "error" not in message or message["error"].get("code") in (-32000,), message
 
         # 6. pipelining: 4 requests without waiting; responses map 1:1 by id.
