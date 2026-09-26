@@ -84,7 +84,11 @@ function decodeShellIntegrationValue(value: string): string {
 
 function completeCommandByExit(state: Osc633ParserState, hasExitCode: boolean) {
   const startAt = Number(state.currentCommandStartAt);
-  const hasValidStart = Number.isFinite(startAt);
+  // A command that ends without a recorded start keeps currentCommandStartAt at
+  // null, and Number(null) === 0 is finite — without the > 0 guard the duration
+  // becomes Date.now() - 0 and the marker strip shows an epoch-sized "29840335m06s".
+  // runningCommandElapsedMs() below already requires start > 0; match it here.
+  const hasValidStart = Number.isFinite(startAt) && startAt > 0;
   const endedAt = stateNow();
 
   state.currentCommandHasExitCode = Boolean(hasExitCode);

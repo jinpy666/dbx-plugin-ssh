@@ -3,7 +3,7 @@
 // updates 曾被 A 携带的 lastExitCode=null 覆写，导致退出码标记永远显示不出
 // 来（本地终端注入脚本与远端 VS Code 兼容脚本同样受害）。
 import { describe, expect, it } from "vitest";
-import { getOsc633ParserState, Osc633CommandParser, parseOsc633StreamChunk } from "./terminalCommandMarkers";
+import { formatCommandDuration, getOsc633ParserState, Osc633CommandParser, parseOsc633StreamChunk } from "./terminalCommandMarkers";
 
 describe("terminalCommandMarkers parser", () => {
   it("keeps the D-mark exit code when the prompt A-mark follows in the same chunk", () => {
@@ -48,5 +48,22 @@ describe("terminalCommandMarkers parser", () => {
     // reset 后 carry/decoder 全清：续块不再拼接旧序列。
     parser.reset();
     expect(parser.push(new TextEncoder().encode("ild\u0007"))).toEqual({});
+  });
+
+  it("does not turn a missing start mark into an epoch-sized duration", () => {
+    // 命令没有前置 C（重连、恢复会话、shell 只发 D）时 currentCommandStartAt 仍是
+    // null，而 Number(null) === 0 也满足 Number.isFinite——少了 > 0 这道判断，
+    // 耗时会算成 Date.now() - 0，标记条显示 "29840335m06s" 这种荒谬值。
+    const state = getOsc633ParserState();
+    parseOsc633StreamChunk("\u001b]633;D;0\u0007", state);
+    expect(state.lastCommandDuration).toBeNull();
+    expect(formatCommandDuration(state.lastCommandDuration)).toBe("0ms");
+
+    // 正常路径：C 记录起始时间后，D 得到的是真实耗时。
+    const started = getOsc633ParserState();
+    parseOsc633StreamChunk("\u001b]633;E;ls\u0007\u001b]633;C\u0007", started);
+    parseOsc633StreamChunk("\u001b]633;D;0\u0007", started);
+    expect(started.lastCommandDuration).toBeGreaterThanOrEqual(0);
+    expect(started.lastCommandDuration as number).toBeLessThan(5000);
   });
 });
