@@ -59,7 +59,7 @@ describe("terminalCommandMarkers parser", () => {
     expect(state.lastCommandDuration).toBeNull();
     expect(formatCommandDuration(state.lastCommandDuration)).toBe("0ms");
 
-    // 正常路径：C 记录起始时间后，D 得到的是真实耗时。
+    // 正常路径：E 记录起始时间后，D 得到的是真实耗时。
     const started = getOsc633ParserState();
     parseOsc633StreamChunk("\u001b]633;E;ls\u0007\u001b]633;C\u0007", started);
     parseOsc633StreamChunk("\u001b]633;D;0\u0007", started);
