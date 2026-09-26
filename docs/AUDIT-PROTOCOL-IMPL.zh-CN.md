@@ -42,6 +42,10 @@
 | R3 | `sftp/read` latin-1 车道 | `raw_read_chunk` 不经 `normalize_remote_path`（auto 车道经），相对路径/`.`/`..` 组件归一在 latin-1 下不发生（注：`normalize_remote_path` 实际不做 `~` 展开，M24 复核修正）。wire 契约下前端恒传列表回传的绝对路径，实际风险低 | 低 | **已修（M24 批）**：`raw_read_chunk` 在 unescape 前对 wire 字符串跑同一 normalize（转义名还原出字面 `..` 的场景不受影响）；cargo 981/clippy 0/fmt 0，smoke 83/0/0 |
 | R4 | FEATURE_PARITY MCP 工具数口径 | 「29 工具齐（0.4.61）」「29→31（NetCatty 批）」均为带日期的历史口径，当前 `tool_definitions()` 实际注册 **33 个工具**（含 `docker_action`/`docker_list`）。行为描述未错，建议后续收口轮统一为「当前 33」口径 | 低 | **已补注（M23 批）**：两处历史口径保留出处、补注当前实际 33（含 `docker_action`/`docker_list`） |
 
+## 后续发现（非 R 序号）
+
+- **M25 镜像排查发现：MCP 面两车道共同缺归一，本批修复**。R3 修复（M24）只覆盖了工作台车道 `raw_read_chunk` 的单点；镜像排查确认 MCP 工具面（`mcp.rs`）所有接受远端路径参数的 SFTP 工具分发臂（`sftp_list_dir`/`sftp_stat`/`sftp_exists`/`sftp_read_file`/`sftp_write_file`/`sftp_mkdir`/`sftp_remove`/`sftp_rename` 源与目标/`sftp_chmod`/`sftp_disk_usage`/`sftp_upload`/`sftp_download` 的 remotePath）在 latin-1 与 auto 两条车道都不经 `normalize_remote_path`——路径来自模型自由文本（`/a//b/../c`、空串、含 NUL），与工作台车道（所有入口先归一）同一缺口且面更宽。修复：每臂在拿到路径后立即归一（latin-1 归一在 `latin1_encode_display` 还原之前；本地路径参数不归一；`sftp_copy`/`sftp_move` 的 from/toDir 经 `sftp_copy::parse_request` 内部本已归一，无需改动）。helper（`raw_sftp_*` 族）内部不重复归一，且经排查无绕过分发臂的调用方。cargo 984/984、clippy 0、fmt 0，smoke_fs_test 83/0/0，smoke_mcp 全绿。
+
 ## 核对通过、无需处理的代表项
 
 以下 PROTOCOL 声明逐条对过实现，一致（抽样列举，均为本批范围重点）：

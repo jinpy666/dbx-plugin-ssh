@@ -3911,3 +3911,10 @@ clipboard Host API，`clipboardDeps()` 无需改动即可接管。
 - **修复**：`raw_read_chunk` 在 unescape 前对 wire 字符串跑同一 `normalize_remote_path`（转义名还原出字面 `..` 的文件名不受影响——归一只作用于还原前的 wire 字符串组件）。三条调用链（sftp/read latin-1 分发、树下载逐文件、单文件下载转义分支）自动收齐。
 - **验证**：cargo **981/981** / clippy 0 / fmt 0；smoke_fs_test **83/0/0**（latin-1 read、树下载、watcher 全链回归）。审计登记簿四项至此全部闭环。
 - **CI 复验全绿**：run 36212498165 success（SSH container smoke 6m32s）。
+
+## M25 批次（2026-09-26，MCP 工具面路径组件归一：latin-1 与 auto 两车道对齐工作台口径）
+
+- **动机**：MCP 是 AI 客户端入口，路径参数来自模型自由文本（可能为 `/a//b/../c`、空串、含 NUL），此前两条编码车道（latin-1 裸包 / auto 高层）都把路径直接送进 SFTP 操作，不经组件归一——与工作台车道（M24 已拉齐：所有入口先 `normalize_remote_path`：绝对化 + 去 `.`/`..`/空段 + 拒空/拒 NUL、不做 `~` 展开）同类缺口且面更宽。
+- **修复范围**（`backend/src/mcp.rs`，每臂拿到路径后立即归一）：`sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_read_file` / `sftp_write_file` / `sftp_mkdir` / `sftp_remove` / `sftp_rename`（sourcePath 与 targetPath 均归一）/ `sftp_chmod` / `sftp_disk_usage`（与工作台 `sftp_disk_usage` 的 df -kP 前归一同口径）/ `sftp_upload`、`sftp_download` 的 remotePath（localPath 不动）。latin-1 臂归一发生在 `latin1_encode_display` 编码还原之前（clean 名字节还原不受影响）；helper（`raw_sftp_exists`/`raw_sftp_read_file`/`raw_sftp_write_file`/`raw_sftp_write_bytes`/`raw_sftp_chmod`）内部不重复归一（调用方已归一），且经 grep 排查无绕过分发臂的调用方。`sftp_copy`/`sftp_move` 的 from/toDir 经 `sftp_copy::parse_request` 内部本已归一，无需改动。
+- **单测**：`tests` 模块新增 3 条 M25 契约用例（归一映射 `/a//b/../c`→`/a/c` 等；拒空串/含 NUL；latin-1 显示域 clean 名归一前后字节还原一致，列表回传路径往返闭环不被破坏）。
+- **验证**：cargo **984/984**（基线 981 + 3）/ clippy 0 / fmt 0；本地容器（dbx-ssh-test）smoke_fs_test **83 PASS / 0 SKIP / 0 FAIL**；smoke_mcp 在线段（--host 127.0.0.1 --port 2222）**all green**。发现记录已登记 docs/AUDIT-PROTOCOL-IMPL.zh-CN.md「后续发现」节。
