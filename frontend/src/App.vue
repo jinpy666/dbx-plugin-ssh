@@ -5419,13 +5419,17 @@ async function reconnectNow() {
 // 旧宿主忽略第三参，退化为原查重行为。connectionId 显式写入 context：宿主的
 // 重推凭据（reinit re-push）与 hostContext 合并都键在 context.connectionId 上，
 // 不能依赖宿主已把它合进 context（旧宿主没有那层合并）。
-function sessionTabContext(reuseAuthenticatedTransport: boolean): Record<string, unknown> {
+function sessionTabContext(reuseAuthenticatedTransport: boolean, spawnCommand?: string): Record<string, unknown> {
   const context: Record<string, unknown> = {
     ...hostContext.value,
     connectionId: connectionId.value,
     workbenchId: randomUUID(),
     reuseAuthenticatedTransport,
     reuseAuthenticatedSessionId: reuseAuthenticatedTransport ? session.value?.sessionId : undefined,
+    // WT-4（WezTerm spawn 对标）：命令会话的一次性打开参数。非宿主保留
+    // 字段，随 context 原样透传给新工作台，由 sessionTransportReuse 状态
+    // 消费；契约见 docs/PROTOCOL.zh-CN.md「同 transport 命令会话」。
+    spawnCommand: spawnCommand?.trim() || undefined,
   };
   const persisted = context.workbenchState;
   if (persisted && typeof persisted === "object") {
@@ -5448,6 +5452,27 @@ function openCopiedSessionTab() {
   const api = window.dbxPlugin;
   if (!api.openWorkbench || !connectionId.value || !connected.value) return;
   void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(true), { forceNew: true });
+}
+
+// 命令会话（WT-4，WezTerm spawn 对标）：复制会话的同族入口，channel 启动
+// 动作从 shell 换成执行指定命令（独立 PTY，后端 shell 单引号转义）。弹窗
+// 收命令后 forceNew 开新 tab；共享 transport 引用、MaxSessions 失败可见等
+// 语义全部复用复制会话链路（PROTOCOL「同 transport 命令会话」节）。
+const spawnSessionDialogOpen = ref(false);
+const spawnSessionCommand = ref("");
+
+function openCommandSessionTab() {
+  if (!window.dbxPlugin?.openWorkbench || !connectionId.value || !connected.value) return;
+  spawnSessionCommand.value = "";
+  spawnSessionDialogOpen.value = true;
+}
+
+function confirmCommandSessionTab() {
+  const command = spawnSessionCommand.value.trim();
+  const api = window.dbxPlugin;
+  if (!api?.openWorkbench || !connectionId.value || !connected.value || !command) return;
+  spawnSessionDialogOpen.value = false;
+  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(true, command), { forceNew: true });
 }
 
 async function restoreTransfers() {
@@ -11452,6 +11477,7 @@ onBeforeUnmount(() => {
         <button class="icon-button" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><SquarePlus /></button>
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('copySessionTab')" :disabled="!connectionId || !connected" @click="openCopiedSessionTab"><Copy /></button>
+        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('spawnSessionTab')" :disabled="!connectionId || !connected" @click="openCommandSessionTab"><TerminalIcon /></button>
         <!-- Telnet/VNC/RDP/串口不再从工具条直开（M32-A）：连接记录统一走宿主
              连接管理 → openSession 路由（B2），表单兜底仍走各 ConnectDialog。 -->
         <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
@@ -12731,9 +12757,28 @@ onBeforeUnmount(() => {
       </DialogContent>
     </Dialog>
 
-    <!-- 上传重复目标「询问我」（P1-5）：重命名 / 覆盖 / 取消，支持应用到本批次 -->
-    <Dialog :open="!!uploadDuplicatePrompt" @update:open="(open) => { if (!open) resolveUploadDuplicate(undefined); }">
+    <!-- 命令会话（WT-4，WezTerm spawn 对标）：输入命令后在已认证 transport 的新 channel 上执行 -->
+    <Dialog :open="spawnSessionDialogOpen" @update:open="(open) => { if (!open) spawnSessionDialogOpen = false; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <header><DialogTitle>{{ t("spawnSessionDialog.title") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="spawnSessionDialogOpen = false"><X /></button></header>
+        <p class="muted">{{ t("spawnSessionDialog.hint") }}</p>
+        <input
+          v-model="spawnSessionCommand"
+          autofocus
+          spellcheck="false"
+          autocomplete="off"
+          :placeholder="t('spawnSessionDialog.placeholder')"
+          @keydown.enter="confirmCommandSessionTab"
+        />
+        <footer>
+          <button @click="spawnSessionDialogOpen = false">{{ t("cancel") }}</button>
+          <button class="primary-button" :disabled="!spawnSessionCommand.trim()" @click="confirmCommandSessionTab">{{ t("confirm") }}</button>
+        </footer>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 上传重复目标「询问我」（P1-5）：重命名 / 覆盖 / 取消，支持应用到本批次 -->
+    <Dialog :open="!!uploadDuplicatePrompt" @update:open="(open) => { if (!open) resolveUploadDuplicate(undefined); }">      <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="uploadDuplicatePrompt">
         <header><DialogTitle>{{ t("transferCfg.duplicateTitle") }}</DialogTitle><button class="icon-button" :title="t('close')" @click="resolveUploadDuplicate(undefined)"><X /></button></header>
         <p>{{ t("transferCfg.duplicateMessage", { name: uploadDuplicatePrompt.fileName }) }}</p>
