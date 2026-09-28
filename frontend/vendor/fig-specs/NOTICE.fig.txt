@@ -1,0 +1,14 @@
+Fig completion specification snapshot
+=====================================
+
+Source: https://github.com/withfig/autocomplete.git
+Pinned commit: aef52acff84c45edde61ae610cc2c964802b9a38 (see snapshot.json)
+Synced by: scripts/sync_fig_specs.mjs (pnpm fig:sync)
+
+The completion specifications vendored under frontend/vendor/fig-specs/build/
+are derived from the public Fig/Amazon Q autocomplete ecosystem and are not
+part of the dbx-plugin-ssh original specification set. They are normalized to
+a static, code-free data form (function generators and postProcess hooks are
+dropped); see frontend/src/lib/completion/fig/types.ts for the normalized shape.
+The upstream license is reproduced verbatim in the LICENSE file beside this
+notice.

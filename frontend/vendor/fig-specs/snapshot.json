@@ -1,0 +1,75 @@
+{
+  "source": "withfig/autocomplete",
+  "repo": "https://github.com/withfig/autocomplete.git",
+  "commit": "aef52acff84c45edde61ae610cc2c964802b9a38",
+  "requestedRef": "aef52acff84c45edde61ae610cc2c964802b9a38",
+  "generatedAt": "2026-09-28T06:01:00.177Z",
+  "formatVersion": 1,
+  "allowlist": [
+    "git",
+    "docker",
+    "kubectl",
+    "helm",
+    "npm",
+    "pnpm",
+    "yarn",
+    "ssh",
+    "aws",
+    "cargo",
+    "systemctl"
+  ],
+  "vendorDeps": {
+    "@fig/autocomplete-generators": "2.4.0"
+  },
+  "sizes": {
+    "specs": {
+      "git": {
+        "rawBytes": 445905,
+        "normalizedBytes": 276697
+      },
+      "docker": {
+        "rawBytes": 184816,
+        "normalizedBytes": 318967
+      },
+      "kubectl": {
+        "rawBytes": 131826,
+        "normalizedBytes": 260235
+      },
+      "helm": {
+        "rawBytes": 78909,
+        "normalizedBytes": 92020
+      },
+      "npm": {
+        "rawBytes": 47331,
+        "normalizedBytes": 79039
+      },
+      "pnpm": {
+        "rawBytes": 33276,
+        "normalizedBytes": 72481
+      },
+      "yarn": {
+        "rawBytes": 45740,
+        "normalizedBytes": 167562
+      },
+      "ssh": {
+        "rawBytes": 13032,
+        "normalizedBytes": 10037
+      },
+      "aws": {
+        "rawBytes": 409615,
+        "normalizedBytes": 402455
+      },
+      "cargo": {
+        "rawBytes": 212197,
+        "normalizedBytes": 180063
+      },
+      "systemctl": {
+        "rawBytes": 23319,
+        "normalizedBytes": 21222
+      }
+    },
+    "totalRawBytes": 1625966,
+    "totalNormalizedBytes": 1880778
+  },
+  "skipped": []
+}
