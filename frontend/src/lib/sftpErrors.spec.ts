@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { friendlySftpError } from "./sftpErrors";
+import { friendlySftpError, isPermissionDeniedError, shouldOfferSudoRetryAfterFollowFailure } from "./sftpErrors";
 
 const t = (key: string) => `<${key}>`;
 
@@ -18,5 +18,44 @@ describe("friendlySftpError", () => {
   it("leaves unrecognized errors untouched", () => {
     expect(friendlySftpError("Connection reset by peer", t)).toBeUndefined();
     expect(friendlySftpError("", t)).toBeUndefined();
+  });
+});
+
+describe("isPermissionDeniedError", () => {
+  it("recognizes permission-class failures regardless of phrasing or case", () => {
+    expect(isPermissionDeniedError("SFTP operation failed: Permission denied")).toBe(true);
+    expect(isPermissionDeniedError("open failed: Access denied")).toBe(true);
+    expect(isPermissionDeniedError("Operation not permitted")).toBe(true);
+  });
+
+  it("rejects unrelated failures", () => {
+    expect(isPermissionDeniedError("SFTP operation failed: No such file")).toBe(false);
+    expect(isPermissionDeniedError("Connection reset by peer")).toBe(false);
+    expect(isPermissionDeniedError("")).toBe(false);
+  });
+});
+
+describe("shouldOfferSudoRetryAfterFollowFailure", () => {
+  const base = { fromTerminal: true, sudoMode: false, canWrite: true, message: "Permission denied" };
+
+  it("offers the sudo hint when a follow hit a permission wall outside sudo mode", () => {
+    expect(shouldOfferSudoRetryAfterFollowFailure(base)).toBe(true);
+    expect(shouldOfferSudoRetryAfterFollowFailure({ ...base, message: "list /root: Operation not permitted" })).toBe(true);
+  });
+
+  it("does not offer the hint for manual navigation errors", () => {
+    expect(shouldOfferSudoRetryAfterFollowFailure({ ...base, fromTerminal: false })).toBe(false);
+  });
+
+  it("does not offer the hint when sudo mode is already on", () => {
+    expect(shouldOfferSudoRetryAfterFollowFailure({ ...base, sudoMode: true })).toBe(false);
+  });
+
+  it("does not offer the hint on read-only connections", () => {
+    expect(shouldOfferSudoRetryAfterFollowFailure({ ...base, canWrite: false })).toBe(false);
+  });
+
+  it("does not offer the hint for non-permission failures", () => {
+    expect(shouldOfferSudoRetryAfterFollowFailure({ ...base, message: "No such file" })).toBe(false);
   });
 });

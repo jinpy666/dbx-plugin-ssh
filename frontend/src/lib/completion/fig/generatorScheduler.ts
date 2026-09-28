@@ -57,7 +57,8 @@ export interface GeneratorSchedulerOptions {
 
 interface GeneratorCacheEntry {
   expiresAt: number;
-  /** 在途即缓存：同 key 并发请求共享同一 promise，天然去重不重复打 RPC。 */
+  /** 在途即缓存：同 key 并发请求共享同一 promise，天然去重不重复打 RPC。
+   * promise 持有未按前缀过滤的全量产出，过滤在调用侧做（前缀归并）。 */
   promise: Promise<CompletionItem[] | null>;
 }
 
@@ -92,6 +93,10 @@ export class GeneratorScheduler {
   /**
    * 运行单个槽位：TTL 命中（含在途共享）直接复用，不重复打 RPC；否则执行
    * 并写入缓存。一切失败 → null（resolve，不 reject）。
+   *
+   * 缓存 key 不含前缀（前缀归并）：快速连打 `cd d`→`cd do`→`cd dow` 属同一
+   * base 位置，TTL 窗口内共享同一次目标机执行，各调用方拿全量产出后自行
+   * 按自己的前缀过滤——Windows/高 RTT 会话不再逐键打 completion/execute。
    */
   run(slot: FigGeneratorSlot): Promise<CompletionItem[] | null> {
     try {
@@ -99,12 +104,13 @@ export class GeneratorScheduler {
       if (!target) return Promise.resolve(null);
       const key = this.cacheKey(slot, target);
       const timestamp = this.now();
-      const hit = this.cache.get(key);
-      if (hit && hit.expiresAt > timestamp) return hit.promise;
-      const promise = this.executeSlot(slot, target);
-      this.cache.set(key, { expiresAt: timestamp + this.ttlMs, promise });
-      this.prune(timestamp);
-      return promise;
+      let promise = this.cache.get(key);
+      if (!promise || promise.expiresAt <= timestamp) {
+        promise = { expiresAt: timestamp + this.ttlMs, promise: this.executeSlot(slot, target) };
+        this.cache.set(key, promise);
+        this.prune(timestamp);
+      }
+      return promise.promise.then((items) => this.filterByPrefix(items, slot.prefix));
     } catch {
       return Promise.resolve(null);
     }
@@ -117,14 +123,14 @@ export class GeneratorScheduler {
 
   // ---- 内部 ---------------------------------------------------------------
 
-  /** 缓存 key（§29）：(commandPath, 位置/前缀, target.sessionId, cwd) + 槽位
-   * 身份（script/splitOn）——同位置多个 generator 不互相串缓存。 */
+  /** 缓存 key（§29）：(commandPath, 位置, target.sessionId, cwd) + 槽位身份
+   * （script/splitOn）——同位置多个 generator 不互相串缓存。**刻意不含
+   * prefix**：同 token 内的连续前缀共享同一次执行（见 run 注释）。 */
   private cacheKey(slot: FigGeneratorSlot, target: CompletionExecuteTarget): string {
     const cwd = this.cwd ? this.cwd() : null;
     return JSON.stringify([
       slot.commandPath,
       slot.tokenStart,
-      slot.prefix,
       target.kind,
       target.sessionId,
       typeof cwd === "string" ? cwd : null,
@@ -146,17 +152,19 @@ export class GeneratorScheduler {
       prefix: slot.prefix,
       cwd: this.cwd ? this.cwd() : null,
     };
+    // 不在此处按前缀过滤：缓存 promise 是全量产出，过滤归调用方（run）。
     return runDeclarativeGenerator(
       { script: slot.script, splitOn: slot.splitOn },
       this.adaptPostProcess(slot),
       ctx,
-    ).then((items) => {
-      if (!items) return null;
-      if (!slot.prefix) return items;
-      // §18：generator 产出按当前前缀过滤后再交 controller 合并（Fig 的
-      // query-term 过滤语义；统一排序/截断仍归 ranking 层）。
-      return items.filter((item) => item.label.startsWith(slot.prefix));
-    });
+    );
+  }
+
+  /** §18：generator 产出按当前前缀过滤（Fig 的 query-term 过滤语义）。 */
+  private filterByPrefix(items: CompletionItem[] | null, prefix: string): CompletionItem[] | null {
+    if (!items) return null;
+    if (!prefix) return items;
+    return items.filter((item) => item.label.startsWith(prefix));
   }
 
   /** spec 原生 postProcess → runDeclarativeGenerator 的适配器。无 postProcess

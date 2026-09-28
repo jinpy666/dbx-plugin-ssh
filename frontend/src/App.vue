@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type CSSProperties } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
@@ -130,8 +130,9 @@ import { sampleTransferSpeed, type TransferSpeedSample } from "./lib/transferSpe
 import { buildPasteConfirmation, type PasteConfirmation } from "./lib/dangerousCommands";
 import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib/clipboardBridge";
 import { filesFromClipboard } from "./lib/clipboardFiles";
-import { friendlySftpError } from "./lib/sftpErrors";
+import { friendlySftpError, shouldOfferSudoRetryAfterFollowFailure } from "./lib/sftpErrors";
 import { filterDiskMounts, filterNetworkInterfaces } from "./lib/metricsView";
+import { clampDockerPaneWidth, terminalFlexBasis } from "./lib/paneLayout";
 import type { GpuOverviewView, NpuOverviewView } from "./lib/metricsGpuNpu";
 import { isCountdownActive, nextCountdownValue, RECORD_COUNTDOWN_START } from "./lib/recordingCountdown";
 import { expandSelection, filterSftpEntries, type SftpTypeFilter } from "./lib/sftpFileFilters";
@@ -150,7 +151,7 @@ import {
 import { browseCommandHistory, commandInputAction, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "./lib/commandSuggestions";
 import { classifyGhostInput, createGhostState, evaluateGhost, nextGhostState, ghostMenuSuppressed, type TerminalGhostState } from "./lib/terminalGhostSuggest";
-import { cursorAbsoluteRow, cursorViewportRow } from "./lib/terminalAnchor";
+import { cursorAbsoluteRow, cursorViewportRow, measureCellSizeFromDom } from "./lib/terminalAnchor";
 import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "./lib/suggestionGuard";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
 // （vendored amazon-q parser + 全量语料，经冻结接缝 FigCompletionSource 注入
@@ -163,6 +164,7 @@ import type { CompletionEdit, CompletionItem, CompletionResponse } from "./lib/c
 import { resolveCompletionKey, type CompletionKeyboardState } from "./lib/completion/keyboard";
 import { figCompletionSource } from "./lib/completion/fig/figCompletionSource";
 import { createEngineRunner } from "./lib/completion/worker/engineRunner";
+import { withShellBuiltinsSource, detectShellKind } from "./lib/completion/shell/shellBuiltins";
 import { GeneratorScheduler } from "./lib/completion/fig/generatorScheduler";
 import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
@@ -479,6 +481,8 @@ interface WorkbenchState {
   splitRatio?: number;
   paneOrder?: SshWorkbenchPaneOrder;
   sftpPaneOpen?: boolean;
+  /** Docker 停靠面板拖宽后的 px 宽度（未拖过不落盘，走 CSS 默认）。 */
+  dockerPaneWidth?: number;
   visibleColumns?: SftpColumn[];
   sftpColumnWidths?: Partial<Record<SftpColumn, number>>;
   sftpNameWidth?: number | null;
@@ -926,7 +930,12 @@ let ghostGate: TerminalGhostState = createGhostState();
 // 批次 2-2 接线：engine runner 包裹同一 source——支持 data-URL worker 的环境
 // 走 worker 线程（resolve 返回 Promise，controller 三重 guard 异步交付），
 // 否则/崩溃两次后永久主线程直跑（§44），调用方无感。
-const completionSource = createEngineRunner({ createSource: () => figCompletionSource });
+// Windows shell 兜底（用户反馈：cmd/PowerShell 无提示）：runner 外侧再包一层
+// 内建命令 source——fig 语料 pass-through 且提示符判出 PowerShell/cmd 时，
+// 命令名位补 cmdlet/内建命令候选；detect 读 xterm buffer，只能在主线程，
+// 故必须在 runner（worker）外侧包装，worker 内不感知。
+const completionEngineSource = createEngineRunner({ createSource: () => figCompletionSource });
+const completionSource = withShellBuiltinsSource(completionEngineSource, sniffTerminalShell);
 
 // 声明式 generator 调度：目标取当前会话（ssh 优先，其次本地；串口无可执行
 // 目标 → null 即不执行），cwd 用 OSC 7/633 跟踪值（terminalCwd）。
@@ -968,18 +977,19 @@ function closeCompletionMenu() {
 }
 
 /** 响应落地：ready（rankItems 排序截断后非空）开浮层；loading（generator
- * 在途且无静态候选）开占位浮层；pass-through 关。 */
+ *  在途且无静态候选）仅当浮层已开时切占位行——不主动开菜单（用户反馈：
+ *  generator 位逐键闪出"加载中"悬浮层，属未请求的自动弹出）；pass-through
+ *  关。首帧 ready 到达才开浮层，与 Warp/VS Code 的"无候选不弹"一致。 */
 function handleCompletionResponse(response: CompletionResponse) {
   if (response.state === "ready" && response.items.length) {
     completionLoading.value = false;
     openCompletionMenu(response);
-  } else if (response.state === "loading") {
+  } else if (response.state === "loading" && completionOpen.value) {
     completionLoading.value = true;
     completionItems.value = [];
     completionActiveIndex.value = 0;
     completionAnchor.value = readTerminalSuggestionAnchor();
-    completionOpen.value = true;
-  } else {
+  } else if (response.state !== "loading") {
     closeCompletionMenu();
   }
 }
@@ -1066,7 +1076,13 @@ const completionController = new CompletionController({
   source: completionSource,
   sessionId: () => session.value?.sessionId ?? localSession.value?.sessionId ?? serialSession.value?.sessionId ?? "",
   readLine: () => pendingTerminalInput,
-  enabled: () => loadCompletionEngine() !== "off" && completionInputAllowed,
+  // 传输占用（zmodem/trzsz）与命令弹窗执行期间不开浮层（与 ghost 同门）：
+  // 输出流里的键入回显不该触发候选请求，更不该把悬浮层盖在输出上。
+  enabled: () =>
+    loadCompletionEngine() !== "off" &&
+    completionInputAllowed &&
+    !terminalTransferBusy.value &&
+    !commandRunning.value,
   generators: completionGeneratorChannel,
   onResponse: handleCompletionResponse,
   onAcceptEdit: (edit: CompletionEdit) => {
@@ -1948,14 +1964,13 @@ const connectionAuthMethodLabel = computed(() => formatAuthMethodLabel(connectio
 }));
 // 连接色染色按主题分级（light 压低 alpha 保 muted 文字 AA 对比度，P2-4）。
 const toolbarStyle = computed(() => toolbarTintStyle(connection.value.color, appearance.value.colorScheme));
-// 终端让宽：SFTP 分栏按用户拖拽比例；Docker 停靠面板为固定宽度（CSS 变量，
-// 见 style.css .panes），终端让出剩余宽度；两者同开时 SFTP 比例优先，其
-// flex:1 自行吸收 Docker 面板宽度。
-const terminalBasis = computed(() => {
-  if (sftpPaneOpen.value) return { flexBasis: `${splitRatio.value}%` };
-  if (dockerPanelOpen.value) return { flexBasis: "calc(100% - var(--docker-pane-width))" };
-  return { flexBasis: "100%" };
-});
+// 终端让宽（纯计算在 lib/paneLayout）：SFTP 分栏按用户拖拽比例；Docker 停靠
+// 面板宽度可拖（--docker-pane-width，见 style.css .panes 与 startDockerDividerDrag）。
+// 两者同开时终端在「(100% - Docker 宽)」内按 SFTP 比例取份额，SFTP flex:1 吸收
+// 剩余——两栏同显，不再互相挤没。
+const terminalBasis = computed(() => ({
+  flexBasis: terminalFlexBasis({ sftpOpen: sftpPaneOpen.value, dockerOpen: dockerPanelOpen.value, splitRatio: splitRatio.value }),
+}));
 const orderedPaneClass = computed(() => [
   paneOrder.value === "sftp-left" ? "panes panes--reversed" : "panes",
   sftpPaneOpen.value ? "" : "panes--solo",
@@ -2030,6 +2045,7 @@ function restoreUiState() {
   const state = initialState();
   currentPath.value = typeof state.sftpPath === "string" ? normalizeRemotePath(state.sftpPath) : "/";
   splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : 58;
+  dockerPaneWidth.value = typeof state.dockerPaneWidth === "number" ? clampDockerPaneWidth(state.dockerPaneWidth, window.innerWidth) : null;
   paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : "terminal-left";
   // Dock panel surface: the SFTP pane stays closed (no auto-list/auto-connect);
   // users who want SFTP open the workbench tab.
@@ -2063,6 +2079,7 @@ function writeWorkbenchState() {
     splitRatio: splitRatio.value,
     paneOrder: paneOrder.value,
     sftpPaneOpen: sftpPaneOpen.value,
+    dockerPaneWidth: dockerPaneWidth.value ?? undefined,
     visibleColumns: visibleColumns.value,
     columnsV2: true,
     sftpColumnWidths: { ...sftpColumnWidths },
@@ -3063,10 +3080,18 @@ function trackPendingInput(data: string) {
 // 应答由 sidecar 直接注入 PTY，与 onData 用户输入不同源，永不入历史。
 // ---------------------------------------------------------------------------
 
-function closeSuggestions() {
+/** 仅收历史建议浮层（不 dismiss 补全调度）：历史建议无匹配的回落分支用。
+ *  worker 模式下本次键入的补全响应还在途——dismiss 会把 revision 顶掉，
+ *  响应到达时被三重 guard 丢弃，表现为"敲错→退格→再输入，补全不再弹出"
+ *  （每个键入都重复 dismiss → 永久失效，直到命中历史建议才恢复）。 */
+function closeSuggestionsOnly() {
   suggestionOpen.value = false;
   suggestionItems.value = [];
   suggestionActiveIndex.value = 0;
+}
+
+function closeSuggestions() {
+  closeSuggestionsOnly();
   // 结构化补全浮层与历史建议浮层同一生命周期（Ctrl+C/回车/Esc 同步关闭）；
   // dismiss 同步作废挂起调度与在途结果（revision 前进）。
   completionController.dismiss();
@@ -3137,9 +3162,9 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
     closeSuggestions();
     return;
   }
-  // 结构化补全（fig 引擎）优先：source 为同步接口，request 在本调用内交付
-  // ——ready 开浮层（保持基线的浮层刷新时机）；pass-through 关浮层并回落
-  // 下方历史建议浮层（两者并存、不替换，历史建议分支一行未动）。
+  // 结构化补全（fig 引擎）优先：request 发起解析——worker 模式下响应异步
+  // 回来（三重 guard 保证过期结果不进 UI）；pass-through 关浮层并回落下方
+  // 历史建议浮层（两者并存、不替换，历史建议分支一行未动）。
   completionInputAllowed = true;
   completionController.request("typing");
   if (completionOpen.value) {
@@ -3151,12 +3176,14 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   const query = pendingTerminalInput;
   const bounds = suggestionSearchBounds();
   if (!commandSuggestionQueryAcceptable(query, bounds.minLength, bounds.maxLength)) {
-    closeSuggestions();
+    // 历史回落分支只收历史浮层：此处 dismiss 会顶掉本次键入在途的补全响应
+    // （见 closeSuggestionsOnly 注释），worker 模式下表现为补全永久失效。
+    closeSuggestionsOnly();
     return;
   }
   const items = runSuggestionSearch(query);
   if (!items.length) {
-    closeSuggestions();
+    closeSuggestionsOnly();
     return;
   }
   suggestionQuery.value = query;
@@ -3196,13 +3223,24 @@ function readTerminalCellFrame(): TerminalCellFrame | null {
   try {
     const core = (terminal as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } } })._core;
     const cell = core?._renderService?.dimensions?.css?.cell;
-    const cellWidth = cell?.width ?? 0;
-    const cellHeight = cell?.height ?? 0;
-    if (!(cellWidth > 0) || !(cellHeight > 0)) return null;
+    let cellWidth = cell?.width ?? 0;
+    let cellHeight = cell?.height ?? 0;
+    const screen = terminal.element?.querySelector(".xterm-screen");
+    // 渲染器尺寸读不到（未就绪/WebGL 恢复切换窗口期，Windows 上更常见）时用
+    // 渲染 DOM 实测兜底：此前直接 null → 浮层永久降级贴底、不跟随不翻转。
+    if (!(cellWidth > 0) || !(cellHeight > 0)) {
+      const fromDom = measureCellSizeFromDom(
+        screen ?? null,
+        terminal.element?.querySelector(".xterm-rows") ?? null,
+        terminal.cols,
+      );
+      if (!fromDom) return null;
+      cellWidth = fromDom.width;
+      cellHeight = fromDom.height;
+    }
     const buffer = terminal.buffer.active;
     // cursorY 已是视口内相对行；旧式 `cursorY - viewportY` 在回滚区出现后为负，浮层画出画布。
     const visibleRow = cursorViewportRow(buffer);
-    const screen = terminal.element?.querySelector(".xterm-screen");
     const hostRect = terminalHost.value.getBoundingClientRect();
     const origin = (screen ?? terminal.element)?.getBoundingClientRect();
     if (!origin) return null;
@@ -3232,6 +3270,35 @@ function readTerminalSuggestionAnchor(): SuggestionAnchor | null {
     cellHeight: frame.cellHeight,
     cellWidth: frame.cellWidth,
   };
+}
+
+// Windows shell 提示符采样（shellBuiltins 兜底源的 detect 回调）：光标行起
+// 向上至多 3 行里找 `PS C:\…>` / `C:\…>` 形态提示符。POSIX 提示符不命中，
+// 行为与直连 fig 引擎一致。TTL 1s：键入路径每次调度都会问一次，miss 也廉价
+// （3 行 buffer 扫描）；短 TTL 保证会话早期（提示符刚到达）尽快收敛。
+const terminalShellSniff = { kind: null as "powershell" | "cmd" | null, at: 0 };
+function sniffTerminalShell(): "powershell" | "cmd" | null {
+  const now = Date.now();
+  if (now - terminalShellSniff.at < 1000) return terminalShellSniff.kind;
+  terminalShellSniff.at = now;
+  terminalShellSniff.kind = null;
+  try {
+    if (!terminal) return null;
+    const buffer = terminal.buffer.active;
+    if (buffer.type !== "normal") return null;
+    const cursorRow = buffer.baseY + Math.min(buffer.cursorY, buffer.length - 1);
+    for (let rowY = cursorRow; rowY >= Math.max(0, cursorRow - 2); rowY -= 1) {
+      const text = buffer.getLine(rowY)?.translateToString(true) ?? "";
+      const kind = detectShellKind(text);
+      if (kind) {
+        terminalShellSniff.kind = kind;
+        break;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return terminalShellSniff.kind;
 }
 
 /** 浮层开启时的按键消费：↑↓ 选择、Tab 填充、Enter 执行、Esc 关闭。 */
@@ -6098,6 +6165,14 @@ const forwardsOpen = ref(false);
 // 不再是 portal 弹层。面板本体仍由 DockerPanel 自治（会话解析/轮询/动作/
 // 引擎设置都在组件内），关闭即卸载并停轮询。
 const dockerPanelOpen = ref(false);
+// Docker 面板可拖宽度（px，null = 用 CSS 默认 clamp）。经 .panes 上的内联
+// CSS 变量 --docker-pane-width 下发：终端让宽（terminalBasis）与 .docker-pane
+// 的 flex-basis 引用同一变量，拖宽后两段口径自动一致。容器表列多时面板可
+// 拖到容器 70% 宽（lib/paneLayout 的钳制口径）。
+const dockerPaneWidth = ref<number | null>(null);
+const panesStyle = computed(() =>
+  dockerPaneWidth.value == null ? undefined : ({ "--docker-pane-width": `${dockerPaneWidth.value}px` } as CSSProperties),
+);
 
 async function runAlertTriage() {
   if (alertTriageBusy.value) return;
@@ -7035,7 +7110,19 @@ async function loadDirectory(path = currentPath.value, fromTerminal = false) {
   } catch (cause) {
     if (!listEpoch.isCurrent(epochId)) return;
     const message = cause instanceof Error ? cause.message : String(cause);
-    if (fromTerminal) showNotice(t("followDirectoryFailed", { path: normalized, error: message }));
+    if (fromTerminal) {
+      // 跟随撞上登录用户权限墙（典型：终端 sudo su 后跟到 /root）：引导切
+      // sudo 模式并重试，而非裸失败提示。重试走手动导航语义——再失败落
+      // SFTP 错误横幅，不再循环弹引导。
+      if (shouldOfferSudoRetryAfterFollowFailure({ fromTerminal, sudoMode: sudoMode.value, canWrite: canWrite.value, message })) {
+        const target = normalized;
+        showNotice(t("followDirectorySudoHint", { path: normalized }), [
+          { label: t("followDirectorySudoRetry"), run: () => void enableSudoModeAndReload(target) },
+        ]);
+      } else {
+        showNotice(t("followDirectoryFailed", { path: normalized, error: message }));
+      }
+    }
     else { sftpError.value = message; sftpErrorKey.value += 1; sftpErrorOpen.value = true; }
   } finally {
     if (listEpoch.isCurrent(epochId)) loadingFiles.value = false;
@@ -7047,6 +7134,14 @@ function toggleSudoMode() {
   sudoMode.value = !sudoMode.value;
   persistState();
   void loadDirectory();
+}
+
+// 目录跟随权限引导的动作：切到 sudo 模式并重载目标目录（守卫与手动开关一致）。
+async function enableSudoModeAndReload(path: string) {
+  if (!connected.value || !canWrite.value || loadingFiles.value) return;
+  sudoMode.value = true;
+  persistState();
+  await loadDirectory(path);
 }
 
 function goParent() {
@@ -7571,6 +7666,39 @@ function startDividerDrag(event: PointerEvent) {
     container.removeEventListener("pointermove", move);
     container.removeEventListener("pointerup", stop);
     container.removeEventListener("pointercancel", stop);
+    persistState();
+  };
+  container.setPointerCapture(pointerId);
+  container.addEventListener("pointermove", move);
+  container.addEventListener("pointerup", stop);
+  container.addEventListener("pointercancel", stop);
+}
+
+// 拖宽结束时刻：pointerup 后浏览器会合成一次 click（目标在 paneContainer 上），
+// document 收口会把它当「点空白」误关 Docker 面板，收口处对短窗内的点击放行。
+let dockerDividerDragEndedAt = 0;
+
+/** Docker 分栏拖宽：与 SFTP divider 同款 pointer-capture 交互；把手始终在
+ *  Docker 面板贴 SFTP 一侧，SFTP 左置（row-reverse）时面板靠容器左缘，其余
+ *  情况靠右缘。宽度经 --docker-pane-width 下发，终端/SFTP 让宽自动跟随。 */
+function startDockerDividerDrag(event: PointerEvent) {
+  const container = paneContainer.value;
+  if (!container) return;
+  const pointerId = event.pointerId;
+  const move = (next: PointerEvent) => {
+    const bounds = container.getBoundingClientRect();
+    const distance = paneOrder.value === "sftp-left" ? next.clientX - bounds.left : bounds.right - next.clientX;
+    dockerPaneWidth.value = clampDockerPaneWidth(distance, bounds.width);
+    scheduleFit();
+  };
+  const stop = () => {
+    container.releasePointerCapture(pointerId);
+    container.removeEventListener("pointermove", move);
+    container.removeEventListener("pointerup", stop);
+    container.removeEventListener("pointercancel", stop);
+    // 拖完的合成 click 目标在 paneContainer 上，document 收口会把它当「点空白」
+    // 误关 Docker 面板——记下时间戳，收口处对短窗内的点击放行（见 onDocumentClickCloseMenus）。
+    dockerDividerDragEndedAt = Date.now();
     persistState();
   };
   container.setPointerCapture(pointerId);
@@ -11145,6 +11273,8 @@ function closeMenus() {
  *  portal 在工具条 popover 之外，点弹窗内部不该把背后的工具条弹层连带收掉。 */
 function onDocumentClickCloseMenus(event: MouseEvent) {
   if ((event.target as HTMLElement | null)?.closest?.('[data-slot="context-menu-content"], [data-slot="popover-content"], [data-slot="dialog-content"]')) return;
+  // Docker 分栏拖宽刚结束：pointerup 的合成 click 不算「点空白」，不收口（见 startDockerDividerDrag）。
+  if (Date.now() - dockerDividerDragEndedAt < 400) return;
   closeMenus();
 }
 
@@ -11648,7 +11778,7 @@ async function reattachProtocolSession(): Promise<boolean> {
   return true;
 }
 
-watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
+watch([splitRatio, dockerPaneWidth, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
 
 onMounted(() => {
   document.addEventListener("click", onDocumentClickCloseMenus);
@@ -12080,7 +12210,7 @@ onBeforeUnmount(() => {
       <ToastViewport class="error-viewport" />
     </ToastProvider>
 
-    <section ref="paneContainer" :class="orderedPaneClass">
+    <section ref="paneContainer" :class="orderedPaneClass" :style="panesStyle">
       <ContextMenu :open="terminalMenuOpen" @update:open="(open) => { if (!open) terminalMenuOpen = false; }">
         <ContextMenuTrigger as-child>
       <section class="terminal-pane" :class="{ 'drag-active': terminalDragActive, 'batch-bar-open': connected && batchBarOpen, 'marker-visible': commandMarker.installed, 'gutter-visible': gutterPaneVisible, 'wallpaper-active': wallpaperActive }" :style="[terminalBasis, gutterPaneStyle]" @contextmenu="showTerminalMenu" @dragenter.prevent="onTerminalDragEnter" @dragover.prevent @dragleave.self="terminalDragActive = false" @drop.prevent="onTerminalDrop($event)">
@@ -12721,6 +12851,7 @@ onBeforeUnmount(() => {
           </div>
           <button class="icon-button" :title="t('sftpPaste.action')" :disabled="!connected || !canWrite || !sftpClipboard || pasteBusy" @click="pasteClipboard"><ClipboardPaste /></button>
           <button class="icon-button icon-teal" :title="`${t('upload')} · Ctrl/Cmd+V`" :disabled="!connected || !canWrite" @click.stop="chooseUpload"><FileUp /></button>
+          <button v-if="folderUploadSupported" class="icon-button icon-teal" :title="t('folderUpload.title')" :aria-label="t('folderUpload.action')" :disabled="!connected || !canWrite" @click.stop="chooseFolderUpload"><FolderUp /></button>
           <button class="icon-button icon-amber" :title="t('newFolder')" :disabled="!connected || !canWrite" @click="operationDraft = ''; operationDialog = 'mkdir'"><FolderPlus /></button>
           <button class="icon-button icon-amber" :title="t('sftpNewFile.action')" :disabled="!connected || !canWrite" @click="openNewFileDialog"><FilePlus /></button>
           <label class="follow-directory-control sudo-label" :title="!canWrite ? t('readOnly') : t('sudo.modeHint')">
@@ -12910,7 +13041,9 @@ onBeforeUnmount(() => {
       <!-- Docker 停靠面板（与 SFTP 面板同款分栏交互，终端经 terminalBasis 让宽）：
            非 portal 弹层——面板内点击 @click.stop 防 document 收口误关；内嵌
            引擎设置 Popover 与确认/日志 Dialog 仍 portal 到 body（收口守卫已排除
-           其 data-slot）。 -->
+           其 data-slot）。宽度可拖（前置 .divider），与 SFTP 同开时按
+           terminalBasis 分摊剩余宽度，两栏同显互不遮挡。 -->
+      <div v-if="dockerPanelOpen" class="divider" @pointerdown="startDockerDividerDrag" />
       <section v-if="dockerPanelOpen" class="docker-pane" @click.stop>
         <header>
           <h2>{{ t("docker.toolbarTitle") }}</h2>

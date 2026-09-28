@@ -3,7 +3,7 @@
 // 公式回归（历史缺陷：用 `cursorY - viewportY` 求可见行，回滚区出现后为负，
 // overlay 画出画布；用 `cursorY + viewportY` 采样光标行，上滚时采到滚回区旧行）。
 import { describe, expect, it } from "vitest";
-import { cursorAbsoluteRow, cursorViewportRow, type CursorBufferLike } from "./terminalAnchor";
+import { cursorAbsoluteRow, cursorViewportRow, measureCellSizeFromDom, type CursorBufferLike } from "./terminalAnchor";
 
 const ROWS = 24;
 const BUFFER_LENGTH = 124; // 100 行滚回 + 24 行视口
@@ -55,5 +55,37 @@ describe("cursorAbsoluteRow (buffer.getLine 采样的绝对行)", () => {
   it("equals baseY + cursorY when scrolled to the bottom", () => {
     const buffer = scrolledBackBuffer({ viewportY: BUFFER_LENGTH - ROWS });
     expect(cursorAbsoluteRow(buffer)).toBe(BUFFER_LENGTH - ROWS + 10);
+  });
+});
+
+describe("measureCellSizeFromDom (渲染器尺寸缺失时的 DOM 兜底)", () => {
+  /** 伪造带 rect 的元素（happy-dom 的 getBoundingClientRect 恒零，手动桩）。 */
+  function fakeEl(rect: { width?: number; height?: number }) {
+    return {
+      getBoundingClientRect: () => ({ width: rect.width ?? 0, height: rect.height ?? 0 }),
+    };
+  }
+
+  it("derives cell width from screen width ÷ cols and row height from the first row", () => {
+    const size = measureCellSizeFromDom(fakeEl({ width: 960 }), { children: [fakeEl({ height: 26 })] }, 120);
+    expect(size).toEqual({ width: 8, height: 26 });
+  });
+
+  it("returns null when any input is unmeasurable (renderer not ready)", () => {
+    expect(measureCellSizeFromDom(null, { children: [fakeEl({ height: 26 })] }, 120)).toBeNull();
+    expect(measureCellSizeFromDom(fakeEl({ width: 960 }), null, 120)).toBeNull();
+    expect(measureCellSizeFromDom(fakeEl({ width: 960 }), { children: [] }, 120)).toBeNull();
+    expect(measureCellSizeFromDom(fakeEl({ width: 0 }), { children: [fakeEl({ height: 26 })] }, 120)).toBeNull();
+    expect(measureCellSizeFromDom(fakeEl({ width: 960 }), { children: [fakeEl({ height: 0 })] }, 120)).toBeNull();
+    expect(measureCellSizeFromDom(fakeEl({ width: 960 }), { children: [fakeEl({ height: 26 })] }, 0)).toBeNull();
+  });
+
+  it("survives a throwing getBoundingClientRect (detached iframe)", () => {
+    const boom = {
+      getBoundingClientRect: () => {
+        throw new Error("detached");
+      },
+    };
+    expect(measureCellSizeFromDom(boom, { children: [fakeEl({ height: 26 })] }, 120)).toBeNull();
   });
 });

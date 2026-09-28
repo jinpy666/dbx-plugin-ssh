@@ -57,8 +57,12 @@ describe("CompletionMenu", () => {
     expect(options[1].attributes("aria-selected")).toBe("true");
   });
 
-  it("emits activate on hover and accept with the full CompletionItem on click", async () => {
+  it("requires a pointer move before hover activates, then accepts with the full CompletionItem on click", async () => {
+    // 悬停武装：浮层弹出位置恰在鼠标下时，静止指针不得抢走键盘选择。
     const wrapper = mountMenu();
+    await wrapper.findAll('[role="option"]')[2].trigger("mouseenter");
+    expect(wrapper.emitted("activate")).toBeUndefined();
+    await wrapper.find(".completion-menu").trigger("pointermove");
     await wrapper.findAll('[role="option"]')[2].trigger("mouseenter");
     expect(wrapper.emitted("activate")?.[0]).toEqual([2]);
     await wrapper.findAll('[role="option"]')[0].trigger("click");

@@ -42,27 +42,35 @@ const rootEl = ref<HTMLElement | null>(null);
 const placement = ref<"below" | "above">("below");
 const overlayBottom = ref(0);
 const constrainedHeight = ref(0);
+// 悬停武装（用户反馈：浮层弹出位置恰在鼠标下时，静止的指针也会抢走键盘
+// 选择）：指针在浮层上真实移动过才允许 hover 激活；条目/锚点变化即解除。
+const hoverArmed = ref(false);
 
-// DOM 更新后按浮层实际高度选放置侧：条目数/锚点变化都重测。宿主高度取
-// 包含块（terminal-pane）实测，不依赖外部下发，batch-bar 让位等也自动正确。
+// DOM 更新后按浮层实际高度选放置侧：条目数/锚点变化都重测。空间判定用
+// 终端可视底界（props.viewport = terminal-host 净高）；翻转的 CSS bottom 偏移
+// 则必须用定位包含块（terminal-pane）实测高度——批量条/标记条让位时 host 比
+// pane 矮（inset-bottom），用 host 高度会把浮层压低一条内缩量、盖住输入行。
 watchEffect(() => {
   const el = rootEl.value;
   const anchor = props.anchor;
   void props.items.length;
+  hoverArmed.value = false;
   if (!el || !anchor) {
     placement.value = "below";
     constrainedHeight.value = 0;
     return;
   }
-  const viewportHeight = props.viewport?.height || el.parentElement?.clientHeight || 0;
+  const hostHeight = props.viewport?.height || 0;
+  const containerHeight = el.parentElement?.clientHeight || hostHeight;
+  const spaceViewport = hostHeight || containerHeight;
   const cellHeight = anchor.cellHeight ?? 0;
   // scrollHeight 而非 offsetHeight：浮层被 max-height 压扁后再次测量，
   // offsetHeight 是受限高、scrollHeight 仍是内容真实高，条目增减时放置
   // 决策不会被上一轮的限制污染。
   const naturalHeight = el.scrollHeight;
-  placement.value = chooseOverlayPlacement(anchor.y, cellHeight, naturalHeight, viewportHeight);
-  overlayBottom.value = flippedOverlayBottom(anchor.y, viewportHeight);
-  const available = overlayMaxHeight(placement.value, anchor.y, cellHeight, viewportHeight);
+  placement.value = chooseOverlayPlacement(anchor.y, cellHeight, naturalHeight, spaceViewport);
+  overlayBottom.value = flippedOverlayBottom(anchor.y, containerHeight);
+  const available = overlayMaxHeight(placement.value, anchor.y, cellHeight, spaceViewport);
   constrainedHeight.value = available > 0 && available < naturalHeight ? available : 0;
 }, { flush: "post" });
 
@@ -88,10 +96,15 @@ function rowIcon(kind: CompletionItemKind) {
   if (kind === "hint") return Info;
   return CornerDownRight;
 }
+
+/** hover 激活只在指针于浮层上移动过之后生效（防弹出位置的静止指针抢选）。 */
+function onRowEnter(index: number) {
+  if (hoverArmed.value) emit("activate", index);
+}
 </script>
 
 <template>
-  <div ref="rootEl" class="completion-menu" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="listbox" :aria-label="t('completionMenu.title')">
+  <div ref="rootEl" class="completion-menu" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="listbox" :aria-label="t('completionMenu.title')" @pointermove="hoverArmed = true">
     <!-- generator 在途占位（§31 两段渲染）：纯状态行，不可点选、不参与
          activeIndex；键盘所有权由 App 的 keyboard.ts loading 态处理。 -->
     <div v-if="loading && !items.length" class="completion-row completion-loading" role="status">
@@ -107,7 +120,7 @@ function rowIcon(kind: CompletionItemKind) {
       role="option"
       :aria-selected="index === activeIndex"
       :title="`${item.description ?? item.label} · ${t('completionMenu.acceptHint')}`"
-      @mouseenter="emit('activate', index)"
+      @mouseenter="onRowEnter(index)"
       @mousedown.prevent
       @click="emit('accept', item)"
     >

@@ -2,7 +2,8 @@
 // （script→execute 请求组装/postProcess 适配）、splitOn、Fig 原生 suggestion
 // 收敛、缺省 postProcess、postProcess 抛错、超时/execute null、非零 exitCode
 // 照常 postProcess、前缀过滤、TTL 缓存命中不重复打 RPC、TTL 过期重打、
-// 在途共享去重、无目标 → null、缓存 key 含 prefix/session/cwd、slots 收集
+// 在途共享去重、前缀归并（同 token 连续前缀共享一次执行、调用方各自过滤）、
+// 无目标 → null、缓存 key 区分 tokenStart/session/cwd/script、slots 收集
 // 异常 → []。
 import { describe, expect, it, vi } from "vitest";
 import type { CompletionExecuteRequest, CompletionExecuteResult } from "../host/protocol";
@@ -178,7 +179,7 @@ describe("GeneratorScheduler · TTL 缓存（§29）", () => {
     expect(h.invoke).toHaveBeenCalledTimes(2);
   });
 
-  it("缓存 key 区分 prefix / sessionId / cwd / script", async () => {
+  it("缓存 key 区分 tokenStart / sessionId / cwd / script（前缀归并不切 key）", async () => {
     const h = harness();
     await h.scheduler.run(baseSlot({ prefix: "ma" }));
     await h.scheduler.run(baseSlot({ prefix: "ma", tokenStart: 8 }));
@@ -192,14 +193,31 @@ describe("GeneratorScheduler · TTL 缓存（§29）", () => {
     h.setCwd("/tmp");
     await h.scheduler.run(baseSlot({ prefix: "ma" }));
     await h.scheduler.run(baseSlot({ prefix: "ma", script: ["git", "tag"] }));
-    // 各 key 均不同 → 每次都执行。
+    // tokenStart/session/cwd/script 各 key 均不同 → 每次都执行；TTL 内的
+    // 重复调用（第 4 步）命中缓存（前缀归并不切 key，也不多打）。
     expect(h.invoke).toHaveBeenCalledTimes(6);
   });
 
-  it("TTL 内换 key：旧条目不串新 key", async () => {
+  it("前缀归并：同 token 连续前缀共享一次执行，各调用按自己的前缀过滤", async () => {
     const h = harness();
+    // stdout: main/master/maintenance —— 逐键 ma/mai/空前缀 的模拟
+    const first = await h.scheduler.run(baseSlot({ prefix: "ma" }));
+    const second = await h.scheduler.run(baseSlot({ prefix: "mai" }));
+    const third = await h.scheduler.run(baseSlot({ prefix: "" }));
+    expect(h.invoke).toHaveBeenCalledTimes(1); // 一个 burst 只打一次 RPC
+    expect(first?.map((item) => item.label)).toEqual(["main", "master", "maintenance"]);
+    expect(second?.map((item) => item.label)).toEqual(["main", "maintenance"]);
+    expect(third?.map((item) => item.label)).toEqual(["main", "master", "maintenance"]);
+    // TTL 过期后同前缀才重打
+    h.clock.now += 301;
     await h.scheduler.run(baseSlot({ prefix: "ma" }));
-    await h.scheduler.run(baseSlot({ prefix: "fe" }));
+    expect(h.invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("TTL 内换 key：tokenStart 变化不串产出", async () => {
+    const h = harness();
+    await h.scheduler.run(baseSlot({ prefix: "ma", tokenStart: 4 }));
+    await h.scheduler.run(baseSlot({ prefix: "ma", tokenStart: 12 }));
     expect(h.invoke).toHaveBeenCalledTimes(2);
   });
 });
