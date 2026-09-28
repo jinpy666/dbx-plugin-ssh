@@ -6361,6 +6361,23 @@ impl SshRuntime {
         )
     }
 
+    /// 把本地推进的树状态零拷贝转移回 registry（替代逐字段深拷贝）：动态容器
+    /// （files/failures/current/sink）整体 swap O(1)，标量直接赋值。调用后本地
+    /// `tree` 持有旧 registry 状态，调用方不得再读。每 chunk 深拷贝整树是
+    /// review 定位的下载热路径分配/锁竞争热点（万文件树 × 每 256KiB 一次）。
+    /// 入口处的 `download.tree.clone()`（每调用一次、从 registry 取初始状态）
+    /// 保留；若要彻底消除，需 registry 改存 `Arc<Mutex<TreeDownloadState>>`，
+    /// 字段访问面大，不在本切口内。
+    fn store_tree_state(tree_state: &mut TreeDownloadState, tree: &mut TreeDownloadState) {
+        tree_state.current_offset = tree.current_offset;
+        tree_state.files_done = tree.files_done;
+        tree_state.skipped = tree.skipped;
+        std::mem::swap(&mut tree_state.files, &mut tree.files);
+        std::mem::swap(&mut tree_state.failures, &mut tree.failures);
+        std::mem::swap(&mut tree_state.current, &mut tree.current);
+        std::mem::swap(&mut tree_state.sink, &mut tree.sink);
+    }
+
     /// Chunk pump for folder downloads. `next_offset` stays the aggregate byte
     /// position across the tree; when the in-flight file completes it is
     /// renamed into place and the next queued file opens within the same call,
@@ -6399,7 +6416,7 @@ impl SshRuntime {
                             .map_err(|_| "Download registry is poisoned".to_string())?;
                         if let Some(current) = downloads.get_mut(task_id) {
                             if let Some(tree_state) = current.tree.as_mut() {
-                                *tree_state = tree.clone();
+                                Self::store_tree_state(tree_state, &mut tree);
                             }
                         }
                     }
@@ -6538,9 +6555,6 @@ impl SshRuntime {
                     return Err("Download task changed while a chunk was in flight".to_string());
                 }
                 current.next_offset = next_offset;
-                if let Some(tree_state) = current.tree.as_mut() {
-                    *tree_state = tree.clone();
-                }
             }
             let current_remaining = tree
                 .current
@@ -6554,6 +6568,20 @@ impl SshRuntime {
                     json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "fileCount": tree.file_count, "fileIndex": tree.files_done + u64::from(tree.current.is_some()), "currentFile": tree.current.as_ref().map(|file| file.relative.clone()) }),
                 )
                 .map_err(plugin_error)?;
+            // 树状态回写：零拷贝转移（store_tree_state），放在 eof/进度读取
+            // 之后——此前每 chunk 深拷贝整树（万文件树 × 每 256KiB 一次）且
+            // 在 registry 锁内进行，是下载热路径的分配与锁竞争热点。
+            {
+                let mut downloads = self
+                    .downloads
+                    .lock()
+                    .map_err(|_| "Download registry is poisoned".to_string())?;
+                if let Some(current) = downloads.get_mut(task_id) {
+                    if let Some(tree_state) = current.tree.as_mut() {
+                        Self::store_tree_state(tree_state, &mut tree);
+                    }
+                }
+            }
             return Ok(
                 json!({ "taskId": task_id, "offset": offset, "length": length, "eof": eof, "fileName": download.file_name }),
             );
