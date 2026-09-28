@@ -35,6 +35,8 @@ describe("ssh pluginStore wiring", () => {
         "vnc-connect-last",
         // 结构化补全开关（对标 Warp/fig 线 2）：SettingsDialog 自治读写。
         "ssh-completion-spec",
+        // 补全引擎选择（FIG wave-1）：legacy | fig-safe。
+        "ssh-completion-engine",
         "ssh-terminal-ghost-suggest",
       ].sort(),
     );

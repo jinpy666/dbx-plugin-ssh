@@ -306,6 +306,34 @@ function setSpecCompletionEnabled(next: boolean) {
 
 specCompletionEnabled.value = loadSpecCompletionEnabled();
 
+// 补全引擎选择（FIG wave-1，键 ssh-completion-engine）：legacy（默认，内置
+// spec）| fig-safe（fig spec 安全子集，wave 2 接线后生效）。组件内自治读写
+// pluginStore——与总开关同款先例；App 装配 resolver 时直读同一键，无需事件
+// 同步。wave 1 两种值行为一致（都走 legacy resolver），选择仅持久化偏好。
+const COMPLETION_ENGINE_KEY = "ssh-completion-engine";
+type CompletionEngineChoice = "legacy" | "fig-safe";
+const completionEngine = ref<CompletionEngineChoice>("legacy");
+
+function loadCompletionEngine(): CompletionEngineChoice {
+  try {
+    return pluginStore.getItem(COMPLETION_ENGINE_KEY) === "fig-safe" ? "fig-safe" : "legacy";
+  } catch {
+    return "legacy";
+  }
+}
+
+function setCompletionEngine(next: string) {
+  const choice: CompletionEngineChoice = next === "fig-safe" ? "fig-safe" : "legacy";
+  completionEngine.value = choice;
+  try {
+    pluginStore.setItem(COMPLETION_ENGINE_KEY, choice);
+  } catch {
+    // 存储不可用（沙箱降级链耗尽）：仅当前会话生效。
+  }
+}
+
+completionEngine.value = loadCompletionEngine();
+
 function setGhostEnabled(next: boolean) {
   ghostEnabled.value = next;
   try {
@@ -2033,6 +2061,19 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <span>{{ t("completionMenu.settingsEnabled") }}</span>
             </label>
             <p class="muted settings-note">{{ t("completionMenu.settingsEnabledHint") }}</p>
+            <!-- 补全引擎选择（FIG wave-1）：legacy 内置 spec / fig-safe 安全子集
+                 （wave 2 生效）；自治读写 pluginStore，与上方开关同款先例。 -->
+            <label class="settings-field">
+              <span>{{ t("completionMenu.engine") }}</span>
+              <Select :model-value="completionEngine" @update:model-value="(v) => setCompletionEngine(String(v))">
+                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="legacy">{{ t("completionMenu.engineLegacy") }}</SelectItem>
+                  <SelectItem value="fig-safe">{{ t("completionMenu.engineFigSafe") }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <p class="muted settings-note">{{ t("completionMenu.engineHint") }}</p>
 
             <!-- 行内 ghost 自动建议（np8，对标 Warp/fish）：追加于「终端行为」组末尾；
                  组件内自治读写 pluginStore（ssh-terminal-ghost-suggest），即时上抛 App。 -->

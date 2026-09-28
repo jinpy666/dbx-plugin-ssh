@@ -154,10 +154,17 @@ import { cursorAbsoluteRow, cursorViewportRow } from "./lib/terminalAnchor";
 import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "./lib/suggestionGuard";
 // 结构化补全（对标 Warp/fig，线 2）：spec 命中时优先于历史建议浮层展示
 // 带描述的命令/flag/值候选；开关读 pluginStore（SettingsDialog 自治写入）。
-import { matchSpecLine, SPEC_COMPLETION_MAX_ROWS, type CompletionLevel, type CompletionRow, type SpecMatch } from "./lib/completions/spec";
-import { pickDynamicCompletionProvider, registerDynamicCompletionProvider } from "./lib/completions/provider";
+// FIG wave-1 Lane A：解析/排序/键盘收进 lib/completion 模块层——App 只保留
+// 渲染 refs 与终端写入；legacy parser 经 legacySpecAdapter 包装成引擎
+// resolver（golden parity 零回归，legacySpecAdapter.spec.ts 固化）。
+import { SPEC_COMPLETION_MAX_ROWS, type CompletionLevel, type CompletionRow } from "./lib/completions/spec";
+import { pickDynamicCompletionProvider, registerDynamicCompletionProvider, type DynamicCompletionTarget } from "./lib/completions/provider";
 import { createRemoteFsProvider } from "./lib/completions/remoteFsProvider";
-import { COMPLETION_SPECS } from "./lib/completions/specs";
+import { CompletionController, type CompletionResolver } from "./lib/completion/CompletionController";
+import { resolveCompletionKey, type CompletionKeyboardState } from "./lib/completion/keyboard";
+import { applyEditToText, trailingTokenEdit } from "./lib/completion/core/edit";
+import { completionRowFromItem, deriveLegacyLevel, legacyDynamicTarget, legacyResolve } from "./lib/completion/legacy/legacySpecAdapter";
+import type { CompletionEdit, CompletionItem, CompletionResponse } from "./lib/completion/core/types";
 import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
@@ -910,17 +917,21 @@ let ghostGate: TerminalGhostState = createGhostState();
 // 行缓冲/锚点语义与 suggestion* 一致（pendingTerminalInput +
 // readTerminalSuggestionAnchor）。开关存 pluginStore（"false" = 关，默认开），
 // SettingsDialog 开关行内联自治读写，本处每次弹出前直读（无缓存即时生效）。
+// FIG wave-1 Lane A：候选解析经 CompletionController（legacy resolver 同步
+// 交付，键入路径的浮层刷新时机与 HEAD 一致）；completionRows/Level 等仅是
+// CompletionResponse 的渲染投影，completionItems 保留引擎形态供 accept。
 const COMPLETION_SPEC_ENABLED_KEY = "ssh-completion-spec";
+// 引擎选择（契约 §4.3）：值 "legacy"（默认）| "fig-safe"。wave 1 两种值都
+// 走 legacy resolver（fig-safe 等 wave 2 fig provider 接线后才生效）；默认
+// 无存储时行为与 HEAD 完全一致（parity 测试背书）。
+const COMPLETION_ENGINE_KEY = "ssh-completion-engine";
 const completionOpen = ref(false);
 const completionRows = ref<CompletionRow[]>([]);
+const completionItems = ref<CompletionItem[]>([]);
 const completionLevel = ref<CompletionLevel>("sub");
 const completionCommandPath = ref<string[]>([]);
 const completionActiveIndex = ref(0);
 const completionAnchor = ref<SuggestionAnchor | null>(null);
-// 候选 token 的 replacement 范围（parser 给出的行尾 token 边界，随菜单
-// 打开/刷新更新）：接受候选项时按范围精确替换，不再用 /\S+$ 反推边界
-// （review 第一批遗留）。null = 无范围（不发生，兜底走行尾 token 规则）。
-const completionReplaceRange = ref<{ start: number; end: number } | null>(null);
 
 function completionSpecEnabled(): boolean {
   try {
@@ -930,24 +941,71 @@ function completionSpecEnabled(): boolean {
   }
 }
 
+/** 引擎偏好读取：非法值/读失败一律回落 legacy（wave 1 唯一可用引擎）。 */
+function completionEngineKind(): "legacy" | "fig-safe" {
+  try {
+    return pluginStore.getItem(COMPLETION_ENGINE_KEY) === "fig-safe" ? "fig-safe" : "legacy";
+  } catch {
+    return "legacy";
+  }
+}
+
+/** wave 1 resolver 装配：两种引擎值当前都折叠到 legacy resolver。 */
+function completionResolver(): CompletionResolver {
+  return completionEngineKind() === "fig-safe" ? legacyResolve : legacyResolve;
+}
+
 function closeCompletionMenu() {
   completionOpen.value = false;
   completionRows.value = [];
+  completionItems.value = [];
   completionActiveIndex.value = 0;
-  completionReplaceRange.value = null;
+  completionController.dismiss();
 }
 
-function openCompletionMenu(match: SpecMatch) {
-  completionCommandPath.value = match.commandPath;
-  completionLevel.value = match.level;
-  completionRows.value = match.rows;
+/** 引擎响应落地：ready 有候选 → 开结构化菜单（关历史建议）；否则收起。 */
+function handleCompletionResponse(response: CompletionResponse) {
+  if (response.state === "ready" && response.items.length) {
+    suggestionOpen.value = false;
+    suggestionItems.value = [];
+    openCompletionMenu(response);
+    return;
+  }
+  closeCompletionMenu();
+}
+
+// 控制器：行缓冲变更 → 防抖/立即请求 → resolver → 三重 guard → 响应落地。
+// 键入路径（refreshSuggestionsAfterInput）经 request("typing") 同步交付，
+// 键入行为与 HEAD 逐项一致；其余行缓冲变更点（粘贴/历史填充/ghost 接受）
+// 经 lineChanged() 的 90ms 防抖刷新（见 lane 报告的已知偏差说明）。
+const completionController = new CompletionController({
+  sessionId: () => telnetSession.value?.sessionId ?? serialSession.value?.sessionId ?? localSession.value?.sessionId ?? session.value?.sessionId ?? "",
+  readLine: () => pendingTerminalInput,
+  enabled: () => completionSpecEnabled(),
+  debounceMs: 90,
+  resolver: completionResolver(),
+  onResponse: handleCompletionResponse,
+  onAcceptEdit: applyCompletionEdit,
+});
+
+function openCompletionMenu(response: CompletionResponse) {
+  const context = response.context;
+  const items = response.items;
+  completionCommandPath.value = context?.commandPath ?? [];
+  completionItems.value = items;
+  completionRows.value = items.map((item) => completionRowFromItem(item));
+  completionLevel.value = deriveLegacyLevel(response, pendingTerminalInput);
   completionActiveIndex.value = 0;
-  completionReplaceRange.value = { start: match.replaceStart, end: match.replaceEnd };
   completionAnchor.value = readTerminalSuggestionAnchor();
   completionOpen.value = true;
   // hint 层（动态值）异步询问 provider：有注册的 provider 且返回候选时，
   // 占位 hint 行被真实候选替换；未注册时保持 hint + Tab 透传（零回归）。
-  void fetchDynamicCompletionRows(match);
+  // 冻结的 CompletionResponse 不携带 dynamic 目标，hint 层沿用 legacy
+  // adapter 的直查重建（wave 2 provider 链接管后移除）。
+  if (items.length && items.every((item) => item.kind === "hint")) {
+    const dynamic = legacyDynamicTarget(pendingTerminalInput);
+    if (dynamic) void fetchDynamicCompletionRows(context?.commandPath ?? [], dynamic);
+  }
 }
 
 // 动态 provider 询问（review 第三批地基）：递增 token 使过期响应作废
@@ -955,72 +1013,77 @@ function openCompletionMenu(match: SpecMatch) {
 let dynamicCompletionFetchToken = 0;
 const DYNAMIC_COMPLETION_TIMEOUT_MS = 1200;
 
-async function fetchDynamicCompletionRows(match: SpecMatch) {
-  // 只对"整层都是 hint"的动态层询问 provider：静态枚举/子命令已有真实候选。
-  if (!match.dynamic || !match.rows.length || match.rows.some((row) => row.kind !== "hint")) return;
-  const provider = pickDynamicCompletionProvider({ commandPath: match.commandPath, target: match.dynamic, prefix: "" });
+async function fetchDynamicCompletionRows(commandPath: string[], dynamic: DynamicCompletionTarget) {
+  const provider = pickDynamicCompletionProvider({ commandPath, target: dynamic, prefix: "" });
   if (!provider) return;
   const token = ++dynamicCompletionFetchToken;
   const lineAtRequest = pendingTerminalInput;
   let values: string[] | null = null;
   try {
     values = await Promise.race([
-      provider.complete({ commandPath: match.commandPath, target: match.dynamic, prefix: "" }),
+      provider.complete({ commandPath, target: dynamic, prefix: "" }),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), DYNAMIC_COMPLETION_TIMEOUT_MS)),
     ]);
   } catch {
     values = null;
   }
   if (token !== dynamicCompletionFetchToken || !values?.length) return;
-  if (!completionOpen.value || completionCommandPath.value.join(" ") !== match.commandPath.join(" ") || pendingTerminalInput !== lineAtRequest) return;
-  const providerRows: CompletionRow[] = values.slice(0, SPEC_COMPLETION_MAX_ROWS).map((value) => ({
-    kind: "value",
-    token: value,
-    space: true,
+  if (!completionOpen.value || completionCommandPath.value.join(" ") !== commandPath.join(" ") || pendingTerminalInput !== lineAtRequest) return;
+  // provider 候选同时投影回 items（含行尾 edit），保证 Tab/点击接受路径统一
+  // 走 controller.accept；行漂移时 edit 由 applyCompletionEdit 的兜底规则接管。
+  completionItems.value = values.slice(0, SPEC_COMPLETION_MAX_ROWS).map((value) => ({
+    id: `legacy-dynamic:${commandPath.join(" ")}:${value}`,
     label: value,
     description: provider.label,
+    kind: "argument",
     score: 1000,
+    source: "remote-provider",
+    edit: trailingTokenEdit(lineAtRequest, value, true),
   }));
-  completionRows.value = providerRows;
+  completionRows.value = completionItems.value.map((item) => completionRowFromItem(item));
   completionActiveIndex.value = 0;
 }
 
 /**
  * 结构化补全浮层的按键消费（review #120 跟进：菜单自动出现 ≠ 接管键盘）：
+ * 键盘所有权规则表在 lib/completion/keyboard.ts 固化（表驱动单测背书）——
  * ↑↓ 选择、Tab 填充静态候选、Esc 关闭；**Enter 恒定放行 shell 执行当前行**
- * （return false 不消费，回车字节照发 PTY）；动态 hint 行（token 空，本地
- * 不可枚举）时 Tab 也放行——远程 shell 是最后一级 completion provider，
- * 不吃掉它的 Tab。
+ * （return false 不消费，回车字节照发 PTY）；动态 hint 行 / loading 态的
+ * Tab 也放行——远程 shell 是最后一级 completion provider，不吃掉它的 Tab。
+ * 放行（passthrough）前先收起菜单，与 HEAD 的 Enter/hint-Tab 行为一致。
  */
 function handleCompletionKey(event: KeyboardEvent): boolean {
-  if (event.type !== "keydown" || !completionOpen.value || !completionRows.value.length) return false;
+  if (event.type !== "keydown" || !completionOpen.value) return false;
   const rows = completionRows.value;
-  if (event.key === "ArrowDown") {
+  // wave 1 resolver 全同步，无 loading 态；hint kind 已让 Tab 放行，
+  // loading 留给 wave 2 异步 provider 接入时置位。
+  const state: CompletionKeyboardState = {
+    menuOpen: true,
+    hasItems: rows.length > 0,
+    activeItemKind: rows.length ? (completionItems.value[completionActiveIndex.value]?.kind ?? null) : null,
+    loading: false,
+  };
+  const action = resolveCompletionKey(state, event.key);
+  if (action === "next" && rows.length) {
     completionActiveIndex.value = (completionActiveIndex.value + 1) % rows.length;
     return true;
   }
-  if (event.key === "ArrowUp") {
+  if (action === "prev" && rows.length) {
     completionActiveIndex.value = (completionActiveIndex.value - 1 + rows.length) % rows.length;
     return true;
   }
-  if (event.key === "Enter") {
-    // 执行当前输入行：关闭浮层后不消费，Enter 原样进 PTY。
+  if (action === "accept" && rows.length) {
+    acceptCompletionRow(rows[completionActiveIndex.value]);
+    return true;
+  }
+  if (action === "close") {
+    closeCompletionMenu();
+    return true;
+  }
+  if (action === "passthrough") {
+    // Enter 恒放行 / hint 行 Tab 放行：先收起菜单，按键原样进 PTY。
     closeCompletionMenu();
     return false;
-  }
-  if (event.key === "Tab") {
-    const row = rows[completionActiveIndex.value];
-    if (!row.token) {
-      // 动态值（分支/文件/pod…）：本地只出占位提示，Tab 交给 shell 补全。
-      closeCompletionMenu();
-      return false;
-    }
-    acceptCompletionRow(row);
-    return true;
-  }
-  if (event.key === "Escape") {
-    closeCompletionMenu();
-    return true;
   }
   return false;
 }
@@ -1033,15 +1096,31 @@ function acceptCompletionRow(row: CompletionRow) {
     terminal?.focus();
     return;
   }
-  // replacement 范围由 matchSpecLine 的 parser 精确给出（含引号/转义的
-  // token 表面）；范围越界视为行已漂移，回落行尾 token 规则兜底。
+  const index = completionRows.value.indexOf(row);
+  const item = index >= 0 ? completionItems.value[index] : undefined;
+  if (item) {
+    completionController.accept(item);
+    return;
+  }
+  // items 已与展示行漂移（不应发生）：按行尾 token 规则现造 edit 兜底。
+  completionController.accept({
+    id: `legacy-fallback:${row.label}`,
+    label: row.label,
+    description: row.description,
+    kind: row.kind === "sub" ? "subcommand" : row.kind === "flag" ? "option" : row.kind === "hint" ? "hint" : "argument",
+    score: row.score,
+    source: "legacy-spec",
+    edit: trailingTokenEdit(pendingTerminalInput, row.token, row.space),
+  });
+}
+
+/** 引擎 edit 的终端落地（controller.onAcceptEdit）：整行擦重打的现机制不动，
+ *  随后立即刷新下一层候选。范围越界视为行漂移，回落行尾 token 规则兜底。 */
+function applyCompletionEdit(edit: CompletionEdit) {
   const line = pendingTerminalInput;
-  const range = completionReplaceRange.value;
-  const usable = range !== null && range.end <= line.length;
-  const start = usable ? range.start : (/\S+$/.exec(line)?.index ?? line.length);
-  const end = usable ? range.end : line.length;
-  const suffix = row.space ? " " : "";
-  replaceTerminalLineWith(line.slice(0, start) + row.token + suffix + line.slice(end), false);
+  const usable = edit.replaceStart >= 0 && edit.replaceStart <= edit.replaceEnd && edit.replaceEnd <= line.length;
+  const applied = applyEditToText(line, usable ? edit : trailingTokenEdit(line, edit.text, false));
+  replaceTerminalLineWith(applied.text, false);
   refreshCompletionMenu();
   if (!completionOpen.value) terminal?.focus();
 }
@@ -1052,12 +1131,7 @@ function refreshCompletionMenu() {
     closeCompletionMenu();
     return;
   }
-  const match = matchSpecLine(pendingTerminalInput, COMPLETION_SPECS);
-  if (match && match.rows.length) {
-    openCompletionMenu(match);
-  } else {
-    closeCompletionMenu();
-  }
+  completionController.request("manual");
 }
 
 // —— 快速命令数据面（M32-A3）：RPC 全部留在 App，编辑器/导入视图在
@@ -3024,6 +3098,9 @@ function trackPendingInput(data: string) {
     else if (character === "\u007f") pendingTerminalInput = pendingTerminalInput.slice(0, -1);
     else if (character >= " ") pendingTerminalInput += character;
   }
+  // 行缓冲变更点（含 Enter/Ctrl+C 清行）：revision++ 并防抖调度补全刷新
+  // （FIG wave-1 Lane A；键入路径随后的 request("typing") 会立即冲刷）。
+  completionController.lineChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -3101,14 +3178,12 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   }
   // 结构化补全（线 2）优先：行缓冲命中 spec 且有候选时展示结构化菜单并
   // 跳过历史模糊建议；未命中回落下方历史建议浮层（两者并存、不替换）。
+  // FIG wave-1 Lane A：直查 matchSpecLine 替换为 controller.request——
+  // legacy resolver 同步交付，onResponse（handleCompletionResponse）在本次
+  // 调用内完成菜单开/收，随后以 completionOpen 判定是否跳过历史建议分支。
   if (completionSpecEnabled()) {
-    const specMatch = matchSpecLine(pendingTerminalInput, COMPLETION_SPECS);
-    if (specMatch && specMatch.rows.length) {
-      suggestionOpen.value = false;
-      suggestionItems.value = [];
-      openCompletionMenu(specMatch);
-      return;
-    }
+    completionController.request("typing");
+    if (completionOpen.value) return;
   }
   closeCompletionMenu();
   const query = pendingTerminalInput;
@@ -3232,6 +3307,9 @@ function replaceTerminalLineWith(nextLine: string, pressEnter: boolean) {
   const erase = "\u007f".repeat(pendingTerminalInput.length);
   const payload = erase + nextLine + (pressEnter ? "\r" : "");
   pendingTerminalInput = pressEnter ? "" : nextLine;
+  // 行缓冲变更点：revision++ 并防抖调度补全刷新（FIG wave-1 Lane A；
+  // 接受路径随后由 refreshCompletionMenu 的 request("manual") 立即冲刷）。
+  completionController.lineChanged();
   if (pressEnter) {
     lastTerminalCommand.value = nextLine;
     commandHistory.value = pushCommandHistory(commandHistory.value, nextLine);
@@ -3356,6 +3434,8 @@ function acceptGhostSuggestion() {
   if (!match || !match.remainder) return;
   ghostMatch.value = null;
   pendingTerminalInput += match.remainder;
+  // 行缓冲变更点：revision++ 并防抖调度补全刷新（FIG wave-1 Lane A）。
+  completionController.lineChanged();
   sendTerminalBytes(new TextEncoder().encode(match.remainder));
   // 接受后按新行重算：更长同前缀历史可继续 → 扩展（fish 同款行为）。
   updateGhostSuggestion();
@@ -3503,11 +3583,14 @@ function resetCommandMarker() {
   commandMarker.durationMs = null;
   commandMarker.cwd = "";
   commandMarker.startedAt = null;
-  // 会话切换/断开：建议浮层与抑制门锁存一并复位（P1-1）；ghost 门同步复位。
+  // 会话切换/断开：建议浮层与抑制门锁存一并复位（P1-1）；ghost 门同步复位；
+  // 补全引擎重置会话态（revision/requestId 跳变，在途结果经 sessionId
+  // guard 静默丢弃——FIG wave-1 Lane A）。
   closeSuggestions();
   suggestionGuardState = createSuggestionGuardState();
   lastTerminalCommand.value = null;
   resetGhostSuggestion();
+  completionController.resetSession();
 }
 
 function applyCommandMarker(updates: Osc633StreamUpdates) {

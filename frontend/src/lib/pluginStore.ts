@@ -42,6 +42,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 结构化补全开关（对标 Warp/fig 线 2）：SettingsDialog 开关行自治读写，
   // App 弹出浮层前直读（"false" = 关，默认开）。
   "ssh-completion-spec",
+  // 补全引擎选择（FIG wave-1）："legacy"（默认）| "fig-safe"；SettingsDialog
+  // 引擎下拉自治读写，App 装配 resolver 时直读（wave 1 两值等价）。
+  "ssh-completion-engine",
   // 会话连接弹窗的上次参数记忆（Telnet/Serial/VNC）：弹窗打开时回填、
   // 提交时写穿；凭据类字段不落盘。
   "telnet-connect-last",
