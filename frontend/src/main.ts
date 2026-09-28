@@ -5,6 +5,7 @@ import "./style.css";
 import "./styles/tailwind.css";
 import { installHostThemeBridge } from "../../shared/frontend/themeSync";
 import { pluginStore } from "./lib/pluginStore";
+import { watchPopupReveal } from "./lib/popupReveal";
 
 // 宿主令牌 → 插件变量桥：首绘即命中宿主主题，主题变化经 SDK 令牌更新自动跟随。
 // 字体回退值覆盖为插件规范链（UI 字体补 CJK 回退，与 style.css :root 一致；
@@ -18,6 +19,9 @@ installHostThemeBridge({
 // 保证 App setup 内的同步首读（面板形态 / 字体 / WebGL 等偏好）命中持久化值。
 const boot = async () => {
   await pluginStore.ready;
+  // 弹层动画冻结保险先于挂载装好：宿主渲染器停摆（动画定格透明首帧）时，
+  // 弹层挂载 300ms 后被强制落到可见态（lib/popupReveal.ts）。
+  watchPopupReveal();
   createApp(App).mount("#app");
 };
 boot();
