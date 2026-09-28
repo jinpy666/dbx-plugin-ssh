@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { splitCommandLine } from "./tokenize";
 
-// 冻结语义回归：splitCommandLine 自 lib/completions/spec.ts 上移（最终架构
+// 冻结语义回归：splitCommandLine 自退役的 legacy spec.ts 上移（最终架构
 // legacy 退役后的公共依赖），本文件保证语义与原实现逐字一致。
 describe("splitCommandLine（冻结）", () => {
   it("普通空白切分", () => {

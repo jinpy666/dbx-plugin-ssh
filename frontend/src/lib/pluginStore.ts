@@ -39,9 +39,10 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-terminal-behavior",
   "ssh-terminal-hotkeys",
   "ssh-terminal-appearance",
-  // 结构化补全开关（对标 Warp/fig 线 2）：SettingsDialog 开关行自治读写，
-  // App 弹出浮层前直读（"false" = 关，默认开）。
-  "ssh-completion-spec",
+  // 结构化补全引擎选择（FIG wave-1，契约 §2.3）：SettingsDialog 引擎下拉
+  // 自治读写，App 每次调度前直读（fig-safe 默认 / fig / off；fig 与 fig-safe
+  // 批次 1 行为相同，差异自 generator 接线起）。
+  "ssh-completion-engine",
   // 会话连接弹窗的上次参数记忆（Telnet/Serial/VNC）：弹窗打开时回填、
   // 提交时写穿；凭据类字段不落盘。
   "telnet-connect-last",
@@ -53,3 +54,22 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);
+
+// 结构化补全引擎（FIG wave-1 契约 §2.3）：三态 + 缺省/容错归一到 fig-safe。
+// App（调度门）与 SettingsDialog（下拉读写）共用同一类型与净化函数，避免
+// 两处字面量分叉；键随 PLUGIN_STORE_KEYS 声明（宿主 storage 水合后可读）。
+export type CompletionEngineSetting = "fig-safe" | "fig" | "off";
+export const COMPLETION_ENGINE_KEY = "ssh-completion-engine";
+
+export function sanitizeCompletionEngine(value: unknown): CompletionEngineSetting {
+  return value === "fig" || value === "off" ? value : "fig-safe";
+}
+
+/** 每次调度前直读（无缓存即时生效；存储不可用时回默认）。 */
+export function loadCompletionEngine(): CompletionEngineSetting {
+  try {
+    return sanitizeCompletionEngine(pluginStore.getItem(COMPLETION_ENGINE_KEY));
+  } catch {
+    return "fig-safe";
+  }
+}
