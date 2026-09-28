@@ -162,6 +162,7 @@ import { rankItems } from "./lib/completion/core/ranking";
 import type { CompletionEdit, CompletionItem, CompletionResponse } from "./lib/completion/core/types";
 import { resolveCompletionKey, type CompletionKeyboardState } from "./lib/completion/keyboard";
 import { figCompletionSource } from "./lib/completion/fig/figCompletionSource";
+import { createEngineRunner } from "./lib/completion/worker/engineRunner";
 import { GeneratorScheduler } from "./lib/completion/fig/generatorScheduler";
 import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
@@ -922,12 +923,17 @@ let ghostGate: TerminalGhostState = createGhostState();
 // （completion/execute，目标机执行）异步补齐，静态候选先行（两段渲染）。
 // fig-safe 与 fig 本批次 generator 行为相同；off 时 controller 不调度。
 // 类型不标注冻结接口：collectGenerators 是 impl 上的批次 2-1 第二通道。
-const completionSource = figCompletionSource;
+// 批次 2-2 接线：engine runner 包裹同一 source——支持 data-URL worker 的环境
+// 走 worker 线程（resolve 返回 Promise，controller 三重 guard 异步交付），
+// 否则/崩溃两次后永久主线程直跑（§44），调用方无感。
+const completionSource = createEngineRunner({ createSource: () => figCompletionSource });
 
 // 声明式 generator 调度：目标取当前会话（ssh 优先，其次本地；串口无可执行
 // 目标 → null 即不执行），cwd 用 OSC 7/633 跟踪值（terminalCwd）。
 const completionScheduler = new GeneratorScheduler({
-  collect: (request) => completionSource.collectGenerators(request),
+  // E lane 裁决：runner 只代理冻结接口的 resolve；槽位提取轻量且 generator
+  // 执行面在目标机（completion/execute），collect 维持主线程直引单例。
+  collect: (request) => figCompletionSource.collectGenerators(request),
   target: () => {
     const sshSessionId = session.value?.sessionId;
     if (sshSessionId) return { kind: "ssh", sessionId: sshSessionId };
