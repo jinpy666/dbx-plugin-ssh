@@ -1,137 +1,56 @@
-# Lane A 细则：前端补全核心（frontend-core）
+# Lane A 细则（最终架构版）：fig 引擎接线 + legacy 退役
 
 > 分支 `codex/ssh/fig-wave1-frontend-core`，基线 `codex/ssh/fig-wave1-base`。
-> 先读：`FIG_WAVE1_CONTRACT.zh-CN.md`、`FIG_ROADMAP.zh-CN.md`、`FIG_VERIFICATION.zh-CN.md`。
-> 冻结类型 `frontend/src/lib/completion/core/types.ts` 只 import 不改。
+> 冻结接口（只 import）：`core/types.ts`、`core/tokenize.ts`、`fig/source.ts`。
+> 旧版细则中的 legacySpecAdapter / golden parity 章节**作废**；其余签名与 App.vue
+> 锚点继续有效。先读：契约（最终架构版）、ROADMAP、FIG_VERIFICATION。
 
 ## 1. 目标 / 非目标
 
-目标：把补全的「解析→候选→键盘→接受」从 App.vue 收进可测试的模块层，
-行为与 HEAD **零回归**；为 wave 2 的 fig provider / generator 接线留好插槽。
+目标：fig 引擎（经 `FigCompletionSource` 接缝）成为结构化补全唯一来源；键盘/编辑
+内核模块化；legacy `lib/completions/**` 整体退役；设置三态。
 
-非目标：Worker 化、fig spec 接线、动态 provider 行为变更、overlay/定位改动、
-`lib/completions/spec.ts`（legacy parser）语义改动、build.mjs。
+非目标：parser/manifest 实现（Lane C'）、generator 执行接线（批次 2）、worker
+runner（批次 2）、overlay/定位改动、ghost 与历史建议（独立引擎，不动）。
 
-## 2. 新增文件与签名
+## 2. 交付物
 
-### `frontend/src/lib/completion/core/edit.ts`
+### 2.1 内核（签名沿用，仍有效）
 
-```ts
-export interface AppliedEdit { text: string; cursor: number }
-/** 把 CompletionEdit 应用到行文本；cursorOffset 缺省 = edit.text.length。 */
-export function applyEditToText(text: string, edit: CompletionEdit): AppliedEdit
-/** 行尾 token 替换的 edit 构造（legacy adapter 用；addSpace 时 text 尾补空格）。 */
-export function trailingTokenEdit(text: string, token: string, addSpace: boolean): CompletionEdit
-```
+- `core/edit.ts`：`applyEditToText(text, edit): {text, cursor}`、`trailingTokenEdit(text, token, addSpace): CompletionEdit`。
+- `core/ranking.ts`：`rankItems(items)`（MAX_COMPLETION_ITEMS=20，score 降序 + label 字典序，纯函数）。
+- `keyboard.ts`：`CompletionKeyboardState` + `resolveCompletionKey(state, key)`；契约 §2.2 表全组合表驱动单测（≥10 用例）。`activeItemKind` 语义：静态候选=accept；`hint`/loading/空=Tab passthrough；Enter 恒 passthrough。
+- `CompletionController.ts`：`lineChanged/request/accept/dismiss/resetSession`；构造参数 `sessionId()/readLine()/enabled()/debounceMs?(默认90)/onResponse/onAcceptEdit`；纪律：三重 guard（revision+sessionId+requestId）、debounce 合并、异常降级 pass-through、`enabled()===false` 直接 pass-through。
+- resolver = `FigCompletionSource`（注入构造）。本 lane 提供 `FakeFigCompletionSource`（测试用）；真实实现由 Lane C' 在集成分支接入。
 
-### `frontend/src/lib/completion/core/ranking.ts`
+### 2.2 legacy 退役（本 lane 独有删除权）
 
-```ts
-export const MAX_COMPLETION_ITEMS = 20;
-/** score 降序、同分 label 字典序、截断；纯函数，引擎唯一排序出口。 */
-export function rankItems(items: CompletionItem[]): CompletionItem[]
-```
+- 删除 `frontend/src/lib/completions/` **整目录**（spec.ts、specs/*、provider.ts、remoteFsProvider.ts、figImport.ts 及全部 *.spec.ts）。
+- 清除 `App.vue`、`SettingsDialog.vue`、`pluginStore.ts`、`pluginStorage.spec.ts` 中 `ssh-completion-spec` 的一切引用。
+- 门禁：`grep -rn "lib/completions" frontend/src` 与 `grep -rn "ssh-completion-spec" frontend/src` 均无结果。
 
-### `frontend/src/lib/completion/keyboard.ts`（契约 §4.2 的固化）
+### 2.3 fig 引擎接线
 
-```ts
-export interface CompletionKeyboardState {
-  menuOpen: boolean;
-  hasItems: boolean;
-  /** 高亮项 kind：null=无高亮；"hint"=动态占位行（Tab 透传）。 */
-  activeItemKind: CompletionItemKind | null;
-  loading: boolean;
-}
-export type CompletionKeyAction = "accept" | "passthrough" | "next" | "prev" | "close" | "none";
-export function resolveCompletionKey(state: CompletionKeyboardState, key: string): CompletionKeyAction
-```
+- App.vue：删除 `matchSpecLine / COMPLETION_SPECS / CompletionRow` 依赖；completion refs 迁 controller + `CompletionResponse`。
+- 接线点（锚点=函数名，与旧版 §3 表一致）：`openCompletionMenu / handleCompletionKey / acceptCompletionRow / refreshCompletionMenu / trackPendingInput / replaceTerminalLineWith / refreshSuggestionsAfterInput`、Enter/Ctrl+C 清行点、ghost 接受点、会话切换（`resetSession`）。
+- source 返回 null（无命中 / generator 动态位置）→ pass-through：菜单关、Tab 交 shell（§34，与旧 hint 行 UX 等价）。
+- `CompletionMenu.vue`：props 迁移为 `items: CompletionItem[]` + `activeIndex` + anchor + viewport；emit `accept(item)` / `activate(index)`（方案 §24 映射：label/description/kind 直用，接受回传 `item.edit`）；同步更新 `CompletionMenu.spec.ts`。App.vue 侧把 item.edit 经 `applyEditToText` 应用后仍走 `replaceTerminalLineWith(nextLine, false)`（整行擦重打机制不变）。
 
-规则（必须表驱动单测全覆盖，缺一不可）：
+### 2.4 设置与 i18n
 
-| menuOpen | activeItemKind | Enter | Tab | ArrowUp/Down | Escape |
-|---|---|---|---|---|---|
-| true | subcommand/option/argument/… | passthrough | accept | next/prev | close |
-| true | hint（或 hasItems=false / loading） | passthrough | passthrough | next/prev（仅 hasItems） | close |
-| false | — | passthrough | passthrough | passthrough | none |
+- `pluginStore.ts`：删 `ssh-completion-spec`，增 `ssh-completion-engine`（`"fig-safe" | "fig" | "off"`，默认 `"fig-safe"`）。
+- `SettingsDialog.vue`：结构化补全开关改为引擎 Select（reka-ui wrapper，参照同文件既有 Select 用法）；`off` = 无结构化浮层（历史/ghost 不受影响）；`fig` 与 `fig-safe` 批次 1 行为相同（差异自 generator 接线起），选项描述注明。
+- `i18n.ts`：新增文案七语全补。
 
-### `frontend/src/lib/completion/legacy/legacySpecAdapter.ts`
+## 3. 测试
 
-把 `matchSpecLine(line, COMPLETION_SPECS)` 包装成引擎 resolver：
+- edit / ranking / keyboard / controller 单测（旧版 §5 清单去掉 parity 项）。
+- FakeFigCompletionSource 驱动 controller 全路径：ready / pass-through(null) / stale 丢弃 / 异常吞掉 / enabled=false / debounce 合并 / accept→onAcceptEdit 边界正确。
+- `CompletionMenu.spec.ts` 更新为 items props。
+- 既有其余测试零回归（删除 legacy 目录连带其 spec 文件属预期，不计回归）。
 
-```ts
-export interface LegacyResolveInput { line: string; requestId: number; revision: number; sessionId: string }
-export function legacyResolve(input: LegacyResolveInput): CompletionResponse
-```
+## 4. 验收
 
-映射规则（**逐字段保真，零回归的根**）：
-
-- `SpecMatch.rows[].kind`：`sub→subcommand`、`flag→option`、`value→argument`、`hint→hint`。
-- `edit` = `{ text: row.token + (row.space ? " " : ""), replaceStart: match.replaceStart, replaceEnd: match.replaceEnd }`（fig-base 的 `SpecMatch` 已带精确边界，见 `lib/completions/spec.ts` `SpecMatch` 定义）。
-- `label/description/score` 原样；`source: "legacy-spec"`；`id` 用 `legacy:{commandPath}:{label}:{i}` 稳定串。
-- `context`：`command = commandPath[0] ?? null`，`tokenStart=match.replaceStart`，`tokenEnd=match.replaceEnd`。
-- `matchSpecLine` 返回 null → `state: "pass-through"`、`items: []`（回落历史建议浮层，由 App.vue 现有逻辑处理）。
-- rows 空（spec 命中无候选）同样 `pass-through`。
-
-### `frontend/src/lib/completion/CompletionController.ts`
-
-```ts
-export interface CompletionControllerOptions {
-  sessionId: () => string;
-  readLine: () => string;              // 返回 pendingTerminalInput 当前值
-  enabled: () => boolean;              // 总开关 + 引擎开关合成后的判定
-  debounceMs?: number;                 // 默认 90
-  onResponse: (response: CompletionResponse) => void;
-  onAcceptEdit: (edit: CompletionEdit) => void;  // App.vue 执行终端写入
-}
-export class CompletionController {
-  /** App.vue 在行缓冲每个变更点调用：revision++ 并调度 request("typing")。 */
-  lineChanged(): void;
-  request(trigger: CompletionTrigger): void;
-  accept(item: CompletionItem): void;
-  dismiss(): void;
-  /** 会话切换：重置 revision/requestId，丢弃在途结果（sessionId guard）。 */
-  resetSession(): void;
-}
-```
-
-纪律（单测必须覆盖）：
-
-1. 响应回来时 `requestId`、`revision`、`sessionId` 三者任一不匹配当前态 → 静默丢弃。
-2. `resolve` 全程 try/catch；任何异常 → `state:"pass-through"` 空响应，绝不抛到调用方（PTY 红线）。
-3. debounce 期间的多次 `lineChanged` 只发一次请求。
-4. `enabled()===false` → 直接 pass-through，不调度。
-
-wave 1 的 resolver 就是 `legacyResolve`；provider 链（fig）留 wave 2，不在本 lane 实现。
-
-## 3. App.vue 接线（锚点为 fig-base 行号，允许 ±小漂移，以函数名为准）
-
-| 位置 | 改造 |
-|---|---|
-| `COMPLETION_SPEC_ENABLED_KEY` ≈L913 / `completionSpecEnabled()` ≈L925 | 保留总开关；新增 `COMPLETION_ENGINE_KEY = "ssh-completion-engine"`，读值 `legacy`(默认)/`fig-safe`，wave 1 两种值都走 legacy resolver |
-| `openCompletionMenu(match)` ≈L940 | 改为消费 `CompletionResponse`：items 映射进现有 `completionRows/Level/CommandPath/ActiveIndex/Anchor` refs（Level 由 context+activeKind 推导，保持现有三层展示语义） |
-| `handleCompletionKey(event)` ≈L995 | 改为：构造 `CompletionKeyboardState` → `resolveCompletionKey` → 按 action 执行（accept 走 `controller.accept`；passthrough 返回 false；close `closeCompletionMenu`）。**Enter 恒放行、hint 行 Tab 放行的现语义必须保持**（由键盘单测背书） |
-| `acceptCompletionRow(row)` ≈L1030 | 改为 `controller.accept(item)` → `onAcceptEdit(edit)` → `applyEditToText(pendingTerminalInput, edit)` → 沿用 `replaceTerminalLineWith(nextLine, false)`（整行擦重打的现机制不动）→ `controller.lineChanged()` 刷新 |
-| `refreshCompletionMenu()` ≈L1050 / `refreshSuggestionsAfterInput()` ≈L3069 | 内层的 `matchSpecLine` 直调替换为 `controller.request("manual"/"typing")`；历史建议/ghost 分支**一行不动** |
-| `trackPendingInput` ≈L3020 / `replaceTerminalLineWith` ≈L3230 / Enter/Ctrl+C 清行点 / ghost 接受点 | 每处行缓冲变更后补 `controller.lineChanged()`（一行调用，不改既有逻辑） |
-| 会话切换/关闭 | `controller.resetSession()` |
-
-## 4. 设置项与 i18n
-
-- `frontend/src/lib/pluginStore.ts`：`PLUGIN_STORE_KEYS` 追加 `"ssh-completion-engine"`（本 lane 唯一允许改此文件的一行；B/C 不碰它）。
-- `SettingsDialog.vue`：在现有 `ssh-completion-spec` 开关（≈L270）旁加引擎 Select（reka-ui wrapper，参照同文件既有 Select 用法）：`legacy` / `fig-safe`；`fig-safe` 项描述注明「wave 2 生效」。
-- `i18n.ts`：新增 key（如 `settings.completion.engine`、`.engineLegacy`、`.engineFigSafe`、`.engineHint`）七语全补（zh-CN/zh-TW/en/es/it/ja/pt）。
-
-## 5. 测试清单（`*.spec.ts` 同目录）
-
-- `edit.spec.ts`：trailingTokenEdit 边界（尾空格/空行=纯插入点、引号 token、`--flag=val`）；applyEditToText cursorOffset。
-- `ranking.spec.ts`：排序确定性、截断 20。
-- `keyboard.spec.ts`：§2 表全组合（≥10 用例）。
-- `legacySpecAdapter.spec.ts`：**golden parity**——对现有 `spec.spec.ts` 语料 + specs/index 全量 spec，断言 controller 输出与 `matchSpecLine` 直查在 label/kind/顺序/描述上逐一相等。
-- `CompletionController.spec.ts`：三重 guard（revision/requestId/sessionId）、debounce 合并、异常降级 pass-through、accept→onAcceptEdit 的 edit 正确、enabled=false。
-- 既有 `spec.spec.ts` / `CompletionMenu.spec.ts` 必须零修改通过。
-
-## 6. 验收
-
-1. `pnpm --dir frontend typecheck && pnpm --dir frontend test && pnpm --dir frontend build` 全绿。
-2. 手动清单（UI mock 或 dev）：`git ch<Tab>` 填充、`git checkout -<Tab>` 进值层、hint 行 Tab 透传、Enter 恒执行、Esc 关闭、总开关关闭后零浮层——与 HEAD 行为一致。
-3. 默认路径（无 `ssh-completion-engine` 存储）行为与 HEAD 完全一致（parity 测试背书）。
+1. `pnpm --dir frontend typecheck / test / build` 全绿。
+2. §2.2 两个 grep 门禁通过。
+3. 手动清单（dev + fake source；真实数据冒烟在集成分支做）：`git ch<Tab>` 静态候选、`git co<Tab>` 别名命中（fake 模拟）、无命中命令 Tab 透传、Enter 恒执行、Esc 关闭、`off` 全关、历史/ghost 不受影响。

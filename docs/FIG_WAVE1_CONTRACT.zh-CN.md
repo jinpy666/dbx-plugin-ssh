@@ -1,98 +1,59 @@
-# FIG 补全引擎 Wave 1 实施契约
+# FIG 补全引擎实施契约（最终架构版）
 
-> 协调者：主会话。基线分支：`codex/ssh/fig-wave1-base`（= main `0da8be89`，已含
-> fix-120 #120 系列）。方案全文：`docs/FIG_AUTOCOMPLETE_INTEGRATION_PLAN.zh-CN.md`。
-> 三个实施 lane 在各自 worktree/分支并发实施；分支合入由 integrator/用户决定，
-> agent 不得自行 merge / push / 安装插件。
+> 基线 `codex/ssh/fig-wave1-base`；方案全文 `docs/FIG_AUTOCOMPLETE_INTEGRATION_PLAN.zh-CN.md`。
+> 本版按「放弃历史包袱、直达最终架构」指令修订：**集成 amazon-q-developer-cli 的
+> autocomplete parser（Fig 开源引擎）+ withfig/autocomplete 全量语料，legacy
+> `lib/completions/` 退役**。lane 细则：LANE_A（最终架构版）/ LANE_B（不变）/
+> LANE_C（最终架构版）；验证：FIG_VERIFICATION。
 
-## 1. Wave 1 范围
+## 1. 冻结文件（只 import 不改；变更须协调者裁决）
 
-| Lane | 分支 | 范围（对应方案里程碑） |
-|---|---|---|
-| A 前端核心 | `codex/ssh/fig-wave1-frontend-core` | M1 + M2-lite：core 纯函数（edit/ranking）、Legacy adapter、CompletionController、键盘所有权模块 + 单测、App.vue 接线、feature flag |
-| B Rust Host | `codex/ssh/fig-wave1-completion-host` | M4-lite：`backend/src/completion/*`，仅 `completion/execute`（local + ssh target），PROTOCOL 文档，smoke 脚本 |
-| C Fig 管线 | `codex/ssh/fig-wave1-fig-specs` | M3 地基：fig/types + adapter（静态子集）、sync/verify 脚本、体积实测报告、vendor LICENSE/NOTICE |
+- `frontend/src/lib/completion/core/types.ts`（CompletionItem/Edit/BufferState/Response…）
+- `frontend/src/lib/completion/core/tokenize.ts`（splitCommandLine，自 legacy spec.ts 上移）
+- `frontend/src/lib/completion/host/protocol.ts`（completion/execute 线协议）
+- `frontend/src/lib/completion/fig/source.ts`（FigCompletionSource 接缝：A 面向它编码，C 实现它）
 
-## 2. 非目标（wave 2+，本波次禁止实施）
+## 2. 总线决策
 
-- **Worker 化**：构建管线 `frontend/build.mjs` 用 `inlineDynamicImports: true` 产出
-  单文件自包含 index.html（并断言恰好 1 个 script 标签）。引擎 wave 1 跑主线程；
-  接口保留 requestId/revision 字段为将来迁移留位。
-- **按命令懒加载 chunk**：同一构建约束下不可行；spec 全量进 bundle，体积是否
-  可接受由 Lane C 的实测报告定夺（wave 2 决策输入）。
-- WSL executor；declarative generator 与 UI 打通（等 B 合入后 wave 2 做
-  `git checkout <Tab>` E2E）；文件 provider 升级（沿用 fix-120 已有的
-  `remoteFsProvider` 缓存版思路）；custom JS generator / loadSpec。
+1. **revision 纪律**：异步结果须 `revision` + `sessionId`（+requestId）匹配，否则静默丢弃（§5.1/§30/§43）。
+2. **键盘所有权**（§21，`keyboard.ts` 纯函数 + 表驱动单测固化）：
 
-## 3. 冻结契约
-
-`frontend/src/lib/completion/core/types.ts` 与 `frontend/src/lib/completion/host/protocol.ts`
-是本波次的冻结类型。实现方**只 import，不修改**；确需变更 → 写进 lane 报告，
-由协调者统一裁决后再同步给所有 lane。
-
-## 4. 总线决策
-
-1. **revision 纪律**：一切异步结果（provider/generator）回来时必须校验
-   `revision` 与 `sessionId` 都匹配当前 buffer，否则静默丢弃（方案 §5.1/§30/§43）。
-2. **键盘所有权**（方案 §21，必须以纯函数 + 单测固化，放
-   `frontend/src/lib/completion/keyboard.ts`）：
-
-   | 状态 | Enter | Tab | ↑↓ | Esc |
+   | 菜单状态 | Enter | Tab | ↑↓ | Esc |
    |---|---|---|---|---|
-   | 菜单开 + 静态候选 | 放行 shell | accept | 移动 | 关闭 |
-   | 菜单开 + 动态 hint / loading | 放行 shell | 放行 shell | 移动 | 关闭 |
-   | 菜单关 | 放行 shell | 放行 shell | shell | — |
+   | 静态候选 | 放行 shell | accept | 移动 | 关闭 |
+   | 动态/generator 位置或 loading | 放行 shell | 放行 shell | 移动 | 关闭 |
+   | 关闭 | shell | shell | shell | — |
 
    菜单显示 ≠ 键盘所有权；补全任何一层失败不得影响 PTY 输入链路。
-3. **feature flag**：pluginStore key `ssh-completion-engine`，值
-   `"legacy" | "fig-safe"`，wave 1 默认 `"legacy"`（fig-safe 等 C 的 spec 落地后
-   wave 2 再切默认）。SettingsDialog 增加引擎选择；新文案七语全补
-   （zh-CN/zh-TW/en/es/it/ja/pt）。
-4. **accept 范围**：wave 1 仅行尾补全（`cursor === text.length`）；任意光标位置
-   留 wave 2（方案 §22/§23）。
-5. **RPC 命名**：方法名 `completion/execute`；字段 camelCase（仓库协议约定，
-   见 SKILL 与 `docs/PROTOCOL.zh-CN.md`）；错误沿用 sidecar 字符串 Err 惯例，
-   加 `completion:` 前缀分类。
+3. **设置**：`ssh-completion-engine` ∈ {`fig-safe`(默认), `fig`, `off`}；`ssh-completion-spec` 退役；新文案七语（zh-CN/zh-TW/en/es/it/ja/pt）。
+4. **accept 范围**：仅行尾补全（`cursor === text.length`）；任意光标批次 3（§22/§23）。
+5. **RPC 命名**：`completion/execute`；camelCase；错误为字符串 Err、`completion:` 前缀。
+6. **语义权威** = vendored amazon-q parser（别名/persistent/variadic/嵌套/`--` 不自研）；generator 一律经 `completion/execute` 目标机执行（批次 2 接线），前端不直连 shell。
+7. **legacy 退役**：`lib/completions/**` 删除；无 spec 命中 → pass-through（§34），不造假候选。
 
-## 5. completion/execute RPC 契约（与 host/protocol.ts 一致）
+## 3. completion/execute 契约（与 host/protocol.ts 一致）
 
-约束：
+- target `{kind:"local"|"ssh", sessionId}`；`timeoutMs` clamp [200,3000] 默认 1200；`maxOutputBytes` 默认 256KiB；`mode:"completion-generator"`。
+- sudo 恒 false；只读连接拒绝；超时 completion 层竞速 + `cancel_exec` 回收；**不修改** `SshRuntime::exec` 的 `clamp(5,300)`。
+- local 用短生命周期子进程（tokio），禁止注入交互 PTY；审计对齐 `ssh/exec`。
+- 批次 1 不做 `completion/listDirectory` / `completion/environment` / WSL。
 
-- generator 一律 `sudo=false`；只读连接（read_only）直接拒绝；
-- `timeoutMs` 在 completion 层 clamp 到 [200, 3000]，默认 1200；
-- stdout/stderr 各自按 `maxOutputBytes` 截断并置 `truncated=true`；
-- SSH 实现复用 `SshRuntime::exec`（`backend/src/ssh.rs` 约 :3638），带 exec_id；
-  completion 层竞速超时，超时后走既有 `ssh/exec/cancel` 同路径回收
-  （**不修改** `SshRuntime::exec` 现有 `clamp(5,300)` 下限）；
-- local 实现用短生命周期子进程（`std::process::Command` + 超时杀进程），
-  **禁止**注入用户交互 PTY（`backend/src/local_terminal.rs` 的 PTY 与本功能无关）；
-- 审计与 `ssh/exec` 同模式（`backend/src/main.rs` 现有 audit 调用照搬）；
-- wave 1 不做 `completion/listDirectory`、`completion/environment`。
+## 4. 文件归属（越界即冲突）
 
-## 6. 文件归属（越界即冲突，禁止）
-
-| Lane | 拥有（新增/修改） |
+| Lane | 拥有（新增/修改/删除） |
 |---|---|
-| A | `frontend/src/lib/completion/core/{engine,edit,ranking}.ts`、`frontend/src/lib/completion/keyboard.ts`、`frontend/src/lib/completion/legacy/*`、`frontend/src/lib/completion/CompletionController.ts`；`frontend/src/App.vue`；`frontend/src/components/CompletionMenu.vue`（仅必要 props 适配）；`frontend/src/lib/i18n.ts`；`frontend/src/components/SettingsDialog.vue`；对应 `*.spec.ts` |
-| B | `backend/src/completion/*`；`backend/src/main.rs`（仅路由注册与 audit 接线）；`docs/PROTOCOL.zh-CN.md`；`scripts/smoke_completion.py`；模块内 `#[cfg(test)]` |
-| C | `frontend/src/lib/completion/fig/*`；`frontend/vendor/*`；`scripts/sync_fig_specs.mjs`；`scripts/verify_fig_specs.mjs`；`frontend/package.json`（仅 scripts 与必要 devDependencies）；`docs/fig-specs-size-report.md`；对应 `*.spec.ts` |
-| 只读共享 | `core/types.ts`、`host/protocol.ts`、`lib/completions/spec.ts`（legacy parser，A 经 adapter 包装、不改语义）、`lib/completions/provider.ts`、`lib/overlayPlacement.ts`、`backend/src/{ssh,exec,local_terminal}.rs`（B 只调用不重构） |
+| A' | `lib/completion/core/{edit,ranking}.ts`、`lib/completion/keyboard.ts`、`CompletionController.ts`；`App.vue`；`components/CompletionMenu.vue(+spec)`；`lib/i18n.ts`；`components/SettingsDialog.vue`；`lib/pluginStore.ts`（键位 swap）与 `pluginStorage.spec.ts` 相应更新；**`lib/completions/**` 删除**；对应 `*.spec.ts` |
+| B | `backend/src/completion/*`；`backend/src/main.rs`（路由+audit 接线）；`backend/src/ssh.rs`（仅预批最小只读查询 fn，报告列明）；`docs/PROTOCOL.zh-CN.md`；`scripts/smoke_completion.py` |
+| C' | `lib/completion/fig/**`（`source.ts` 除外）；`frontend/vendor/**`；`scripts/sync_fig_specs.mjs`、`scripts/verify_fig_specs.mjs`、`scripts/import-fig-specs.mjs` 删除；`frontend/package.json`（scripts + devDeps 论证制）；`tsconfig.json`（如需）；`docs/fig-specs-size-report.md` |
 
-## 7. 验证门禁（交付前必须全绿）
+## 5. 门禁
 
-环境：`export PATH="$HOME/.nvm/versions/node/v22.21.0/bin:$HOME/Library/pnpm:$HOME/.cargo/bin:$PATH"`
+- A'：`pnpm --dir frontend install --prefer-offline` → typecheck → test → build；
+  `grep -rn "lib/completions" frontend/src` 与 `grep -rn "ssh-completion-spec" frontend/src` 均无结果。
+- C'：前端三件套 + `pnpm --dir frontend fig:verify` + `fig:sync` 幂等自查。
+- B：`cargo fmt --check` / `clippy --locked --all-targets -- -D warnings` / `test --locked`；docker 可用时 `smoke_completion.py`。
+- 全 lane：`git diff --stat codex/ssh/fig-wave1-base` 只落 §4 归属文件；零新增运行时依赖（C' build-time devDeps 论证制）；测试零联网；不 push / 不 merge / 不安装。
 
-- A/C：`pnpm --dir frontend install --prefer-offline` → `typecheck` → `test` → `build`
-- B：`cargo fmt --manifest-path backend/Cargo.toml --check` →
-  `cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings` →
-  `cargo test --locked --manifest-path backend/Cargo.toml`
-- 全 lane：不新增运行时依赖（SKILL 红线；C 的 devDependency 例外需在报告里论证）；
-  不使用真实 SSH 凭据；单测不得联网（C 的上游拉取只发生在显式 sync 命令，测试用
-  fixture）；不 push / 不 merge / 不安装插件。
+## 6. 提交与移交
 
-## 8. 提交与移交
-
-- 每 lane 在自己分支按逻辑单元提交（zh conventional commits，如
-  `feat(completion): ...`）；**不 push**。
-- lane 最终报告必须包含：base SHA、commit 列表、变更文件、验证结果摘要、
-  与契约的偏差、风险与 follow-up。
+zh conventional commits（`feat(completion): …`）；lane 报告含 base SHA、commit 列表、变更文件、验证摘要、与细则偏差、风险、follow-up。

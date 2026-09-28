@@ -3,6 +3,10 @@
 > 分支 `codex/ssh/fig-wave1-completion-host`，基线 `codex/ssh/fig-wave1-base`。
 > 先读：`FIG_WAVE1_CONTRACT.zh-CN.md`（§5 RPC 契约）、`FIG_ROADMAP.zh-CN.md`、`FIG_VERIFICATION.zh-CN.md`。
 > 前端线协议 `frontend/src/lib/completion/host/protocol.ts` 是冻结镜像，两边字段必须逐字一致。
+>
+> 2026-09-28 注：最终架构调整（vendor amazon-q parser + legacy 退役）与本 lane
+> **正交**——`completion/execute` 正是最终架构的 generator 执行通道。本文继续
+> 有效，在途 agent 按原文执行，勿受其他 lane 文档修订影响。
 
 ## 1. 目标 / 非目标
 
