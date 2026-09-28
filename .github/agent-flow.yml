@@ -23,6 +23,9 @@ validation:
     - python3 scripts/check_vendor_lockstep.py
     - python3 scripts/verify_rdp_vendor_integrity.py
     - node scripts/connection-forms/verify.mjs
+    # mockDbxHost 注册表比对：mock 实现 ∪ 白名单 ∪ SKIP ⊇ 后端分派表
+    # （docs/MOCK_HOST_STRICTNESS_PLAN.zh-CN.md），缺口/拼错即失败。
+    - node scripts/mock_host_registry_check.mjs
     - pnpm --dir frontend typecheck
     - pnpm --dir frontend test
     - pnpm --dir frontend build
