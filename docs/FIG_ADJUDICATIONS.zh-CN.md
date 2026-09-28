@@ -32,4 +32,41 @@ B 分支基于 `5b63b0b8`（早于最终架构提交 `448e92d8`）。与基线�
 
 C′ 已成功 clone 双上游（网络可用）：`/tmp/fig-sync-probe` 内 amazon-q（已 pin）与
 fig-autocomplete 全量语料，并在组装语料共享模块的编译产物；尚未向 worktree 落盘。
-继续等待其提交与报告。
+继续等待其提交与报告。（后记：C′ 按时交付，报告偏差已在集成阶段全部落办。）
+
+## 2026-09-28 批次 2
+
+### 6. P1 尖兵结论（采纳）
+
+`?worker&inline` 在 vite@8.3.0（内置 rolldown）可用：data-URL + encodeURIComponent
+内联、零额外 chunk、单文件断言全过、vite/client 类型现成。第四棒按此实施。
+spike 分支 `codex/ssh/fig-spike-worker-inline` 保留现场、永不合并。
+
+### 7. P2 归属补录与设计追认
+
+归属补录：`lib/completion/host/hostClient.ts(+spec)`、`lib/completion/fig/generatorRunner.ts(+spec)`。
+设计追认：①非零 exitCode 不判失败（对齐 Fig 语义）；②客户端前置畸形校验与传输
+失败同语义返回 null。
+
+### 8. D（批次 2-1）实现取态追认
+
+①App 构造点切换真实 figCompletionSource（DEV Fake 退役）；②CompletionMenu/i18n
+越界授权（占位行与七语必须落此）；③figCompletionSource 导出类型放宽为实现类
+（collectGenerators 第二通道），冻结接缝不变；④"零静态候选纯 loading"时 Tab/Enter
+放行 shell（契约 §2.2 的实现化）；⑤缓存 key 追加 script/splitOn 槽位身份；⑥icon
+无通道仅接受不透传（已文档化）。
+
+### 9. E（批次 2-2）归属、接线与同步/异步裁决
+
+归属：`lib/completion/worker/{engineRunner,engine.worker}.ts(+spec)`、`build.mjs`
+（inlineDynamicImports→codeSplitting: false 迁移）。裁决：①worker 模式 resolve
+返回 Promise——controller 已有 thenable 防御分支（"Worker 化留位"），零改动采纳；
+②最终接线由协调者执行（b2b3d56e）：构造点换 runner、**collect 通道直引单例**
+（runner 只代理冻结 resolve）；③per-request 超时（worker 假死防悬挂）列 follow-up。
+
+### 10. 体积裁决（发布前硬门禁）
+
+批次 2 完成态 `ui/index.html` = **11.76 MB**（语料在主 bundle 与 worker 载荷双份）。
+**未落批次 2-3 裁剪前不得发布**。裁决方向：默认 allowlist 收敛到
+MOST_USED_SPECS（C′ 确定性规则优先级 1）重跑 fig:sync，同步约束两份载荷；
+Top-N 定版数值由用户在体积/覆盖间拍板。
