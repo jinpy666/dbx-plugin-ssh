@@ -1440,6 +1440,8 @@ struct UploadState {
     received: u64,
     local_path: PathBuf,
     file: std::fs::File,
+    /// Staging push（`sftp/upload/chunk`）每块一发的进度事件节流。
+    progress_throttle: crate::progress_throttle::ProgressThrottle,
 }
 
 /// Local (client-machine) persistence target for a download started with
@@ -1486,6 +1488,9 @@ struct DownloadState {
     /// 的一次性快照（0=不限速）。整个任务沿用快照值——改动对下一个下载
     /// 任务生效，进行中的任务不受中途修改影响。sudo 下载车道本期不限速。
     throttle: Throttle,
+    /// `download_chunk` 每块一发的进度事件节流（clone 出来的快照不含此
+    /// 字段的最新状态；决策只在 registry 锁内做）。
+    progress_throttle: crate::progress_throttle::ProgressThrottle,
 }
 
 /// Live state of one recursive folder download. Files stream through the same
@@ -3477,6 +3482,14 @@ impl SshRuntime {
         }
     }
 
+    /// Completion-host read-only gate (FIG wave-1 lane B, decision D4):
+    /// `completion/execute` must refuse SSH targets on read-only
+    /// connections. Minimal read-only query only — no other behavior of
+    /// this module changes.
+    pub async fn completion_session_read_only(&self, session_id: &str) -> Result<bool, String> {
+        Ok(self.session(session_id).await?.read_only)
+    }
+
     /// Connection-level sudoers-style allowlist for privileged commands
     /// (`sudo_whitelist` in the connection's external config). Empty config
     /// = gate off; otherwise the command (minus a leading `sudo` token) must
@@ -4664,6 +4677,9 @@ impl SshRuntime {
     ) -> Result<(), String> {
         self.ensure_writable(session_id).await?;
         let path = normalize_remote_path(path)?;
+        if path == "/" {
+            return Err("Refusing to delete the filesystem root".to_string());
+        }
         if encoding == NameEncoding::Latin1 {
             // latin-1：wire 路径整条还原为原始字节后走裸包删除（LSTAT 判型
             // → REMOVE/RMDIR/递归树删，symlink 绝不跟随）。回退策略与
@@ -4797,13 +4813,15 @@ impl SshRuntime {
     }
 
     /// `ssh/processes/kill`: signals one remote process (pid/signal are
-    /// validated in `metrics::kill_command`; pid 0/1 refused).
+    /// validated in `metrics::kill_command`; pid 0/1 refused). Treated as a
+    /// write op: refused on read-only connections like the SFTP write family.
     pub async fn kill_process(
         &self,
         session_id: &str,
         pid: u64,
         signal: u32,
     ) -> Result<Value, String> {
+        self.ensure_writable(session_id).await?;
         let session = self.session(session_id).await?;
         metrics::kill_process(&session.handle, pid, signal).await?;
         Ok(json!({ "success": true, "pid": pid }))
@@ -5468,6 +5486,7 @@ impl SshRuntime {
                         received: resume_offset,
                         local_path,
                         file,
+                        progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
                     },
                 );
             let file_name = remote_path
@@ -5528,6 +5547,7 @@ impl SshRuntime {
                     received: 0,
                     local_path,
                     file,
+                    progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
                 },
             );
         let file_name = remote_path.rsplit('/').next().unwrap_or("upload");
@@ -5654,20 +5674,28 @@ impl SshRuntime {
             .write_all(chunk)
             .map_err(|error| format!("Failed to spool upload chunk: {error}"))?;
         upload.received = upload.received.saturating_add(chunk.len() as u64);
-        emitter
-            .event(
-                "sftp/transfer/progress",
-                upload_progress_payload(
-                    task_id,
-                    &upload.session_id,
-                    None,
-                    upload.received,
-                    upload.expected_size,
-                    UploadPhase::Staging,
-                    "running",
-                ),
-            )
-            .map_err(plugin_error)?;
+        // 进度事件时间窗节流（progress_throttle）：每块一条 IPC 事件在
+        // 大文件下约 200 条/秒；末块（received 达到声明总量）必发，ack 与
+        // 终态事件不节流。
+        if upload
+            .progress_throttle
+            .should_emit(upload.expected_size > 0 && upload.received >= upload.expected_size)
+        {
+            emitter
+                .event(
+                    "sftp/transfer/progress",
+                    upload_progress_payload(
+                        task_id,
+                        &upload.session_id,
+                        None,
+                        upload.received,
+                        upload.expected_size,
+                        UploadPhase::Staging,
+                        "running",
+                    ),
+                )
+                .map_err(plugin_error)?;
+        }
         emitter
             .event(
                 "sftp/upload/ack",
@@ -5716,6 +5744,7 @@ impl SshRuntime {
             received: _,
             local_path,
             file,
+            progress_throttle: _,
         } = upload;
         drop(file);
         let transferred_bytes = Arc::new(AtomicU64::new(0));
@@ -5748,8 +5777,19 @@ impl SshRuntime {
                 if encoding == NameEncoding::Latin1 {
                     match this.raw_sftp_client(&session_id).await {
                         Ok(mut client) => {
+                            // 进度事件时间窗节流（progress_throttle）：每
+                            // 256KiB 一条 IPC 事件在 1GB 上传时约 200 条/秒；
+                            // 末块（bytes 达到声明总量）必发保证终值，终态
+                            // 事件由循环外 completed 照常无条件发射。
+                            let mut progress_throttle =
+                                crate::progress_throttle::ProgressThrottle::default();
                             let progress = |bytes: u64| {
                                 transferred_bytes.store(bytes, Ordering::Release);
+                                if !progress_throttle
+                                    .should_emit(expected_size > 0 && bytes >= expected_size)
+                                {
+                                    return Ok(());
+                                }
                                 emitter
                                     .event(
                                         "sftp/transfer/progress",
@@ -5799,6 +5839,9 @@ impl SshRuntime {
                     .map_err(sftp_error)?;
                 let mut transferred = 0_u64;
                 let mut buffer = vec![0_u8; TRANSFER_CHUNK_SIZE];
+                // 进度事件时间窗节流（progress_throttle）：终态事件由循环
+                // 外 completed/failed 照常无条件发射，末块必发保证终值。
+                let mut progress_throttle = crate::progress_throttle::ProgressThrottle::default();
                 loop {
                     if cancelled.load(Ordering::Acquire) {
                         let reason = cancel_reason
@@ -5825,6 +5868,11 @@ impl SshRuntime {
                     }
                     transferred = transferred.saturating_add(read as u64);
                     transferred_bytes.store(transferred, Ordering::Release);
+                    if !progress_throttle
+                        .should_emit(expected_size > 0 && transferred >= expected_size)
+                    {
+                        continue;
+                    }
                     emitter
                         .event(
                             "sftp/transfer/progress",
@@ -6042,6 +6090,7 @@ impl SshRuntime {
                     // sudo 车道本期不在限速范围（issue #66 收敛在 SFTP
                     // 下载），字段照常填充但快照取 0（不限速）。
                     throttle: Throttle::new(0),
+                    progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
                 },
             );
         emitter
@@ -6163,6 +6212,7 @@ impl SshRuntime {
                     sudo_tmp: None,
                     latin1,
                     throttle,
+                    progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
                 },
             );
         emitter
@@ -6331,6 +6381,7 @@ impl SshRuntime {
                     // 树任务的逐文件读取按 TreeDownloadState.latin1 判分支。
                     latin1: false,
                     throttle,
+                    progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
                 },
             );
         emitter
@@ -6351,6 +6402,23 @@ impl SshRuntime {
         Ok(
             json!({ "taskId": task_id, "fileName": file_name, "size": total, "chunkSize": TRANSFER_CHUNK_SIZE, "fileCount": file_count, "dirCount": dir_count, "skippedCount": skipped }),
         )
+    }
+
+    /// 把本地推进的树状态零拷贝转移回 registry（替代逐字段深拷贝）：动态容器
+    /// （files/failures/current/sink）整体 swap O(1)，标量直接赋值。调用后本地
+    /// `tree` 持有旧 registry 状态，调用方不得再读。每 chunk 深拷贝整树是
+    /// review 定位的下载热路径分配/锁竞争热点（万文件树 × 每 256KiB 一次）。
+    /// 入口处的 `download.tree.clone()`（每调用一次、从 registry 取初始状态）
+    /// 保留；若要彻底消除，需 registry 改存 `Arc<Mutex<TreeDownloadState>>`，
+    /// 字段访问面大，不在本切口内。
+    fn store_tree_state(tree_state: &mut TreeDownloadState, tree: &mut TreeDownloadState) {
+        tree_state.current_offset = tree.current_offset;
+        tree_state.files_done = tree.files_done;
+        tree_state.skipped = tree.skipped;
+        std::mem::swap(&mut tree_state.files, &mut tree.files);
+        std::mem::swap(&mut tree_state.failures, &mut tree.failures);
+        std::mem::swap(&mut tree_state.current, &mut tree.current);
+        std::mem::swap(&mut tree_state.sink, &mut tree.sink);
     }
 
     /// Chunk pump for folder downloads. `next_offset` stays the aggregate byte
@@ -6391,7 +6459,7 @@ impl SshRuntime {
                             .map_err(|_| "Download registry is poisoned".to_string())?;
                         if let Some(current) = downloads.get_mut(task_id) {
                             if let Some(tree_state) = current.tree.as_mut() {
-                                *tree_state = tree.clone();
+                                Self::store_tree_state(tree_state, &mut tree);
                             }
                         }
                     }
@@ -6518,7 +6586,9 @@ impl SshRuntime {
             emitter
                 .binary(&format!("sftp/download/{task_id}"), &payload)
                 .map_err(plugin_error)?;
-            {
+            // 进度事件时间窗节流（progress_throttle），eof 帧必发兜底树
+            // 收尾/文件切换的最终进度可见。
+            let emit_progress = {
                 let mut downloads = self
                     .downloads
                     .lock()
@@ -6530,22 +6600,38 @@ impl SshRuntime {
                     return Err("Download task changed while a chunk was in flight".to_string());
                 }
                 current.next_offset = next_offset;
-                if let Some(tree_state) = current.tree.as_mut() {
-                    *tree_state = tree.clone();
-                }
-            }
+                current
+                    .progress_throttle
+                    .should_emit(download.size > 0 && next_offset >= download.size)
+            };
             let current_remaining = tree
                 .current
                 .as_ref()
                 .map(|file| file.size - tree.current_offset)
                 .unwrap_or(0);
             let eof = sftp_tree::tree_eof(tree.files.len(), current_remaining);
-            emitter
-                .event(
-                    "sftp/transfer/progress",
-                    json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "fileCount": tree.file_count, "fileIndex": tree.files_done + u64::from(tree.current.is_some()), "currentFile": tree.current.as_ref().map(|file| file.relative.clone()) }),
-                )
-                .map_err(plugin_error)?;
+            if emit_progress || eof {
+                emitter
+                    .event(
+                        "sftp/transfer/progress",
+                        json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "fileCount": tree.file_count, "fileIndex": tree.files_done + u64::from(tree.current.is_some()), "currentFile": tree.current.as_ref().map(|file| file.relative.clone()) }),
+                    )
+                    .map_err(plugin_error)?;
+            }
+            // 树状态回写：零拷贝转移（store_tree_state），放在 eof/进度读取
+            // 之后——此前每 chunk 深拷贝整树（万文件树 × 每 256KiB 一次）且
+            // 在 registry 锁内进行，是下载热路径的分配与锁竞争热点。
+            {
+                let mut downloads = self
+                    .downloads
+                    .lock()
+                    .map_err(|_| "Download registry is poisoned".to_string())?;
+                if let Some(current) = downloads.get_mut(task_id) {
+                    if let Some(tree_state) = current.tree.as_mut() {
+                        Self::store_tree_state(tree_state, &mut tree);
+                    }
+                }
+            }
             return Ok(
                 json!({ "taskId": task_id, "offset": offset, "length": length, "eof": eof, "fileName": download.file_name }),
             );
@@ -6640,23 +6726,32 @@ impl SshRuntime {
         emitter
             .binary(&format!("sftp/download/{task_id}"), &payload)
             .map_err(plugin_error)?;
-        if let Some(current) = self
-            .downloads
-            .lock()
-            .map_err(|_| "Download registry is poisoned".to_string())?
-            .get_mut(task_id)
-        {
+        // 进度事件时间窗节流（progress_throttle）：每块一条 IPC 事件在
+        // 大文件下约 200 条/秒，直驱前端重渲染；终块必发保证进度条终值。
+        let emit_progress = {
+            let mut downloads = self
+                .downloads
+                .lock()
+                .map_err(|_| "Download registry is poisoned".to_string())?;
+            let current = downloads
+                .get_mut(task_id)
+                .ok_or("Download task was not found")?;
             if current.next_offset != offset {
                 return Err("Download task changed while a chunk was in flight".to_string());
             }
             current.next_offset = next_offset;
+            current
+                .progress_throttle
+                .should_emit(download.size > 0 && next_offset >= download.size)
+        };
+        if emit_progress {
+            emitter
+                .event(
+                    "sftp/transfer/progress",
+                    json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running" }),
+                )
+                .map_err(plugin_error)?;
         }
-        emitter
-            .event(
-                "sftp/transfer/progress",
-                json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running" }),
-            )
-            .map_err(plugin_error)?;
         Ok(
             json!({ "taskId": task_id, "offset": offset, "length": length, "eof": next_offset >= download.size, "fileName": download.file_name }),
         )
@@ -8514,6 +8609,11 @@ async fn delete_directory_tree(
     sftp: &Arc<AsyncMutex<SftpSession>>,
     root: String,
 ) -> Result<(), String> {
+    // Defense in depth: the caller already refuses "/" — keep the guard at
+    // the recursive implementation too, so no future call site can bypass it.
+    if root == "/" {
+        return Err("Refusing to recursively delete the filesystem root".to_string());
+    }
     let mut pending = vec![root];
     let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -8762,6 +8862,10 @@ async fn raw_delete_path(
 /// 裸包递归删除：后序遍历（先文件后目录），单通道串行，`.`/`..` 跳过。
 /// pub(crate)：MCP 工具面 sftp_remove 的 latin-1 递归分支复用（M17）。
 pub(crate) async fn raw_delete_tree(client: &mut RawSftpClient, root: &[u8]) -> Result<(), String> {
+    // 与 delete_directory_tree 同源的根守卫：调用方已拒绝 "/"，此处兜底。
+    if root == b"/" {
+        return Err("Refusing to recursively delete the filesystem root".to_string());
+    }
     let mut pending = vec![root.to_vec()];
     let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -11476,6 +11580,7 @@ matrix-ed25519";
                 sudo_tmp: None,
                 latin1: false,
                 throttle: Throttle::new(0),
+                progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
             },
         );
         let no_connection = |_: &str| String::new();
@@ -11574,6 +11679,7 @@ matrix-ed25519";
                     sudo_tmp: None,
                     latin1: false,
                     throttle: Throttle::new(0),
+                    progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
                 },
             );
         }

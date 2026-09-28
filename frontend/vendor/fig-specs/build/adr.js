@@ -1,0 +1,34 @@
+//#region ../../../../../../private/var/folders/4_/zmg595750zv57pwjdvllgrtc0000gn/T/dbx-fig-sync/fig-autocomplete-aef52acff84c/src/adr.ts
+var completionSpec = {
+	name: "adr",
+	description: "Manage Architectural Design Records",
+	subcommands: [
+		{
+			name: "init",
+			description: "Create an ADR directory in the root of your project, example usage: ' adr init doc/architecture/decisions'",
+			args: { name: "Location where to create the ADR, example 'adr init doc/architecture/decisions'" }
+		},
+		{
+			name: "new",
+			description: "Create a new, numbered ADR file",
+			options: [{
+				name: "-s",
+				description: "Create a new ADR that supercedes a previous one (ADR 9, for example), use the -s option",
+				args: {
+					name: "number",
+					description: "Which ADR to supercede"
+				}
+			}],
+			args: {
+				name: "ADR name",
+				description: "Name for the ADR separated with '-'"
+			}
+		},
+		{
+			name: "help",
+			description: "Built in help"
+		}
+	]
+};
+//#endregion
+export { completionSpec as default };

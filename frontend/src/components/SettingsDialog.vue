@@ -9,6 +9,7 @@
 import { computed, reactive, ref, watch } from "vue";
 import { ArrowDown, ArrowUp, Check, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, ShieldCheck, Trash2, Upload, X } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
+import PasswordField from "./PasswordField.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 import { Switch } from "./ui/switch";
@@ -151,7 +152,7 @@ function clampStartupDelayInput(raw: string): number {
   if (!Number.isFinite(value) || value < 0) return STARTUP_DELAY_DEFAULT_MS;
   return Math.min(value, STARTUP_DELAY_MAX_MS);
 }
-import { pluginStore } from "../lib/pluginStore";
+import { COMPLETION_ENGINE_KEY, loadCompletionEngine, pluginStore, sanitizeCompletionEngine, type CompletionEngineSetting } from "../lib/pluginStore";
 
 /** 连接级 SFTP 文件名编码覆盖（M16）：同启动命令的自治 RPC 读写
  * （`sftp_name_encoding_overrides` 键按 connectionId 分桶）。控件缺省
@@ -266,17 +267,19 @@ void loadRdpExperimentalPreference();
 
 void loadX11Preference();
 
-// 结构化补全开关（对标 Warp/fig，线 2）：组件内自治读写 pluginStore
-// （键 ssh-completion-spec，"false" = 关，默认开）——不走 props/emit，
-// App 在浮层弹出前直读同一键，无需事件同步。
-const SPEC_COMPLETION_ENABLED_KEY = "ssh-completion-spec";
-const specCompletionEnabled = ref(true);
+// 结构化补全引擎选择（FIG wave-1，契约 §2.3）：组件内自治读写 pluginStore
+// （键 ssh-completion-engine，fig-safe 默认 / fig / off）——不走 props/emit，
+// App 每次调度前直读同一键，无需事件同步。off = 无结构化浮层（历史/ghost
+// 不受影响）；fig 与 fig-safe 批次 1 行为相同，差异自 generator 接线起。
+const completionEngine = ref<CompletionEngineSetting>(loadCompletionEngine());
 
-function loadSpecCompletionEnabled(): boolean {
+function setCompletionEngine(next: string) {
+  const value = sanitizeCompletionEngine(next);
+  completionEngine.value = value;
   try {
-    return pluginStore.getItem(SPEC_COMPLETION_ENABLED_KEY) !== "false";
+    pluginStore.setItem(COMPLETION_ENGINE_KEY, value);
   } catch {
-    return true;
+    // 存储不可用（无宿主桥且 localStorage 受限）：仅当前会话生效。
   }
 }
 
@@ -294,17 +297,6 @@ function loadGhostEnabled(): boolean {
     return true;
   }
 }
-
-function setSpecCompletionEnabled(next: boolean) {
-  specCompletionEnabled.value = next;
-  try {
-    pluginStore.setItem(SPEC_COMPLETION_ENABLED_KEY, next ? "true" : "false");
-  } catch {
-    // 存储不可用（无宿主桥且 localStorage 受限）：仅当前会话生效。
-  }
-}
-
-specCompletionEnabled.value = loadSpecCompletionEnabled();
 
 function setGhostEnabled(next: boolean) {
   ghostEnabled.value = next;
@@ -447,6 +439,10 @@ const emit = defineEmits<{
 }>();
 
 const t = props.t;
+
+// 快速命令分栏实例：其删除确认弹层打开时，Esc 由本组件的 consumeInlineEsc
+// 转交子组件消费（与 App→本组件的逐层询问同构）。
+const quickCommandsRef = ref<InstanceType<typeof QuickCommandsSection> | null>(null);
 
 // 分类顺序对齐 Tabby 的设置页优先级：外观 / 配色方案 / 终端 / 快捷键 四个
 // 终端相关分类排在最前（Tabby 把 Appearance 与 Color scheme 标为 prioritized），
@@ -712,13 +708,13 @@ function saveCurrentTheme() {
   themeNameDraft.value = "";
 }
 
-function deleteTheme(theme: TerminalAppearanceProfile) {
-  if (!window.confirm(t("terminalAppearance.deleteThemeConfirm", { name: t(theme.name) }))) return;
+async function deleteTheme(theme: TerminalAppearanceProfile) {
+  if (!(await confirmDelete(t("terminalAppearance.deleteThemeConfirm", { name: t(theme.name) })))) return;
   emit("delete-theme", theme.id);
 }
 
-function removeCustomScheme(scheme: TerminalColorScheme) {
-  if (!window.confirm(t("terminalAppearance.importRemoveConfirm", { name: scheme.name }))) return;
+async function removeCustomScheme(scheme: TerminalColorScheme) {
+  if (!(await confirmDelete(t("terminalAppearance.importRemoveConfirm", { name: scheme.name })))) return;
   emit("remove-scheme", scheme.id);
 }
 
@@ -1078,7 +1074,7 @@ async function saveProfileDraft() {
 }
 
 async function removeProfile(profile: SudoProfileView) {
-  if (!window.confirm(t("profilesDeleteConfirm", { name: profile.name }))) return;
+  if (!(await confirmDelete(t("profilesDeleteConfirm", { name: profile.name })))) return;
   try {
     await window.dbxPlugin.invoke("sudo/profiles/delete", { id: profile.id });
     if (settingsDraft.quickSudoProfileId === profile.id) settingsDraft.quickSudoProfileId = "";
@@ -1123,7 +1119,7 @@ async function loadKnownHosts() {
 }
 
 async function removeKnownHost(entry: KnownHostEntry) {
-  if (!window.confirm(t("knownHosts.removeConfirm", { host: `${entry.host}:${entry.port}` }))) return;
+  if (!(await confirmDelete(t("knownHosts.removeConfirm", { host: `${entry.host}:${entry.port}` })))) return;
   try {
     await window.dbxPlugin.invoke("ssh/knownHosts/remove", { host: entry.host, port: entry.port });
     emit("notice", t("knownHosts.removed", { host: `${entry.host}:${entry.port}` }));
@@ -1254,6 +1250,12 @@ async function clearStoredSecrets() {
 /// Esc 分层退出：先关编辑表单，再收起配置档 section；返回 false 表示已到
 /// 最底层，调用方（App Esc 链）应关闭整个弹窗。
 function consumeInlineEsc(): boolean {
+  // 快速命令分栏的删除确认（子组件内打开的弹层）先消费 Esc。
+  if (quickCommandsRef.value?.consumeInlineEsc()) return true;
+  if (deleteConfirmState.value) {
+    resolveDeleteConfirm(false);
+    return true;
+  }
   if (profilesInlineOpen.value && profileEditing.value) {
     cancelProfileEdit();
     return true;
@@ -1263,6 +1265,24 @@ function consumeInlineEsc(): boolean {
     return true;
   }
   return false;
+}
+
+// 应用内删除确认：宿主沙箱 iframe 无 allow-modals，window.confirm 恒 false
+// （曾让删除按钮看起来完全失效）。promise 化，语义与原生 confirm 等价。
+const deleteConfirmState = ref<{ message: string; confirmLabel: string }>();
+let deleteConfirmResolver: ((accepted: boolean) => void) | undefined;
+function confirmDelete(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    resolveDeleteConfirm(false);
+    deleteConfirmResolver = resolve;
+    deleteConfirmState.value = { message, confirmLabel: t("delete") };
+  });
+}
+function resolveDeleteConfirm(accepted: boolean) {
+  deleteConfirmState.value = undefined;
+  const resolve = deleteConfirmResolver;
+  deleteConfirmResolver = undefined;
+  resolve?.(accepted);
 }
 
 /// 下载询问弹窗勾选「设为默认」/目录选择器回填后，App 同步设置页草稿
@@ -1611,7 +1631,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                 </label>
                 <label class="settings-field">
                   <span>{{ t("profilesPassword") }}</span>
-                  <input v-model="profileDraft.sudoPassword" type="password" autocomplete="off" :placeholder="profileDraftHadPassword ? t('profilesPasswordKeep') : t('settingsSudoPasswordPlaceholder')" />
+                  <PasswordField v-model="profileDraft.sudoPassword" :placeholder="profileDraftHadPassword ? t('profilesPasswordKeep') : t('settingsSudoPasswordPlaceholder')" :t="t" />
                 </label>
                 <label class="settings-field">
                   <span>{{ t("settingsTotp") }}</span>
@@ -1655,7 +1675,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             <template v-if="!boundProfile">
             <label class="settings-field">
               <span>{{ t("settingsSudoPassword") }}</span>
-              <input v-model="settingsDraft.sudoPassword" type="password" autocomplete="off" :placeholder="settingsMeta?.sudoPasswordSet ? t('settingsConfigured') : t('settingsSudoPasswordPlaceholder')" />
+              <PasswordField v-model="settingsDraft.sudoPassword" :placeholder="settingsMeta?.sudoPasswordSet ? t('settingsConfigured') : t('settingsSudoPasswordPlaceholder')" :t="t" />
             </label>
             <label class="settings-field">
               <span>{{ t("settingsTotp") }}</span>
@@ -2028,11 +2048,18 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <input v-model="suggestionMaxCharsDraft" type="number" min="8" max="512" step="1" @change="suggestionMaxCharsDraft = String(Math.min(512, Math.max(8, Number.parseInt(suggestionMaxCharsDraft, 10) || 64)))" />
             </label>
             <p class="muted settings-note">{{ t("suggestions.settingsMaxCharsHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="specCompletionEnabled" size="sm" @update:model-value="setSpecCompletionEnabled(Boolean($event))" />
-              <span>{{ t("completionMenu.settingsEnabled") }}</span>
+            <label class="settings-field">
+              <span>{{ t("completionMenu.engine") }}</span>
+              <Select :model-value="completionEngine" @update:model-value="setCompletionEngine(String($event))">
+                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="fig-safe">{{ t("completionMenu.engineFigSafe") }}</SelectItem>
+                  <SelectItem value="fig">{{ t("completionMenu.engineFig") }}</SelectItem>
+                  <SelectItem value="off">{{ t("completionMenu.engineOff") }}</SelectItem>
+                </SelectContent>
+              </Select>
             </label>
-            <p class="muted settings-note">{{ t("completionMenu.settingsEnabledHint") }}</p>
+            <p class="muted settings-note">{{ t("completionMenu.engineHint") }}</p>
 
             <!-- 行内 ghost 自动建议（np8，对标 Warp/fish）：追加于「终端行为」组末尾；
                  组件内自治读写 pluginStore（ssh-terminal-ghost-suggest），即时上抛 App。 -->
@@ -2063,6 +2090,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                  工具条弹层（高频），新建/编辑/导入在此管理。 -->
             <div v-show="settingsCategory === 'commands'" class="settings-pane">
             <QuickCommandsSection
+              ref="quickCommandsRef"
               :commands="quickCommands"
               :saving="quickSaving"
               :importing="quickImporting"
@@ -2199,7 +2227,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <label class="settings-field">
               <span>{{ t("profilesPassword") }}</span>
-              <input v-model="profileDraft.sudoPassword" type="password" autocomplete="off" :placeholder="profileDraftHadPassword ? t('profilesPasswordKeep') : t('settingsSudoPasswordPlaceholder')" />
+              <PasswordField v-model="profileDraft.sudoPassword" :placeholder="profileDraftHadPassword ? t('profilesPasswordKeep') : t('settingsSudoPasswordPlaceholder')" :t="t" />
             </label>
             <label class="settings-field">
               <span>{{ t("settingsTotp") }}</span>
@@ -2236,6 +2264,17 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
           </template>
         </div>
         <footer><button @click="emit('update:profilesOpen', false)">{{ t("close") }}</button></footer>
+      </DialogContent>
+    </Dialog>
+    <!-- 通用删除确认：替代 window.confirm（沙箱 iframe 无 allow-modals，confirm 恒 false）。
+         Esc 由 App 链经 consumeInlineEsc 收口，此处 .prevent 防 reka 双关。 -->
+    <Dialog :open="!!deleteConfirmState" @update:open="(open) => { if (!open) resolveDeleteConfirm(false); }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <template v-if="deleteConfirmState">
+          <header><DialogTitle>{{ t("confirm") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="resolveDeleteConfirm(false)"><X /></button></header>
+          <div class="destructive-copy"><div><strong>{{ deleteConfirmState.message }}</strong></div></div>
+          <footer><button @click="resolveDeleteConfirm(false)">{{ t("cancel") }}</button><button class="danger-button" @click="resolveDeleteConfirm(true)">{{ deleteConfirmState.confirmLabel }}</button></footer>
+        </template>
       </DialogContent>
     </Dialog>
 </template>

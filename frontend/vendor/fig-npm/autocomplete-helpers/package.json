@@ -1,0 +1,32 @@
+{
+  "name": "@fig/autocomplete-helpers",
+  "version": "2.0.0",
+  "description": "Helper functions for fig completion specs",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "files": [
+    "dist/"
+  ],
+  "author": "Fig Team",
+  "dependencies": {
+    "semver": "^7.6.3"
+  },
+  "devDependencies": {
+    "@tsconfig/recommended": "^1.0.7",
+    "@types/node": "^22.5.2",
+    "@types/semver": "^7.5.8",
+    "prettier": "^3.3.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.4",
+    "@withfig/autocomplete-types": "^1.31.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "clean": "rm -rf dist/",
+    "build": "pnpm clean && tsc",
+    "test": "tsx test/index.ts && vitest --run"
+  }
+}

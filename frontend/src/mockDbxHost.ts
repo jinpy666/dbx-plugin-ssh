@@ -1604,7 +1604,11 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     if (index >= 0) bookmarksState.splice(index, 1);
     result = { success: true, removed: index >= 0 };
   }
-  else result = { success: true };
+  // 严格化（docs/MOCK_HOST_STRICTNESS_PLAN.zh-CN.md）：未实现的方法显式
+  // 报错而非静默成功——静默成功会把调用侧的方法名/参数回归吞成「成功」，
+  // 让 GUI 走查与真实宿主行为系统性背离。处理三选一见
+  // scripts/mock_host_registry_check.mjs（实现桩 / ALLOWLIST / SKIP）。
+  else throw new Error(`[mockDbxHost] unimplemented method: ${method}`);
   return result as T;
 };
 

@@ -1,0 +1,40 @@
+NOTICE — Fig / Amazon Q autocomplete engine & specifications
+=============================================================
+
+This product incorporates, in vendored form:
+
+1. The Fig autocomplete specification corpus ("specs")
+   from https://github.com/withfig/autocomplete
+   (commit aef52acff84c45edde61ae610cc2c964802b9a38), licensed under the MIT License
+   (Copyright (c) 2021 Hercules Labs Inc. (Fig)). See frontend/vendor/fig-specs/LICENSE.
+
+2. The Fig autocomplete TypeScript parser engine
+   from https://github.com/aws/amazon-q-developer-cli
+   (packages/autocomplete-parser, packages/shell-parser, packages/shared at
+   commit 5c621df6fd3112eb44da02132cde06cad25cb418; the subtree was removed upstream in
+   09aa3cbad570f8fa89ce72c617721557fba4243e), licensed under MIT OR Apache-2.0.
+   See frontend/vendor/amazon-q-autocomplete/LICENSE-MIT and LICENSE-APACHE.
+
+3. npm packages "@fig/autocomplete-shared" 1.1.2,
+   "@fig/autocomplete-generators" 2.4.0, "@fig/autocomplete-helpers" 2.0.0
+   and "semver" 7.7.2, vendored under frontend/vendor/fig-npm/ (MIT).
+
+Completion specifications are derived from the public Fig/Amazon Q
+autocomplete ecosystem and are not part of the dbx-plugin-ssh original
+specification set.
+
+Vendoring-time modifications (semantics preserved, mechanical only):
+- packages/autocomplete-parser/src/parseArguments.ts: added the "export"
+  keyword to the existing module-local functions updateState and
+  getInitialState so the synchronous driver in
+  frontend/src/lib/completion/fig/figCompletionSource.ts can drive the
+  upstream state machine without the async filesystem/CDN spec loader that
+  upstream's parseArguments() entry point requires.
+- All other upstream files are byte-identical to the pinned commits.
+
+Host-coupled surfaces (fs/CDN spec loading, desktop settings, shell
+execution) are replaced by isolation facades in
+frontend/vendor/amazon-q-autocomplete/facades/ — see that directory's
+README for the full mapping. Generator execution is disabled in wave 1
+(declared generator positions resolve to null / pass-through);
+wave 2 routes them through the sidecar RPC completion/execute.

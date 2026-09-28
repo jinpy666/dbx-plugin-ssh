@@ -4,7 +4,8 @@
 // （ssh/quickCommands/* RPC）留在 App——save/import 落库后 App 会整体替换
 // commands 数组，组件据此收口子视图。
 import { computed, reactive, ref, watch } from "vue";
-import { ArrowLeft, FileUp, Pencil, Trash2 } from "@lucide/vue";
+import { ArrowLeft, FileUp, Pencil, Trash2, X } from "@lucide/vue";
+import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { QUICK_COMMAND_NAME_MAX_LENGTH, QUICK_COMMAND_TEXT_MAX_LENGTH, type QuickCommand } from "../lib/quickCommands";
 import { mergeQuickCommandImport, parseQuickCommandImport } from "../lib/quickCommandImport";
 
@@ -100,10 +101,26 @@ function saveCommand() {
   emit("save", { id: draft.id, name: draft.name.trim(), command });
 }
 
-/** 删除是不可逆操作：先确认（与既有工具条删除同一 confirm 语义）。 */
-function deleteCommand(id: string) {
+/** 删除是不可逆操作：先确认（应用内弹窗——宿主沙箱 iframe 无 allow-modals，
+ *  window.confirm 恒 false，曾让删除按钮看起来完全失效）。 */
+const deleteConfirmState = ref<{ message: string }>();
+let deleteConfirmResolver: ((accepted: boolean) => void) | undefined;
+function confirmDelete(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    resolveDeleteConfirm(false);
+    deleteConfirmResolver = resolve;
+    deleteConfirmState.value = { message };
+  });
+}
+function resolveDeleteConfirm(accepted: boolean) {
+  deleteConfirmState.value = undefined;
+  const resolve = deleteConfirmResolver;
+  deleteConfirmResolver = undefined;
+  resolve?.(accepted);
+}
+async function deleteCommand(id: string) {
   const target = props.commands.find((item) => item.id === id);
-  if (target && !window.confirm(t("quickCommandDeleteConfirm", { name: target.name || target.command }))) return;
+  if (target && !(await confirmDelete(t("quickCommandDeleteConfirm", { name: target.name || target.command })))) return;
   emit("delete", id);
 }
 
@@ -114,6 +131,16 @@ function confirmImport() {
   awaitingImportResult = true;
   emit("import", merge.accepted);
 }
+
+/** Esc 收口：删除确认打开时由父级 SettingsDialog 的 consumeInlineEsc 询问。 */
+function consumeInlineEsc(): boolean {
+  if (deleteConfirmState.value) {
+    resolveDeleteConfirm(false);
+    return true;
+  }
+  return false;
+}
+defineExpose({ consumeInlineEsc });
 </script>
 
 <template>
@@ -177,6 +204,17 @@ function confirmImport() {
       </footer>
     </template>
   </div>
+  <!-- 删除确认：应用内弹窗（沙箱 iframe confirm 恒 false）。Esc 由父级
+       SettingsDialog 经 consumeInlineEsc 收口，此处 .prevent 防 reka 双关。 -->
+  <Dialog :open="!!deleteConfirmState" @update:open="(open) => { if (!open) resolveDeleteConfirm(false); }">
+    <DialogContent class="modal small-modal" @escape-key-down.prevent>
+      <template v-if="deleteConfirmState">
+        <header><DialogTitle>{{ t("confirm") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="resolveDeleteConfirm(false)"><X /></button></header>
+        <div class="destructive-copy"><div><strong>{{ deleteConfirmState.message }}</strong></div></div>
+        <footer><button @click="resolveDeleteConfirm(false)">{{ t("cancel") }}</button><button class="danger-button" @click="resolveDeleteConfirm(true)">{{ t("delete") }}</button></footer>
+      </template>
+    </DialogContent>
+  </Dialog>
 </template>
 
 <style scoped>

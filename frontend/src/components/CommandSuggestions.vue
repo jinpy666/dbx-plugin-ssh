@@ -41,29 +41,36 @@ const rootEl = ref<HTMLElement | null>(null);
 const placement = ref<"below" | "above">("below");
 const overlayBottom = ref(0);
 const constrainedHeight = ref(0);
-const clampedLeft = ref(0);
+// 悬停武装（与 CompletionMenu 同款）：静止指针不得抢占键盘选择，指针在
+// 浮层上真实移动过才允许 hover 激活；条目/锚点变化即解除。
+const hoverArmed = ref(false);
 
-// DOM 更新后按浮层实际高度选放置侧：条目数/锚点变化都重测。宿主高度取
-// 包含块（terminal-pane）实测，不依赖外部下发，batch-bar 让位等也自动正确。
+// DOM 更新后按浮层实际高度选放置侧：条目数/锚点变化都重测。空间判定用
+// 终端可视底界（props.viewport = terminal-host 净高）；翻转的 CSS bottom 偏移
+// 用定位包含块（terminal-pane）实测高度——批量条/标记条让位时 host 比 pane
+// 矮（inset-bottom），用 host 高度会把浮层压低一条内缩量、盖住输入行。
 watchEffect(() => {
   const el = rootEl.value;
   const anchor = props.anchor;
   void props.items.length;
+  hoverArmed.value = false;
   if (!el || !anchor) {
     placement.value = "below";
     constrainedHeight.value = 0;
     return;
   }
   const viewportWidth = el.parentElement?.clientWidth ?? 0;
-  const viewportHeight = props.viewport?.height || el.parentElement?.clientHeight || 0;
+  const hostHeight = props.viewport?.height || 0;
+  const containerHeight = el.parentElement?.clientHeight || hostHeight;
+  const spaceViewport = hostHeight || containerHeight;
   const cellHeight = anchor.cellHeight ?? 0;
   // scrollHeight 而非 offsetHeight：浮层被 max-height 压扁后再次测量，
   // offsetHeight 是受限高、scrollHeight 仍是内容真实高，条目增减时放置
   // 决策不会被上一轮的限制污染。
   const naturalHeight = el.scrollHeight;
-  placement.value = chooseOverlayPlacement(anchor.y, cellHeight, naturalHeight, viewportHeight);
-  overlayBottom.value = flippedOverlayBottom(anchor.y, viewportHeight);
-  const available = overlayMaxHeight(placement.value, anchor.y, cellHeight, viewportHeight);
+  placement.value = chooseOverlayPlacement(anchor.y, cellHeight, naturalHeight, spaceViewport);
+  overlayBottom.value = flippedOverlayBottom(anchor.y, containerHeight);
+  const available = overlayMaxHeight(placement.value, anchor.y, cellHeight, spaceViewport);
   constrainedHeight.value = available > 0 && available < naturalHeight ? available : 0;
 }, { flush: "post" });
 
@@ -101,10 +108,15 @@ function segments(command: string, indices: number[]): Segment[] {
 }
 
 const sourceLabel = (item: CommandSuggestion) => (item.source === "quick" ? props.t("suggestions.sourceQuick") : props.t("suggestions.sourceHistory"));
+
+/** hover 激活只在指针于浮层上移动过之后生效（防弹出位置的静止指针抢选）。 */
+function onRowEnter(index: number) {
+  if (hoverArmed.value) emit("activate", index);
+}
 </script>
 
 <template>
-  <div ref="rootEl" class="command-suggestions" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="listbox" :aria-label="t('suggestions.title')">
+  <div ref="rootEl" class="command-suggestions" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="listbox" :aria-label="t('suggestions.title')" @pointermove="hoverArmed = true">
     <button
       v-for="(item, index) in items"
       :key="`${item.source}-${item.command}`"
@@ -114,7 +126,7 @@ const sourceLabel = (item: CommandSuggestion) => (item.source === "quick" ? prop
       role="option"
       :aria-selected="index === activeIndex"
       :title="`${sourceLabel(item)} · ${t('suggestions.fillHint')}`"
-      @mouseenter="emit('activate', index)"
+      @mouseenter="onRowEnter(index)"
       @mousedown.prevent
       @click="emit('fill', item)"
     >

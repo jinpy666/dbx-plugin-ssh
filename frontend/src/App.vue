@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type CSSProperties } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
@@ -130,8 +130,10 @@ import { sampleTransferSpeed, type TransferSpeedSample } from "./lib/transferSpe
 import { buildPasteConfirmation, type PasteConfirmation } from "./lib/dangerousCommands";
 import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib/clipboardBridge";
 import { filesFromClipboard } from "./lib/clipboardFiles";
-import { friendlySftpError } from "./lib/sftpErrors";
+import { friendlySftpError, shouldOfferSudoRetryAfterFollowFailure } from "./lib/sftpErrors";
 import { filterDiskMounts, filterNetworkInterfaces } from "./lib/metricsView";
+import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "./lib/paneLayout";
+import { computeWindow } from "./lib/virtualWindow";
 import type { GpuOverviewView, NpuOverviewView } from "./lib/metricsGpuNpu";
 import { isCountdownActive, nextCountdownValue, RECORD_COUNTDOWN_START } from "./lib/recordingCountdown";
 import { expandSelection, filterSftpEntries, type SftpTypeFilter } from "./lib/sftpFileFilters";
@@ -150,14 +152,21 @@ import {
 import { browseCommandHistory, commandInputAction, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "./lib/commandSuggestions";
 import { classifyGhostInput, createGhostState, evaluateGhost, nextGhostState, ghostMenuSuppressed, type TerminalGhostState } from "./lib/terminalGhostSuggest";
-import { cursorAbsoluteRow, cursorViewportRow } from "./lib/terminalAnchor";
+import { cursorAbsoluteRow, cursorViewportRow, measureCellSizeFromDom } from "./lib/terminalAnchor";
 import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "./lib/suggestionGuard";
-// 结构化补全（对标 Warp/fig，线 2）：spec 命中时优先于历史建议浮层展示
-// 带描述的命令/flag/值候选；开关读 pluginStore（SettingsDialog 自治写入）。
-import { matchSpecLine, SPEC_COMPLETION_MAX_ROWS, type CompletionLevel, type CompletionRow, type SpecMatch } from "./lib/completions/spec";
-import { pickDynamicCompletionProvider, registerDynamicCompletionProvider } from "./lib/completions/provider";
-import { createRemoteFsProvider } from "./lib/completions/remoteFsProvider";
-import { COMPLETION_SPECS } from "./lib/completions/specs";
+// 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
+// （vendored amazon-q parser + 全量语料，经冻结接缝 FigCompletionSource 注入
+// CompletionController）；legacy 补全目录已退役，无命中即
+// pass-through（菜单关、Tab 交 shell），不造假候选。
+import { CompletionController, type CompletionGeneratorChannel } from "./lib/completion/CompletionController";
+import { applyEditToText } from "./lib/completion/core/edit";
+import { rankItems } from "./lib/completion/core/ranking";
+import type { CompletionEdit, CompletionItem, CompletionResponse } from "./lib/completion/core/types";
+import { resolveCompletionKey, type CompletionKeyboardState } from "./lib/completion/keyboard";
+import { figCompletionSource } from "./lib/completion/fig/figCompletionSource";
+import { createEngineRunner } from "./lib/completion/worker/engineRunner";
+import { withShellBuiltinsSource, detectShellKind } from "./lib/completion/shell/shellBuiltins";
+import { GeneratorScheduler } from "./lib/completion/fig/generatorScheduler";
 import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
@@ -167,7 +176,7 @@ import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normaliz
 import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./lib/pluginContext";
 import { clampFontSize } from "./lib/terminalZoom";
 import { loadLastConnectParams } from "./lib/connectLastParams";
-import { pluginStore } from "./lib/pluginStore";
+import { pluginStore, loadCompletionEngine } from "./lib/pluginStore";
 import { loadTerminalFontOverride, persistTerminalFontFamily, persistTerminalFontSize, resolveTerminalFont, type TerminalFontOverride } from "./lib/terminalFont";
 import { MIB, settingsErrorOf } from "./lib/settingsModel";
 import type { DownloadConflictPolicy } from "./lib/downloadPrefs";
@@ -473,6 +482,8 @@ interface WorkbenchState {
   splitRatio?: number;
   paneOrder?: SshWorkbenchPaneOrder;
   sftpPaneOpen?: boolean;
+  /** Docker 停靠面板拖宽后的 px 宽度（未拖过不落盘，走 CSS 默认）。 */
+  dockerPaneWidth?: number;
   visibleColumns?: SftpColumn[];
   sftpColumnWidths?: Partial<Record<SftpColumn, number>>;
   sftpNameWidth?: number | null;
@@ -906,159 +917,182 @@ const ghostAnchor = ref<{ x: number; y: number } | null>(null);
 // 门状态非响应式：只有 evaluateGhost 的产物（ghostMatch）进渲染。
 let ghostGate: TerminalGhostState = createGhostState();
 
-// 结构化补全浮层（对标 Warp/fig，线 2）：spec 命中时取代历史建议浮层；
+// 结构化补全浮层（FIG wave-1 最终架构）：唯一来源 = fig 引擎，经冻结接缝
+// FigCompletionSource 注入 CompletionController（解析→防抖→guard→菜单）。
 // 行缓冲/锚点语义与 suggestion* 一致（pendingTerminalInput +
-// readTerminalSuggestionAnchor）。开关存 pluginStore（"false" = 关，默认开），
-// SettingsDialog 开关行内联自治读写，本处每次弹出前直读（无缓存即时生效）。
-const COMPLETION_SPEC_ENABLED_KEY = "ssh-completion-spec";
+// readTerminalSuggestionAnchor）。引擎三态存 pluginStore
+// （ssh-completion-engine：fig-safe 默认 / fig / off），SettingsDialog 下拉
+// 自治写入，本处每次调度前直读（无缓存即时生效）。
+// 批次 2-1 接线：真实 figCompletionSource（vendored amazon-q parser + 全量
+// 语料）DEV/生产同源；声明式 generator 位经 GeneratorScheduler → hostClient
+// （completion/execute，目标机执行）异步补齐，静态候选先行（两段渲染）。
+// fig-safe 与 fig 本批次 generator 行为相同；off 时 controller 不调度。
+// 类型不标注冻结接口：collectGenerators 是 impl 上的批次 2-1 第二通道。
+// 批次 2-2 接线：engine runner 包裹同一 source——支持 data-URL worker 的环境
+// 走 worker 线程（resolve 返回 Promise，controller 三重 guard 异步交付），
+// 否则/崩溃两次后永久主线程直跑（§44），调用方无感。
+// Windows shell 兜底（用户反馈：cmd/PowerShell 无提示）：runner 外侧再包一层
+// 内建命令 source——fig 语料 pass-through 且提示符判出 PowerShell/cmd 时，
+// 命令名位补 cmdlet/内建命令候选；detect 读 xterm buffer，只能在主线程，
+// 故必须在 runner（worker）外侧包装，worker 内不感知。
+const completionEngineSource = createEngineRunner({ createSource: () => figCompletionSource });
+const completionSource = withShellBuiltinsSource(completionEngineSource, sniffTerminalShell);
+
+// 声明式 generator 调度：目标取当前会话（ssh 优先，其次本地；串口无可执行
+// 目标 → null 即不执行），cwd 用 OSC 7/633 跟踪值（terminalCwd）。
+const completionScheduler = new GeneratorScheduler({
+  // E lane 裁决：runner 只代理冻结接口的 resolve；槽位提取轻量且 generator
+  // 执行面在目标机（completion/execute），collect 维持主线程直引单例。
+  collect: (request) => figCompletionSource.collectGenerators(request),
+  target: () => {
+    const sshSessionId = session.value?.sessionId;
+    if (sshSessionId) return { kind: "ssh", sessionId: sshSessionId };
+    const localSessionId = localSession.value?.sessionId;
+    if (localSessionId) return { kind: "local", sessionId: localSessionId };
+    return null;
+  },
+  cwd: () => (terminalCwd.value ? terminalCwd.value : null),
+});
+const completionGeneratorChannel: CompletionGeneratorChannel = {
+  slots: (request) => completionScheduler.slots(request),
+  run: (slot) => completionScheduler.run(slot),
+};
 const completionOpen = ref(false);
-const completionRows = ref<CompletionRow[]>([]);
-const completionLevel = ref<CompletionLevel>("sub");
-const completionCommandPath = ref<string[]>([]);
+const completionItems = ref<CompletionItem[]>([]);
 const completionActiveIndex = ref(0);
 const completionAnchor = ref<SuggestionAnchor | null>(null);
-// 候选 token 的 replacement 范围（parser 给出的行尾 token 边界，随菜单
-// 打开/刷新更新）：接受候选项时按范围精确替换，不再用 /\S+$ 反推边界
-// （review 第一批遗留）。null = 无范围（不发生，兜底走行尾 token 规则）。
-const completionReplaceRange = ref<{ start: number; end: number } | null>(null);
-
-function completionSpecEnabled(): boolean {
-  try {
-    return pluginStore.getItem(COMPLETION_SPEC_ENABLED_KEY) !== "false";
-  } catch {
-    return true;
-  }
-}
+// generator 在途占位态（§31）：true 仅表示「无静态候选、动态候选在途」的
+// loading 浮层（零条目占位行，Tab/Enter 放行 shell）；静态候选照常先行。
+const completionLoading = ref(false);
+// 结构化补全输入门：仅 onData 常规键入路径（refreshSuggestionsAfterInput 的
+// guard.show 分支）放行调度。粘贴/快速命令/本地重跑等旁路写入不开浮层
+// （与基线一致）；guard 抑制（alternate screen/跟随程序锁存/历史建议总开关
+// 关）同样关门。controller 在 lineChanged 调度时与 dispatch 前各查一次。
+let completionInputAllowed = false;
 
 function closeCompletionMenu() {
   completionOpen.value = false;
-  completionRows.value = [];
+  completionItems.value = [];
   completionActiveIndex.value = 0;
-  completionReplaceRange.value = null;
+  completionLoading.value = false;
 }
 
-function openCompletionMenu(match: SpecMatch) {
-  completionCommandPath.value = match.commandPath;
-  completionLevel.value = match.level;
-  completionRows.value = match.rows;
+/** 响应落地：ready（rankItems 排序截断后非空）开浮层；loading（generator
+ *  在途且无静态候选）仅当浮层已开时切占位行——不主动开菜单（用户反馈：
+ *  generator 位逐键闪出"加载中"悬浮层，属未请求的自动弹出）；pass-through
+ *  关。首帧 ready 到达才开浮层，与 Warp/VS Code 的"无候选不弹"一致。 */
+function handleCompletionResponse(response: CompletionResponse) {
+  if (response.state === "ready" && response.items.length) {
+    completionLoading.value = false;
+    openCompletionMenu(response);
+  } else if (response.state === "loading" && completionOpen.value) {
+    completionLoading.value = true;
+    completionItems.value = [];
+    completionActiveIndex.value = 0;
+    completionAnchor.value = readTerminalSuggestionAnchor();
+  } else if (response.state !== "loading") {
+    closeCompletionMenu();
+  }
+}
+
+function openCompletionMenu(response: CompletionResponse) {
+  const items = rankItems(response.items);
+  if (!items.length) {
+    closeCompletionMenu();
+    return;
+  }
+  completionItems.value = items;
   completionActiveIndex.value = 0;
-  completionReplaceRange.value = { start: match.replaceStart, end: match.replaceEnd };
   completionAnchor.value = readTerminalSuggestionAnchor();
   completionOpen.value = true;
-  // hint 层（动态值）异步询问 provider：有注册的 provider 且返回候选时，
-  // 占位 hint 行被真实候选替换；未注册时保持 hint + Tab 透传（零回归）。
-  void fetchDynamicCompletionRows(match);
-}
-
-// 动态 provider 询问（review 第三批地基）：递增 token 使过期响应作废
-// （菜单已关 / 行已变 / 更新的请求已发出时丢弃）；超时兜底防远端卡死。
-let dynamicCompletionFetchToken = 0;
-const DYNAMIC_COMPLETION_TIMEOUT_MS = 1200;
-
-async function fetchDynamicCompletionRows(match: SpecMatch) {
-  // 只对"整层都是 hint"的动态层询问 provider：静态枚举/子命令已有真实候选。
-  if (!match.dynamic || !match.rows.length || match.rows.some((row) => row.kind !== "hint")) return;
-  const provider = pickDynamicCompletionProvider({ commandPath: match.commandPath, target: match.dynamic, prefix: "" });
-  if (!provider) return;
-  const token = ++dynamicCompletionFetchToken;
-  const lineAtRequest = pendingTerminalInput;
-  let values: string[] | null = null;
-  try {
-    values = await Promise.race([
-      provider.complete({ commandPath: match.commandPath, target: match.dynamic, prefix: "" }),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), DYNAMIC_COMPLETION_TIMEOUT_MS)),
-    ]);
-  } catch {
-    values = null;
-  }
-  if (token !== dynamicCompletionFetchToken || !values?.length) return;
-  if (!completionOpen.value || completionCommandPath.value.join(" ") !== match.commandPath.join(" ") || pendingTerminalInput !== lineAtRequest) return;
-  const providerRows: CompletionRow[] = values.slice(0, SPEC_COMPLETION_MAX_ROWS).map((value) => ({
-    kind: "value",
-    token: value,
-    space: true,
-    label: value,
-    description: provider.label,
-    score: 1000,
-  }));
-  completionRows.value = providerRows;
-  completionActiveIndex.value = 0;
 }
 
 /**
- * 结构化补全浮层的按键消费（review #120 跟进：菜单自动出现 ≠ 接管键盘）：
+ * 结构化补全浮层的按键消费（方案 §21，规则表固化在 keyboard.ts）：
  * ↑↓ 选择、Tab 填充静态候选、Esc 关闭；**Enter 恒定放行 shell 执行当前行**
- * （return false 不消费，回车字节照发 PTY）；动态 hint 行（token 空，本地
- * 不可枚举）时 Tab 也放行——远程 shell 是最后一级 completion provider，
- * 不吃掉它的 Tab。
+ * （return false 不消费，回车字节照发 PTY）；generator 动态位置（hint 行）
+ * 与 loading 态的 Tab 同样放行——远程 shell 是最后一级 completion provider。
  */
 function handleCompletionKey(event: KeyboardEvent): boolean {
-  if (event.type !== "keydown" || !completionOpen.value || !completionRows.value.length) return false;
-  const rows = completionRows.value;
-  if (event.key === "ArrowDown") {
-    completionActiveIndex.value = (completionActiveIndex.value + 1) % rows.length;
-    return true;
-  }
-  if (event.key === "ArrowUp") {
-    completionActiveIndex.value = (completionActiveIndex.value - 1 + rows.length) % rows.length;
-    return true;
-  }
-  if (event.key === "Enter") {
-    // 执行当前输入行：关闭浮层后不消费，Enter 原样进 PTY。
-    closeCompletionMenu();
-    return false;
-  }
-  if (event.key === "Tab") {
-    const row = rows[completionActiveIndex.value];
-    if (!row.token) {
-      // 动态值（分支/文件/pod…）：本地只出占位提示，Tab 交给 shell 补全。
+  if (event.type !== "keydown" || !completionOpen.value) return false;
+  const items = completionItems.value;
+  // loading（generator 在途且无静态候选）时 Tab/Enter 放行 shell
+  // （keyboard.ts 规则表 §21：动态/generator 位置或 loading 一律透传）；
+  // 静态候选已就位则保持静态键盘模式（active 项可 Tab 接受）。
+  const state: CompletionKeyboardState = {
+    menuOpen: completionOpen.value,
+    hasItems: items.length > 0,
+    activeItemKind: items[completionActiveIndex.value]?.kind ?? null,
+    loading: completionLoading.value && items.length === 0,
+  };
+  switch (resolveCompletionKey(state, event.key)) {
+    case "accept": {
+      const item = items[completionActiveIndex.value];
+      if (item) acceptCompletionRow(item);
+      return true;
+    }
+    case "close":
+      closeCompletionMenu();
+      return true;
+    case "next":
+      completionActiveIndex.value = (completionActiveIndex.value + 1) % items.length;
+      return true;
+    case "prev":
+      completionActiveIndex.value = (completionActiveIndex.value - 1 + items.length) % items.length;
+      return true;
+    case "passthrough":
+      // Enter 恒执行当前行、Tab 交还 shell（静态候选外的透传面）：同基线，
+      // 放行前关闭浮层，避免 shell 自己的补全/执行与浮层叠加。
       closeCompletionMenu();
       return false;
-    }
-    acceptCompletionRow(row);
-    return true;
+    default:
+      return false;
   }
-  if (event.key === "Escape") {
-    closeCompletionMenu();
-    return true;
-  }
-  return false;
 }
 
-/** 接受候选项：替换行尾 token（保留命令前缀，issue #120「Enter 覆盖输入」）
- *  并按新行内容刷新（无后续候选则关闭）。 */
-function acceptCompletionRow(row: CompletionRow) {
-  if (!row.token) {
+/** 接受候选项（§24 映射）：item.edit 经 applyEditToText 应用后仍走
+ *  replaceTerminalLineWith（整行擦重打机制不变），随后同步刷新候选
+ *  （request 即时冲掉挂起的防抖，保持基线的无闪断刷新时序）。 */
+function acceptCompletionRow(item: CompletionItem) {
+  if (item.kind === "hint") {
     closeCompletionMenu();
     terminal?.focus();
     return;
   }
-  // replacement 范围由 matchSpecLine 的 parser 精确给出（含引号/转义的
-  // token 表面）；范围越界视为行已漂移，回落行尾 token 规则兜底。
-  const line = pendingTerminalInput;
-  const range = completionReplaceRange.value;
-  const usable = range !== null && range.end <= line.length;
-  const start = usable ? range.start : (/\S+$/.exec(line)?.index ?? line.length);
-  const end = usable ? range.end : line.length;
-  const suffix = row.space ? " " : "";
-  replaceTerminalLineWith(line.slice(0, start) + row.token + suffix + line.slice(end), false);
+  completionController.accept(item);
   refreshCompletionMenu();
   if (!completionOpen.value) terminal?.focus();
 }
 
-/** 按当前行缓冲重算结构化补全候选：无命中或无候选时关闭（回落历史建议）。 */
+/** 按当前行缓冲重算结构化补全候选：ready 开/刷新浮层，pass-through 关闭
+ *  （回落历史建议，由调用方处理）。 */
 function refreshCompletionMenu() {
-  if (!completionSpecEnabled()) {
-    closeCompletionMenu();
-    return;
-  }
-  const match = matchSpecLine(pendingTerminalInput, COMPLETION_SPECS);
-  if (match && match.rows.length) {
-    openCompletionMenu(match);
-  } else {
-    closeCompletionMenu();
-  }
+  completionController.request("typing");
 }
+
+// CompletionController（lib/completion）：调度中枢。enabled = 引擎三态
+// （off 即关）+ 输入门；session id 取当前会话（无会话空串，guard 兜底）；
+// generators 通道接声明式 generator 调度（两段渲染 + 三重 guard 在 controller）。
+const completionController = new CompletionController({
+  source: completionSource,
+  sessionId: () => session.value?.sessionId ?? localSession.value?.sessionId ?? serialSession.value?.sessionId ?? "",
+  readLine: () => pendingTerminalInput,
+  // 传输占用（zmodem/trzsz）与命令弹窗执行期间不开浮层（与 ghost 同门）：
+  // 输出流里的键入回显不该触发候选请求，更不该把悬浮层盖在输出上。
+  enabled: () =>
+    loadCompletionEngine() !== "off" &&
+    completionInputAllowed &&
+    !terminalTransferBusy.value &&
+    !commandRunning.value,
+  generators: completionGeneratorChannel,
+  onResponse: handleCompletionResponse,
+  onAcceptEdit: (edit: CompletionEdit) => {
+    // 替换范围由 source 的 CompletionEdit 给出（含引号/转义表面）；越界时
+    // applyEditToText 向行界收敛（行漂移防御），整行擦重打机制不变。
+    const applied = applyEditToText(pendingTerminalInput, edit);
+    replaceTerminalLineWith(applied.text, false);
+  },
+});
 
 // —— 快速命令数据面（M32-A3）：RPC 全部留在 App，编辑器/导入视图在
 // QuickCommandsSection（设置·终端），经 SettingsDialog 上抛意图。 ——
@@ -1363,6 +1397,10 @@ const sftpTypeFilter = ref<SftpTypeFilter>("all");
  *  用户可通过过滤栏眼睛图标切换。 */
 const sftpShowHidden = ref(false);
 const selectedUris = ref<string[]>([]);
+// 选中态热点查询走 Set：行 class 绑定与 selectedEntries 每次渲染对全部
+// 可见条目各查一次，数组 includes 是 O(条目×选中数)（万行目录 × 多选
+// 1000 项 ≈ 每帧千万次比较）；Set 写入仍走 selectedUris 数组。
+const selectedUriSet = computed(() => new Set(selectedUris.value));
 const lastClickedUri = ref("");
 const sftpClipboard = ref<SftpClipboard>();
 const pasteBusy = ref(false);
@@ -1931,14 +1969,13 @@ const connectionAuthMethodLabel = computed(() => formatAuthMethodLabel(connectio
 }));
 // 连接色染色按主题分级（light 压低 alpha 保 muted 文字 AA 对比度，P2-4）。
 const toolbarStyle = computed(() => toolbarTintStyle(connection.value.color, appearance.value.colorScheme));
-// 终端让宽：SFTP 分栏按用户拖拽比例；Docker 停靠面板为固定宽度（CSS 变量，
-// 见 style.css .panes），终端让出剩余宽度；两者同开时 SFTP 比例优先，其
-// flex:1 自行吸收 Docker 面板宽度。
-const terminalBasis = computed(() => {
-  if (sftpPaneOpen.value) return { flexBasis: `${splitRatio.value}%` };
-  if (dockerPanelOpen.value) return { flexBasis: "calc(100% - var(--docker-pane-width))" };
-  return { flexBasis: "100%" };
-});
+// 终端让宽（纯计算在 lib/paneLayout）：SFTP 分栏按用户拖拽比例；Docker 停靠
+// 面板宽度可拖（--docker-pane-width，见 style.css .panes 与 startDockerDividerDrag）。
+// 两者同开时终端在「(100% - Docker 宽)」内按 SFTP 比例取份额，SFTP flex:1 吸收
+// 剩余——两栏同显，不再互相挤没。
+const terminalBasis = computed(() => ({
+  flexBasis: terminalFlexBasis({ sftpOpen: sftpPaneOpen.value, dockerOpen: dockerPanelOpen.value, splitRatio: splitRatio.value }),
+}));
 const orderedPaneClass = computed(() => [
   paneOrder.value === "sftp-left" ? "panes panes--reversed" : "panes",
   sftpPaneOpen.value ? "" : "panes--solo",
@@ -1992,7 +2029,67 @@ const sftpGridStyle = computed(() => {
 });
 const sftpFiltersActive = computed(() => sftpSearch.value.trim() !== "" || sftpTypeFilter.value !== "all" || sftpShowHidden.value);
 const visibleEntries = computed(() => filterSftpEntries(sortedEntries.value, sftpSearch.value, sftpTypeFilter.value, sftpShowHidden.value));
-const selectedEntries = computed(() => entries.value.filter((entry) => selectedUris.value.includes(entry.uri)));
+
+// —— 文件列表窗口化（虚拟滚动）——
+// 渲染层只挂可见窗口的行（.file-row 30px + 上下 spacer 撑总高，滚动条比例
+// 真实）；选中、范围选择等逻辑层始终作用于全量 visibleEntries，与窗口无关。
+// 方案：docs/SFTP_LIST_VIRTUAL_SCROLL_PLAN.zh-CN.md。
+const FILE_ROW_HEIGHT_PX = 30;
+const FILE_ROW_OVERSCAN = 10;
+const fileRowsEl = ref<HTMLElement | null>(null);
+const fileRowsViewportHeight = ref(0);
+const fileScrollTop = ref(0);
+const virtualFileWindow = computed(() =>
+  computeWindow({
+    scrollTop: fileScrollTop.value,
+    viewportHeight: fileRowsViewportHeight.value,
+    rowHeight: FILE_ROW_HEIGHT_PX,
+    total: visibleEntries.value.length,
+    overscan: FILE_ROW_OVERSCAN,
+  }),
+);
+const windowedEntries = computed(() => visibleEntries.value.slice(virtualFileWindow.value.start, virtualFileWindow.value.end));
+
+function onFileRowsScroll(event: Event) {
+  fileScrollTop.value = (event.target as HTMLElement).scrollTop;
+}
+
+watch(fileRowsEl, (el, previous) => {
+  if (previous === el) return;
+  if (fileRowsResizeObserver) {
+    fileRowsResizeObserver.disconnect();
+    fileRowsResizeObserver = undefined;
+  }
+  if (!el) return;
+  fileRowsViewportHeight.value = el.clientHeight;
+  fileRowsResizeObserver = new ResizeObserver(() => {
+    if (fileRowsResizeTarget) fileRowsViewportHeight.value = fileRowsResizeTarget.clientHeight;
+  });
+  fileRowsResizeTarget = el;
+  fileRowsResizeObserver.observe(el);
+});
+let fileRowsResizeObserver: ResizeObserver | undefined;
+let fileRowsResizeTarget: HTMLElement | undefined;
+
+// 搜索输入防抖：大目录下每个按键 O(n) 过滤 + 全量 diff 明显掉帧；150ms
+// 静默期后一次性生效（footer 计数与过滤随之滞后一拍，可接受）。
+const SFTP_SEARCH_DEBOUNCE_MS = 150;
+const sftpSearchDraft = ref("");
+let sftpSearchDebounce: number | undefined;
+watch(sftpSearchDraft, (value) => {
+  window.clearTimeout(sftpSearchDebounce);
+  sftpSearchDebounce = window.setTimeout(() => {
+    sftpSearch.value = value;
+  }, SFTP_SEARCH_DEBOUNCE_MS);
+});
+onBeforeUnmount(() => window.clearTimeout(sftpSearchDebounce));
+
+function clearSftpSearch() {
+  window.clearTimeout(sftpSearchDebounce);
+  sftpSearchDraft.value = "";
+  sftpSearch.value = "";
+}
+const selectedEntries = computed(() => entries.value.filter((entry) => selectedUriSet.value.has(entry.uri)));
 const currentPathHistory = computed(() => pathHistories[connectionId.value] || []);
 const previewDirty = computed(() => previewEditable.value && previewDraft.value !== previewBaseline.value);
 // 编辑保存走 sftp/write 整文件覆写：只有完整加载（未截断）且不超直写上限的
@@ -2013,6 +2110,15 @@ function restoreUiState() {
   const state = initialState();
   currentPath.value = typeof state.sftpPath === "string" ? normalizeRemotePath(state.sftpPath) : "/";
   splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : 58;
+  dockerPaneWidth.value = typeof state.dockerPaneWidth === "number" ? clampDockerPaneWidth(state.dockerPaneWidth, window.innerWidth) : null;
+  // 恢复时 .panes 未必完成布局，上面以 window.innerWidth 近似容器宽；窗口窄于
+  // 窗口宽时持久化宽度可能越过容器 70% 上限，挂帧后用实测宽复钳一次校正。
+  void nextTick(() => {
+    const containerWidth = paneContainer.value?.clientWidth;
+    if (dockerPaneWidth.value != null && containerWidth) {
+      dockerPaneWidth.value = clampDockerPaneWidth(dockerPaneWidth.value, containerWidth);
+    }
+  });
   paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : "terminal-left";
   // Dock panel surface: the SFTP pane stays closed (no auto-list/auto-connect);
   // users who want SFTP open the workbench tab.
@@ -2046,6 +2152,7 @@ function writeWorkbenchState() {
     splitRatio: splitRatio.value,
     paneOrder: paneOrder.value,
     sftpPaneOpen: sftpPaneOpen.value,
+    dockerPaneWidth: dockerPaneWidth.value ?? undefined,
     visibleColumns: visibleColumns.value,
     columnsV2: true,
     sftpColumnWidths: { ...sftpColumnWidths },
@@ -3032,6 +3139,10 @@ function trackPendingInput(data: string) {
     else if (character === "\u007f") pendingTerminalInput = pendingTerminalInput.slice(0, -1);
     else if (character >= " ") pendingTerminalInput += character;
   }
+  // 行缓冲变更点（FIG wave-1 锚点）：revision 前进作废在途结果 + 防抖调度
+  // （输入门未放行时只作废不调度；常规键入路径随后由
+  // refreshSuggestionsAfterInput 的 request("typing") 即时冲掉防抖）。
+  completionController.lineChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -3042,11 +3153,21 @@ function trackPendingInput(data: string) {
 // 应答由 sidecar 直接注入 PTY，与 onData 用户输入不同源，永不入历史。
 // ---------------------------------------------------------------------------
 
-function closeSuggestions() {
+/** 仅收历史建议浮层（不 dismiss 补全调度）：历史建议无匹配的回落分支用。
+ *  worker 模式下本次键入的补全响应还在途——dismiss 会把 revision 顶掉，
+ *  响应到达时被三重 guard 丢弃，表现为"敲错→退格→再输入，补全不再弹出"
+ *  （每个键入都重复 dismiss → 永久失效，直到命中历史建议才恢复）。 */
+function closeSuggestionsOnly() {
   suggestionOpen.value = false;
   suggestionItems.value = [];
   suggestionActiveIndex.value = 0;
-  // 结构化补全浮层与历史建议浮层同一生命周期（Ctrl+C/回车/Esc 同步关闭）。
+}
+
+function closeSuggestions() {
+  closeSuggestionsOnly();
+  // 结构化补全浮层与历史建议浮层同一生命周期（Ctrl+C/回车/Esc 同步关闭）；
+  // dismiss 同步作废挂起调度与在途结果（revision 前进）。
+  completionController.dismiss();
   closeCompletionMenu();
 }
 
@@ -3073,6 +3194,9 @@ function suggestionTypingChar(data: string): string | null {
 /**
  * onData 每次输入后调用：推进抑制门状态并按需刷新浮层。
  * lineBefore 是本次输入前的行缓冲快照（\r 清空后仍能取到被执行的命令行）。
+ * 结构化补全（fig 引擎）经 CompletionController 调度：本函数是唯一放行
+ * completionInputAllowed 的地方（常规键入路径），旁路写入（粘贴/快速命令）
+ * 与 guard 抑制面一律关门。
  */
 function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   const alternateActive = terminal?.buffer.active.type === "alternate";
@@ -3080,6 +3204,7 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
 
   if (data.includes("\u0003")) {
     // Ctrl+C：打断当前行与跟随程序，锁存解除，浮层关闭。
+    completionInputAllowed = false;
     suggestionGuardState = canShowSuggestions({ alternateActive, lastCommand: null, typingChar: "\u0003" }, suggestionGuardState).state;
     lastTerminalCommand.value = null;
     closeSuggestions();
@@ -3088,12 +3213,14 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   if (data.includes("\r") || data.includes("\n")) {
     const executed = lineBefore.trim();
     if (executed) lastTerminalCommand.value = executed;
+    completionInputAllowed = false;
     suggestionGuardState = canShowSuggestions({ alternateActive, lastCommand: lastTerminalCommand.value, typingChar: null }, suggestionGuardState).state;
     closeSuggestions();
     return;
   }
   if (data.includes("\u001b")) {
     // 方向键/控制序列：不当作输入，浮层保持原状之外直接隐藏（无法追踪行内容）。
+    completionInputAllowed = false;
     closeSuggestions();
     return;
   }
@@ -3104,30 +3231,32 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   );
   suggestionGuardState = guard.state;
   if (!guard.show || !suggestionsEnabledState.value) {
+    completionInputAllowed = false;
     closeSuggestions();
     return;
   }
-  // 结构化补全（线 2）优先：行缓冲命中 spec 且有候选时展示结构化菜单并
-  // 跳过历史模糊建议；未命中回落下方历史建议浮层（两者并存、不替换）。
-  if (completionSpecEnabled()) {
-    const specMatch = matchSpecLine(pendingTerminalInput, COMPLETION_SPECS);
-    if (specMatch && specMatch.rows.length) {
-      suggestionOpen.value = false;
-      suggestionItems.value = [];
-      openCompletionMenu(specMatch);
-      return;
-    }
+  // 结构化补全（fig 引擎）优先：request 发起解析——worker 模式下响应异步
+  // 回来（三重 guard 保证过期结果不进 UI）；pass-through 关浮层并回落下方
+  // 历史建议浮层（两者并存、不替换，历史建议分支一行未动）。
+  completionInputAllowed = true;
+  completionController.request("typing");
+  if (completionOpen.value) {
+    suggestionOpen.value = false;
+    suggestionItems.value = [];
+    return;
   }
   closeCompletionMenu();
   const query = pendingTerminalInput;
   const bounds = suggestionSearchBounds();
   if (!commandSuggestionQueryAcceptable(query, bounds.minLength, bounds.maxLength)) {
-    closeSuggestions();
+    // 历史回落分支只收历史浮层：此处 dismiss 会顶掉本次键入在途的补全响应
+    // （见 closeSuggestionsOnly 注释），worker 模式下表现为补全永久失效。
+    closeSuggestionsOnly();
     return;
   }
   const items = runSuggestionSearch(query);
   if (!items.length) {
-    closeSuggestions();
+    closeSuggestionsOnly();
     return;
   }
   suggestionQuery.value = query;
@@ -3167,13 +3296,24 @@ function readTerminalCellFrame(): TerminalCellFrame | null {
   try {
     const core = (terminal as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } } })._core;
     const cell = core?._renderService?.dimensions?.css?.cell;
-    const cellWidth = cell?.width ?? 0;
-    const cellHeight = cell?.height ?? 0;
-    if (!(cellWidth > 0) || !(cellHeight > 0)) return null;
+    let cellWidth = cell?.width ?? 0;
+    let cellHeight = cell?.height ?? 0;
+    const screen = terminal.element?.querySelector(".xterm-screen");
+    // 渲染器尺寸读不到（未就绪/WebGL 恢复切换窗口期，Windows 上更常见）时用
+    // 渲染 DOM 实测兜底：此前直接 null → 浮层永久降级贴底、不跟随不翻转。
+    if (!(cellWidth > 0) || !(cellHeight > 0)) {
+      const fromDom = measureCellSizeFromDom(
+        screen ?? null,
+        terminal.element?.querySelector(".xterm-rows") ?? null,
+        terminal.cols,
+      );
+      if (!fromDom) return null;
+      cellWidth = fromDom.width;
+      cellHeight = fromDom.height;
+    }
     const buffer = terminal.buffer.active;
     // cursorY 已是视口内相对行；旧式 `cursorY - viewportY` 在回滚区出现后为负，浮层画出画布。
     const visibleRow = cursorViewportRow(buffer);
-    const screen = terminal.element?.querySelector(".xterm-screen");
     const hostRect = terminalHost.value.getBoundingClientRect();
     const origin = (screen ?? terminal.element)?.getBoundingClientRect();
     if (!origin) return null;
@@ -3203,6 +3343,35 @@ function readTerminalSuggestionAnchor(): SuggestionAnchor | null {
     cellHeight: frame.cellHeight,
     cellWidth: frame.cellWidth,
   };
+}
+
+// Windows shell 提示符采样（shellBuiltins 兜底源的 detect 回调）：光标行起
+// 向上至多 3 行里找 `PS C:\…>` / `C:\…>` 形态提示符。POSIX 提示符不命中，
+// 行为与直连 fig 引擎一致。TTL 1s：键入路径每次调度都会问一次，miss 也廉价
+// （3 行 buffer 扫描）；短 TTL 保证会话早期（提示符刚到达）尽快收敛。
+const terminalShellSniff = { kind: null as "powershell" | "cmd" | null, at: 0 };
+function sniffTerminalShell(): "powershell" | "cmd" | null {
+  const now = Date.now();
+  if (now - terminalShellSniff.at < 1000) return terminalShellSniff.kind;
+  terminalShellSniff.at = now;
+  terminalShellSniff.kind = null;
+  try {
+    if (!terminal) return null;
+    const buffer = terminal.buffer.active;
+    if (buffer.type !== "normal") return null;
+    const cursorRow = buffer.baseY + Math.min(buffer.cursorY, buffer.length - 1);
+    for (let rowY = cursorRow; rowY >= Math.max(0, cursorRow - 2); rowY -= 1) {
+      const text = buffer.getLine(rowY)?.translateToString(true) ?? "";
+      const kind = detectShellKind(text);
+      if (kind) {
+        terminalShellSniff.kind = kind;
+        break;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return terminalShellSniff.kind;
 }
 
 /** 浮层开启时的按键消费：↑↓ 选择、Tab 填充、Enter 执行、Esc 关闭。 */
@@ -3246,6 +3415,9 @@ function replaceTerminalLineWith(nextLine: string, pressEnter: boolean) {
     persistCommandHistory();
   }
   sendTerminalBytes(new TextEncoder().encode(payload));
+  // 整行替换也是行缓冲变更点（FIG wave-1 锚点）：作废在途结果并防抖刷新；
+  // 显式刷新面（acceptCompletionRow）会紧跟 request 即时冲掉本次防抖。
+  completionController.lineChanged();
 }
 
 function fillSuggestion(item: CommandSuggestion) {
@@ -3365,6 +3537,9 @@ function acceptGhostSuggestion() {
   ghostMatch.value = null;
   pendingTerminalInput += match.remainder;
   sendTerminalBytes(new TextEncoder().encode(match.remainder));
+  // ghost 接受同样推进行缓冲（FIG wave-1 锚点）：作废在途结构化补全结果
+  // 并防抖重算（补全后的行可能命中引擎候选）。
+  completionController.lineChanged();
   // 接受后按新行重算：更长同前缀历史可继续 → 扩展（fish 同款行为）。
   updateGhostSuggestion();
 }
@@ -3511,9 +3686,12 @@ function resetCommandMarker() {
   commandMarker.durationMs = null;
   commandMarker.cwd = "";
   commandMarker.startedAt = null;
-  // 会话切换/断开：建议浮层与抑制门锁存一并复位（P1-1）；ghost 门同步复位。
+  // 会话切换/断开：建议浮层与抑制门锁存一并复位（P1-1）；ghost 门同步复位；
+  // 结构化补全在途结果经 resetSession 作废（sessionId guard 另有兜底）。
   closeSuggestions();
   suggestionGuardState = createSuggestionGuardState();
+  completionInputAllowed = false;
+  completionController.resetSession();
   lastTerminalCommand.value = null;
   resetGhostSuggestion();
 }
@@ -4514,6 +4692,7 @@ function updateTransfer(params: Record<string, unknown>) {
     currentFile: currentFile || undefined,
   };
   settleTransferCompletion(taskId, status);
+  if (!isLiveTransferStatus(status)) scheduleTerminalTaskSweep(taskId);
   if (!existing && isLiveTransferStatus(transferTasks[taskId].status)) {
     // 面板已开时不得重开：openTransferPanel 的"先收口再开"会卸载弹层、
     // 复位滚动位置，用户正往下看历史时会被弹回顶部（issue #18）。互斥族
@@ -4526,6 +4705,57 @@ function updateTransfer(params: Record<string, unknown>) {
 function normalizeTransferStatus(value: unknown, fallback: TransferTask["status"] = "running"): TransferTask["status"] {
   return ["queued", "running", "completed", "cancelled", "failed"].includes(String(value)) ? String(value) as TransferTask["status"] : fallback;
 }
+
+// —— 终态任务清收 ——
+// transferTasks/transferSpeeds 此前只在视图层过滤，记录本身永不清收：长会话
+// 成千上万次小传输会持续累积响应式对象并放大每次进度写入的依赖追踪成本。
+// 终态后保留一小段时间供用户看到结果，随后删除任务与速度/采样记录；记录
+// 总量超 ring 上限时最老终态先删。活跃任务永不清理；记录删除后同一 taskId
+// 再来事件会照常重建（updateTransfer 的 !existing 分支）。
+const TERMINAL_TASK_RETENTION_MS = 30_000;
+const TERMINAL_TASK_RING_LIMIT = 200;
+const terminalTaskSweepTimers = new Map<string, number>();
+
+function dropTransferRecord(taskId: string) {
+  const timer = terminalTaskSweepTimers.get(taskId);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    terminalTaskSweepTimers.delete(taskId);
+  }
+  delete transferTasks[taskId];
+  delete transferSpeeds[taskId];
+  transferSamples.delete(taskId);
+}
+
+function scheduleTerminalTaskSweep(taskId: string) {
+  if (terminalTaskSweepTimers.has(taskId)) return;
+  terminalTaskSweepTimers.set(
+    taskId,
+    window.setTimeout(() => {
+      terminalTaskSweepTimers.delete(taskId);
+      dropTransferRecord(taskId);
+    }, TERMINAL_TASK_RETENTION_MS),
+  );
+  enforceTransferRecordRing();
+}
+
+function enforceTransferRecordRing() {
+  let overflow = Object.keys(transferTasks).length - TERMINAL_TASK_RING_LIMIT;
+  if (overflow <= 0) return;
+  const sweepable = Object.values(transferTasks)
+    .filter((task) => !isLiveTransferStatus(task.status) && terminalTaskSweepTimers.has(task.taskId))
+    .sort((a, b) => (a.joinedAt ?? 0) - (b.joinedAt ?? 0));
+  for (const task of sweepable) {
+    if (overflow <= 0) break;
+    dropTransferRecord(task.taskId);
+    overflow -= 1;
+  }
+}
+
+onBeforeUnmount(() => {
+  for (const timer of terminalTaskSweepTimers.values()) window.clearTimeout(timer);
+  terminalTaskSweepTimers.clear();
+});
 
 /** 终态事件结算 finish 之后的收尾等待器：completed 兑现，cancelled/failed 拒绝。 */
 function settleTransferCompletion(taskId: string, status: TransferTask["status"]) {
@@ -5816,6 +6046,30 @@ async function confirmTransferHistoryClear() {
   }
 }
 
+// 通用确认弹窗（promise 化）：宿主沙箱 iframe 无 allow-modals，window.confirm
+// 恒返回 false（见文件头注释）。旧 window.confirm 调用点统一迁移为
+// await appConfirm(...)，语义与原生 confirm 等价（true=确认，false=取消）。
+const appConfirmState = ref<{ message: string; confirmLabel: string; danger: boolean }>();
+let appConfirmResolver: ((accepted: boolean) => void) | undefined;
+function appConfirm(message: string, options?: { confirmLabel?: string; danger?: boolean }): Promise<boolean> {
+  return new Promise((resolve) => {
+    // 理论不可达（弹窗互斥）：前一个未决确认按取消收敛，防止悬挂。
+    resolveAppConfirm(false);
+    appConfirmResolver = resolve;
+    appConfirmState.value = {
+      message,
+      confirmLabel: options?.confirmLabel ?? t("confirm"),
+      danger: options?.danger ?? false,
+    };
+  });
+}
+function resolveAppConfirm(accepted: boolean) {
+  appConfirmState.value = undefined;
+  const resolve = appConfirmResolver;
+  appConfirmResolver = undefined;
+  resolve?.(accepted);
+}
+
 /** Refresh every data source rendered by the transfer popover. */
 async function refreshTransferPanel() {
   await Promise.all([
@@ -6060,6 +6314,14 @@ const forwardsOpen = ref(false);
 // 不再是 portal 弹层。面板本体仍由 DockerPanel 自治（会话解析/轮询/动作/
 // 引擎设置都在组件内），关闭即卸载并停轮询。
 const dockerPanelOpen = ref(false);
+// Docker 面板可拖宽度（px，null = 用 CSS 默认 clamp）。经 .panes 上的内联
+// CSS 变量 --docker-pane-width 下发：终端让宽（terminalBasis）与 .docker-pane
+// 的 flex-basis 引用同一变量，拖宽后两段口径自动一致。容器表列多时面板可
+// 拖到容器 70% 宽（lib/paneLayout 的钳制口径）。
+const dockerPaneWidth = ref<number | null>(null);
+const panesStyle = computed(() =>
+  dockerPaneWidth.value == null ? undefined : ({ "--docker-pane-width": `${dockerPaneWidth.value}px` } as CSSProperties),
+);
 
 async function runAlertTriage() {
   if (alertTriageBusy.value) return;
@@ -6997,7 +7259,19 @@ async function loadDirectory(path = currentPath.value, fromTerminal = false) {
   } catch (cause) {
     if (!listEpoch.isCurrent(epochId)) return;
     const message = cause instanceof Error ? cause.message : String(cause);
-    if (fromTerminal) showNotice(t("followDirectoryFailed", { path: normalized, error: message }));
+    if (fromTerminal) {
+      // 跟随撞上登录用户权限墙（典型：终端 sudo su 后跟到 /root）：引导切
+      // sudo 模式并重试，而非裸失败提示。重试走手动导航语义——再失败落
+      // SFTP 错误横幅，不再循环弹引导。
+      if (shouldOfferSudoRetryAfterFollowFailure({ fromTerminal, sudoMode: sudoMode.value, canWrite: canWrite.value, message })) {
+        const target = normalized;
+        showNotice(t("followDirectorySudoHint", { path: normalized }), [
+          { label: t("followDirectorySudoRetry"), run: () => void enableSudoModeAndReload(target) },
+        ]);
+      } else {
+        showNotice(t("followDirectoryFailed", { path: normalized, error: message }));
+      }
+    }
     else { sftpError.value = message; sftpErrorKey.value += 1; sftpErrorOpen.value = true; }
   } finally {
     if (listEpoch.isCurrent(epochId)) loadingFiles.value = false;
@@ -7009,6 +7283,14 @@ function toggleSudoMode() {
   sudoMode.value = !sudoMode.value;
   persistState();
   void loadDirectory();
+}
+
+// 目录跟随权限引导的动作：切到 sudo 模式并重载目标目录（守卫与手动开关一致）。
+async function enableSudoModeAndReload(path: string) {
+  if (!connected.value || !canWrite.value || loadingFiles.value) return;
+  sudoMode.value = true;
+  persistState();
+  await loadDirectory(path);
 }
 
 function goParent() {
@@ -7522,23 +7804,108 @@ function startDividerDrag(event: PointerEvent) {
   if (!container) return;
   const pointerId = event.pointerId;
   const move = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return;
     const bounds = container.getBoundingClientRect();
     const fromLeft = ((next.clientX - bounds.left) / bounds.width) * 100;
     const terminalPercent = paneOrder.value === "terminal-left" ? fromLeft : 100 - fromLeft;
     splitRatio.value = Math.max(35, Math.min(80, terminalPercent));
     scheduleFit();
   };
-  const stop = () => {
-    container.releasePointerCapture(pointerId);
+  // pointercancel 触发时指针已被移出 active 集合：releasePointerCapture 对非
+  // active 指针会抛 NotFoundError，必须先摘监听、再守卫释放，否则监听器泄漏、
+  // 容器内后续鼠标移动会持续重算分栏（触屏拖动被浏览器接管时必现）。
+  const release = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return;
     container.removeEventListener("pointermove", move);
-    container.removeEventListener("pointerup", stop);
-    container.removeEventListener("pointercancel", stop);
+    container.removeEventListener("pointerup", release);
+    container.removeEventListener("pointercancel", release);
+    if (container.hasPointerCapture(pointerId)) {
+      try { container.releasePointerCapture(pointerId); } catch { /* 已被隐式释放 */ }
+    }
     persistState();
   };
   container.setPointerCapture(pointerId);
   container.addEventListener("pointermove", move);
-  container.addEventListener("pointerup", stop);
-  container.addEventListener("pointercancel", stop);
+  container.addEventListener("pointerup", release);
+  container.addEventListener("pointercancel", release);
+}
+
+/** Docker 分栏拖宽：与 SFTP divider 同款 pointer-capture 交互；把手始终在
+ *  Docker 面板贴 SFTP 一侧，SFTP 左置（row-reverse）时面板靠容器左缘，其余
+ *  情况靠右缘。宽度经 --docker-pane-width 下发，终端/SFTP 让宽自动跟随。 */
+function startDockerDividerDrag(event: PointerEvent) {
+  const container = paneContainer.value;
+  if (!container) return;
+  const pointerId = event.pointerId;
+  const move = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return;
+    const bounds = container.getBoundingClientRect();
+    const distance = paneOrder.value === "sftp-left" ? next.clientX - bounds.left : bounds.right - next.clientX;
+    dockerPaneWidth.value = clampDockerPaneWidth(distance, bounds.width);
+    scheduleFit();
+  };
+  // release 先摘监听再守卫释放捕获，原因同 startDividerDrag 的 pointercancel 注释。
+  const release = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return;
+    container.removeEventListener("pointermove", move);
+    container.removeEventListener("pointerup", release);
+    container.removeEventListener("pointercancel", release);
+    if (container.hasPointerCapture(pointerId)) {
+      try { container.releasePointerCapture(pointerId); } catch { /* 已被隐式释放 */ }
+    }
+    // pointerup 后浏览器会向捕获目标（容器）合成一次 click：在捕获阶段吞掉这
+    // 一发，document 收口（onDocumentClickCloseMenus）就不会把它当「点空白」
+    // 误关 Docker 面板。pointercancel 不合成 click，无需布防；超时拆除兜底个
+    // 别内核在 pointer capture 下不合成 click 的情形，防止守卫滞留吞掉用户下
+    // 一次真实点击。
+    if (next.type === "pointerup") {
+      const swallowSyntheticClick = (click: MouseEvent) => click.stopPropagation();
+      container.addEventListener("click", swallowSyntheticClick, { capture: true, once: true });
+      setTimeout(() => container.removeEventListener("click", swallowSyntheticClick, { capture: true }), 1000);
+    }
+    persistState();
+  };
+  container.setPointerCapture(pointerId);
+  container.addEventListener("pointermove", move);
+  container.addEventListener("pointerup", release);
+  container.addEventListener("pointercancel", release);
+}
+
+// 分栏把手键盘通道（pointer 拖拽对键盘用户不可达）：左右方向键把手 ±16px，
+// Shift 加速 ×3。`delta > 0` 统一表示「把手向右移」。
+const DIVIDER_KEY_STEP_PX = 16;
+function onDividerKeydown(event: KeyboardEvent, nudge: (deltaPx: number) => void) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const magnitude = event.shiftKey ? DIVIDER_KEY_STEP_PX * 3 : DIVIDER_KEY_STEP_PX;
+  nudge(event.key === "ArrowRight" ? magnitude : -magnitude);
+}
+
+function nudgeSplitDivider(deltaPx: number) {
+  const container = paneContainer.value;
+  if (!container) return;
+  const bounds = container.getBoundingClientRect();
+  if (!bounds.width) return;
+  // splitRatio 是终端占比：terminal-left 时把手右移 = 终端变宽；否则反向。
+  const sign = paneOrder.value === "terminal-left" ? 1 : -1;
+  splitRatio.value = Math.max(35, Math.min(80, splitRatio.value + (deltaPx / bounds.width) * 100 * sign));
+  scheduleFit();
+  persistState();
+}
+
+function nudgeDockerDivider(deltaPx: number) {
+  const container = paneContainer.value;
+  if (!container) return;
+  const bounds = container.getBoundingClientRect();
+  if (!bounds.width) return;
+  // dockerPaneWidth 恒等于把手到「面板贴靠缘」的距离：sftp-left（面板靠
+  // 左缘）时把手右移 = 面板变宽；否则把手右移 = 面板变窄。null = 尚未
+  // 拖过（CSS 默认宽，钳制下限同源），从默认宽起算。
+  const sign = paneOrder.value === "sftp-left" ? 1 : -1;
+  const current = dockerPaneWidth.value ?? DOCKER_PANE_MIN_WIDTH;
+  dockerPaneWidth.value = clampDockerPaneWidth(current + deltaPx * sign, bounds.width);
+  scheduleFit();
+  persistState();
 }
 
 function toggleColumn(column: SftpColumn) {
@@ -7599,7 +7966,7 @@ function sortIcon(column: SftpSortColumn) {
 }
 
 async function openEntry(entry: SftpEntry) {
-  if (previewOpen.value && previewDirty.value && !window.confirm(t("editSave.closeConfirm"))) return;
+  if (previewOpen.value && previewDirty.value && !(await appConfirm(t("editSave.closeConfirm")))) return;
   if (entry.kind === "directory") {
     await loadDirectory(pathFromUri(entry.uri));
     return;
@@ -7616,7 +7983,7 @@ async function openEntry(entry: SftpEntry) {
     return;
   }
   // 大文件先询问：确认后仍预览，但只加载头部且只读。
-  if (size > MAX_INLINE_PREVIEW_BYTES && !window.confirm(t("previewDialog.tooLargeConfirm", { name: entry.name, size: formatBytes(size), limit: formatBytes(MAX_INLINE_PREVIEW_BYTES) }))) return;
+  if (size > MAX_INLINE_PREVIEW_BYTES && !(await appConfirm(t("previewDialog.tooLargeConfirm", { name: entry.name, size: formatBytes(size), limit: formatBytes(MAX_INLINE_PREVIEW_BYTES) })))) return;
   // 内容嗅探兜底：无后缀或改名的二进制文件在打开前拦下。
   if (size > 0 && (await remoteFileLooksBinary(entry))) {
     showNotice(t("binaryFile.notOpen", { name: entry.name }));
@@ -7737,12 +8104,12 @@ function hasBinaryExtension(name: string) {
   return BINARY_PREVIEW_EXTENSIONS.has(fileExtension(name));
 }
 
-function confirmDiscardPreviewEdits() {
-  return !previewDirty.value || window.confirm(t("editSave.closeConfirm"));
+async function confirmDiscardPreviewEdits(): Promise<boolean> {
+  return !previewDirty.value || appConfirm(t("editSave.closeConfirm"));
 }
 
-function closePreview() {
-  if (!confirmDiscardPreviewEdits()) return;
+async function closePreview() {
+  if (!(await confirmDiscardPreviewEdits())) return;
   previewOpen.value = false;
   previewEditable.value = false;
   previewDraft.value = "";
@@ -7756,8 +8123,8 @@ function beginPreviewEdit() {
   previewEditable.value = true;
 }
 
-function cancelPreviewEdit() {
-  if (!confirmDiscardPreviewEdits()) return;
+async function cancelPreviewEdit() {
+  if (!(await confirmDiscardPreviewEdits())) return;
   previewEditable.value = false;
   previewDraft.value = "";
 }
@@ -7889,7 +8256,7 @@ async function commitRename(entry: SftpEntry) {
     } catch {
       // 预检不可用时保持原语义直接下发。
     }
-    if (targetExists && !window.confirm(t("sftpRename.overwriteConfirm", { name }))) {
+    if (targetExists && !(await appConfirm(t("sftpRename.overwriteConfirm", { name }), { danger: true }))) {
       renamingPath.value = "";
       return;
     }
@@ -8068,7 +8435,7 @@ function selectFile(entry: SftpEntry, event?: MouseEvent) {
   selectedPath.value = entry.uri;
   if (event?.shiftKey && lastClickedUri.value) {
     const expanded = expandSelection(selectedUris.value, lastClickedUri.value, entry.uri, visibleEntries.value.map((item) => item.uri));
-    if (expanded.length > selectedUris.value.length || selectedUris.value.includes(entry.uri)) {
+    if (expanded.length > selectedUris.value.length || selectedUriSet.value.has(entry.uri)) {
       selectedUris.value = expanded;
       return;
     }
@@ -8237,7 +8604,7 @@ function remoteBasename(path: string) {
 function copySelectedEntries(mode: "copy" | "cut") {
   const entry = fileMenu.value?.entry;
   if (!entry) return;
-  const uris = selectedUris.value.includes(entry.uri) && selectedUris.value.length > 1 ? selectedUris.value : [entry.uri];
+  const uris = selectedUriSet.value.has(entry.uri) && selectedUris.value.length > 1 ? selectedUris.value : [entry.uri];
   sftpClipboard.value = { mode, paths: uris.map((uri) => pathFromUri(uri)), connectionId: connectionId.value };
   fileMenu.value = undefined;
   showNotice(t("sftpCopy.done", { count: sftpClipboard.value.paths.length }));
@@ -8271,7 +8638,7 @@ async function pasteClipboard() {
   }
   let overwrite = false;
   if (conflicting.length) {
-    if (!window.confirm(t("sftpPaste.overwriteConfirm", { count: conflicting.length, names: conflicting.slice(0, 5).join(", ") }))) return;
+    if (!(await appConfirm(t("sftpPaste.overwriteConfirm", { count: conflicting.length, names: conflicting.slice(0, 5).join(", ") }), { danger: true }))) return;
     overwrite = true;
   }
   pasteBusy.value = true;
@@ -8830,7 +9197,7 @@ async function downloadEntry(entry: SftpEntry, forceSudo = false) {
   const fileTransfer = saveToLocal ? undefined : window.dbxPlugin.fileTransfer;
   // Web/Docker mode has no local sink and no host save dialog; the whole file
   // is buffered in browser memory before saving, so warn before large ones.
-  if (!fileTransfer && !saveToLocal && (entry.size || 0) > WEB_DOWNLOAD_WARNING_BYTES && !window.confirm(t("webDownload.largeWarning", { name: entry.name, size: formatBytes(entry.size || 0) }))) return;
+  if (!fileTransfer && !saveToLocal && (entry.size || 0) > WEB_DOWNLOAD_WARNING_BYTES && !(await appConfirm(t("webDownload.largeWarning", { name: entry.name, size: formatBytes(entry.size || 0) })))) return;
   let info: DownloadInfo | undefined;
   let target: { handleId: string; chunkBytes: number } | undefined;
   const chunks = fileTransfer || saveToLocal ? undefined : ([] as Uint8Array[]);
@@ -10305,7 +10672,7 @@ const visibleProcessRows = computed(() => sortedProcessRows.value.slice(0, PROCE
 async function killProcessRow(row: ProcessRow, signal: 15 | 9) {
   if (!session.value || !canKillProcess(row.pid)) return;
   const confirmKey = signal === 9 ? "procKillForceConfirm" : "procKillConfirm";
-  if (!window.confirm(t(confirmKey, { pid: row.pid, command: row.command }))) return;
+  if (!(await appConfirm(t(confirmKey, { pid: row.pid, command: row.command }), { danger: true }))) return;
   try {
     await window.dbxPlugin.invoke("ssh/processes/kill", { sessionId: session.value.sessionId, pid: row.pid, signal });
     showNotice(t("procKilled", { pid: row.pid }));
@@ -11165,6 +11532,7 @@ const modalOpenStates = computed(() => [
   folderPickerTarget.value !== null,
   previewOpen.value,
   pasteConfirm.value,
+  appConfirmState.value,
   dropUploadPrompt.value,
   downloadPrompt.value !== null,
   downloadConflictPrompt.value !== null,
@@ -11249,6 +11617,11 @@ function onDocumentKeydown(event: KeyboardEvent) {
   // 录制倒计时优先取消（遮罩在终端区，不属于弹层体系）。
   if (isCountdownActive(recordCountdown.value)) {
     cancelRecordCountdown();
+    return;
+  }
+  // 通用确认弹窗盖在最上层：先收掉确认（false=取消），再走既有分层链。
+  if (appConfirmState.value) {
+    resolveAppConfirm(false);
     return;
   }
   if (previewOpen.value) {
@@ -11444,15 +11817,9 @@ async function initialize() {
   // 外观偏好的 CSS 部分（终端内边距变量）与宿主是否推送 appearance 无关，
   // 开机先落一次，否则用户设了内边距要等下次主题推送才生效。
   applyTerminalPaddingVars();
-  // 远端 fs 动态补全（review 第三批 14 首实现）：数据源为 SFTP 面板已加载
-  // 条目（零新增远端调用）；面板未就绪/目录不一致时 provider 返回 null，
-  // hint 行保持 + Tab 透传 shell。
-  registerDynamicCompletionProvider(
-    createRemoteFsProvider(() => {
-      if (!sftpPaneOpen.value) return null;
-      return { currentPath: currentPath.value, entries: entries.value };
-    }),
-  );
+  // FIG wave-1：legacy 动态 fs provider 随 legacy spec 目录整体退役；
+  // generator 动态候选在批次 2 经 completion/execute 目标机执行接线
+  // （前端不直连 shell）。
   if (api.appearance) applyAppearance(api.appearance);
   else if (isDbxPluginTheme(api.theme)) applyAppearance(themeToAppearance(api.theme));
   // 宿主可能在 init 前先应答 host.getContext（如重推连接期间 init 被延迟）：
@@ -11616,7 +11983,7 @@ async function reattachProtocolSession(): Promise<boolean> {
   return true;
 }
 
-watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
+watch([splitRatio, dockerPaneWidth, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
 
 onMounted(() => {
   document.addEventListener("click", onDocumentClickCloseMenus);
@@ -12048,7 +12415,7 @@ onBeforeUnmount(() => {
       <ToastViewport class="error-viewport" />
     </ToastProvider>
 
-    <section ref="paneContainer" :class="orderedPaneClass">
+    <section ref="paneContainer" :class="orderedPaneClass" :style="panesStyle">
       <ContextMenu :open="terminalMenuOpen" @update:open="(open) => { if (!open) terminalMenuOpen = false; }">
         <ContextMenuTrigger as-child>
       <section class="terminal-pane" :class="{ 'drag-active': terminalDragActive, 'batch-bar-open': connected && batchBarOpen, 'marker-visible': commandMarker.installed, 'gutter-visible': gutterPaneVisible, 'wallpaper-active': wallpaperActive }" :style="[terminalBasis, gutterPaneStyle]" @contextmenu="showTerminalMenu" @dragenter.prevent="onTerminalDragEnter" @dragover.prevent @dragleave.self="terminalDragActive = false" @drop.prevent="onTerminalDrop($event)">
@@ -12090,16 +12457,18 @@ onBeforeUnmount(() => {
           @activate="(index) => (suggestionActiveIndex = index)"
           @fill="fillSuggestion"
         />
-        <!-- 结构化补全浮层（对标 Warp/fig，线 2）：spec 命中时优先展示，
-             键盘（↑↓/Tab/Enter/Esc）由 handleCompletionKey 消费，点击即填充。 -->
+        <!-- 结构化补全浮层（FIG wave-1 最终架构；批次 2-1 两段渲染）：fig 引擎
+             候选（CompletionItem）直用展示，keyboard.ts 规则表由
+             handleCompletionKey 消费，点击回传 item 由 controller 执行 edit；
+             generator 在途且无静态候选时显示 loading 占位行（Tab/Enter 放行
+             shell，keyboard.ts loading 态）。 -->
         <CompletionMenu
-          v-if="completionOpen && completionRows.length"
-          :rows="completionRows"
-          :level="completionLevel"
-          :command-path="completionCommandPath"
+          v-if="completionOpen && (completionItems.length || completionLoading)"
+          :items="completionItems"
           :active-index="completionActiveIndex"
           :anchor="completionAnchor"
           :viewport="suggestionViewport"
+          :loading="completionLoading"
           :t="t"
           @activate="(index) => (completionActiveIndex = index)"
           @accept="acceptCompletionRow"
@@ -12616,7 +12985,19 @@ onBeforeUnmount(() => {
         </TerminalContextMenu>
       </ContextMenu>
 
-      <div v-if="sftpPaneOpen" class="divider" @pointerdown="startDividerDrag" />
+      <div
+        v-if="sftpPaneOpen"
+        class="divider"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-valuenow="Math.round(splitRatio)"
+        aria-valuemin="35"
+        aria-valuemax="80"
+        :title="t('dividerResizeHint')"
+        tabindex="0"
+        @pointerdown="startDividerDrag"
+        @keydown="onDividerKeydown($event, nudgeSplitDivider)"
+      />
 
       <section v-if="sftpPaneOpen" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave.self="dragActive = false" @drop.prevent="onDrop">
         <div class="path-toolbar">
@@ -12687,6 +13068,7 @@ onBeforeUnmount(() => {
           </div>
           <button class="icon-button" :title="t('sftpPaste.action')" :disabled="!connected || !canWrite || !sftpClipboard || pasteBusy" @click="pasteClipboard"><ClipboardPaste /></button>
           <button class="icon-button icon-teal" :title="`${t('upload')} · Ctrl/Cmd+V`" :disabled="!connected || !canWrite" @click.stop="chooseUpload"><FileUp /></button>
+          <button v-if="folderUploadSupported" class="icon-button icon-teal" :title="t('folderUpload.title')" :aria-label="t('folderUpload.action')" :disabled="!connected || !canWrite" @click.stop="chooseFolderUpload"><FolderUp /></button>
           <button class="icon-button icon-amber" :title="t('newFolder')" :disabled="!connected || !canWrite" @click="operationDraft = ''; operationDialog = 'mkdir'"><FolderPlus /></button>
           <button class="icon-button icon-amber" :title="t('sftpNewFile.action')" :disabled="!connected || !canWrite" @click="openNewFileDialog"><FilePlus /></button>
           <label class="follow-directory-control sudo-label" :title="!canWrite ? t('readOnly') : t('sudo.modeHint')">
@@ -12726,8 +13108,8 @@ onBeforeUnmount(() => {
           <div class="sftp-filter-bar">
             <label class="sftp-search-input">
               <Search />
-              <input v-model="sftpSearch" type="search" :placeholder="t('sftpSearch.placeholder')" spellcheck="false" />
-              <button v-if="sftpSearch" class="sftp-search-clear" :title="t('cancel')" @click.prevent="sftpSearch = ''"><X /></button>
+              <input v-model="sftpSearchDraft" type="search" :placeholder="t('sftpSearch.placeholder')" spellcheck="false" />
+              <button v-if="sftpSearchDraft" class="sftp-search-clear" :title="t('cancel')" @click.prevent="clearSftpSearch"><X /></button>
             </label>
             <Select :model-value="sftpTypeFilter" @update:model-value="(v) => (sftpTypeFilter = v as SftpTypeFilter)">
               <SelectTrigger size="xs" class="sftp-type-filter" :title="t('sftpFilter.all')">
@@ -12766,7 +13148,7 @@ onBeforeUnmount(() => {
                  定位/碰撞/Esc/外点关闭均由 reka 承担。 -->
             <ContextMenu :open="!!(fileMenu || blankMenu)" @update:open="(open) => { if (!open) { fileMenu = undefined; blankMenu = false; } }">
               <ContextMenuTrigger as-child>
-            <div class="file-rows" @contextmenu="onFileAreaContextMenu">
+            <div ref="fileRowsEl" class="file-rows" @scroll.passive="onFileRowsScroll" @contextmenu="onFileAreaContextMenu">
               <div class="file-header" :style="sftpGridStyle">
                 <button class="col-wrap" @click="toggleSort('name')">{{ t("name") }}<component :is="sortIcon('name')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('name', e)" /></button>
                 <button v-if="visibleColumns.includes('size')" class="col-wrap" @click="toggleSort('size')">{{ t("size") }}<component :is="sortIcon('size')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('size', e)" /></button>
@@ -12776,12 +13158,14 @@ onBeforeUnmount(() => {
                 <span v-if="visibleColumns.includes('permissions')" class="col-wrap">{{ t("permissions") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('permissions', e)" /></span>
               </div>
               <div v-if="loadingFiles" class="empty"><Loader2 class="spinning" />{{ t("loading") }}</div>
+              <!-- 窗口化 spacer：撑起视口外行的总高，滚动条比例保持真实 -->
+              <div v-if="!loadingFiles && virtualFileWindow.padTop" :style="{ height: `${virtualFileWindow.padTop}px` }" aria-hidden="true"></div>
               <button
-                v-for="entry in visibleEntries"
+                v-for="entry in windowedEntries"
                 v-else
                 :key="entry.uri"
                 class="file-row"
-                :class="{ selected: selectedPath === entry.uri || selectedUris.includes(entry.uri) }"
+                :class="{ selected: selectedPath === entry.uri || selectedUriSet.has(entry.uri) }"
                 :style="sftpGridStyle"
                 @mousedown="onFileRowMousedown"
                 @click="selectFile(entry, $event)"
@@ -12819,6 +13203,7 @@ onBeforeUnmount(() => {
                 <span v-if="visibleColumns.includes('group')" class="mono" :title="entry.group">{{ entry.group || "-" }}</span>
                 <span v-if="visibleColumns.includes('permissions')" class="mono">{{ entry.permissions }}</span>
               </button>
+              <div v-if="!loadingFiles && virtualFileWindow.padBottom" :style="{ height: `${virtualFileWindow.padBottom}px` }" aria-hidden="true"></div>
               <div v-if="!loadingFiles && !visibleEntries.length" class="empty">{{ entries.length ? t("sftpSearch.noMatch") : t("emptyFolder") }}</div>
             </div>
               </ContextMenuTrigger>
@@ -12876,7 +13261,19 @@ onBeforeUnmount(() => {
       <!-- Docker 停靠面板（与 SFTP 面板同款分栏交互，终端经 terminalBasis 让宽）：
            非 portal 弹层——面板内点击 @click.stop 防 document 收口误关；内嵌
            引擎设置 Popover 与确认/日志 Dialog 仍 portal 到 body（收口守卫已排除
-           其 data-slot）。 -->
+           其 data-slot）。宽度可拖（前置 .divider），与 SFTP 同开时按
+           terminalBasis 分摊剩余宽度，两栏同显互不遮挡。 -->
+      <div
+        v-if="dockerPanelOpen"
+        class="divider"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-valuenow="Math.round(dockerPaneWidth ?? 0)"
+        :title="t('dividerResizeHint')"
+        tabindex="0"
+        @pointerdown="startDockerDividerDrag"
+        @keydown="onDividerKeydown($event, nudgeDockerDivider)"
+      />
       <section v-if="dockerPanelOpen" class="docker-pane" @click.stop>
         <header>
           <h2>{{ t("docker.toolbarTitle") }}</h2>
@@ -13328,6 +13725,17 @@ onBeforeUnmount(() => {
         <header><DialogTitle>{{ t("auditLog.clear") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="auditClearOpen = false"><X /></button></header>
         <div class="destructive-copy"><div><strong>{{ t("auditLog.clearConfirm") }}</strong></div></div>
         <footer><button @click="auditClearOpen = false" :disabled="auditClearSubmitting">{{ t("cancel") }}</button><button class="danger-button" :disabled="auditClearSubmitting" @click="confirmAuditClear"><Loader2 v-if="auditClearSubmitting" class="spinning" /><Trash2 v-else />{{ t("delete") }}</button></footer>
+      </DialogContent>
+    </Dialog>
+    <!-- 通用确认弹窗：替代 window.confirm（沙箱 iframe 无 allow-modals，confirm 恒 false）。
+         Esc 关闭走 App 分层链（见 onDocumentKeydown），此处 .prevent 防 reka 双关。 -->
+    <Dialog :open="!!appConfirmState" @update:open="(open) => { if (!open) resolveAppConfirm(false); }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <template v-if="appConfirmState">
+          <header><DialogTitle>{{ t("confirm") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="resolveAppConfirm(false)"><X /></button></header>
+          <div :class="appConfirmState.danger ? 'destructive-copy' : ''"><div><strong>{{ appConfirmState.message }}</strong></div></div>
+          <footer><button @click="resolveAppConfirm(false)">{{ t("cancel") }}</button><button :class="appConfirmState.danger ? 'danger-button' : 'primary-button'" @click="resolveAppConfirm(true)">{{ appConfirmState.confirmLabel }}</button></footer>
+        </template>
       </DialogContent>
     </Dialog>
     <!-- 安全弹窗：不允许 Esc / 点击遮罩关闭，必须显式信任或拒绝（不在 Esc 链中） -->

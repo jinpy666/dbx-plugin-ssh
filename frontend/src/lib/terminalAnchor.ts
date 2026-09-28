@@ -26,3 +26,26 @@ export function cursorViewportRow(buffer: CursorBufferLike): number {
 export function cursorAbsoluteRow(buffer: CursorBufferLike): number {
   return buffer.baseY + buffer.cursorY;
 }
+
+/**
+ * DOM 兜底的单元格尺寸测量：xterm 私有 `_renderService.dimensions.css.cell`
+ * 读不到时（渲染器未就绪/WebGL 恢复切换窗口期）用渲染 DOM 实测——DOM 渲染器
+ * 给每个行元素写显式像素高，列宽按 .xterm-screen 实测宽 ÷ cols 推出。
+ * 任一项测不出 → null（调用方维持既有降级，不造假锚点）。
+ */
+export function measureCellSizeFromDom(
+  screen: { getBoundingClientRect(): { width: number } } | null,
+  rows: { children: ArrayLike<{ getBoundingClientRect(): { height: number } }> } | null,
+  cols: number,
+): { width: number; height: number } | null {
+  try {
+    const firstRow = rows?.children?.[0];
+    if (!firstRow || !(cols > 0)) return null;
+    const rowHeight = firstRow.getBoundingClientRect().height;
+    const screenWidth = screen?.getBoundingClientRect().width ?? 0;
+    if (!(rowHeight > 0) || !(screenWidth > 0)) return null;
+    return { width: screenWidth / cols, height: rowHeight };
+  } catch {
+    return null;
+  }
+}

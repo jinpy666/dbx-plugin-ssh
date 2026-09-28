@@ -3,6 +3,7 @@ mod agent_terminal;
 mod alert_triage;
 mod app_bridge;
 mod audit_log;
+mod completion;
 mod connection_import;
 mod docker;
 mod exec;
@@ -25,6 +26,7 @@ mod multi_exec;
 mod otp;
 mod otp_store;
 mod preferences;
+mod progress_throttle;
 mod quick_commands;
 mod rdp_session;
 mod serial_session;
@@ -441,6 +443,19 @@ impl Plugin {
                 let exec_id = required_string(&params, "execId")?;
                 self.ssh.cancel_exec(exec_id)?;
                 Ok(json!({ "success": true }))
+            }
+            // FIG 补全引擎 generator 执行（wave-1 lane B）：反序列化 →
+            // 安全校验/收紧 → 按 target 分派（local 短子进程 / ssh 复用
+            // exec 通道）。审计与 ssh/exec 臂同款：该臂无审计调用，此处
+            // 同样不加。
+            "completion/execute" => {
+                let mut request: completion::protocol::CompletionExecuteRequest = parse(params)?;
+                completion::security::validate_and_clamp(&mut request)?;
+                let result = self
+                    .runtime
+                    .block_on(completion::executor::dispatch(self.ssh.as_ref(), &request))?;
+                serde_json::to_value(result)
+                    .map_err(|error| format!("completion: failed to encode result: {error}"))
             }
             "ssh/terminal/resize" => {
                 let session_id = required_string(&params, "sessionId")?;

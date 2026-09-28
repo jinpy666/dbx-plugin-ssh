@@ -260,9 +260,11 @@ try {
   await page.evaluate(() => document.querySelector('button svg[class*="lucide-settings"]').closest("button").click());
   await page.locator(".settings-nav-item").first().waitFor({ state: "visible", timeout: 15_000 });
   await page.getByRole("tab", { name: "Quick commands", exact: true }).click();
-  // 删除有 window.confirm 确认（不可逆操作），自动接受。
-  page.once("dialog", (dialog) => void dialog.accept());
+  // 删除确认已迁应用内弹窗（沙箱 iframe 无 allow-modals，window.confirm 恒
+  // false）：点删除 → 弹窗内确认按钮 → 等弹窗收口后再关设置。
   await page.click('.quick-manage-list li button[title="Delete"]');
+  await page.locator(".small-modal footer .danger-button").click();
+  await page.locator(".small-modal").waitFor({ state: "hidden", timeout: 5_000 });
   await page.locator(".settings-modal header button.icon-button").first().click();
   await page.locator(".settings-nav-item").first().waitFor({ state: "hidden", timeout: 10_000 });
   await page.click(QUICK_BTN);
