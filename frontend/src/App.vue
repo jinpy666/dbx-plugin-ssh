@@ -132,7 +132,12 @@ import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib
 import { filesFromClipboard } from "./lib/clipboardFiles";
 import { friendlySftpError, shouldOfferSudoRetryAfterFollowFailure } from "./lib/sftpErrors";
 import { filterDiskMounts, filterNetworkInterfaces } from "./lib/metricsView";
+<<<<<<< HEAD
 import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "./lib/paneLayout";
+=======
+import { clampDockerPaneWidth, terminalFlexBasis } from "./lib/paneLayout";
+import { computeWindow } from "./lib/virtualWindow";
+>>>>>>> codex/ssh/review-fix-4
 import type { GpuOverviewView, NpuOverviewView } from "./lib/metricsGpuNpu";
 import { isCountdownActive, nextCountdownValue, RECORD_COUNTDOWN_START } from "./lib/recordingCountdown";
 import { expandSelection, filterSftpEntries, type SftpTypeFilter } from "./lib/sftpFileFilters";
@@ -2028,7 +2033,71 @@ const sftpGridStyle = computed(() => {
 });
 const sftpFiltersActive = computed(() => sftpSearch.value.trim() !== "" || sftpTypeFilter.value !== "all" || sftpShowHidden.value);
 const visibleEntries = computed(() => filterSftpEntries(sortedEntries.value, sftpSearch.value, sftpTypeFilter.value, sftpShowHidden.value));
+<<<<<<< HEAD
 const selectedEntries = computed(() => entries.value.filter((entry) => selectedUriSet.value.has(entry.uri)));
+=======
+
+// —— 文件列表窗口化（虚拟滚动）——
+// 渲染层只挂可见窗口的行（.file-row 30px + 上下 spacer 撑总高，滚动条比例
+// 真实）；选中、范围选择等逻辑层始终作用于全量 visibleEntries，与窗口无关。
+// 方案：docs/SFTP_LIST_VIRTUAL_SCROLL_PLAN.zh-CN.md。
+const FILE_ROW_HEIGHT_PX = 30;
+const FILE_ROW_OVERSCAN = 10;
+const fileRowsEl = ref<HTMLElement | null>(null);
+const fileRowsViewportHeight = ref(0);
+const fileScrollTop = ref(0);
+const virtualFileWindow = computed(() =>
+  computeWindow({
+    scrollTop: fileScrollTop.value,
+    viewportHeight: fileRowsViewportHeight.value,
+    rowHeight: FILE_ROW_HEIGHT_PX,
+    total: visibleEntries.value.length,
+    overscan: FILE_ROW_OVERSCAN,
+  }),
+);
+const windowedEntries = computed(() => visibleEntries.value.slice(virtualFileWindow.value.start, virtualFileWindow.value.end));
+
+function onFileRowsScroll(event: Event) {
+  fileScrollTop.value = (event.target as HTMLElement).scrollTop;
+}
+
+watch(fileRowsEl, (el, previous) => {
+  if (previous === el) return;
+  if (fileRowsResizeObserver) {
+    fileRowsResizeObserver.disconnect();
+    fileRowsResizeObserver = undefined;
+  }
+  if (!el) return;
+  fileRowsViewportHeight.value = el.clientHeight;
+  fileRowsResizeObserver = new ResizeObserver(() => {
+    if (fileRowsResizeTarget) fileRowsViewportHeight.value = fileRowsResizeTarget.clientHeight;
+  });
+  fileRowsResizeTarget = el;
+  fileRowsResizeObserver.observe(el);
+});
+let fileRowsResizeObserver: ResizeObserver | undefined;
+let fileRowsResizeTarget: HTMLElement | undefined;
+
+// 搜索输入防抖：大目录下每个按键 O(n) 过滤 + 全量 diff 明显掉帧；150ms
+// 静默期后一次性生效（footer 计数与过滤随之滞后一拍，可接受）。
+const SFTP_SEARCH_DEBOUNCE_MS = 150;
+const sftpSearchDraft = ref("");
+let sftpSearchDebounce: number | undefined;
+watch(sftpSearchDraft, (value) => {
+  window.clearTimeout(sftpSearchDebounce);
+  sftpSearchDebounce = window.setTimeout(() => {
+    sftpSearch.value = value;
+  }, SFTP_SEARCH_DEBOUNCE_MS);
+});
+onBeforeUnmount(() => window.clearTimeout(sftpSearchDebounce));
+
+function clearSftpSearch() {
+  window.clearTimeout(sftpSearchDebounce);
+  sftpSearchDraft.value = "";
+  sftpSearch.value = "";
+}
+const selectedEntries = computed(() => entries.value.filter((entry) => selectedUris.value.includes(entry.uri)));
+>>>>>>> codex/ssh/review-fix-4
 const currentPathHistory = computed(() => pathHistories[connectionId.value] || []);
 const previewDirty = computed(() => previewEditable.value && previewDraft.value !== previewBaseline.value);
 // 编辑保存走 sftp/write 整文件覆写：只有完整加载（未截断）且不超直写上限的
@@ -13047,8 +13116,8 @@ onBeforeUnmount(() => {
           <div class="sftp-filter-bar">
             <label class="sftp-search-input">
               <Search />
-              <input v-model="sftpSearch" type="search" :placeholder="t('sftpSearch.placeholder')" spellcheck="false" />
-              <button v-if="sftpSearch" class="sftp-search-clear" :title="t('cancel')" @click.prevent="sftpSearch = ''"><X /></button>
+              <input v-model="sftpSearchDraft" type="search" :placeholder="t('sftpSearch.placeholder')" spellcheck="false" />
+              <button v-if="sftpSearchDraft" class="sftp-search-clear" :title="t('cancel')" @click.prevent="clearSftpSearch"><X /></button>
             </label>
             <Select :model-value="sftpTypeFilter" @update:model-value="(v) => (sftpTypeFilter = v as SftpTypeFilter)">
               <SelectTrigger size="xs" class="sftp-type-filter" :title="t('sftpFilter.all')">
@@ -13087,7 +13156,7 @@ onBeforeUnmount(() => {
                  定位/碰撞/Esc/外点关闭均由 reka 承担。 -->
             <ContextMenu :open="!!(fileMenu || blankMenu)" @update:open="(open) => { if (!open) { fileMenu = undefined; blankMenu = false; } }">
               <ContextMenuTrigger as-child>
-            <div class="file-rows" @contextmenu="onFileAreaContextMenu">
+            <div ref="fileRowsEl" class="file-rows" @scroll.passive="onFileRowsScroll" @contextmenu="onFileAreaContextMenu">
               <div class="file-header" :style="sftpGridStyle">
                 <button class="col-wrap" @click="toggleSort('name')">{{ t("name") }}<component :is="sortIcon('name')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('name', e)" /></button>
                 <button v-if="visibleColumns.includes('size')" class="col-wrap" @click="toggleSort('size')">{{ t("size") }}<component :is="sortIcon('size')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('size', e)" /></button>
@@ -13097,8 +13166,10 @@ onBeforeUnmount(() => {
                 <span v-if="visibleColumns.includes('permissions')" class="col-wrap">{{ t("permissions") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('permissions', e)" /></span>
               </div>
               <div v-if="loadingFiles" class="empty"><Loader2 class="spinning" />{{ t("loading") }}</div>
+              <!-- 窗口化 spacer：撑起视口外行的总高，滚动条比例保持真实 -->
+              <div v-if="!loadingFiles && virtualFileWindow.padTop" :style="{ height: `${virtualFileWindow.padTop}px` }" aria-hidden="true"></div>
               <button
-                v-for="entry in visibleEntries"
+                v-for="entry in windowedEntries"
                 v-else
                 :key="entry.uri"
                 class="file-row"
@@ -13140,6 +13211,7 @@ onBeforeUnmount(() => {
                 <span v-if="visibleColumns.includes('group')" class="mono" :title="entry.group">{{ entry.group || "-" }}</span>
                 <span v-if="visibleColumns.includes('permissions')" class="mono">{{ entry.permissions }}</span>
               </button>
+              <div v-if="!loadingFiles && virtualFileWindow.padBottom" :style="{ height: `${virtualFileWindow.padBottom}px` }" aria-hidden="true"></div>
               <div v-if="!loadingFiles && !visibleEntries.length" class="empty">{{ entries.length ? t("sftpSearch.noMatch") : t("emptyFolder") }}</div>
             </div>
               </ContextMenuTrigger>
