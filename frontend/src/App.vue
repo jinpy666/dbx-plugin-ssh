@@ -132,12 +132,8 @@ import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib
 import { filesFromClipboard } from "./lib/clipboardFiles";
 import { friendlySftpError, shouldOfferSudoRetryAfterFollowFailure } from "./lib/sftpErrors";
 import { filterDiskMounts, filterNetworkInterfaces } from "./lib/metricsView";
-<<<<<<< HEAD
 import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "./lib/paneLayout";
-=======
-import { clampDockerPaneWidth, terminalFlexBasis } from "./lib/paneLayout";
 import { computeWindow } from "./lib/virtualWindow";
->>>>>>> codex/ssh/review-fix-4
 import type { GpuOverviewView, NpuOverviewView } from "./lib/metricsGpuNpu";
 import { isCountdownActive, nextCountdownValue, RECORD_COUNTDOWN_START } from "./lib/recordingCountdown";
 import { expandSelection, filterSftpEntries, type SftpTypeFilter } from "./lib/sftpFileFilters";
@@ -2033,9 +2029,6 @@ const sftpGridStyle = computed(() => {
 });
 const sftpFiltersActive = computed(() => sftpSearch.value.trim() !== "" || sftpTypeFilter.value !== "all" || sftpShowHidden.value);
 const visibleEntries = computed(() => filterSftpEntries(sortedEntries.value, sftpSearch.value, sftpTypeFilter.value, sftpShowHidden.value));
-<<<<<<< HEAD
-const selectedEntries = computed(() => entries.value.filter((entry) => selectedUriSet.value.has(entry.uri)));
-=======
 
 // —— 文件列表窗口化（虚拟滚动）——
 // 渲染层只挂可见窗口的行（.file-row 30px + 上下 spacer 撑总高，滚动条比例
@@ -2096,8 +2089,7 @@ function clearSftpSearch() {
   sftpSearchDraft.value = "";
   sftpSearch.value = "";
 }
-const selectedEntries = computed(() => entries.value.filter((entry) => selectedUris.value.includes(entry.uri)));
->>>>>>> codex/ssh/review-fix-4
+const selectedEntries = computed(() => entries.value.filter((entry) => selectedUriSet.value.has(entry.uri)));
 const currentPathHistory = computed(() => pathHistories[connectionId.value] || []);
 const previewDirty = computed(() => previewEditable.value && previewDraft.value !== previewBaseline.value);
 // 编辑保存走 sftp/write 整文件覆写：只有完整加载（未截断）且不超直写上限的

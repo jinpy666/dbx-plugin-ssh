@@ -68,8 +68,6 @@
 
 全套门禁 + 比对脚本对当前仓库 zero-diff（mock 实现集 ∪ 白名单 ∪ SKIP ⊇
 后端方法全集），并把结果计数写入本文件附录。
-<<<<<<< HEAD
-=======
 
 ## 实施结果（review-fix-5 轮，2026-09-29）
 
@@ -86,4 +84,3 @@
   （docker/list）不受影响。
 - 比对结果：`backend 153 methods, mock 90 implemented, allowlist 0, skip 45`，
   zero-diff PASS。
->>>>>>> codex/ssh/review-fix-5

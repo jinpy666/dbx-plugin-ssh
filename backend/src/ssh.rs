@@ -6600,24 +6600,16 @@ impl SshRuntime {
                     return Err("Download task changed while a chunk was in flight".to_string());
                 }
                 current.next_offset = next_offset;
-<<<<<<< HEAD
-                if let Some(tree_state) = current.tree.as_mut() {
-                    *tree_state = tree.clone();
-                }
                 current
                     .progress_throttle
                     .should_emit(download.size > 0 && next_offset >= download.size)
             };
-=======
-            }
->>>>>>> codex/ssh/review-fix-6
             let current_remaining = tree
                 .current
                 .as_ref()
                 .map(|file| file.size - tree.current_offset)
                 .unwrap_or(0);
             let eof = sftp_tree::tree_eof(tree.files.len(), current_remaining);
-<<<<<<< HEAD
             if emit_progress || eof {
                 emitter
                     .event(
@@ -6625,13 +6617,7 @@ impl SshRuntime {
                         json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "fileCount": tree.file_count, "fileIndex": tree.files_done + u64::from(tree.current.is_some()), "currentFile": tree.current.as_ref().map(|file| file.relative.clone()) }),
                     )
                     .map_err(plugin_error)?;
-=======
-            emitter
-                .event(
-                    "sftp/transfer/progress",
-                    json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "fileCount": tree.file_count, "fileIndex": tree.files_done + u64::from(tree.current.is_some()), "currentFile": tree.current.as_ref().map(|file| file.relative.clone()) }),
-                )
-                .map_err(plugin_error)?;
+            }
             // 树状态回写：零拷贝转移（store_tree_state），放在 eof/进度读取
             // 之后——此前每 chunk 深拷贝整树（万文件树 × 每 256KiB 一次）且
             // 在 registry 锁内进行，是下载热路径的分配与锁竞争热点。
@@ -6645,7 +6631,6 @@ impl SshRuntime {
                         Self::store_tree_state(tree_state, &mut tree);
                     }
                 }
->>>>>>> codex/ssh/review-fix-6
             }
             return Ok(
                 json!({ "taskId": task_id, "offset": offset, "length": length, "eof": eof, "fileName": download.file_name }),
