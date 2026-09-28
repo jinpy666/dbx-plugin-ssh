@@ -8,7 +8,7 @@
 // 「在终端打开」（M3 遗留 6）：面板不直接写 PTY，改为 emit 语义的 window 自定义
 // 事件（SideNavPanel 不透传事件且不在本次改动范围），由 App.vue 走「填入输入行
 // 不回车」通道——命令落到 shell 输入行原地，用户确认后再回车执行。
-import { computed, onMounted, onScopeDispose, onUnmounted, ref } from "vue";
+import { computed, onMounted, onScopeDispose, onUnmounted, ref, watch } from "vue";
 import {
   Check,
   ChevronDown,
@@ -304,6 +304,21 @@ async function confirmAction(accepted: boolean): Promise<void> {
     confirmBusy.value = false;
   }
 }
+
+// kill/rm 确认弹窗的 Esc 取消：面板内状态不在 App 的分层 Esc 链里，而
+// DialogContent 的 @escape-key-down.prevent 又挡掉了 reka 自带关闭（Esc 此前
+// 完全失效）。document 捕获阶段监听先于 App 冒泡链与 reka 触发，打开时挂、
+// 关闭即卸；stopPropagation 防止同一次 Esc 再关掉底层弹层。
+function onConfirmEsc(event: KeyboardEvent): void {
+  if (event.key !== "Escape") return;
+  event.stopPropagation();
+  void confirmAction(false);
+}
+watch(confirmTarget, (target) => {
+  if (target) document.addEventListener("keydown", onConfirmEsc, true);
+  else document.removeEventListener("keydown", onConfirmEsc, true);
+});
+onScopeDispose(() => document.removeEventListener("keydown", onConfirmEsc, true));
 
 // —— 行操作悬浮下拉（hover 开合，状态机在 lib/dockerRowMenu）—————————————
 // 触发器 hover 延迟开、移出延迟关（跨 side-offset 间隙不闪断）、click 兜底

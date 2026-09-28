@@ -4672,6 +4672,9 @@ impl SshRuntime {
     ) -> Result<(), String> {
         self.ensure_writable(session_id).await?;
         let path = normalize_remote_path(path)?;
+        if path == "/" {
+            return Err("Refusing to delete the filesystem root".to_string());
+        }
         if encoding == NameEncoding::Latin1 {
             // latin-1：wire 路径整条还原为原始字节后走裸包删除（LSTAT 判型
             // → REMOVE/RMDIR/递归树删，symlink 绝不跟随）。回退策略与
@@ -4805,13 +4808,15 @@ impl SshRuntime {
     }
 
     /// `ssh/processes/kill`: signals one remote process (pid/signal are
-    /// validated in `metrics::kill_command`; pid 0/1 refused).
+    /// validated in `metrics::kill_command`; pid 0/1 refused). Treated as a
+    /// write op: refused on read-only connections like the SFTP write family.
     pub async fn kill_process(
         &self,
         session_id: &str,
         pid: u64,
         signal: u32,
     ) -> Result<Value, String> {
+        self.ensure_writable(session_id).await?;
         let session = self.session(session_id).await?;
         metrics::kill_process(&session.handle, pid, signal).await?;
         Ok(json!({ "success": true, "pid": pid }))
@@ -8522,6 +8527,11 @@ async fn delete_directory_tree(
     sftp: &Arc<AsyncMutex<SftpSession>>,
     root: String,
 ) -> Result<(), String> {
+    // Defense in depth: the caller already refuses "/" — keep the guard at
+    // the recursive implementation too, so no future call site can bypass it.
+    if root == "/" {
+        return Err("Refusing to recursively delete the filesystem root".to_string());
+    }
     let mut pending = vec![root];
     let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -8770,6 +8780,10 @@ async fn raw_delete_path(
 /// 裸包递归删除：后序遍历（先文件后目录），单通道串行，`.`/`..` 跳过。
 /// pub(crate)：MCP 工具面 sftp_remove 的 latin-1 递归分支复用（M17）。
 pub(crate) async fn raw_delete_tree(client: &mut RawSftpClient, root: &[u8]) -> Result<(), String> {
+    // 与 delete_directory_tree 同源的根守卫：调用方已拒绝 "/"，此处兜底。
+    if root == b"/" {
+        return Err("Refusing to recursively delete the filesystem root".to_string());
+    }
     let mut pending = vec![root.to_vec()];
     let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
