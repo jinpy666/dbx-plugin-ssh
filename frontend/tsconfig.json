@@ -16,8 +16,6 @@
       "@/*": ["./src/*"]
     }
   },
-  // vendor/fig-specs 的纯数据 spec 模块参与 typecheck（Lane C；
-  // 归一化类型来自 src/lib/completion/fig/types.ts）
-  "include": ["src/**/*.ts", "src/**/*.vue", "vendor/fig-specs/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.vue"]
 }
 
