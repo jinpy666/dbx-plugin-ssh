@@ -24,7 +24,9 @@ await build({
     emptyOutDir: true,
     cssCodeSplit: false,
     assetsInlineLimit: 10 * 1024 * 1024,
-    rollupOptions: { output: { inlineDynamicImports: true } },
+    // rolldown（vite 8 内置）：inlineDynamicImports 已弃用，codeSplitting: false
+    // 为官方等价项（单 bundle 内联全部 dynamic imports），产物结构不变。
+    rollupOptions: { output: { codeSplitting: false } },
   },
 });
 
