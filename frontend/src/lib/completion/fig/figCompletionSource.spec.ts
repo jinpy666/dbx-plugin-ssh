@@ -89,6 +89,54 @@ const fixtureGeneratorArg = {
   parserDirectives: {},
   args: [{ name: "resource", generators: [{ template: "filepaths" }] }],
 };
+const fixtureBranchGen = {
+  // 声明式 generator（script argv + splitOn + postProcess）→ 批次 2-1
+  // collectGenerators 产槽位；静态 suggestions 照常先行（两段渲染）。
+  name: ["mybranch"],
+  subcommands: [],
+  options: [],
+  persistentOptions: [],
+  parserDirectives: {},
+  args: [
+    {
+      name: "branch",
+      isOptional: true,
+      suggestions: [{ name: "HEAD", description: "detached" }],
+      generators: [
+        {
+          script: ["git", "branch", "--format=%(refname:short)"],
+          splitOn: "\n",
+          postProcess: (out: string) =>
+            out
+              .split("\n")
+              .filter((line) => line.length > 0)
+              .map((name) => ({ name, description: "branch" })),
+        },
+      ],
+    },
+  ],
+};
+const fixtureMixedScripts = {
+  // 非声明式 script 形态（字符串 shell / 函数 custom / 混型 / template）：
+  // §16 allowShellScript=false + 批次 3 边界 → 不产槽位。
+  name: ["myshell"],
+  subcommands: [],
+  options: [],
+  persistentOptions: [],
+  parserDirectives: {},
+  args: [
+    {
+      name: "x",
+      isOptional: true,
+      generators: [
+        { script: "git branch | grep main" },
+        { script: () => ["a"] },
+        { script: ["git", 1] },
+        { template: "filepaths" },
+      ],
+    },
+  ],
+};
 const fixtureGenerateSpec = {
   // completionObj.generateSpec 函数 → 动态 spec 面 → pass-through
   name: ["mydyn"],
@@ -153,6 +201,8 @@ const fixtureManifest = {
   mygit: fixtureMyGit,
   mycat: fixtureVariadic,
   mykubectl: fixtureGeneratorArg,
+  mybranch: fixtureBranchGen,
+  myshell: fixtureMixedScripts,
   mydyn: fixtureGenerateSpec,
   myfunc: fixtureLoadSpecFn,
   myaws: fixtureAws,
@@ -327,5 +377,54 @@ describe("FigCompletionSource 防御性收敛", () => {
     const source = makeSource();
     expect(source.resolve(baseRequest('mygit commit -m "未闭合'))).not.toBeUndefined();
     expect(source.resolve(baseRequest("mygit 'a b"))).not.toBeUndefined();
+  });
+});
+
+describe("FigCompletionSource · 声明式 generator 槽位（批次 2-1 collectGenerators）", () => {
+  const source = makeSource();
+
+  it("script argv/splitOn/postProcess + 位置上下文产出槽位", () => {
+    const slots = source.collectGenerators(baseRequest("mybranch ma"));
+    expect(slots).toHaveLength(1);
+    expect(slots[0]).toMatchObject({
+      script: ["git", "branch", "--format=%(refname:short)"],
+      splitOn: "\n",
+      command: "mybranch",
+      commandPath: ["mybranch"],
+      prefix: "ma",
+      tokenStart: "mybranch ".length,
+      tokenEnd: "mybranch ma".length,
+    });
+    expect(typeof slots[0].postProcess).toBe("function");
+  });
+
+  it("纯 generator 位：resolve 仍 null（冻结同步面不变），槽位照常产出", () => {
+    expect(source.resolve(baseRequest("mybranch ma"))).toBeNull();
+    expect(source.collectGenerators(baseRequest("mybranch ma"))).toHaveLength(1);
+  });
+
+  it("静态 + generator 并存：静态候选照常 ready，槽位并行产出（两段渲染基座）", () => {
+    const res = source.resolve(baseRequest("mybranch "));
+    expect(itemLabels(res)).toContain("HEAD");
+    const slots = source.collectGenerators(baseRequest("mybranch "));
+    expect(slots).toHaveLength(1);
+    expect(slots[0].prefix).toBe("");
+    expect(slots[0].tokenStart).toBe("mybranch ".length);
+    expect(slots[0].tokenEnd).toBe("mybranch ".length);
+  });
+
+  it("非声明式 script 形态（字符串 shell/函数/混型/template）不产槽位", () => {
+    expect(source.collectGenerators(baseRequest("myshell x"))).toEqual([]);
+  });
+
+  it("无 generator 位置 / 无 spec 命中 → []", () => {
+    expect(source.collectGenerators(baseRequest("mygit che"))).toEqual([]);
+    expect(source.collectGenerators(baseRequest("nosuchcmd x"))).toEqual([]);
+    expect(source.collectGenerators(baseRequest("mykubectl get po"))).toEqual([]); // template 生成器不产槽位
+  });
+
+  it("异常行不外抛（spec 枚举抛错 / 引号未闭合）→ []", () => {
+    expect(source.collectGenerators(baseRequest("mybroken --x"))).toEqual([]);
+    expect(source.collectGenerators(baseRequest('mygit commit -m "未闭合'))).toEqual([]);
   });
 });

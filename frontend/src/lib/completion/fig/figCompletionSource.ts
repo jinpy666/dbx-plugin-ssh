@@ -11,8 +11,10 @@
 //   注册表（loadSpec 文件系统语义被 manifest 替代，见 vendor NOTICE）；
 // - token 边界用 core/tokenize.ts 做行级判定（冻结复用），候选编辑范围用
 //   shell-parser 的 token 节点 startIndex/endIndex（buffer 绝对偏移，行尾精确）；
-// - generator 声明位置（currentArg.generators / completionObj.generateSpec /
-//   loadSpec 函数形态）批次 1 → resolve 返回 null（pass-through）；
+// - generator 声明位置（currentArg.generators）：resolve() 保持同步冻结接口
+//   语义——静态候选照常给出，纯动态位返回 null（pass-through）；声明式
+//   generator（script argv 数组形态）由 collectGenerators()（批次 2-1 新增，
+//   不动冻结接口）产出槽位，经 GeneratorScheduler + hostClient 异步执行；
 // - 任何异常吞掉返 null，绝不上抛（回归红线 §3.1）。
 
 import { splitCommandLine } from "../core/tokenize";
@@ -23,6 +25,7 @@ import type {
   CompletionItemKind,
   CompletionResponse,
 } from "../core/types";
+import type { FigGeneratorSlot } from "./generatorScheduler";
 import type {
   FigSourceRequest,
   FigSpecManifest,
@@ -252,38 +255,56 @@ export class FigCompletionSourceImpl implements FigCompletionSource {
 
   resolve(request: FigSourceRequest): CompletionResponse | null {
     try {
-      return this.resolveOrThrow(request);
+      return this.analyzeOrThrow(request).response;
     } catch {
       return null; // 回归红线 §3.1：任何异常不外抛
     }
   }
 
-  private resolveOrThrow(request: FigSourceRequest): CompletionResponse | null {
+  /**
+   * 批次 2-1：当前请求位置的声明式 generator 槽位（不动冻结接口的第二通道，
+   * 由 GeneratorScheduler 消费）。仅产出 script 为 argv 数组形态的声明式
+   * generator（§16 allowShellScript=false：字符串/函数形态属 shell script /
+   * custom JS，本批次不执行；template 生成器属文件 provider 领域，亦不产出）。
+   * 任何异常 → []（调用方按无槽位处理，绝不抛）。
+   */
+  collectGenerators(request: FigSourceRequest): FigGeneratorSlot[] {
+    try {
+      return this.analyzeOrThrow(request).slots;
+    } catch {
+      return [];
+    }
+  }
+
+  private analyzeOrThrow(request: FigSourceRequest): {
+    response: CompletionResponse | null;
+    slots: FigGeneratorSlot[];
+  } {
     const { line, requestId, revision } = request;
-    if (typeof line !== "string" || line.length === 0) return null;
+    if (typeof line !== "string" || line.length === 0) return { response: null, slots: [] };
 
     // 冻结 tokenize：行级判定（空行/无 token 直接 pass-through）。
     const split = splitCommandLine(line);
-    if (split.tokens.length === 0) return null;
+    if (split.tokens.length === 0) return { response: null, slots: [] };
 
     // 上游 shell-parser：行 → 命令节点（光标所在命令；`git status && docker `
     // 这类多段行只对当前段补全）。token 节点携带 buffer 绝对偏移。
     const command = engine.getCommand(line, EMPTY_ALIASES, line.length);
-    if (!command || command.tokens.length === 0) return null;
+    if (!command || command.tokens.length === 0) return { response: null, slots: [] };
 
     const tokens = command.tokens;
     const lastToken = tokens[tokens.length - 1];
 
     // 单 token 且非行尾空白：正在敲命令名 → 用 manifest 命令名补全。
     if (tokens.length === 1 && !split.trailingSpace) {
-      return this.commandNameResponse(request, command, tokens[0].text);
+      return { response: this.commandNameResponse(request, command, tokens[0].text), slots: [] };
     }
 
     const rootName = tokens[0].text;
     let rootSpec = this.lookupSpec(rootName, new Set());
     if (!rootSpec) {
-      if (tokens.length === 1) return this.commandNameResponse(request, command, rootName);
-      return null; // 无 spec 命中 → pass-through（不造假候选）
+      if (tokens.length === 1) return { response: this.commandNameResponse(request, command, rootName), slots: [] };
+      return { response: null, slots: [] }; // 无 spec 命中 → pass-through（不造假候选）
     }
 
     let state = engine.getInitialState(rootSpec, rootName, {
@@ -297,7 +318,7 @@ export class FigCompletionSourceImpl implements FigCompletionSource {
     // string/数组/内联对象 → manifest 解析换轨。
     if (rootSpec.loadSpec !== undefined && rootSpec.loadSpec !== null) {
       const rootSwapped = this.resolveLoadSpecValue(rootSpec.loadSpec, visitedLoadSpec);
-      if (!rootSwapped) return null;
+      if (!rootSwapped) return { response: null, slots: [] };
       rootSpec = rootSwapped;
     }
 
@@ -312,10 +333,10 @@ export class FigCompletionSourceImpl implements FigCompletionSource {
       try {
         state = engine.updateState(state, token);
       } catch {
-        return null; // token 无法消费（上游语义）→ pass-through
+        return { response: null, slots: [] }; // token 无法消费（上游语义）→ pass-through
       }
       const swapped = this.applySyncLoadSpec(state, token, visitedLoadSpec, argBefore);
-      if (swapped === null) return null;
+      if (swapped === null) return { response: null, slots: [] };
       state = swapped;
     }
 
@@ -333,24 +354,25 @@ export class FigCompletionSourceImpl implements FigCompletionSource {
       };
     }
     const result = engine.getResultFromState(finalState);
-    if (!isRecord(result)) return null;
+    if (!isRecord(result)) return { response: null, slots: [] };
 
     // 候选枚举（语义全部来自上游状态机：哪些类目可建议由 suggestionFlags 决定）。
     const items = this.buildItems(result, lastToken, line.length);
 
-    // generator 声明参数位（currentArg.generators）：批次 1 不执行 generator，
-    // 静态候选（options/subcommands/静态 args suggestions）照常给出；完全无
-    // 静态候选的动态位 → null（pass-through；批次 2 经 completion/execute 接入）。
+    // generator 声明参数位（currentArg.generators）：resolve() 静态面不执行
+    // generator（冻结同步接口），静态候选照常给出；完全无静态候选的动态位
+    // → null 响应 + 槽位由 collectGenerators 异步通道执行（批次 2-1）。
     const currentArg = result.currentArg;
     const generatorOwned =
       !!currentArg && Array.isArray(currentArg.generators) && currentArg.generators.length > 0;
+    const slots = this.generatorSlotsOf(result, command, line.length);
     if (items.length === 0) {
-      if (generatorOwned) return null;
+      if (generatorOwned) return { response: null, slots };
       // isCommand/isModule 参数位（如 `sudo `）：静态可补的是 manifest 命令名。
       if (currentArg && (currentArg.isCommand || typeof currentArg.isModule === "string") && !currentArg.isScript) {
-        return this.commandNameResponse(request, command, result.searchTerm ?? "");
+        return { response: this.commandNameResponse(request, command, result.searchTerm ?? ""), slots: [] };
       }
-      return null; // 无命中 → pass-through
+      return { response: null, slots: [] }; // 无命中 → pass-through
     }
 
     const flattened = safeFlatten(engine, result.annotations);
@@ -366,12 +388,55 @@ export class FigCompletionSourceImpl implements FigCompletionSource {
       tokenEnd: safeIndex(lastToken.node?.endIndex, line.length, line.length),
     };
     return {
-      requestId,
-      revision,
-      state: "ready",
-      context,
-      items,
+      response: {
+        requestId,
+        revision,
+        state: "ready",
+        context,
+        items,
+      },
+      slots,
     };
+  }
+
+  /** currentArg.generators 中的声明式子集 → 槽位（script argv 数组 +
+   * splitOn + spec 原生 postProcess + 编辑/缓存上下文）。template 生成器、
+   * 字符串/函数 script 不产出（§16/§17/批次 3 边界）。 */
+  private generatorSlotsOf(
+    result: ParserResult,
+    command: ParserCommand,
+    lineLength: number,
+  ): FigGeneratorSlot[] {
+    const arg = result.currentArg;
+    if (!arg || !Array.isArray(arg.generators)) return [];
+    const lastToken = command.tokens[command.tokens.length - 1];
+    const tokenStart = safeIndex(lastToken.node?.startIndex, lineLength, 0);
+    const tokenEnd = safeIndex(lastToken.node?.endIndex, lineLength, lineLength);
+    const flattened = safeFlatten(engine, result.annotations);
+    const commandPath = flattened
+      .filter((a) => a.type === TokenType.Subcommand)
+      .map((a) => a.text);
+    const rootName = command.tokens[0]?.text ?? "";
+    const primaryName = firstString(result.completionObj?.name) ?? rootName;
+    const prefix = typeof result.searchTerm === "string" ? result.searchTerm : "";
+    const slots: FigGeneratorSlot[] = [];
+    for (const raw of arg.generators) {
+      if (!isRecord(raw)) continue;
+      const script = raw.script;
+      if (!Array.isArray(script) || script.length === 0) continue;
+      if (!script.every((entry) => typeof entry === "string")) continue;
+      slots.push({
+        script: script.filter((entry): entry is string => typeof entry === "string"),
+        ...(typeof raw.splitOn === "string" && raw.splitOn.length > 0 ? { splitOn: raw.splitOn } : {}),
+        ...(typeof raw.postProcess === "function" ? { postProcess: raw.postProcess as FigGeneratorSlot["postProcess"] } : {}),
+        command: primaryName || null,
+        commandPath,
+        prefix,
+        tokenStart,
+        tokenEnd,
+      });
+    }
+    return slots;
   }
 
   /** 上游 loadSpec 语义的同步镜像（loadSpec.ts 被 manifest 替代）。上游
@@ -658,14 +723,14 @@ function safeIndex(value: unknown, fallback: number, minimum: number): number {
 
 // ---------------------------------------------------------------------------
 // 默认实例（Lane A' 的注入来源；单测可经 createFigCompletionSource 换 fixture）
+// 导出类型保持实现类：App 的 generator 通道需要 collectGenerators（批次 2-1
+// 第二通道）；实现类可赋给冻结接口 FigCompletionSource，接缝不受影响。
 // ---------------------------------------------------------------------------
 
-export function createFigCompletionSource(
-  options: FigSourceOptions = {},
-): FigCompletionSource {
+export function createFigCompletionSource(options: FigSourceOptions = {}): FigCompletionSourceImpl {
   return new FigCompletionSourceImpl(options);
 }
 
-export const figCompletionSource: FigCompletionSource = createFigCompletionSource();
+export const figCompletionSource = createFigCompletionSource();
 
 export default figCompletionSource;
