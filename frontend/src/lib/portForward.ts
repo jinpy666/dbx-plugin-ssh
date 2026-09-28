@@ -239,6 +239,39 @@ export function parseInterfaces(payload: unknown): HostInterface[] {
   return parsed;
 }
 
+/** 监听地址 datalist 的静态默认候选行；labelKey 是完整 i18n key（含
+ * `forwards.` 前缀，i18nKeyReferences 扫描器按全量 key 校验），翻译留在
+ * 组件侧。 */
+export interface ListenHostOption {
+  value: string;
+  labelKey: string;
+}
+
+/**
+ * 按方向的监听地址默认候选。本地（-L）绑定发生在客户机：全接口 + 回环字面量，
+ * 客户机网卡探测结果由组件追加。远程（-R）的绑定发生在 SSH 服务器上，客户机
+ * 网卡地址在这里是误导——默认候选换成服务器侧地址：回环组（127.0.0.1、
+ * localhost 名、::1）与全接口组（0.0.0.0、::、sshd 通配 `*`）。全部条目都
+ * 通过 validateForwardForm（`*` 仅远程合法，本地组刻意不含）。
+ */
+export function listenHostOptions(kind: ForwardKind): ListenHostOption[] {
+  if (kind === "local") {
+    return [
+      { value: "0.0.0.0", labelKey: "forwards.allInterfaces" },
+      { value: "127.0.0.1", labelKey: "forwards.loopback" },
+      { value: "::1", labelKey: "forwards.loopback" },
+    ];
+  }
+  return [
+    { value: "127.0.0.1", labelKey: "forwards.loopback" },
+    { value: "localhost", labelKey: "forwards.loopbackName" },
+    { value: "::1", labelKey: "forwards.loopback" },
+    { value: "0.0.0.0", labelKey: "forwards.allInterfaces" },
+    { value: "::", labelKey: "forwards.allInterfacesV6" },
+    { value: "*", labelKey: "forwards.wildcardHost" },
+  ];
+}
+
 /** 校验通过后的 RPC 参数（端口转数字；listenHost 空串交给 sidecar 默认）。 */
 export function forwardStartParams(draft: ForwardFormDraft, sessionId: string) {
   return {

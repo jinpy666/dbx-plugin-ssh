@@ -2,7 +2,7 @@
 // 端口映射管理弹窗（-L/-R，ssh(1)/Xshell 语义）：列表 + 添加表单 + 停止。
 // 状态、RPC 编排与 ssh/forward/state 事件订阅都在本组件内；App.vue 只负责
 // 工具栏入口。纯逻辑（解析/校验/格式化）在 lib/portForward.ts。
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Loader2, Plus, Square, X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
 import {
@@ -11,6 +11,7 @@ import {
   formatForwardBytes,
   formatForwardRoute,
   forwardStartParams,
+  listenHostOptions,
   parseForwards,
   parseInterfaces,
   validateForwardForm,
@@ -49,6 +50,16 @@ const forwardFormMessage = ref("");
 const interfaces = ref<HostInterface[]>([]);
 /** datalist id：绑定监听输入框与网卡候选列表。 */
 const hostOptionListId = "forward-listen-host-options";
+/** 按方向的静态默认候选：远程（-R）绑定在 SSH 服务器上，默认给服务器侧的
+ * 回环/全接口/通配组；本地（-L）给本机的全接口 + 回环字面量。 */
+const hostOptions = computed(() => listenHostOptions(forwardForm.kind));
+/** 本机网卡探测候选只在本地方向追加（远程方向的监听地址属于服务器，客户机
+ * 网卡是误导）；与静态候选按地址去重，探测失败自然退化为纯静态组。 */
+const probedInterfaceOptions = computed(() => {
+  if (forwardForm.kind !== "local") return [];
+  const known = new Set(hostOptions.value.map((option) => option.value));
+  return interfaces.value.filter((iface) => !known.has(iface.addr));
+});
 
 async function refreshForwards() {
   if (!props.connectionId) return;
@@ -192,11 +203,14 @@ watch(
                   :placeholder="t('forwards.listenHostPlaceholder')"
                   :list="hostOptionListId"
                 />
-                <!-- ip+网卡名同框：datalist 候选 value=可绑定 IP，网卡名作说明
+                <!-- 候选随方向切换：静态默认在前，本机网卡（仅 -L）去重后追加。
+                     ip+网卡名同框：datalist 候选 value=可绑定 IP，网卡名作说明
                      文案；手输与点选同一输入框，探测失败自动退化为纯手输。 -->
                 <datalist :id="hostOptionListId">
-                  <option value="0.0.0.0">{{ t("forwards.allInterfaces") }}</option>
-                  <option v-for="iface in interfaces" :key="iface.addr" :value="iface.addr">
+                  <option v-for="option in hostOptions" :key="option.value" :value="option.value">
+                    {{ t(option.labelKey) }}
+                  </option>
+                  <option v-for="iface in probedInterfaceOptions" :key="iface.addr" :value="iface.addr">
                     {{ iface.isLoopback ? t("forwards.loopback") : iface.name }}
                   </option>
                 </datalist>
@@ -211,6 +225,7 @@ watch(
               </span>
             </label>
           </div>
+          <p v-if="forwardForm.kind === 'remote'" class="forward-form-hint">{{ t("forwards.remoteListenTip") }}</p>
           <p v-if="forwardFormMessage" class="forward-form-error">{{ forwardFormMessage }}</p>
           <footer>
             <button type="submit" class="primary-button" :disabled="!props.sessionId"><Plus />{{ t("forwards.add") }}</button>

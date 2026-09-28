@@ -1036,6 +1036,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .forward-kind-picker input { margin: 0; }
 .forward-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 220px; font-size: 11px; color: var(--muted-foreground); }
 .forward-field-pair { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 6px; }
+.forward-form-hint { margin: 0; font-size: 11px; color: var(--muted-foreground); }
 .forward-form-error { margin: 0; font-size: 11px; color: var(--destructive); }
 .forward-form footer { display: flex; justify-content: flex-end; }
 

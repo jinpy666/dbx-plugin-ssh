@@ -7,6 +7,7 @@ import {
   forwardStartParams,
   parseForwards,
   parseInterfaces,
+  listenHostOptions,
   validateForwardForm,
   type ForwardFormDraft,
   type PortForward,
@@ -151,6 +152,42 @@ describe("parseInterfaces", () => {
   it("returns an empty list for junk payloads", () => {
     expect(parseInterfaces(null)).toEqual([]);
     expect(parseInterfaces({})).toEqual([]);
+  });
+});
+
+describe("listenHostOptions", () => {
+  const values = (kind: "local" | "remote") => listenHostOptions(kind).map((option) => option.value);
+
+  it("offers all-interfaces and loopback literals for local binds", () => {
+    expect(values("local")).toEqual(["0.0.0.0", "127.0.0.1", "::1"]);
+  });
+
+  it("defaults remote binds to server-side loopback and wildcard group", () => {
+    expect(values("remote")).toEqual(["127.0.0.1", "localhost", "::1", "0.0.0.0", "::", "*"]);
+    const labels = listenHostOptions("remote").map((option) => option.labelKey);
+    expect(labels).toEqual([
+      "forwards.loopback",
+      "forwards.loopbackName",
+      "forwards.loopback",
+      "forwards.allInterfaces",
+      "forwards.allInterfacesV6",
+      "forwards.wildcardHost",
+    ]);
+  });
+
+  it("keeps every remote candidate acceptable to validateForwardForm and local free of the wildcard", () => {
+    for (const option of listenHostOptions("remote")) {
+      expect(
+        validateForwardForm({ kind: "remote", listenHost: option.value, listenPort: "8080", targetHost: "db", targetPort: "5432" }),
+      ).toBeNull();
+    }
+    for (const option of listenHostOptions("local")) {
+      // 本地候选也必须全量过本地校验（`*` 只允许出现在远程组）。
+      expect(
+        validateForwardForm({ kind: "local", listenHost: option.value, listenPort: "8080", targetHost: "db", targetPort: "5432" }),
+      ).toBeNull();
+    }
+    expect(values("local")).not.toContain("*");
   });
 });
 
