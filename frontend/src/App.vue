@@ -1931,10 +1931,18 @@ const connectionAuthMethodLabel = computed(() => formatAuthMethodLabel(connectio
 }));
 // 连接色染色按主题分级（light 压低 alpha 保 muted 文字 AA 对比度，P2-4）。
 const toolbarStyle = computed(() => toolbarTintStyle(connection.value.color, appearance.value.colorScheme));
-const terminalBasis = computed(() => ({ flexBasis: sftpPaneOpen.value ? `${splitRatio.value}%` : "100%" }));
+// 终端让宽：SFTP 分栏按用户拖拽比例；Docker 停靠面板为固定宽度（CSS 变量，
+// 见 style.css .panes），终端让出剩余宽度；两者同开时 SFTP 比例优先，其
+// flex:1 自行吸收 Docker 面板宽度。
+const terminalBasis = computed(() => {
+  if (sftpPaneOpen.value) return { flexBasis: `${splitRatio.value}%` };
+  if (dockerPanelOpen.value) return { flexBasis: "calc(100% - var(--docker-pane-width))" };
+  return { flexBasis: "100%" };
+});
 const orderedPaneClass = computed(() => [
   paneOrder.value === "sftp-left" ? "panes panes--reversed" : "panes",
   sftpPaneOpen.value ? "" : "panes--solo",
+  dockerPanelOpen.value ? "panes--docker" : "",
 ].filter(Boolean).join(" "));
 const sortedEntries = computed(() => {
   const direction = sort.value.direction === "asc" ? 1 : -1;
@@ -6047,9 +6055,10 @@ function openAlertTriage() {
 // 这里只保留工具栏入口的开关状态。
 const forwardsOpen = ref(false);
 
-// Docker 容器面板（P2-4 迁移）：入口从 SFTP 侧栏 tab 独立为工具条鲸鱼按钮
-// （终端上方常驻，SFTP 面板关闭时也可见），面板本体仍由 DockerPanel 自治
-// （会话解析/轮询/动作/引擎设置都在组件内），关闭即卸载并停轮询。
+// Docker 停靠面板（P2-4 迁移后二迁）：工具条鲸鱼按钮开合，与 SFTP 面板同款
+// 分栏停靠（paneContainer 末尾的 .docker-pane，终端经 terminalBasis 让宽），
+// 不再是 portal 弹层。面板本体仍由 DockerPanel 自治（会话解析/轮询/动作/
+// 引擎设置都在组件内），关闭即卸载并停轮询。
 const dockerPanelOpen = ref(false);
 
 async function runAlertTriage() {
@@ -11079,7 +11088,7 @@ function closeToolbarPopovers() {
   sessionMenuOpen.value = false;
   sessionMenuShellOpen.value = false;
   localShellSurfaceOpen.value = false;
-  // Docker 鲸鱼入口弹层：点空白/切 tab 等全局收口时一并关闭（幂等）。
+  // Docker 停靠面板：点空白/切 tab 等全局收口时一并关闭（幂等）。
   dockerPanelOpen.value = false;
 }
 
@@ -11857,19 +11866,10 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :disabled="!session" @click="forwardsOpen = true"><Network /></button>
-        <!-- Docker 容器面板（鲸鱼 logo 独立入口）：挂在终端上方工具条，SFTP
-             面板关闭时也可达；local 模式保留——本机 daemon（Docker Desktop/
-             OrbStack）场景照常可用。面板自治，v-if 关闭即停轮询。 -->
-        <div>
-          <Popover :open="dockerPanelOpen" @update:open="(open) => (dockerPanelOpen = open)">
-            <PopoverAnchor as-child>
-              <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
-            </PopoverAnchor>
-            <PopoverContent class="popover docker-toolbar-popover" align="end" :side-offset="5">
-              <DockerPanel v-if="dockerPanelOpen" :t="t" />
-            </PopoverContent>
-          </Popover>
-        </div>
+        <!-- Docker 停靠面板（鲸鱼 logo 独立入口，与 SFTP 面板同款分栏交互）：
+             SFTP 面板关闭时也可达；local 模式保留——本机 daemon（Docker
+             Desktop/OrbStack）场景照常可用。面板自治，关闭即卸载停轮询。 -->
+        <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
         <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
           <Switch size="sm" :model-value="followDirectory" :disabled="!connected || panelSurface" @update:model-value="setDirectoryTracking" />
           <span>{{ t("followTerminal") }}</span>
@@ -12872,6 +12872,17 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-if="dragActive" class="drop-overlay"><FileUp /><strong>{{ t("upload") }}</strong></div>
+      </section>
+      <!-- Docker 停靠面板（与 SFTP 面板同款分栏交互，终端经 terminalBasis 让宽）：
+           非 portal 弹层——面板内点击 @click.stop 防 document 收口误关；内嵌
+           引擎设置 Popover 与确认/日志 Dialog 仍 portal 到 body（收口守卫已排除
+           其 data-slot）。 -->
+      <section v-if="dockerPanelOpen" class="docker-pane" @click.stop>
+        <header>
+          <h2>{{ t("docker.toolbarTitle") }}</h2>
+          <button class="icon-button" :title="t('close')" @click="dockerPanelOpen = false"><X /></button>
+        </header>
+        <DockerPanel :t="t" />
       </section>
     </section>
 
