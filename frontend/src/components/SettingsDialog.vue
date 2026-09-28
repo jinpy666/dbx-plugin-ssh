@@ -151,7 +151,7 @@ function clampStartupDelayInput(raw: string): number {
   if (!Number.isFinite(value) || value < 0) return STARTUP_DELAY_DEFAULT_MS;
   return Math.min(value, STARTUP_DELAY_MAX_MS);
 }
-import { pluginStore } from "../lib/pluginStore";
+import { COMPLETION_ENGINE_KEY, loadCompletionEngine, pluginStore, sanitizeCompletionEngine, type CompletionEngineSetting } from "../lib/pluginStore";
 
 /** 连接级 SFTP 文件名编码覆盖（M16）：同启动命令的自治 RPC 读写
  * （`sftp_name_encoding_overrides` 键按 connectionId 分桶）。控件缺省
@@ -266,17 +266,19 @@ void loadRdpExperimentalPreference();
 
 void loadX11Preference();
 
-// 结构化补全开关（对标 Warp/fig，线 2）：组件内自治读写 pluginStore
-// （键 ssh-completion-spec，"false" = 关，默认开）——不走 props/emit，
-// App 在浮层弹出前直读同一键，无需事件同步。
-const SPEC_COMPLETION_ENABLED_KEY = "ssh-completion-spec";
-const specCompletionEnabled = ref(true);
+// 结构化补全引擎选择（FIG wave-1，契约 §2.3）：组件内自治读写 pluginStore
+// （键 ssh-completion-engine，fig-safe 默认 / fig / off）——不走 props/emit，
+// App 每次调度前直读同一键，无需事件同步。off = 无结构化浮层（历史/ghost
+// 不受影响）；fig 与 fig-safe 批次 1 行为相同，差异自 generator 接线起。
+const completionEngine = ref<CompletionEngineSetting>(loadCompletionEngine());
 
-function loadSpecCompletionEnabled(): boolean {
+function setCompletionEngine(next: string) {
+  const value = sanitizeCompletionEngine(next);
+  completionEngine.value = value;
   try {
-    return pluginStore.getItem(SPEC_COMPLETION_ENABLED_KEY) !== "false";
+    pluginStore.setItem(COMPLETION_ENGINE_KEY, value);
   } catch {
-    return true;
+    // 存储不可用（无宿主桥且 localStorage 受限）：仅当前会话生效。
   }
 }
 
@@ -294,17 +296,6 @@ function loadGhostEnabled(): boolean {
     return true;
   }
 }
-
-function setSpecCompletionEnabled(next: boolean) {
-  specCompletionEnabled.value = next;
-  try {
-    pluginStore.setItem(SPEC_COMPLETION_ENABLED_KEY, next ? "true" : "false");
-  } catch {
-    // 存储不可用（无宿主桥且 localStorage 受限）：仅当前会话生效。
-  }
-}
-
-specCompletionEnabled.value = loadSpecCompletionEnabled();
 
 function setGhostEnabled(next: boolean) {
   ghostEnabled.value = next;
@@ -2028,11 +2019,18 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <input v-model="suggestionMaxCharsDraft" type="number" min="8" max="512" step="1" @change="suggestionMaxCharsDraft = String(Math.min(512, Math.max(8, Number.parseInt(suggestionMaxCharsDraft, 10) || 64)))" />
             </label>
             <p class="muted settings-note">{{ t("suggestions.settingsMaxCharsHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="specCompletionEnabled" size="sm" @update:model-value="setSpecCompletionEnabled(Boolean($event))" />
-              <span>{{ t("completionMenu.settingsEnabled") }}</span>
+            <label class="settings-field">
+              <span>{{ t("completionMenu.engine") }}</span>
+              <Select :model-value="completionEngine" @update:model-value="setCompletionEngine(String($event))">
+                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="fig-safe">{{ t("completionMenu.engineFigSafe") }}</SelectItem>
+                  <SelectItem value="fig">{{ t("completionMenu.engineFig") }}</SelectItem>
+                  <SelectItem value="off">{{ t("completionMenu.engineOff") }}</SelectItem>
+                </SelectContent>
+              </Select>
             </label>
-            <p class="muted settings-note">{{ t("completionMenu.settingsEnabledHint") }}</p>
+            <p class="muted settings-note">{{ t("completionMenu.engineHint") }}</p>
 
             <!-- 行内 ghost 自动建议（np8，对标 Warp/fish）：追加于「终端行为」组末尾；
                  组件内自治读写 pluginStore（ssh-terminal-ghost-suggest），即时上抛 App。 -->

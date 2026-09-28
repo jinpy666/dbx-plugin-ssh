@@ -59,14 +59,10 @@ registerDynamicCompletionProvider(
   目录一致才处理），不产生任何新增远端 I/O。任意目录的 `sftp/list` 缓存、
   `git branch`、kubectl resource 等 provider 后续按同接口接入。
 
-## Fig / Amazon Q spec 导入
+## Fig / Amazon Q spec 导入（已退役）
 
-```bash
-node scripts/import-fig-specs.mjs ~/downloads/fig-git.json
-# → frontend/src/lib/completions/specs/imported-git.ts
-# 在 specs/index.ts 手动聚合后生效；导入结果定位为原型，review 后可裁剪。
-```
-
-归一化支持静态子集（options 长短名、带值 flag、required positional→dynamic、
-两层子命令树）；fig 的 generators/priority 等动态指令忽略（由 provider/
-Tab 透传承担）。
+`scripts/import-fig-specs.mjs` 与 `lib/completions/**` 手写 spec 原型已随
+FIG wave-1 最终架构退役：补全语义改由 vendored amazon-q parser + withfig
+全量语料承担（`frontend/vendor/`、`frontend/src/lib/completion/fig/`），
+同步/校验走 `pnpm --dir frontend fig:sync` / `fig:verify`，详见
+`docs/FIG_ROADMAP.zh-CN.md` 与 `docs/fig-specs-size-report.md`。

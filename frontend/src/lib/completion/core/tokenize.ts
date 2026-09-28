@@ -1,4 +1,4 @@
-// 命令行 token 切分（冻结）：自 lib/completions/spec.ts 上移，作为 legacy
+// 命令行 token 切分（冻结）：自退役的 legacy spec.ts 上移，作为 legacy
 // spec 目录退役后的公共依赖（fig source 与 controller 共用）。语义与原实现
 // 逐字一致：空白分隔；单引号内全字面；双引号与引号外支持反斜杠转义；
 // 裸 "--" 是 flag 终结符；空 token 只有显式 '' 会产生。

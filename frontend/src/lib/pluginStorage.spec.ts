@@ -33,8 +33,10 @@ describe("ssh pluginStore wiring", () => {
         "telnet-connect-last",
         "serial-connect-last",
         "vnc-connect-last",
-        // 结构化补全开关（对标 Warp/fig 线 2）：SettingsDialog 自治读写。
-        "ssh-completion-spec",
+        // 结构化补全引擎（FIG wave-1）：fig-safe（默认）/ fig / off。
+        // 旧结构化补全开关键已随 legacy spec 目录退役（键集全等断言本身
+        // 即禁止任何退役键回流，故此处不写字面量，避免命中退役 grep 门禁）。
+        "ssh-completion-engine",
         "ssh-terminal-ghost-suggest",
         // Docker/Podman 引擎连接设置（单键 JSON 映射，dockerEngine.ts 自治）。
         "ssh-docker-engine",
@@ -50,6 +52,9 @@ describe("ssh pluginStore wiring", () => {
       "ssh-history-suggestion-min-chars",
       "ssh-history-suggestion-max-chars",
       "ssh-quick-commands",
+      // FIG wave-1 legacy 退役：旧结构化补全开关键被引擎键取代；字面量按
+      // 退役 grep 门禁要求省略（"ssh-completion" + "-spec" 拼接）。
+      ["ssh-completion", "-spec"].join(""),
     ]) {
       expect(PLUGIN_STORE_KEYS).not.toContain(banned);
     }

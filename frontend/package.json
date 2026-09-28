@@ -6,7 +6,10 @@
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "vue-tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "fig:sync": "node ../scripts/sync_fig_specs.mjs",
+    "fig:verify": "node ../scripts/verify_fig_specs.mjs",
+    "fig:test": "vitest run src/lib/completion"
   },
   "dependencies": {
     "@codemirror/language": "^6.12.4",
