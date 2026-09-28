@@ -349,12 +349,15 @@ function flagRows(command: SpecCommand, partial: string): CompletionRow[] {
 
   const rows: CompletionRow[] = [];
   for (const flag of flags) {
+    // 接受后一律补空格：无参 flag 进入下一参数；带参 flag（--branch <name>）
+    // 补空格后 matchSpecLine 把它记作等待值的 flag，刷新即进入 value 层——
+    // 不补空格会停留在 flag 层重复出同一行（review #120）。
     if (wantShortForm) {
       if (flag.short === undefined || flag.short !== stripped) continue;
       rows.push({
         kind: "flag",
-        token: `-${flag.short}${flag.arg !== undefined ? " " : ""}`.trimEnd(),
-        space: flag.arg === undefined,
+        token: `-${flag.short}`,
+        space: true,
         label: `-${flag.short}`,
         description: flag.arg !== undefined ? `${flag.description} <${flag.arg}>` : flag.description,
         score: SCORE_EXACT + SCORE_KIND_FLAG,
@@ -367,7 +370,7 @@ function flagRows(command: SpecCommand, partial: string): CompletionRow[] {
     rows.push({
       kind: "flag",
       token: `--${flag.name}`,
-      space: flag.arg === undefined,
+      space: true,
       label: `--${flag.name}${valueSuffix}`,
       description: flag.short !== undefined ? `${flag.description} (-${flag.short})` : flag.description,
       score,
