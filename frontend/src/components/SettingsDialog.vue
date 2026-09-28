@@ -9,6 +9,7 @@
 import { computed, reactive, ref, watch } from "vue";
 import { ArrowDown, ArrowUp, Check, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, ShieldCheck, Trash2, Upload, X } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
+import PasswordField from "./PasswordField.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 import { Switch } from "./ui/switch";
@@ -1630,7 +1631,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                 </label>
                 <label class="settings-field">
                   <span>{{ t("profilesPassword") }}</span>
-                  <input v-model="profileDraft.sudoPassword" type="password" autocomplete="off" :placeholder="profileDraftHadPassword ? t('profilesPasswordKeep') : t('settingsSudoPasswordPlaceholder')" />
+                  <PasswordField v-model="profileDraft.sudoPassword" :placeholder="profileDraftHadPassword ? t('profilesPasswordKeep') : t('settingsSudoPasswordPlaceholder')" :t="t" />
                 </label>
                 <label class="settings-field">
                   <span>{{ t("settingsTotp") }}</span>
@@ -1674,7 +1675,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             <template v-if="!boundProfile">
             <label class="settings-field">
               <span>{{ t("settingsSudoPassword") }}</span>
-              <input v-model="settingsDraft.sudoPassword" type="password" autocomplete="off" :placeholder="settingsMeta?.sudoPasswordSet ? t('settingsConfigured') : t('settingsSudoPasswordPlaceholder')" />
+              <PasswordField v-model="settingsDraft.sudoPassword" :placeholder="settingsMeta?.sudoPasswordSet ? t('settingsConfigured') : t('settingsSudoPasswordPlaceholder')" :t="t" />
             </label>
             <label class="settings-field">
               <span>{{ t("settingsTotp") }}</span>
@@ -2226,7 +2227,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <label class="settings-field">
               <span>{{ t("profilesPassword") }}</span>
-              <input v-model="profileDraft.sudoPassword" type="password" autocomplete="off" :placeholder="profileDraftHadPassword ? t('profilesPasswordKeep') : t('settingsSudoPasswordPlaceholder')" />
+              <PasswordField v-model="profileDraft.sudoPassword" :placeholder="profileDraftHadPassword ? t('profilesPasswordKeep') : t('settingsSudoPasswordPlaceholder')" :t="t" />
             </label>
             <label class="settings-field">
               <span>{{ t("settingsTotp") }}</span>

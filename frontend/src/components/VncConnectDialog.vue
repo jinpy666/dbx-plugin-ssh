@@ -4,6 +4,7 @@
 // 认证的协议上限（sidecar 也会拒绝），明文安全提示与 Telnet 同款常驻。
 import { reactive, ref, watch } from "vue";
 import { TriangleAlert, X } from "@lucide/vue";
+import PasswordField from "./PasswordField.vue";
 import { workbenchMessage } from "../lib/i18n";
 import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
@@ -100,7 +101,7 @@ function submit() {
         </label>
         <label class="settings-field">
           <span>{{ t("vnc.password") }}</span>
-          <input v-model="form.password" type="password" autocomplete="off" spellcheck="false" :placeholder="t('vnc.passwordHint')" :aria-invalid="passwordError" @keydown.enter="submit" @input="passwordError = false" />
+          <PasswordField v-model="form.password" :placeholder="t('vnc.passwordHint')" :aria-invalid="passwordError" @keydown.enter="submit" @input="passwordError = false" :t="t" />
         </label>
         <label class="settings-field">
           <span>{{ t("vnc.scaleMode") }}</span>

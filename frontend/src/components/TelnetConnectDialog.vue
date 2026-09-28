@@ -8,6 +8,7 @@
 // 纯 UI：不做连接编排，App.vue 持有会话状态。
 import { reactive, ref, watch } from "vue";
 import { TriangleAlert, X } from "@lucide/vue";
+import PasswordField from "./PasswordField.vue";
 import { workbenchMessage } from "../lib/i18n";
 import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
@@ -197,7 +198,7 @@ function submit() {
             </label>
             <label class="settings-field">
               <span>{{ t("telnet.declPassword") }}</span>
-              <input v-model="decl.password" type="password" autocomplete="off" spellcheck="false" :aria-invalid="declError" @input="declError = false" />
+              <PasswordField v-model="decl.password" :aria-invalid="declError" @input="declError = false" :t="t" />
             </label>
             <label class="settings-field">
               <span>{{ t("telnet.declUsernamePrompt") }}</span>
@@ -230,11 +231,11 @@ function submit() {
         <div class="telnet-form-grid">
           <label class="settings-field">
             <span>{{ t("telnet.secret1") }}</span>
-            <input v-model="form.secret1" type="password" autocomplete="off" spellcheck="false" :disabled="decl.enabled" />
+            <PasswordField v-model="form.secret1" :disabled="decl.enabled" :t="t" />
           </label>
           <label class="settings-field">
             <span>{{ t("telnet.secret2") }}</span>
-            <input v-model="form.secret2" type="password" autocomplete="off" spellcheck="false" :disabled="decl.enabled" />
+            <PasswordField v-model="form.secret2" :disabled="decl.enabled" :t="t" />
           </label>
         </div>
       </details>

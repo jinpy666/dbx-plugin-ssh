@@ -132,7 +132,7 @@ import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib
 import { filesFromClipboard } from "./lib/clipboardFiles";
 import { friendlySftpError, shouldOfferSudoRetryAfterFollowFailure } from "./lib/sftpErrors";
 import { filterDiskMounts, filterNetworkInterfaces } from "./lib/metricsView";
-import { clampDockerPaneWidth, terminalFlexBasis } from "./lib/paneLayout";
+import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "./lib/paneLayout";
 import type { GpuOverviewView, NpuOverviewView } from "./lib/metricsGpuNpu";
 import { isCountdownActive, nextCountdownValue, RECORD_COUNTDOWN_START } from "./lib/recordingCountdown";
 import { expandSelection, filterSftpEntries, type SftpTypeFilter } from "./lib/sftpFileFilters";
@@ -4631,6 +4631,7 @@ function updateTransfer(params: Record<string, unknown>) {
     currentFile: currentFile || undefined,
   };
   settleTransferCompletion(taskId, status);
+  if (!isLiveTransferStatus(status)) scheduleTerminalTaskSweep(taskId);
   if (!existing && isLiveTransferStatus(transferTasks[taskId].status)) {
     // 面板已开时不得重开：openTransferPanel 的"先收口再开"会卸载弹层、
     // 复位滚动位置，用户正往下看历史时会被弹回顶部（issue #18）。互斥族
@@ -4643,6 +4644,57 @@ function updateTransfer(params: Record<string, unknown>) {
 function normalizeTransferStatus(value: unknown, fallback: TransferTask["status"] = "running"): TransferTask["status"] {
   return ["queued", "running", "completed", "cancelled", "failed"].includes(String(value)) ? String(value) as TransferTask["status"] : fallback;
 }
+
+// —— 终态任务清收 ——
+// transferTasks/transferSpeeds 此前只在视图层过滤，记录本身永不清收：长会话
+// 成千上万次小传输会持续累积响应式对象并放大每次进度写入的依赖追踪成本。
+// 终态后保留一小段时间供用户看到结果，随后删除任务与速度/采样记录；记录
+// 总量超 ring 上限时最老终态先删。活跃任务永不清理；记录删除后同一 taskId
+// 再来事件会照常重建（updateTransfer 的 !existing 分支）。
+const TERMINAL_TASK_RETENTION_MS = 30_000;
+const TERMINAL_TASK_RING_LIMIT = 200;
+const terminalTaskSweepTimers = new Map<string, number>();
+
+function dropTransferRecord(taskId: string) {
+  const timer = terminalTaskSweepTimers.get(taskId);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    terminalTaskSweepTimers.delete(taskId);
+  }
+  delete transferTasks[taskId];
+  delete transferSpeeds[taskId];
+  transferSamples.delete(taskId);
+}
+
+function scheduleTerminalTaskSweep(taskId: string) {
+  if (terminalTaskSweepTimers.has(taskId)) return;
+  terminalTaskSweepTimers.set(
+    taskId,
+    window.setTimeout(() => {
+      terminalTaskSweepTimers.delete(taskId);
+      dropTransferRecord(taskId);
+    }, TERMINAL_TASK_RETENTION_MS),
+  );
+  enforceTransferRecordRing();
+}
+
+function enforceTransferRecordRing() {
+  let overflow = Object.keys(transferTasks).length - TERMINAL_TASK_RING_LIMIT;
+  if (overflow <= 0) return;
+  const sweepable = Object.values(transferTasks)
+    .filter((task) => !isLiveTransferStatus(task.status) && terminalTaskSweepTimers.has(task.taskId))
+    .sort((a, b) => (a.joinedAt ?? 0) - (b.joinedAt ?? 0));
+  for (const task of sweepable) {
+    if (overflow <= 0) break;
+    dropTransferRecord(task.taskId);
+    overflow -= 1;
+  }
+}
+
+onBeforeUnmount(() => {
+  for (const timer of terminalTaskSweepTimers.values()) window.clearTimeout(timer);
+  terminalTaskSweepTimers.clear();
+});
 
 /** 终态事件结算 finish 之后的收尾等待器：completed 兑现，cancelled/failed 拒绝。 */
 function settleTransferCompletion(taskId: string, status: TransferTask["status"]) {
@@ -7756,6 +7808,43 @@ function startDockerDividerDrag(event: PointerEvent) {
   container.addEventListener("pointermove", move);
   container.addEventListener("pointerup", release);
   container.addEventListener("pointercancel", release);
+}
+
+// 分栏把手键盘通道（pointer 拖拽对键盘用户不可达）：左右方向键把手 ±16px，
+// Shift 加速 ×3。`delta > 0` 统一表示「把手向右移」。
+const DIVIDER_KEY_STEP_PX = 16;
+function onDividerKeydown(event: KeyboardEvent, nudge: (deltaPx: number) => void) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const magnitude = event.shiftKey ? DIVIDER_KEY_STEP_PX * 3 : DIVIDER_KEY_STEP_PX;
+  nudge(event.key === "ArrowRight" ? magnitude : -magnitude);
+}
+
+function nudgeSplitDivider(deltaPx: number) {
+  const container = paneContainer.value;
+  if (!container) return;
+  const bounds = container.getBoundingClientRect();
+  if (!bounds.width) return;
+  // splitRatio 是终端占比：terminal-left 时把手右移 = 终端变宽；否则反向。
+  const sign = paneOrder.value === "terminal-left" ? 1 : -1;
+  splitRatio.value = Math.max(35, Math.min(80, splitRatio.value + (deltaPx / bounds.width) * 100 * sign));
+  scheduleFit();
+  persistState();
+}
+
+function nudgeDockerDivider(deltaPx: number) {
+  const container = paneContainer.value;
+  if (!container) return;
+  const bounds = container.getBoundingClientRect();
+  if (!bounds.width) return;
+  // dockerPaneWidth 恒等于把手到「面板贴靠缘」的距离：sftp-left（面板靠
+  // 左缘）时把手右移 = 面板变宽；否则把手右移 = 面板变窄。null = 尚未
+  // 拖过（CSS 默认宽，钳制下限同源），从默认宽起算。
+  const sign = paneOrder.value === "sftp-left" ? 1 : -1;
+  const current = dockerPaneWidth.value ?? DOCKER_PANE_MIN_WIDTH;
+  dockerPaneWidth.value = clampDockerPaneWidth(current + deltaPx * sign, bounds.width);
+  scheduleFit();
+  persistState();
 }
 
 function toggleColumn(column: SftpColumn) {
@@ -12835,7 +12924,19 @@ onBeforeUnmount(() => {
         </TerminalContextMenu>
       </ContextMenu>
 
-      <div v-if="sftpPaneOpen" class="divider" @pointerdown="startDividerDrag" />
+      <div
+        v-if="sftpPaneOpen"
+        class="divider"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-valuenow="Math.round(splitRatio)"
+        aria-valuemin="35"
+        aria-valuemax="80"
+        :title="t('dividerResizeHint')"
+        tabindex="0"
+        @pointerdown="startDividerDrag"
+        @keydown="onDividerKeydown($event, nudgeSplitDivider)"
+      />
 
       <section v-if="sftpPaneOpen" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave.self="dragActive = false" @drop.prevent="onDrop">
         <div class="path-toolbar">
@@ -13098,7 +13199,17 @@ onBeforeUnmount(() => {
            引擎设置 Popover 与确认/日志 Dialog 仍 portal 到 body（收口守卫已排除
            其 data-slot）。宽度可拖（前置 .divider），与 SFTP 同开时按
            terminalBasis 分摊剩余宽度，两栏同显互不遮挡。 -->
-      <div v-if="dockerPanelOpen" class="divider" @pointerdown="startDockerDividerDrag" />
+      <div
+        v-if="dockerPanelOpen"
+        class="divider"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-valuenow="Math.round(dockerPaneWidth ?? 0)"
+        :title="t('dividerResizeHint')"
+        tabindex="0"
+        @pointerdown="startDockerDividerDrag"
+        @keydown="onDividerKeydown($event, nudgeDockerDivider)"
+      />
       <section v-if="dockerPanelOpen" class="docker-pane" @click.stop>
         <header>
           <h2>{{ t("docker.toolbarTitle") }}</h2>
