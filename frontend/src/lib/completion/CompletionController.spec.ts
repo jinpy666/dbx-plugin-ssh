@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompletionController } from "./CompletionController";
 import { FakeFigCompletionSource, createPassThroughFigSource } from "./testing/fakeFigSource";
 import type { CompletionEdit, CompletionItem, CompletionResponse } from "./core/types";
+import type { FigGeneratorSlot } from "./fig/generatorScheduler";
 import type { FigCompletionSource, FigSourceRequest } from "./fig/source";
 
 /** 挂起式异步 source（防御 thenable 分支 + stale 路径驱动）。冻结接缝类型为
@@ -341,6 +342,214 @@ describe("createPassThroughFigSource", () => {
     const source = createPassThroughFigSource();
     expect(source.id).toBe("pass-through");
     expect(source.resolve({ line: "git ch", requestId: 1, revision: 0, sessionId: "s", trigger: "typing" })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 批次 2-1：声明式 generator 两段渲染（§31）+ 三重 guard 防陈旧（§30）
+// ---------------------------------------------------------------------------
+
+function genItem(label: string): CompletionItem {
+  return {
+    id: `fig-generator:git:0:${label}`,
+    label,
+    kind: "argument",
+    score: 0,
+    source: "fig-generator",
+    edit: { text: label, replaceStart: 13, replaceEnd: 15, cursorOffset: 13 + label.length },
+  };
+}
+
+function generatorSlot(overrides: Partial<FigGeneratorSlot> = {}): FigGeneratorSlot {
+  return {
+    script: ["git", "branch"],
+    command: "git",
+    commandPath: ["git", "checkout"],
+    prefix: "ma",
+    tokenStart: 13,
+    tokenEnd: 15,
+    ...overrides,
+  };
+}
+
+interface GeneratorHarness {
+  controller: CompletionController;
+  responses: CompletionResponse[];
+  runResults: Array<{ slot: FigGeneratorSlot; resolve: (items: CompletionItem[] | null) => void; reject: (cause?: unknown) => void }>;
+  setLine: (line: string) => void;
+  setSessionId: (sessionId: string) => void;
+}
+
+function generatorHarness(
+  config: {
+    resolve?: (request: FigSourceRequest) => CompletionResponse | null;
+    slots?: FigGeneratorSlot[];
+    slotsThrow?: boolean;
+  } = {},
+): GeneratorHarness {
+  let line = "git checkout ma";
+  let sessionId = "session-a";
+  const responses: CompletionResponse[] = [];
+  const slots = config.slots ?? [generatorSlot()];
+  const runResults: GeneratorHarness["runResults"] = [];
+  const controller = new CompletionController({
+    source: {
+      id: "gen-fixture",
+      resolve:
+        config.resolve ??
+        (() => null), // 纯 generator 位：静态面无候选
+    },
+    sessionId: () => sessionId,
+    readLine: () => line,
+    enabled: () => true,
+    generators: {
+      slots: () => {
+        if (config.slotsThrow) throw new Error("slots boom");
+        return slots;
+      },
+      run: (slot) =>
+        new Promise<CompletionItem[] | null>((resolve, reject) => runResults.push({ slot, resolve, reject })),
+    },
+    onResponse: (response) => responses.push(response),
+    onAcceptEdit: () => undefined,
+  });
+  return {
+    controller,
+    responses,
+    runResults,
+    setLine: (next) => (line = next),
+    setSessionId: (next) => (sessionId = next),
+  };
+}
+
+describe("CompletionController · generator 两段渲染（批次 2-1，§31）", () => {
+  it("纯 generator 位：先交付 loading 占位，异步结果回来后交付 ready 合并", async () => {
+    const h = generatorHarness();
+    h.controller.request("typing");
+    expect(h.responses).toHaveLength(1);
+    expect(h.responses[0].state).toBe("loading");
+    expect(h.responses[0].items).toEqual([]);
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses).toHaveLength(2);
+    expect(h.responses[1].state).toBe("ready");
+    expect(h.responses[1].items.map((entry) => entry.label)).toEqual(["main"]);
+    // 合并交付锚回同一 requestId/revision（三重 guard 的锚点）。
+    expect(h.responses[1].requestId).toBe(h.responses[0].requestId);
+    expect(h.responses[1].revision).toBe(h.responses[0].revision);
+  });
+
+  it("静态候选立即交付（第一段无 loading），generator 结果随后合并为第二段 ready", async () => {
+    const h = generatorHarness({ resolve: (request) => readyResponse(request, [item("checkout")]) });
+    h.controller.request("typing");
+    expect(h.responses).toHaveLength(1);
+    expect(h.responses[0].state).toBe("ready");
+    expect(h.responses[0].items.map((entry) => entry.label)).toEqual(["checkout"]);
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses).toHaveLength(2);
+    expect(h.responses[1].state).toBe("ready");
+    expect(h.responses[1].items.map((entry) => entry.label)).toEqual(["checkout", "main"]);
+  });
+
+  it("多槽位逐个 settle 逐次合并交付；全落空不补发 pass-through（已有候选）", async () => {
+    const h = generatorHarness({
+      resolve: (request) => readyResponse(request, [item("checkout")]),
+      slots: [generatorSlot(), generatorSlot({ script: ["git", "tag"] })],
+    });
+    h.controller.request("typing");
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses[1].items.map((entry) => entry.label)).toEqual(["checkout", "main"]);
+    h.runResults[1].resolve([genItem("v1.0")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses).toHaveLength(3);
+    expect(h.responses[2].items.map((entry) => entry.label)).toEqual(["checkout", "main", "v1.0"]);
+  });
+
+  it("generator 落空且无静态候选：loading 后补发 pass-through 收尾（收回占位）", async () => {
+    const h = generatorHarness();
+    h.controller.request("typing");
+    h.runResults[0].resolve(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses.map((response) => response.state)).toEqual(["loading", "pass-through"]);
+  });
+
+  it("静态候选存在 + generator 落空：不补发（静态已展示）", async () => {
+    const h = generatorHarness({ resolve: (request) => readyResponse(request, [item("checkout")]) });
+    h.controller.request("typing");
+    h.runResults[0].resolve(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses.map((response) => response.state)).toEqual(["ready"]);
+  });
+
+  it("channel.run reject 与 run 内抛错同收敛：不冒泡、按落空收尾", async () => {
+    const h = generatorHarness();
+    h.controller.request("typing");
+    h.runResults[0].reject(new Error("rpc exploded"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses.map((response) => response.state)).toEqual(["loading", "pass-through"]);
+  });
+
+  it("channel.slots 抛错：退化为无 generator 的批次 1 行为（pass-through，无 loading）", () => {
+    const h = generatorHarness({ slotsThrow: true });
+    expect(() => h.controller.request("typing")).not.toThrow();
+    expect(h.responses).toHaveLength(1);
+    expect(h.responses[0].state).toBe("pass-through");
+    expect(h.runResults).toHaveLength(0);
+  });
+});
+
+describe("CompletionController · generator 防陈旧（批次 2-1，§30）", () => {
+  it("新 revision 到来即丢弃在途 generator 结果（客户端层面防陈旧）", async () => {
+    const h = generatorHarness();
+    h.controller.request("typing");
+    h.controller.lineChanged();
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses).toHaveLength(1); // 只有第一段 loading，结果被丢弃
+  });
+
+  it("新 requestId（后发 dispatch）废弃旧在途结果", async () => {
+    const h = generatorHarness();
+    h.controller.request("typing");
+    h.controller.request("manual");
+    // 两次 dispatch 各交付一段 loading，且各登记一个在途槽位。
+    expect(h.responses).toHaveLength(2);
+    expect(h.runResults).toHaveLength(2);
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    // 旧 phase 作废：结果被丢弃，不产生新交付。
+    expect(h.responses).toHaveLength(2);
+    h.runResults[1].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses).toHaveLength(3);
+    expect(h.responses[2].state).toBe("ready");
+  });
+
+  it("dismiss() 与 resetSession() 作废在途 generator 结果", async () => {
+    const dismissed = generatorHarness();
+    dismissed.controller.request("typing");
+    dismissed.controller.dismiss();
+    dismissed.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(dismissed.responses).toHaveLength(1);
+
+    const reset = generatorHarness();
+    reset.controller.request("typing");
+    reset.controller.resetSession();
+    reset.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reset.responses).toHaveLength(1);
+  });
+
+  it("会话切换（sessionId guard）丢弃在途 generator 结果", async () => {
+    const h = generatorHarness();
+    h.controller.request("typing");
+    h.setSessionId("session-b");
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses).toHaveLength(1);
   });
 });
 
