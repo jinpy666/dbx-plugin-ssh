@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import QuickCommandsSection from "./QuickCommandsSection.vue";
+import { resolveConfirmDialog } from "../lib/confirmDialog";
 import { workbenchMessage } from "../lib/i18n";
 import type { QuickCommand } from "../lib/quickCommands";
 
@@ -42,15 +43,17 @@ describe("QuickCommandsSection", () => {
   it("lists commands with edit/delete actions and emits delete after confirm", async () => {
     const wrapper = mountSection();
     expect(wrapper.findAll(".quick-manage-list li")).toHaveLength(2);
-    // happy-dom 无 window.confirm：直接替换实现模拟"取消/确认"两档。
-    const originalConfirm = window.confirm;
-    window.confirm = () => false;
+    // 删除确认走应用内 confirmDialog 单例（沙箱 window.confirm 恒 false）：
+    // 取消/确认两档经 resolveConfirmDialog 结算，不再 stub window.confirm。
     await click(wrapper, '.quick-manage-list li button[title="删除"]');
     expect(wrapper.emitted("delete")).toBeUndefined();
-    window.confirm = () => true;
+    resolveConfirmDialog(false);
+    await flushPromises();
+    expect(wrapper.emitted("delete")).toBeUndefined();
     await click(wrapper, '.quick-manage-list li button[title="删除"]');
+    resolveConfirmDialog(true);
+    await flushPromises();
     expect(wrapper.emitted("delete")![0][0]).toBe("q1");
-    window.confirm = originalConfirm;
   });
 
   it("creates a command through the editor view and emits the trimmed payload", async () => {

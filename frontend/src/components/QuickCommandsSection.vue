@@ -7,6 +7,7 @@ import { computed, reactive, ref, watch } from "vue";
 import { ArrowLeft, FileUp, Pencil, Trash2 } from "@lucide/vue";
 import { QUICK_COMMAND_NAME_MAX_LENGTH, QUICK_COMMAND_TEXT_MAX_LENGTH, type QuickCommand } from "../lib/quickCommands";
 import { mergeQuickCommandImport, parseQuickCommandImport } from "../lib/quickCommandImport";
+import { confirmDialog } from "../lib/confirmDialog";
 
 const props = defineProps<{
   commands: QuickCommand[];
@@ -100,10 +101,10 @@ function saveCommand() {
   emit("save", { id: draft.id, name: draft.name.trim(), command });
 }
 
-/** 删除是不可逆操作：先确认（与既有工具条删除同一 confirm 语义）。 */
-function deleteCommand(id: string) {
+/** 删除是不可逆操作：先确认（应用内弹窗——宿主沙箱 window.confirm 恒 false）。 */
+async function deleteCommand(id: string) {
   const target = props.commands.find((item) => item.id === id);
-  if (target && !window.confirm(t("quickCommandDeleteConfirm", { name: target.name || target.command }))) return;
+  if (target && !(await confirmDialog(t("quickCommandDeleteConfirm", { name: target.name || target.command })))) return;
   emit("delete", id);
 }
 

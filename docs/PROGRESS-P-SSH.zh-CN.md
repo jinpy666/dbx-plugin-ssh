@@ -4405,3 +4405,41 @@ headless conhost 各烧满 1 核近 10 小时——sidecar 死亡（崩溃/更�
   本地终端 → 杀 sidecar → 任务管理器确认 cmd/conhost 零残留无 CPU 空转。
 - 旧包黑屏问题的完整修复链以 ad701f3（ConPTY CPR 握手应答）为主，本次
   A/B 为纵深：孤儿从根上不可能产生 + 卡死必有时限与可见反馈。
+
+## 2026-09-29 评审未收口项修复 + hostThemeRuntime 单点收敛（前端批次）
+
+### 做了什么
+
+- **SSH-H1 全量收口（12 处，超评审记录的 8 处）**：App.vue 7 处 +
+  SettingsDialog 4 处 + QuickCommandsSection 1 处 `window.confirm` 全部替换
+  为应用内确认弹窗。新沉淀 `frontend/src/lib/confirmDialog.ts`（Promise 原语、
+  模块级单例、App.vue 统一渲染，复用既有 i18n 键零新增文案），组件经
+  `confirmDialog()` 共用同一弹窗；`confirmDialog.spec.ts` 锁结算语义。
+  `scripts/test.sh` 增 `window.confirm(` 归零 lint 守卫（评审防回归建议）。
+- **X-P2/P3/P5 幽灵 API 清理**：env.d.ts 对齐真桥（backend/env 联合事件类型、
+  `onContext` + legacy `onContextChange`，删 `onLocaleChange`）；mock 裁掉
+  onLocaleChange/onContextChange，`__dbxMockSetLocale` 改经 onEvent 投递
+  `{type:"env", locale}`（镜像真桥 updateLocale）；mockDbxHost.spec 重写并加
+  "mock 无幽灵 API"规则 7 机械守卫。
+- **X-P4 appearance 收敛**：颜色变量探测/回退循环收敛
+  `shared/frontend/hostThemeRuntime.ts` 的 `applyAppearanceColorVars`
+  （kafka 策略为准），App.vue 只保留终端底色/字体特有处理。
+- **hostThemeRuntime 接入（参考实现）**：`subscribeHostEnvironment` 统一
+  env（locale/theme）+ context（onContext ?? 旧桥回退）+ appearance
+  （onAppearanceChange ?? themeChannel，互斥）订阅，聚合退订；
+  handleEvent 保留 env 窄化守卫。薄 spec `lib/hostThemeRuntime.spec.ts`。
+
+### 结果
+
+- 前端 typecheck 全绿；**142 文件 / 1492 用例全绿**（含新增 confirmDialog
+  3 用例、hostThemeRuntime 4 用例、重写的 mockDbxHost locale 用例）；
+  `pnpm build` 出自包含 UI 正常（含 build.mjs `<!--` 双层转义回移，X-M8）。
+
+### 边界与剩余风险
+
+- 未动 host/；未提交未 push；manifest 版本未 bump。
+- appearance 跟随/切语言/12 处确认弹窗的真机走查待下轮 e2e（自动化 spec
+  已覆盖逻辑层；happy-dom 不覆盖宿主令牌存在的 removeProperty 分支）。
+- `lib/hostTheme.ts` 仍四插件各一份（ldap≡kafka 同源，ssh/files 有差异），
+  列为下一轮收敛候选；shared/frontend `hostBridge.d.ts` 类型单点（X-M7）
+  同前排期。

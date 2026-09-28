@@ -21,6 +21,7 @@ import { HIGHLIGHT_RULES_LIMIT, type HighlightRuleView } from "../lib/keywordHig
 import { QUICK_COMMANDS_LIMIT, type QuickCommand } from "../lib/quickCommands";
 import { AGENT_MODES, sanitizeRememberedCommands } from "../lib/agentTerminal";
 import { clampFontSize, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
+import { confirmDialog } from "../lib/confirmDialog";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
 import { MIB, mibField, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
 import { DOWNLOAD_CONFLICT_POLICIES, type DownloadConflictPolicy } from "../lib/downloadPrefs";
@@ -703,13 +704,13 @@ function saveCurrentTheme() {
   themeNameDraft.value = "";
 }
 
-function deleteTheme(theme: TerminalAppearanceProfile) {
-  if (!window.confirm(t("terminalAppearance.deleteThemeConfirm", { name: t(theme.name) }))) return;
+async function deleteTheme(theme: TerminalAppearanceProfile) {
+  if (!(await confirmDialog(t("terminalAppearance.deleteThemeConfirm", { name: t(theme.name) })))) return;
   emit("delete-theme", theme.id);
 }
 
-function removeCustomScheme(scheme: TerminalColorScheme) {
-  if (!window.confirm(t("terminalAppearance.importRemoveConfirm", { name: scheme.name }))) return;
+async function removeCustomScheme(scheme: TerminalColorScheme) {
+  if (!(await confirmDialog(t("terminalAppearance.importRemoveConfirm", { name: scheme.name })))) return;
   emit("remove-scheme", scheme.id);
 }
 
@@ -1069,7 +1070,7 @@ async function saveProfileDraft() {
 }
 
 async function removeProfile(profile: SudoProfileView) {
-  if (!window.confirm(t("profilesDeleteConfirm", { name: profile.name }))) return;
+  if (!(await confirmDialog(t("profilesDeleteConfirm", { name: profile.name })))) return;
   try {
     await window.dbxPlugin.invoke("sudo/profiles/delete", { id: profile.id });
     if (settingsDraft.quickSudoProfileId === profile.id) settingsDraft.quickSudoProfileId = "";
@@ -1114,7 +1115,7 @@ async function loadKnownHosts() {
 }
 
 async function removeKnownHost(entry: KnownHostEntry) {
-  if (!window.confirm(t("knownHosts.removeConfirm", { host: `${entry.host}:${entry.port}` }))) return;
+  if (!(await confirmDialog(t("knownHosts.removeConfirm", { host: `${entry.host}:${entry.port}` })))) return;
   try {
     await window.dbxPlugin.invoke("ssh/knownHosts/remove", { host: entry.host, port: entry.port });
     emit("notice", t("knownHosts.removed", { host: `${entry.host}:${entry.port}` }));

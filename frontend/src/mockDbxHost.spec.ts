@@ -160,27 +160,29 @@ describe("mockDbxHost fixture", () => {
     }
   });
 
-  // round2：onLocaleChange 夹具补齐（env.d.ts 宿主 1.1 形状）：?locale= 定初值，
-  // __dbxMockSetLocale 模拟宿主 updateLocale 推送，供 i18n 切换链走查。
-  // round2：onLocaleChange 夹具补齐（env.d.ts 宿主 1.1 形状）：?locale= 定初值，
-  // __dbxMockSetLocale 模拟宿主 updateLocale 推送，供 i18n 切换链走查。
-  it("exposes onLocaleChange with ?locale= initial value and runtime switching", async () => {
+  // X-P2/P5 对齐真桥：无 onLocaleChange 订阅（真桥 API 面不存在），locale 经
+  // onEvent 投递 {type:"env", locale}（镜像真桥 updateLocale）；?locale= 定初值。
+  it("delivers runtime locale switches via onEvent env push and exposes no ghost bridge APIs", async () => {
     const plugin = await loadMock("?locale=ja");
     expect(plugin.locale).toBe("ja");
-    const seen: string[] = [];
-    const unsubscribe = plugin.onLocaleChange!((locale) => seen.push(locale));
-    // 订阅即回调当前 locale（与 mock 的 onAppearanceChange/onContextChange 同构）。
-    expect(seen).toEqual(["ja"]);
+    // 规则 7 机械守卫：mock 不得提供真桥不存在的幽灵 API；onContext 必须在。
+    expect(plugin).not.toHaveProperty("onLocaleChange");
+    expect(plugin).not.toHaveProperty("onContextChange");
+    expect(typeof plugin.onContext).toBe("function");
 
+    const seen: string[] = [];
+    const unsubscribe = plugin.onEvent((event) => {
+      if (event.type === "env" && typeof event.locale === "string") seen.push(event.locale);
+    });
     const setLocale = (window as unknown as { __dbxMockSetLocale?: (next: string) => void }).__dbxMockSetLocale;
     expect(typeof setLocale).toBe("function");
     setLocale!("zh-CN");
     expect(plugin.locale).toBe("zh-CN");
-    expect(seen).toEqual(["ja", "zh-CN"]);
+    expect(seen).toEqual(["zh-CN"]);
     unsubscribe();
     setLocale!("en");
     expect(plugin.locale).toBe("en");
-    expect(seen).toEqual(["ja", "zh-CN"]);
+    expect(seen).toEqual(["zh-CN"]);
   });
 
   // round4：sftp/transfer/history 夹具补齐——此前落 catch-all（success:true 无

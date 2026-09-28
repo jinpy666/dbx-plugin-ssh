@@ -56,6 +56,7 @@ function importAck(taskId: string, part: string, nextOffset: number): Promise<vo
   return new Promise((resolve, reject) => {
     const timeout = window.setTimeout(() => { unsubscribe(); reject(new Error("import preview acknowledgment timed out")); }, 30_000);
     const unsubscribe = window.dbxPlugin.onEvent((event) => {
+      if (event.type === "env") return; // 宿主环境推送（locale/theme）不携带 method
       if (event.method === "import/preview/ack" && event.params.taskId === taskId && event.params.part === part && event.params.nextOffset === nextOffset) { window.clearTimeout(timeout); unsubscribe(); resolve(); }
       if (event.method === "import/preview/error" && event.params.taskId === taskId && event.params.part === part) { window.clearTimeout(timeout); unsubscribe(); reject(new Error(String(event.params.error ?? "import preview failed"))); }
     });
