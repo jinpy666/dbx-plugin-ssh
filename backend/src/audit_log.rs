@@ -414,13 +414,26 @@ pub fn append(data_dir: &Path, entry: &AuditEntry) -> Result<(), String> {
     let mut line = serde_json::to_string(&clamped)
         .map_err(|error| format!("Failed to encode audit entry: {error}"))?;
     line.push('\n');
-    // Fresh open-append-close per entry (decision D5).
+    // Fresh open-append-close per entry (decision D5). The ledger records
+    // executed command text and output tails, so create it owner-only (0600)
+    // like otp-entries/recordings/sudo-profiles; .mode() only applies at
+    // creation, pre-existing files keep their permissions.
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
-        .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
+        .open(&path);
+    let mut file = file.map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
     file.write_all(line.as_bytes())
         .map_err(|error| format!("Failed to write {}: {error}", path.display()))?;
     Ok(())

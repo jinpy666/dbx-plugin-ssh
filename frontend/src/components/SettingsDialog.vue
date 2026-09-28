@@ -439,6 +439,10 @@ const emit = defineEmits<{
 
 const t = props.t;
 
+// 快速命令分栏实例：其删除确认弹层打开时，Esc 由本组件的 consumeInlineEsc
+// 转交子组件消费（与 App→本组件的逐层询问同构）。
+const quickCommandsRef = ref<InstanceType<typeof QuickCommandsSection> | null>(null);
+
 // 分类顺序对齐 Tabby 的设置页优先级：外观 / 配色方案 / 终端 / 快捷键 四个
 // 终端相关分类排在最前（Tabby 把 Appearance 与 Color scheme 标为 prioritized），
 // 之后才是本插件特有的 sudo / 智能体 / 传输 / 安全 / MCP。
@@ -703,13 +707,13 @@ function saveCurrentTheme() {
   themeNameDraft.value = "";
 }
 
-function deleteTheme(theme: TerminalAppearanceProfile) {
-  if (!window.confirm(t("terminalAppearance.deleteThemeConfirm", { name: t(theme.name) }))) return;
+async function deleteTheme(theme: TerminalAppearanceProfile) {
+  if (!(await confirmDelete(t("terminalAppearance.deleteThemeConfirm", { name: t(theme.name) })))) return;
   emit("delete-theme", theme.id);
 }
 
-function removeCustomScheme(scheme: TerminalColorScheme) {
-  if (!window.confirm(t("terminalAppearance.importRemoveConfirm", { name: scheme.name }))) return;
+async function removeCustomScheme(scheme: TerminalColorScheme) {
+  if (!(await confirmDelete(t("terminalAppearance.importRemoveConfirm", { name: scheme.name })))) return;
   emit("remove-scheme", scheme.id);
 }
 
@@ -1069,7 +1073,7 @@ async function saveProfileDraft() {
 }
 
 async function removeProfile(profile: SudoProfileView) {
-  if (!window.confirm(t("profilesDeleteConfirm", { name: profile.name }))) return;
+  if (!(await confirmDelete(t("profilesDeleteConfirm", { name: profile.name })))) return;
   try {
     await window.dbxPlugin.invoke("sudo/profiles/delete", { id: profile.id });
     if (settingsDraft.quickSudoProfileId === profile.id) settingsDraft.quickSudoProfileId = "";
@@ -1114,7 +1118,7 @@ async function loadKnownHosts() {
 }
 
 async function removeKnownHost(entry: KnownHostEntry) {
-  if (!window.confirm(t("knownHosts.removeConfirm", { host: `${entry.host}:${entry.port}` }))) return;
+  if (!(await confirmDelete(t("knownHosts.removeConfirm", { host: `${entry.host}:${entry.port}` })))) return;
   try {
     await window.dbxPlugin.invoke("ssh/knownHosts/remove", { host: entry.host, port: entry.port });
     emit("notice", t("knownHosts.removed", { host: `${entry.host}:${entry.port}` }));
@@ -1245,6 +1249,12 @@ async function clearStoredSecrets() {
 /// Esc 分层退出：先关编辑表单，再收起配置档 section；返回 false 表示已到
 /// 最底层，调用方（App Esc 链）应关闭整个弹窗。
 function consumeInlineEsc(): boolean {
+  // 快速命令分栏的删除确认（子组件内打开的弹层）先消费 Esc。
+  if (quickCommandsRef.value?.consumeInlineEsc()) return true;
+  if (deleteConfirmState.value) {
+    resolveDeleteConfirm(false);
+    return true;
+  }
   if (profilesInlineOpen.value && profileEditing.value) {
     cancelProfileEdit();
     return true;
@@ -1254,6 +1264,24 @@ function consumeInlineEsc(): boolean {
     return true;
   }
   return false;
+}
+
+// 应用内删除确认：宿主沙箱 iframe 无 allow-modals，window.confirm 恒 false
+// （曾让删除按钮看起来完全失效）。promise 化，语义与原生 confirm 等价。
+const deleteConfirmState = ref<{ message: string; confirmLabel: string }>();
+let deleteConfirmResolver: ((accepted: boolean) => void) | undefined;
+function confirmDelete(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    resolveDeleteConfirm(false);
+    deleteConfirmResolver = resolve;
+    deleteConfirmState.value = { message, confirmLabel: t("delete") };
+  });
+}
+function resolveDeleteConfirm(accepted: boolean) {
+  deleteConfirmState.value = undefined;
+  const resolve = deleteConfirmResolver;
+  deleteConfirmResolver = undefined;
+  resolve?.(accepted);
 }
 
 /// 下载询问弹窗勾选「设为默认」/目录选择器回填后，App 同步设置页草稿
@@ -2061,6 +2089,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                  工具条弹层（高频），新建/编辑/导入在此管理。 -->
             <div v-show="settingsCategory === 'commands'" class="settings-pane">
             <QuickCommandsSection
+              ref="quickCommandsRef"
               :commands="quickCommands"
               :saving="quickSaving"
               :importing="quickImporting"
@@ -2234,6 +2263,17 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
           </template>
         </div>
         <footer><button @click="emit('update:profilesOpen', false)">{{ t("close") }}</button></footer>
+      </DialogContent>
+    </Dialog>
+    <!-- 通用删除确认：替代 window.confirm（沙箱 iframe 无 allow-modals，confirm 恒 false）。
+         Esc 由 App 链经 consumeInlineEsc 收口，此处 .prevent 防 reka 双关。 -->
+    <Dialog :open="!!deleteConfirmState" @update:open="(open) => { if (!open) resolveDeleteConfirm(false); }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <template v-if="deleteConfirmState">
+          <header><DialogTitle>{{ t("confirm") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="resolveDeleteConfirm(false)"><X /></button></header>
+          <div class="destructive-copy"><div><strong>{{ deleteConfirmState.message }}</strong></div></div>
+          <footer><button @click="resolveDeleteConfirm(false)">{{ t("cancel") }}</button><button class="danger-button" @click="resolveDeleteConfirm(true)">{{ deleteConfirmState.confirmLabel }}</button></footer>
+        </template>
       </DialogContent>
     </Dialog>
 </template>

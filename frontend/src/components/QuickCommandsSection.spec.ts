@@ -16,6 +16,7 @@ const commands: QuickCommand[] = [
 
 function mountSection(props: { commands?: QuickCommand[]; saving?: boolean; importing?: boolean } = {}) {
   return mount(QuickCommandsSection, {
+    attachTo: document.body,
     props: {
       commands: props.commands ?? commands,
       saving: props.saving ?? false,
@@ -39,18 +40,25 @@ afterEach(() => {
 });
 
 describe("QuickCommandsSection", () => {
-  it("lists commands with edit/delete actions and emits delete after confirm", async () => {
+  it("lists commands with edit/delete actions and emits delete after in-app confirm", async () => {
     const wrapper = mountSection();
     expect(wrapper.findAll(".quick-manage-list li")).toHaveLength(2);
-    // happy-dom 无 window.confirm：直接替换实现模拟"取消/确认"两档。
-    const originalConfirm = window.confirm;
-    window.confirm = () => false;
+    // 删除确认已迁应用内弹窗（沙箱 iframe 无 allow-modals，window.confirm 恒
+    // false）：弹窗取消不删除，弹窗确认才上抛。
     await click(wrapper, '.quick-manage-list li button[title="删除"]');
     expect(wrapper.emitted("delete")).toBeUndefined();
-    window.confirm = () => true;
+    expect(document.querySelector(".small-modal .destructive-copy")?.textContent).toContain("disk free");
+    // 取消：弹窗收口且不上抛。
+    document.querySelector<HTMLElement>(".small-modal footer button:not(.danger-button)")!.click();
+    await flushPromises();
+    expect(document.querySelector(".small-modal")).toBeNull();
+    expect(wrapper.emitted("delete")).toBeUndefined();
+    // 确认：上抛目标 id。
     await click(wrapper, '.quick-manage-list li button[title="删除"]');
+    document.querySelector<HTMLElement>(".small-modal footer .danger-button")!.click();
+    await flushPromises();
     expect(wrapper.emitted("delete")![0][0]).toBe("q1");
-    window.confirm = originalConfirm;
+    wrapper.unmount();
   });
 
   it("creates a command through the editor view and emits the trimmed payload", async () => {

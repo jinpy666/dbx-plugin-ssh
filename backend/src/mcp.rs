@@ -2654,6 +2654,9 @@ impl McpState {
             "sftp_remove" => {
                 // M25：组件归一，与工作台删除族同口径。
                 let path = normalize_remote_path(required_str(arguments, "path")?)?;
+                if path == "/" {
+                    return Err("Refusing to delete the filesystem root".to_string());
+                }
                 let recursive = arg_bool(arguments, "recursive")?.unwrap_or(false);
                 if encoding == sftp_name::NameEncoding::Latin1 {
                     // latin-1（M17）：显示路径还原字节后走裸包删除。LSTAT 判型
@@ -3260,6 +3263,10 @@ impl McpState {
 }
 
 async fn remove_tree(sftp: &Arc<AsyncMutex<SftpSession>>, root: String) -> Result<(), String> {
+    // 与工作台删除族同源的根守卫：调用方已拒绝 "/"，此处兜底。
+    if root == "/" {
+        return Err("Refusing to recursively delete the filesystem root".to_string());
+    }
     let mut pending = vec![root];
     let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
