@@ -36,6 +36,8 @@ describe("ssh pluginStore wiring", () => {
         // 结构化补全开关（对标 Warp/fig 线 2）：SettingsDialog 自治读写。
         "ssh-completion-spec",
         "ssh-terminal-ghost-suggest",
+        // Docker/Podman 引擎连接设置（单键 JSON 映射，dockerEngine.ts 自治）。
+        "ssh-docker-engine",
       ].sort(),
     );
     for (const banned of [

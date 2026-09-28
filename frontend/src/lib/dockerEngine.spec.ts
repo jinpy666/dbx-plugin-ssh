@@ -1,24 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_DOCKER_CLI,
+  DOCKER_ENGINE_STORE_KEY,
   dockerEngineParams,
-  dockerEngineStorageKey,
   EMPTY_DOCKER_ENGINE_SETTINGS,
   loadDockerEngineSettings,
   saveDockerEngineSettings,
   validateDockerEngineSettings,
 } from "./dockerEngine";
-
-/** vitest node 环境没有 localStorage：Map 后备实现 stub 全局。 */
-function stubLocalStorage(): Map<string, string> {
-  const backing = new Map<string, string>();
-  vi.stubGlobal("localStorage", {
-    getItem: (key: string) => backing.get(key) ?? null,
-    setItem: (key: string, value: string) => backing.set(key, value),
-    removeItem: (key: string) => backing.delete(key),
-  });
-  return backing;
-}
+import { pluginStore } from "./pluginStore";
 
 describe("validateDockerEngineSettings", () => {
   it("trims input and keeps empty cli legal (default docker)", () => {
@@ -72,29 +62,33 @@ describe("dockerEngineParams", () => {
   });
 });
 
-describe("localStorage persistence", () => {
+describe("pluginStore persistence", () => {
   beforeEach(() => {
-    stubLocalStorage();
+    // node 环境无宿主桥/localStorage → pluginStore 为内存通道；模块级单例
+    // 需要逐用例清键隔离。
+    pluginStore.removeItem(DOCKER_ENGINE_STORE_KEY);
   });
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("keys settings per connection with a local fallback", () => {
-    expect(dockerEngineStorageKey("conn-1")).toBe("ssh-docker-engine-conn-1");
-    expect(dockerEngineStorageKey("")).toBe("ssh-docker-engine-local");
+  it("stores per-connection settings under the single structured key", () => {
+    expect(DOCKER_ENGINE_STORE_KEY).toBe("ssh-docker-engine");
+    saveDockerEngineSettings("conn-1", { cli: "podman", socket: "", host: "" });
+    const map = JSON.parse(pluginStore.getItem(DOCKER_ENGINE_STORE_KEY)!);
+    expect(map["conn-1"]).toEqual({ cli: "podman", socket: "", host: "" });
+    expect(saveDockerEngineSettings("", { cli: "", socket: "/run/podman.sock", host: "" })).toBeUndefined();
+    expect(Object.keys(JSON.parse(pluginStore.getItem(DOCKER_ENGINE_STORE_KEY)!))).toEqual(["conn-1", "local"]);
   });
 
   it("round-trips saved settings and validates on load", () => {
     saveDockerEngineSettings("conn-1", { cli: "podman", socket: "", host: "127.0.0.1:2375" });
     expect(loadDockerEngineSettings("conn-1")).toEqual({ cli: "podman", socket: "", host: "127.0.0.1:2375" });
-    // 损坏 JSON 回落全空；非法字段在读取侧同样被过滤。
-    localStorage.setItem("ssh-docker-engine-broken", "{not json");
-    expect(loadDockerEngineSettings("broken")).toEqual(EMPTY_DOCKER_ENGINE_SETTINGS);
-    localStorage.setItem(
-      "ssh-docker-engine-evil",
-      JSON.stringify({ cli: 42, socket: "/ok.sock", host: "evil; host" }),
+    // 损坏 JSON 整份回落空映射；非法字段在读取侧同样被过滤。
+    pluginStore.setItem(DOCKER_ENGINE_STORE_KEY, "{not json");
+    expect(loadDockerEngineSettings("conn-1")).toEqual(EMPTY_DOCKER_ENGINE_SETTINGS);
+    pluginStore.setItem(
+      DOCKER_ENGINE_STORE_KEY,
+      JSON.stringify({
+        evil: { cli: 42, socket: "/ok.sock", host: "evil; host" },
+      }),
     );
     // socket/host 同时存在触发互斥校验：两者一并剔除（无法判定保谁）。
     expect(loadDockerEngineSettings("evil")).toEqual({ cli: "", socket: "", host: "" });

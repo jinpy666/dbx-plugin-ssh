@@ -239,6 +239,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   min-height: 0;
   flex: 1;
   overflow: hidden;
+  /* Docker 停靠面板固定宽度（terminalBasis 的让宽计算引用同一变量）。 */
+  --docker-pane-width: clamp(320px, 30vw, 520px);
 }
 .panes--reversed { flex-direction: row-reverse; }
 .terminal-pane, .sftp-pane { display: flex; height: 100%; min-width: 0; min-height: 0; flex-direction: column; background: var(--background); }
@@ -377,6 +379,13 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .divider { position: relative; z-index: 4; width: 1px; flex: 0 0 1px; background: var(--border); cursor: col-resize; }
 .divider:hover { background: color-mix(in srgb, var(--foreground) 38%, var(--border)); }
 .sftp-pane { position: relative; z-index: 0; flex: 1; overflow: hidden; }
+/* Docker 停靠面板（鲸鱼按钮开合）：与 sftp-pane 同族分栏；固定宽度，终端经
+   terminalBasis 让宽，SFTP 分栏 flex:1 自行吸收。面板头沿用 metrics-float
+   的紧凑头样式。 */
+.docker-pane { position: relative; z-index: 0; display: flex; height: 100%; min-width: 0; min-height: 0; flex-direction: column; flex: 0 0 var(--docker-pane-width); overflow: hidden; border-left: 1px solid var(--border); background: var(--background); }
+.docker-pane > header { display: flex; min-height: 34px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 3px 4px 3px 12px; }
+.docker-pane h2 { margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
+.docker-pane > .docker-panel { flex: 1 1 auto; min-height: 0; }
 .sftp-pane.drag-active { background: color-mix(in srgb, var(--primary) 4%, var(--background)); }
 
 /* SFTP 面板主体：左侧 tree/quick 双 tab 侧栏（可收起为窄条）+ 右侧文件区。
@@ -518,7 +527,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .transfer-popover { gap: 0; width: min(340px, calc(100vw - 24px)); max-height: min(520px, calc(100vh - 52px)); padding: 8px; overflow: auto; }
 .transfer-popover h3 { margin: 2px 4px 8px; font-size: 12px; }
 /* Docker 工具条弹层（鲸鱼入口）：容器表需要比侧栏宽的横向空间，关闭即卸载。 */
-.docker-toolbar-popover { gap: 0; width: min(760px, calc(100vw - 24px)); max-height: min(560px, calc(100vh - 52px)); padding: 10px; overflow: auto; }
 .transfer-card { display: grid; grid-template: "title actions" auto "progress progress" auto "meta meta" auto "path path" auto "error error" auto / minmax(0, 1fr) auto; position: relative; column-gap: 6px; row-gap: 4px; border-top: 1px solid var(--border); padding: 7px 4px; }
 .transfer-title { grid-area: title; min-width: 0; gap: 6px; }
 .transfer-title span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -617,6 +625,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   .divider { width: 100%; height: 1px; flex-basis: 1px; cursor: row-resize; }
   /* SFTP 面板收起时终端占满整个工作台（含窄屏纵向布局）。 */
   .panes--solo .terminal-pane { height: 100%; }
+  /* Docker 停靠面板窄屏纵向占位；同开时 SFTP flex 收缩吸收（见 .panes--docker）。 */
+  .docker-pane { width: 100%; height: 48%; flex-basis: 48%; border-left: none; border-top: 1px solid var(--border); }
+  .panes--docker .terminal-pane { height: 52%; }
+  .panes--docker .sftp-pane { height: auto; flex: 1 1 0; min-height: 0; }
 }
 
 @media (max-width: 640px) {

@@ -50,6 +50,11 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 行内 ghost 自动建议（对标 Warp 线 1）：SettingsDialog 开关行自治读写，
   // 默认开。
   "ssh-terminal-ghost-suggest",
+  // Docker/Podman 引擎连接设置：单键 JSON 映射（connectionKey → settings）。
+  // 按连接的动态键无法在创建期声明（宿主 storage 无列键），收进一个结构化
+  // 值由 dockerEngine.ts 自行拆装；曾用 localStorage 动态键，在工作台
+  // opaque origin 沙箱里属性访问即抛 SecurityError，从未发布过无需迁移。
+  "ssh-docker-engine",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);

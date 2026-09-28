@@ -3,9 +3,11 @@
  * （unix socket / tcp host）三参数的归一、校验与按连接持久化。字段语义与
  * sidecar docker/list|logs|action 的可选 cli/socket/host 参数一一对应：
  * 端点由 sidecar 经 DOCKER_HOST/CONTAINER_HOST 环境变量下发，Docker 与
- * Podman 各取所需，一处设置两个引擎通用。本模块只做纯逻辑与 localStorage，
- * RPC 调用留在 DockerPanel。
+ * Podman 各取所需，一处设置两个引擎通用。本模块只做纯逻辑与 pluginStore
+ * 持久化（宿主 host.storage，Host API 1.2；RPC 调用留在 DockerPanel）。
  */
+
+import { pluginStore } from "./pluginStore";
 
 export interface DockerEngineSettings {
   /** 容器 CLI：二进制名或全路径；空串 = 默认 docker。 */
@@ -22,11 +24,10 @@ export const DEFAULT_DOCKER_CLI = "docker";
 export const DOCKER_CLI_PATTERN = /^[A-Za-z0-9_.\\/:/-]{1,256}$/;
 export const DOCKER_ENDPOINT_PATTERN = /^[A-Za-z0-9_.\\/:/-]{1,512}$/;
 
-export const DOCKER_ENGINE_STORAGE_PREFIX = "ssh-docker-engine-";
-
-export function dockerEngineStorageKey(connectionKey: string): string {
-  return `${DOCKER_ENGINE_STORAGE_PREFIX}${connectionKey || "local"}`;
-}
+/** 宿主 storage 单键：值是 connectionKey（空串归一为 "local"）→ settings 的
+ *  JSON 映射。按连接的动态键无法进 PLUGIN_STORE_KEYS 的创建期声明，见
+ *  pluginStore.ts 内注释。 */
+export const DOCKER_ENGINE_STORE_KEY = "ssh-docker-engine";
 
 export const EMPTY_DOCKER_ENGINE_SETTINGS: DockerEngineSettings = {
   cli: "",
@@ -84,38 +85,43 @@ export function dockerEngineParams(settings: DockerEngineSettings): Record<strin
   return params;
 }
 
-/** localStorage 读取；损坏/缺失/非法回落（非法字段单独剔除，合法字段保留）。
- *  仅 window 环境可用（面板内调用）。 */
-export function loadDockerEngineSettings(connectionKey: string): DockerEngineSettings {
-  if (typeof localStorage === "undefined") return { ...EMPTY_DOCKER_ENGINE_SETTINGS };
+/** 单键映射读取：缺键/损坏 JSON 一律回落空映射（损坏不弹错，全量重置）。 */
+function loadEngineMap(): Record<string, DockerEngineSettings> {
+  const raw = pluginStore.getItem(DOCKER_ENGINE_STORE_KEY);
+  if (!raw) return {};
   try {
-    const raw = localStorage.getItem(dockerEngineStorageKey(connectionKey));
-    if (!raw) return { ...EMPTY_DOCKER_ENGINE_SETTINGS };
     const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return { ...EMPTY_DOCKER_ENGINE_SETTINGS };
-    const record = parsed as Record<string, unknown>;
-    const stringOf = (key: string): string => (typeof record[key] === "string" ? (record[key] as string) : "");
-    const { settings, errors } = validateDockerEngineSettings({
-      cli: stringOf("cli"),
-      socket: stringOf("socket"),
-      host: stringOf("host"),
-    });
-    // 存量数据可能早于当前校验口径：非法字段剔除而不是让整份设置失效。
-    return {
-      cli: errors.cli ? "" : settings.cli,
-      socket: errors.endpoints ? "" : settings.socket,
-      host: errors.endpoints ? "" : settings.host,
-    };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as Record<string, DockerEngineSettings>;
   } catch {
-    return { ...EMPTY_DOCKER_ENGINE_SETTINGS };
+    return {};
   }
 }
 
+/** localStorage 读取；损坏/缺失/非法回落（非法字段单独剔除，合法字段保留）。
+ *  pluginStore 在 main.ts boot 时 await ready 完成水合，此后读取全同步
+ *  （面板内调用）。 */
+export function loadDockerEngineSettings(connectionKey: string): DockerEngineSettings {
+  const record = loadEngineMap()[connectionKey || "local"];
+  if (!record || typeof record !== "object") return { ...EMPTY_DOCKER_ENGINE_SETTINGS };
+  const stringOf = (key: keyof DockerEngineSettings): string =>
+    typeof record[key] === "string" ? (record[key] as string) : "";
+  const { settings, errors } = validateDockerEngineSettings({
+    cli: stringOf("cli"),
+    socket: stringOf("socket"),
+    host: stringOf("host"),
+  });
+  // 存量数据可能早于当前校验口径：非法字段剔除而不是让整份设置失效。
+  return {
+    cli: errors.cli ? "" : settings.cli,
+    socket: errors.endpoints ? "" : settings.socket,
+    host: errors.endpoints ? "" : settings.host,
+  };
+}
+
 export function saveDockerEngineSettings(connectionKey: string, settings: DockerEngineSettings): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(dockerEngineStorageKey(connectionKey), JSON.stringify(settings));
-  } catch {
-    // 存储不可用（隐私模式等）：设置仅本次会话内存生效。
-  }
+  const map = loadEngineMap();
+  map[connectionKey || "local"] = settings;
+  // pluginStore 写穿宿主桥（沙箱/配额失败仅告警不阻断，见 pluginStorage）。
+  pluginStore.setItem(DOCKER_ENGINE_STORE_KEY, JSON.stringify(map));
 }
