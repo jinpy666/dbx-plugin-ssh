@@ -26,6 +26,7 @@ mod multi_exec;
 mod otp;
 mod otp_store;
 mod preferences;
+mod progress_throttle;
 mod quick_commands;
 mod rdp_session;
 mod serial_session;
