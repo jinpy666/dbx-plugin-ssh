@@ -1396,6 +1396,10 @@ const sftpTypeFilter = ref<SftpTypeFilter>("all");
  *  用户可通过过滤栏眼睛图标切换。 */
 const sftpShowHidden = ref(false);
 const selectedUris = ref<string[]>([]);
+// 选中态热点查询走 Set：行 class 绑定与 selectedEntries 每次渲染对全部
+// 可见条目各查一次，数组 includes 是 O(条目×选中数)（万行目录 × 多选
+// 1000 项 ≈ 每帧千万次比较）；Set 写入仍走 selectedUris 数组。
+const selectedUriSet = computed(() => new Set(selectedUris.value));
 const lastClickedUri = ref("");
 const sftpClipboard = ref<SftpClipboard>();
 const pasteBusy = ref(false);
@@ -2024,7 +2028,7 @@ const sftpGridStyle = computed(() => {
 });
 const sftpFiltersActive = computed(() => sftpSearch.value.trim() !== "" || sftpTypeFilter.value !== "all" || sftpShowHidden.value);
 const visibleEntries = computed(() => filterSftpEntries(sortedEntries.value, sftpSearch.value, sftpTypeFilter.value, sftpShowHidden.value));
-const selectedEntries = computed(() => entries.value.filter((entry) => selectedUris.value.includes(entry.uri)));
+const selectedEntries = computed(() => entries.value.filter((entry) => selectedUriSet.value.has(entry.uri)));
 const currentPathHistory = computed(() => pathHistories[connectionId.value] || []);
 const previewDirty = computed(() => previewEditable.value && previewDraft.value !== previewBaseline.value);
 // 编辑保存走 sftp/write 整文件覆写：只有完整加载（未截断）且不超直写上限的
@@ -8257,7 +8261,7 @@ function selectFile(entry: SftpEntry, event?: MouseEvent) {
   selectedPath.value = entry.uri;
   if (event?.shiftKey && lastClickedUri.value) {
     const expanded = expandSelection(selectedUris.value, lastClickedUri.value, entry.uri, visibleEntries.value.map((item) => item.uri));
-    if (expanded.length > selectedUris.value.length || selectedUris.value.includes(entry.uri)) {
+    if (expanded.length > selectedUris.value.length || selectedUriSet.value.has(entry.uri)) {
       selectedUris.value = expanded;
       return;
     }
@@ -8426,7 +8430,7 @@ function remoteBasename(path: string) {
 function copySelectedEntries(mode: "copy" | "cut") {
   const entry = fileMenu.value?.entry;
   if (!entry) return;
-  const uris = selectedUris.value.includes(entry.uri) && selectedUris.value.length > 1 ? selectedUris.value : [entry.uri];
+  const uris = selectedUriSet.value.has(entry.uri) && selectedUris.value.length > 1 ? selectedUris.value : [entry.uri];
   sftpClipboard.value = { mode, paths: uris.map((uri) => pathFromUri(uri)), connectionId: connectionId.value };
   fileMenu.value = undefined;
   showNotice(t("sftpCopy.done", { count: sftpClipboard.value.paths.length }));
@@ -12967,7 +12971,7 @@ onBeforeUnmount(() => {
                 v-else
                 :key="entry.uri"
                 class="file-row"
-                :class="{ selected: selectedPath === entry.uri || selectedUris.includes(entry.uri) }"
+                :class="{ selected: selectedPath === entry.uri || selectedUriSet.has(entry.uri) }"
                 :style="sftpGridStyle"
                 @mousedown="onFileRowMousedown"
                 @click="selectFile(entry, $event)"
