@@ -1,9 +1,10 @@
-// 声明式 generator 运行器（骨架，FIG wave-1 契约 §2 决策 6 / 方案 M5）。
+// 声明式 generator 运行器（FIG wave-1 契约 §2 决策 6 / 方案 M5；批次 2-1
+// 接线：figCompletionSource 槽位 + GeneratorScheduler 调用，App.vue 注入）。
 // 只负责一条流水线：decl.script → completion/execute（目标机执行，前端不直连
 // shell）→ splitOn 切分 stdout → postProcess 产候选 → 归一化为 CompletionItem[]。
-// 骨架边界：不接 source/controller/App.vue（正式接线属批次 2-1），不含
-// ranking/过滤（打分与按前缀过滤属 Lane A' 的 ranking 层，score 恒 0）。
-// 失败/超时/任何异常一律 null（调用方 pass-through），绝不 throw。
+// 边界不变：不含 ranking/过滤（打分与按前缀过滤属 ranking 层，score 恒 0；
+// 前缀过滤由 scheduler 在合并前执行）。失败/超时/任何异常一律 null（调用方
+// pass-through），绝不 throw。
 
 import type { CompletionContext, CompletionItem } from "../core/types";
 import type { CompletionExecuteRequest, CompletionExecuteResult, CompletionExecuteTarget } from "../host/protocol";
@@ -21,21 +22,25 @@ export interface DeclarativeGeneratorDecl {
   splitOn?: string;
 }
 
-/** postProcess 的归一化产出；映射为 CompletionItem 时 label/description 原样透传。 */
-export interface GeneratorSuggestion {
-  label: string;
-  description?: string;
-}
+/**
+ * postProcess 的单条产出：Fig 原生 Suggestion（name/description/icon/…，spec
+ * 数据面，运行时才可判形）或纯字符串。收敛规则见 normalizeSuggestionLabel：
+ * 只透传 label(name)/description 合理子集，kind 恒 argument；icon/insertValue/
+ * priority 等 CompletionItem 无对应通道的字段仅接受不透传（图标由 UI 按 kind
+ * 映射，§5.2 编辑操作由引擎产生、UI 只执行）。
+ */
+export type GeneratorSuggestion = string | Record<string, unknown>;
 
 /**
  * postProcess：与 Fig.Spec 语义对齐——收到按 splitOn 切分后的 stdout 片段
- * 与原始执行结果（可判 truncated/exitCode）。返回 null/undefined 或抛错
- * = 本次 generator 失败（降级 null）。
+ * 与原始执行结果（可判 truncated/exitCode）。返回 null/undefined、非数组或
+ * 抛错 = 本次 generator 失败（降级 null）。元素级结构校验在本模块内做
+ * （spec 数据不信任）。
  */
 export type GeneratorPostProcess = (
   parts: string[],
   result: CompletionExecuteResult,
-) => GeneratorSuggestion[] | null | undefined;
+) => readonly GeneratorSuggestion[] | null | undefined;
 
 export interface GeneratorRunContext {
   /** 目标会话（local/ssh）；generator 一律经 completion/execute 在目标机执行。 */
@@ -59,6 +64,26 @@ export const GENERATOR_ITEM_KIND: CompletionItem["kind"] = "argument";
 function splitOutput(stdout: string, splitOn: string | undefined): string[] {
   const separator = typeof splitOn === "string" && splitOn.length > 0 ? splitOn : "\n";
   return stdout.split(separator);
+}
+
+/**
+ * 单条产出 → {label, description?}：name 优先于 label（Fig 原生 Suggestion
+ * 主键是 name）；纯字符串即 label；空 label / 非对象 / 两者皆缺 → null（跳过，
+ * 不判整批失败）。
+ */
+function normalizeSuggestion(entry: unknown): { label: string; description?: string } | null {
+  if (typeof entry === "string") return entry.length > 0 ? { label: entry } : null;
+  if (typeof entry !== "object" || entry === null) return null;
+  const record = entry as Record<string, unknown>;
+  const label =
+    typeof record.name === "string" && record.name.length > 0
+      ? record.name
+      : typeof record.label === "string" && record.label.length > 0
+        ? record.label
+        : null;
+  if (label === null) return null;
+  const description = typeof record.description === "string" && record.description.length > 0 ? record.description : undefined;
+  return description === undefined ? { label } : { label, description };
 }
 
 /**
@@ -101,20 +126,20 @@ export async function runDeclarativeGenerator(
     const { context } = ctx;
     const items: CompletionItem[] = [];
     suggestions.forEach((suggestion, index) => {
-      if (typeof suggestion !== "object" || suggestion === null) return;
-      if (typeof suggestion.label !== "string") return;
+      const normalized = normalizeSuggestion(suggestion);
+      if (!normalized) return;
       items.push({
-        id: `${GENERATOR_ITEM_SOURCE}:${command}:${index}:${suggestion.label}`,
-        label: suggestion.label,
-        ...(suggestion.description === undefined ? {} : { description: suggestion.description }),
+        id: `${GENERATOR_ITEM_SOURCE}:${command}:${index}:${normalized.label}`,
+        label: normalized.label,
+        ...(normalized.description === undefined ? {} : { description: normalized.description }),
         kind: GENERATOR_ITEM_KIND,
         score: 0,
         source: GENERATOR_ITEM_SOURCE,
         edit: {
-          text: suggestion.label,
+          text: normalized.label,
           replaceStart: context.tokenStart,
           replaceEnd: context.tokenEnd,
-          cursorOffset: context.tokenStart + suggestion.label.length,
+          cursorOffset: context.tokenStart + normalized.label.length,
         },
       });
     });

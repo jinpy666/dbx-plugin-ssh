@@ -169,3 +169,47 @@ describe("runDeclarativeGenerator（骨架，全 Fake）", () => {
     expect(items?.map((item) => item.label)).toEqual(["main", "master", "maintenance"]);
   });
 });
+
+describe("runDeclarativeGenerator · Fig 原生 Suggestion 收敛（批次 2-1）", () => {
+  const figStdout = branchesResult;
+
+  it("name 优先于 label；description 透传；icon 仅接受不透传（CompletionItem 无图标通道）", async () => {
+    const items = await runDeclarativeGenerator(
+      branchDecl,
+      () => [{ name: "main", description: "default branch", icon: "fig-branch" }],
+      baseContext({ execute: fakeExecute(figStdout) }),
+    );
+    expect(items).toHaveLength(1);
+    expect(items?.[0]).toMatchObject({ label: "main", description: "default branch", kind: "argument", source: GENERATOR_ITEM_SOURCE });
+    expect(items?.[0]).not.toHaveProperty("icon");
+  });
+
+  it("纯字符串产出即 label；空串跳过不判整批失败", async () => {
+    const items = await runDeclarativeGenerator(
+      branchDecl,
+      () => ["main", "", "master", 42 as unknown as string, { name: "dev" }],
+      baseContext({ execute: fakeExecute(figStdout) }),
+    );
+    expect(items?.map((item) => item.label)).toEqual(["main", "master", "dev"]);
+  });
+
+  it("name/label 皆缺的条目跳过；id 仍按原索引生成保持唯一", async () => {
+    const items = await runDeclarativeGenerator(
+      branchDecl,
+      () => [{ description: "no name" }, { label: "ok" }],
+      baseContext({ execute: fakeExecute(figStdout) }),
+    );
+    expect(items?.map((item) => item.label)).toEqual(["ok"]);
+  });
+
+  it("非零 exitCode 不判失败：stdout 照常交 postProcess 产候选", async () => {
+    const items = await runDeclarativeGenerator(
+      branchDecl,
+      () => [{ name: "main" }],
+      baseContext({
+        execute: fakeExecute({ exitCode: 1, stdout: "main\n", stderr: "warning", truncated: false, timedOut: false }),
+      }),
+    );
+    expect(items?.map((item) => item.label)).toEqual(["main"]);
+  });
+});
