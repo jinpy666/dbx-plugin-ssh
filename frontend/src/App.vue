@@ -2046,6 +2046,14 @@ function restoreUiState() {
   currentPath.value = typeof state.sftpPath === "string" ? normalizeRemotePath(state.sftpPath) : "/";
   splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : 58;
   dockerPaneWidth.value = typeof state.dockerPaneWidth === "number" ? clampDockerPaneWidth(state.dockerPaneWidth, window.innerWidth) : null;
+  // 恢复时 .panes 未必完成布局，上面以 window.innerWidth 近似容器宽；窗口窄于
+  // 窗口宽时持久化宽度可能越过容器 70% 上限，挂帧后用实测宽复钳一次校正。
+  void nextTick(() => {
+    const containerWidth = paneContainer.value?.clientWidth;
+    if (dockerPaneWidth.value != null && containerWidth) {
+      dockerPaneWidth.value = clampDockerPaneWidth(dockerPaneWidth.value, containerWidth);
+    }
+  });
   paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : "terminal-left";
   // Dock panel surface: the SFTP pane stays closed (no auto-list/auto-connect);
   // users who want SFTP open the workbench tab.
@@ -7655,28 +7663,31 @@ function startDividerDrag(event: PointerEvent) {
   if (!container) return;
   const pointerId = event.pointerId;
   const move = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return;
     const bounds = container.getBoundingClientRect();
     const fromLeft = ((next.clientX - bounds.left) / bounds.width) * 100;
     const terminalPercent = paneOrder.value === "terminal-left" ? fromLeft : 100 - fromLeft;
     splitRatio.value = Math.max(35, Math.min(80, terminalPercent));
     scheduleFit();
   };
-  const stop = () => {
-    container.releasePointerCapture(pointerId);
+  // pointercancel 触发时指针已被移出 active 集合：releasePointerCapture 对非
+  // active 指针会抛 NotFoundError，必须先摘监听、再守卫释放，否则监听器泄漏、
+  // 容器内后续鼠标移动会持续重算分栏（触屏拖动被浏览器接管时必现）。
+  const release = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return;
     container.removeEventListener("pointermove", move);
-    container.removeEventListener("pointerup", stop);
-    container.removeEventListener("pointercancel", stop);
+    container.removeEventListener("pointerup", release);
+    container.removeEventListener("pointercancel", release);
+    if (container.hasPointerCapture(pointerId)) {
+      try { container.releasePointerCapture(pointerId); } catch { /* 已被隐式释放 */ }
+    }
     persistState();
   };
   container.setPointerCapture(pointerId);
   container.addEventListener("pointermove", move);
-  container.addEventListener("pointerup", stop);
-  container.addEventListener("pointercancel", stop);
+  container.addEventListener("pointerup", release);
+  container.addEventListener("pointercancel", release);
 }
-
-// 拖宽结束时刻：pointerup 后浏览器会合成一次 click（目标在 paneContainer 上），
-// document 收口会把它当「点空白」误关 Docker 面板，收口处对短窗内的点击放行。
-let dockerDividerDragEndedAt = 0;
 
 /** Docker 分栏拖宽：与 SFTP divider 同款 pointer-capture 交互；把手始终在
  *  Docker 面板贴 SFTP 一侧，SFTP 左置（row-reverse）时面板靠容器左缘，其余
@@ -7686,25 +7697,37 @@ function startDockerDividerDrag(event: PointerEvent) {
   if (!container) return;
   const pointerId = event.pointerId;
   const move = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return;
     const bounds = container.getBoundingClientRect();
     const distance = paneOrder.value === "sftp-left" ? next.clientX - bounds.left : bounds.right - next.clientX;
     dockerPaneWidth.value = clampDockerPaneWidth(distance, bounds.width);
     scheduleFit();
   };
-  const stop = () => {
-    container.releasePointerCapture(pointerId);
+  // release 先摘监听再守卫释放捕获，原因同 startDividerDrag 的 pointercancel 注释。
+  const release = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return;
     container.removeEventListener("pointermove", move);
-    container.removeEventListener("pointerup", stop);
-    container.removeEventListener("pointercancel", stop);
-    // 拖完的合成 click 目标在 paneContainer 上，document 收口会把它当「点空白」
-    // 误关 Docker 面板——记下时间戳，收口处对短窗内的点击放行（见 onDocumentClickCloseMenus）。
-    dockerDividerDragEndedAt = Date.now();
+    container.removeEventListener("pointerup", release);
+    container.removeEventListener("pointercancel", release);
+    if (container.hasPointerCapture(pointerId)) {
+      try { container.releasePointerCapture(pointerId); } catch { /* 已被隐式释放 */ }
+    }
+    // pointerup 后浏览器会向捕获目标（容器）合成一次 click：在捕获阶段吞掉这
+    // 一发，document 收口（onDocumentClickCloseMenus）就不会把它当「点空白」
+    // 误关 Docker 面板。pointercancel 不合成 click，无需布防；超时拆除兜底个
+    // 别内核在 pointer capture 下不合成 click 的情形，防止守卫滞留吞掉用户下
+    // 一次真实点击。
+    if (next.type === "pointerup") {
+      const swallowSyntheticClick = (click: MouseEvent) => click.stopPropagation();
+      container.addEventListener("click", swallowSyntheticClick, { capture: true, once: true });
+      setTimeout(() => container.removeEventListener("click", swallowSyntheticClick, { capture: true }), 1000);
+    }
     persistState();
   };
   container.setPointerCapture(pointerId);
   container.addEventListener("pointermove", move);
-  container.addEventListener("pointerup", stop);
-  container.addEventListener("pointercancel", stop);
+  container.addEventListener("pointerup", release);
+  container.addEventListener("pointercancel", release);
 }
 
 function toggleColumn(column: SftpColumn) {
@@ -11273,8 +11296,6 @@ function closeMenus() {
  *  portal 在工具条 popover 之外，点弹窗内部不该把背后的工具条弹层连带收掉。 */
 function onDocumentClickCloseMenus(event: MouseEvent) {
   if ((event.target as HTMLElement | null)?.closest?.('[data-slot="context-menu-content"], [data-slot="popover-content"], [data-slot="dialog-content"]')) return;
-  // Docker 分栏拖宽刚结束：pointerup 的合成 click 不算「点空白」，不收口（见 startDockerDividerDrag）。
-  if (Date.now() - dockerDividerDragEndedAt < 400) return;
   closeMenus();
 }
 

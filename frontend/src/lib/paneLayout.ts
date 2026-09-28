@@ -3,8 +3,9 @@
 // Docker 三段的让宽口径必须同源，否则同开时会互相挤占（SFTP flex:1 被
 // 压成 0 宽，见「Docker 面板遮挡 SFTP」修复）。
 
-/** Docker 面板拖宽下限：对齐旧 CSS clamp 的 320px 下限。 */
-export const DOCKER_PANE_MIN_WIDTH = 320;
+/** Docker 面板拖宽下限：与 style.css `.panes` 里 --docker-pane-width 的默认
+ *  clamp 下限（360px）保持同源，改一处必须同步另一处。 */
+export const DOCKER_PANE_MIN_WIDTH = 360;
 /** Docker 面板拖宽上限：不超过分栏容器宽度的 70%，给终端留最小可用区。 */
 export const DOCKER_PANE_MAX_SHARE = 0.7;
 
@@ -21,7 +22,7 @@ export function terminalFlexBasis(input: { sftpOpen: boolean; dockerOpen: boolea
   return "100%";
 }
 
-/** Docker 面板宽度钳制：[320px, max(320px, 容器宽 70%)]，四舍五入到整像素。 */
+/** Docker 面板宽度钳制：[DOCKER_PANE_MIN_WIDTH, max(下限, 容器宽 70%)]，四舍五入到整像素。 */
 export function clampDockerPaneWidth(px: number, containerWidth: number): number {
   const max = Math.max(DOCKER_PANE_MIN_WIDTH, Math.round(containerWidth * DOCKER_PANE_MAX_SHARE));
   return Math.round(Math.min(Math.max(px, DOCKER_PANE_MIN_WIDTH), max));

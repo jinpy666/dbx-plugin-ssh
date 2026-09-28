@@ -69,6 +69,32 @@ describe("dockerRowMenu", () => {
     expect(menu.isOpen("b")).toBe(false);
   });
 
+  it("pins a hover-opened menu on click and keeps it open across pointer-out", () => {
+    const menu = createRowMenuController();
+    menu.hoverTrigger("a");
+    vi.advanceTimersByTime(120);
+    expect(menu.openedByHover()).toBe(true);
+    // hover 已开后点击是「钉住」，不是关闭。
+    menu.toggle("a");
+    expect(menu.isOpen("a")).toBe(true);
+    expect(menu.openedByHover()).toBe(false);
+    // 钉住后移出触发器/菜单不再延迟关闭。
+    menu.leaveToClose();
+    vi.advanceTimersByTime(1000);
+    expect(menu.isOpen("a")).toBe(true);
+    // 再点一次才收口。
+    menu.toggle("a");
+    expect(menu.isOpen("a")).toBe(false);
+  });
+
+  it("reports click-opened menus as not hover-opened", () => {
+    const menu = createRowMenuController();
+    menu.toggle("a");
+    expect(menu.openedByHover()).toBe(false);
+    menu.close();
+    expect(menu.openedByHover()).toBe(false);
+  });
+
   it("close() clears the state and any pending timers", () => {
     const menu = createRowMenuController();
     menu.hoverTrigger("a");

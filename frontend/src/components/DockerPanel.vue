@@ -311,6 +311,13 @@ async function confirmAction(accepted: boolean): Promise<void> {
 const rowMenu = createRowMenuController();
 onScopeDispose(() => rowMenu.close());
 
+/** reka 打开弹层默认把焦点迁入首控件；hover 开启的菜单不迁移——用户可能正在
+ *  终端输入，焦点被抢走后按键（Space/Enter）会落到菜单项上误触容器操作。
+ *  click/键盘/触屏开启的菜单保留默认迁移，方向键与 Esc 才能在菜单内工作。 */
+function onRowMenuOpenAutoFocus(event: Event): void {
+  if (rowMenu.openedByHover()) event.preventDefault();
+}
+
 /** 菜单选项统一入口：先收菜单再派发（kill/rm 仍走确认弹层）。 */
 function runMenuAction(container: DockerContainer, action: DockerActionName): void {
   rowMenu.close();
@@ -513,6 +520,8 @@ const running = (container: DockerContainer): boolean => container.state === "ru
                     :class="{ 'is-active': rowMenu.isOpen(container.id) }"
                     :title="props.t('docker.colActions')"
                     :aria-label="props.t('docker.colActions')"
+                    aria-haspopup="menu"
+                    :aria-expanded="rowMenu.isOpen(container.id)"
                     @pointerenter="rowMenu.hoverTrigger(container.id)"
                     @pointerleave="rowMenu.leaveToClose()"
                     @click="rowMenu.toggle(container.id)"
@@ -525,6 +534,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
                   class="docker-row-menu w-auto gap-1 p-1"
                   align="end"
                   :side-offset="4"
+                  @open-auto-focus="onRowMenuOpenAutoFocus"
                   @pointerenter="rowMenu.hoverContent()"
                   @pointerleave="rowMenu.leaveToClose()"
                 >

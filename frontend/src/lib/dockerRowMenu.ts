@@ -13,10 +13,15 @@ export interface RowMenuControllerOptions {
 
 type Timer = ReturnType<typeof setTimeout>;
 
+/** 菜单开启途径：hover 延迟开，click/键盘/触屏立即开。 */
+type OpenSource = "hover" | "click";
+
 export interface RowMenuController {
   /** 当前打开菜单的行 id（空串 = 全关）。 */
   openId: ReturnType<typeof ref<string>>;
   isOpen(id: string): boolean;
+  /** 当前打开的菜单是否由 hover 开启（DockerPanel 据此决定是否迁移焦点）。 */
+  openedByHover(): boolean;
   hoverTrigger(id: string): void;
   leaveToClose(): void;
   hoverContent(): void;
@@ -31,6 +36,7 @@ export function createRowMenuController(options: RowMenuControllerOptions = {}):
   let closeTimer: Timer | undefined;
 
   const openId = ref("");
+  let openSource: OpenSource = "hover";
 
   function clearTimers(): void {
     if (openTimer !== undefined) {
@@ -47,6 +53,10 @@ export function createRowMenuController(options: RowMenuControllerOptions = {}):
     return openId.value === id;
   }
 
+  function openedByHover(): boolean {
+    return openId.value !== "" && openSource === "hover";
+  }
+
   /** 指针进入触发器：延迟开启该行菜单；已是当前菜单则只取消待关闭（回移不闪关）。 */
   function hoverTrigger(id: string): void {
     if (openId.value === id) {
@@ -60,11 +70,14 @@ export function createRowMenuController(options: RowMenuControllerOptions = {}):
     openTimer = setTimeout(() => {
       openTimer = undefined;
       openId.value = id;
+      openSource = "hover";
     }, openDelayMs);
   }
 
-  /** 指针移出触发器或菜单：延迟关闭（期间进入内容会被 hoverContent 取消）。 */
+  /** 指针移出触发器或菜单：延迟关闭（期间进入内容会被 hoverContent 取消）。
+   *  click 开启的菜单已「钉住」，移出不关，等外部点击/Esc/选项点击/re-toggle 收口。 */
   function leaveToClose(): void {
+    if (openId.value !== "" && openSource === "click") return;
     clearTimers();
     closeTimer = setTimeout(() => {
       closeTimer = undefined;
@@ -77,9 +90,16 @@ export function createRowMenuController(options: RowMenuControllerOptions = {}):
     clearTimers();
   }
 
-  /** 点击触发器：直接切换（触屏/键盘场景，无延迟）。 */
+  /** 点击触发器：直接切换（触屏/键盘场景，无延迟）。对 hover 已开的菜单，
+   *  点击视为「钉住」——保持开启并转为 click 来源，再点一次才收口；
+   *  否则悬停后想固定菜单的鼠标点击会被误判成关闭。 */
   function toggle(id: string): void {
     clearTimers();
+    if (openId.value === id && openSource === "hover") {
+      openSource = "click";
+      return;
+    }
+    openSource = "click";
     openId.value = openId.value === id ? "" : id;
   }
 
@@ -89,5 +109,5 @@ export function createRowMenuController(options: RowMenuControllerOptions = {}):
     openId.value = "";
   }
 
-  return { openId, isOpen, hoverTrigger, leaveToClose, hoverContent, toggle, close };
+  return { openId, isOpen, openedByHover, hoverTrigger, leaveToClose, hoverContent, toggle, close };
 }

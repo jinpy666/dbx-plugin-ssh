@@ -45,6 +45,12 @@ describe("detectShellKind", () => {
   it("recognizes cmd drive prompts", () => {
     expect(detectShellKind("C:\\Users\\demo>")).toBe("cmd");
     expect(detectShellKind("D:\\>cd ")).toBe("cmd");
+    expect(detectShellKind("C:\\Program Files\\x>")).toBe("cmd");
+  });
+
+  it("rejects redirection output lines that merely start with a drive path", () => {
+    expect(detectShellKind("C:\\tools\\run.exe > out.txt")).toBeNull();
+    expect(detectShellKind("D:\\data > log 2>&1")).toBeNull();
   });
 
   it("rejects posix prompts and non-prompt lines", () => {

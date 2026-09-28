@@ -19,11 +19,14 @@ export type WindowsShellKind = Extract<ShellKind, "powershell" | "cmd">;
  * 文本（采样行可能是光标行）：
  * - `PS C:\Users\x>` / `PS C:\>dir ` → powershell（先判，避免被 cmd 规则吃掉）
  * - `C:\Users\x>` / `D:\>cd ` → cmd
+ *
+ * cmd 规则要求 `>` 紧贴路径文本（真实提示符 `…x>`/`…\>` 均无空格），避免把
+ * 「路径开头 + 重定向」的输出行（`C:\tools\run.exe > out.txt`）误判为提示符。
  */
 export function detectShellKind(promptLine: string): WindowsShellKind | null {
   const line = String(promptLine ?? "");
   if (/^\s*PS\s+[A-Za-z]:\\/.test(line)) return "powershell";
-  if (/^\s*[A-Za-z]:\\[^\r\n]*>/.test(line)) return "cmd";
+  if (/^\s*[A-Za-z]:\\(?:[^\r\n>]*[^\s>])?>/.test(line)) return "cmd";
   return null;
 }
 
