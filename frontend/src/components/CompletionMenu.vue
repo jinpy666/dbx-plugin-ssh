@@ -9,7 +9,7 @@
 // 建议浮层的面板视觉（同一 --popover/--border/--accent 令牌体系，随宿主
 // 主题），不引 reka 弹层——避免与 xterm 键盘捕获争焦点。
 import { computed, ref, watchEffect } from "vue";
-import { ChevronRight, CornerDownRight, Flag, Info, SlidersHorizontal } from "@lucide/vue";
+import { ChevronRight, CornerDownRight, Flag, Info, LoaderCircle, SlidersHorizontal } from "@lucide/vue";
 import type { CompletionItem, CompletionItemKind } from "../lib/completion/core/types";
 import {
   chooseOverlayPlacement,
@@ -28,6 +28,8 @@ const props = defineProps<{
   anchor: SuggestionAnchor | null;
   /** 终端可视底界（terminal-host 净高）；缺省时回落实测包含块高度。 */
   viewport?: { height: number };
+  /** generator 在途且无静态候选的占位态（批次 2-1，两段渲染 §31）。 */
+  loading?: boolean;
   t: (key: string, values?: Record<string, string | number>) => string;
 }>();
 
@@ -90,6 +92,12 @@ function rowIcon(kind: CompletionItemKind) {
 
 <template>
   <div ref="rootEl" class="completion-menu" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="listbox" :aria-label="t('completionMenu.title')">
+    <!-- generator 在途占位（§31 两段渲染）：纯状态行，不可点选、不参与
+         activeIndex；键盘所有权由 App 的 keyboard.ts loading 态处理。 -->
+    <div v-if="loading && !items.length" class="completion-row completion-loading" role="status">
+      <LoaderCircle class="completion-icon completion-loading-icon" aria-hidden="true" />
+      <span class="completion-description">{{ t("completionMenu.loading") }}</span>
+    </div>
     <button
       v-for="(item, index) in items"
       :key="item.id"
@@ -193,5 +201,33 @@ function rowIcon(kind: CompletionItemKind) {
   width: 12px;
   height: 12px;
   opacity: 0.45;
+}
+
+/* generator 在途占位行（§31）：非交互状态行，弱化展示。 */
+.completion-row.completion-loading {
+  cursor: default;
+}
+
+.completion-loading .completion-description {
+  opacity: 0.5;
+}
+
+.completion-loading-icon {
+  animation: completion-loading-spin 1.1s linear infinite;
+}
+
+@keyframes completion-loading-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .completion-loading-icon {
+    animation: none;
+  }
 }
 </style>

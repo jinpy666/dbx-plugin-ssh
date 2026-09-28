@@ -156,13 +156,13 @@ import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardSta
 // （vendored amazon-q parser + 全量语料，经冻结接缝 FigCompletionSource 注入
 // CompletionController）；legacy 补全目录已退役，无命中即
 // pass-through（菜单关、Tab 交 shell），不造假候选。
-import { CompletionController } from "./lib/completion/CompletionController";
+import { CompletionController, type CompletionGeneratorChannel } from "./lib/completion/CompletionController";
 import { applyEditToText } from "./lib/completion/core/edit";
 import { rankItems } from "./lib/completion/core/ranking";
 import type { CompletionEdit, CompletionItem, CompletionResponse } from "./lib/completion/core/types";
 import { resolveCompletionKey, type CompletionKeyboardState } from "./lib/completion/keyboard";
-import type { FigCompletionSource } from "./lib/completion/fig/source";
-import { FakeFigCompletionSource, createPassThroughFigSource } from "./lib/completion/testing/fakeFigSource";
+import { figCompletionSource } from "./lib/completion/fig/figCompletionSource";
+import { GeneratorScheduler } from "./lib/completion/fig/generatorScheduler";
 import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, normalizeQuickCommands, QUICK_COMMANDS_LIMIT, quickCommandText, type QuickCommand } from "./lib/quickCommands";
@@ -917,17 +917,37 @@ let ghostGate: TerminalGhostState = createGhostState();
 // readTerminalSuggestionAnchor）。引擎三态存 pluginStore
 // （ssh-completion-engine：fig-safe 默认 / fig / off），SettingsDialog 下拉
 // 自治写入，本处每次调度前直读（无缓存即时生效）。
-// 批次 1 接线：dev 构建（import.meta.env.DEV）注入 FakeFigCompletionSource
-// 支撑手动验证清单（git ch<Tab>/git co 别名/无命中透传）；生产构建为
-// pass-through source（恒 null，零浮层），真实实现由 Lane C' 在集成分支
-// 一处替换（构造点仅此一处）。
-const completionSource: FigCompletionSource = import.meta.env.DEV
-  ? new FakeFigCompletionSource()
-  : createPassThroughFigSource();
+// 批次 2-1 接线：真实 figCompletionSource（vendored amazon-q parser + 全量
+// 语料）DEV/生产同源；声明式 generator 位经 GeneratorScheduler → hostClient
+// （completion/execute，目标机执行）异步补齐，静态候选先行（两段渲染）。
+// fig-safe 与 fig 本批次 generator 行为相同；off 时 controller 不调度。
+// 类型不标注冻结接口：collectGenerators 是 impl 上的批次 2-1 第二通道。
+const completionSource = figCompletionSource;
+
+// 声明式 generator 调度：目标取当前会话（ssh 优先，其次本地；串口无可执行
+// 目标 → null 即不执行），cwd 用 OSC 7/633 跟踪值（terminalCwd）。
+const completionScheduler = new GeneratorScheduler({
+  collect: (request) => completionSource.collectGenerators(request),
+  target: () => {
+    const sshSessionId = session.value?.sessionId;
+    if (sshSessionId) return { kind: "ssh", sessionId: sshSessionId };
+    const localSessionId = localSession.value?.sessionId;
+    if (localSessionId) return { kind: "local", sessionId: localSessionId };
+    return null;
+  },
+  cwd: () => (terminalCwd.value ? terminalCwd.value : null),
+});
+const completionGeneratorChannel: CompletionGeneratorChannel = {
+  slots: (request) => completionScheduler.slots(request),
+  run: (slot) => completionScheduler.run(slot),
+};
 const completionOpen = ref(false);
 const completionItems = ref<CompletionItem[]>([]);
 const completionActiveIndex = ref(0);
 const completionAnchor = ref<SuggestionAnchor | null>(null);
+// generator 在途占位态（§31）：true 仅表示「无静态候选、动态候选在途」的
+// loading 浮层（零条目占位行，Tab/Enter 放行 shell）；静态候选照常先行。
+const completionLoading = ref(false);
 // 结构化补全输入门：仅 onData 常规键入路径（refreshSuggestionsAfterInput 的
 // guard.show 分支）放行调度。粘贴/快速命令/本地重跑等旁路写入不开浮层
 // （与基线一致）；guard 抑制（alternate screen/跟随程序锁存/历史建议总开关
@@ -938,12 +958,21 @@ function closeCompletionMenu() {
   completionOpen.value = false;
   completionItems.value = [];
   completionActiveIndex.value = 0;
+  completionLoading.value = false;
 }
 
-/** 响应落地：ready（rankItems 排序截断后非空）开浮层；pass-through 关。 */
+/** 响应落地：ready（rankItems 排序截断后非空）开浮层；loading（generator
+ * 在途且无静态候选）开占位浮层；pass-through 关。 */
 function handleCompletionResponse(response: CompletionResponse) {
   if (response.state === "ready" && response.items.length) {
+    completionLoading.value = false;
     openCompletionMenu(response);
+  } else if (response.state === "loading") {
+    completionLoading.value = true;
+    completionItems.value = [];
+    completionActiveIndex.value = 0;
+    completionAnchor.value = readTerminalSuggestionAnchor();
+    completionOpen.value = true;
   } else {
     closeCompletionMenu();
   }
@@ -970,13 +999,14 @@ function openCompletionMenu(response: CompletionResponse) {
 function handleCompletionKey(event: KeyboardEvent): boolean {
   if (event.type !== "keydown" || !completionOpen.value) return false;
   const items = completionItems.value;
-  // 批次 1 source 同步交付，无 loading 态；loading 字段为批次 2 generator
-  // 接线留位（届时 Tab 透传语义由 keyboard.ts 规则表保证）。
+  // loading（generator 在途且无静态候选）时 Tab/Enter 放行 shell
+  // （keyboard.ts 规则表 §21：动态/generator 位置或 loading 一律透传）；
+  // 静态候选已就位则保持静态键盘模式（active 项可 Tab 接受）。
   const state: CompletionKeyboardState = {
     menuOpen: completionOpen.value,
     hasItems: items.length > 0,
     activeItemKind: items[completionActiveIndex.value]?.kind ?? null,
-    loading: false,
+    loading: completionLoading.value && items.length === 0,
   };
   switch (resolveCompletionKey(state, event.key)) {
     case "accept": {
@@ -1024,12 +1054,14 @@ function refreshCompletionMenu() {
 }
 
 // CompletionController（lib/completion）：调度中枢。enabled = 引擎三态
-// （off 即关）+ 输入门；session id 取当前会话（无会话空串，guard 兜底）。
+// （off 即关）+ 输入门；session id 取当前会话（无会话空串，guard 兜底）；
+// generators 通道接声明式 generator 调度（两段渲染 + 三重 guard 在 controller）。
 const completionController = new CompletionController({
   source: completionSource,
   sessionId: () => session.value?.sessionId ?? localSession.value?.sessionId ?? serialSession.value?.sessionId ?? "",
   readLine: () => pendingTerminalInput,
   enabled: () => loadCompletionEngine() !== "off" && completionInputAllowed,
+  generators: completionGeneratorChannel,
   onResponse: handleCompletionResponse,
   onAcceptEdit: (edit: CompletionEdit) => {
     // 替换范围由 source 的 CompletionEdit 给出（含引号/转义表面）；越界时
@@ -12084,15 +12116,18 @@ onBeforeUnmount(() => {
           @activate="(index) => (suggestionActiveIndex = index)"
           @fill="fillSuggestion"
         />
-        <!-- 结构化补全浮层（FIG wave-1 最终架构）：fig 引擎候选（CompletionItem）
-             直用展示，键盘（↑↓/Tab/Enter/Esc）经 keyboard.ts 规则表由
-             handleCompletionKey 消费，点击回传 item 由 controller 执行 edit。 -->
+        <!-- 结构化补全浮层（FIG wave-1 最终架构；批次 2-1 两段渲染）：fig 引擎
+             候选（CompletionItem）直用展示，keyboard.ts 规则表由
+             handleCompletionKey 消费，点击回传 item 由 controller 执行 edit；
+             generator 在途且无静态候选时显示 loading 占位行（Tab/Enter 放行
+             shell，keyboard.ts loading 态）。 -->
         <CompletionMenu
-          v-if="completionOpen && completionItems.length"
+          v-if="completionOpen && (completionItems.length || completionLoading)"
           :items="completionItems"
           :active-index="completionActiveIndex"
           :anchor="completionAnchor"
           :viewport="suggestionViewport"
+          :loading="completionLoading"
           :t="t"
           @activate="(index) => (completionActiveIndex = index)"
           @accept="acceptCompletionRow"
