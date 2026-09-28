@@ -40,6 +40,16 @@ if cargo build --manifest-path backend/Cargo.toml 2>&1 | grep -q "never used"; t
 fi
 echo "  no dead-code warnings"
 
+echo "==> frontend sandbox-confirm lint (SSH-H1 regression gate)"
+# 宿主沙箱 iframe 无 allow-modals，window.confirm 恒返回 false——危险确认
+# （覆盖/删除/强杀）必须走 lib/confirmDialog 应用内弹窗；出现即失败。
+if grep -rn "window\.confirm(" frontend/src >/dev/null 2>&1; then
+  echo "FAIL: window.confirm( found (sandbox iframe has no allow-modals, always false):" >&2
+  grep -rn "window\.confirm(" frontend/src >&2
+  exit 1
+fi
+echo "  no window.confirm calls"
+
 echo "==> frontend typecheck + tests + build"
 [ -d frontend/node_modules ] || pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend typecheck

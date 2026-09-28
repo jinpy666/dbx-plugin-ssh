@@ -34,7 +34,10 @@ let html = await fs.readFile(path.join(temporary, "index.html"), "utf8");
 const scriptMatch = html.match(/<script[^>]+src="\.\/([^"]+\.js)"[^>]*><\/script>/);
 if (!scriptMatch) throw new Error("Vite output did not contain a JavaScript entry");
 const script = await fs.readFile(path.join(temporary, scriptMatch[1]), "utf8");
-const inlineScript = script.replace(/<\/script/gi, "<\\/script");
+// 内联双层转义：① `</script` 防止提前闭合；② `<!--` 防止 HTML 解析器进入
+// script 注释态（highlight.js 语言定义同时含 `<!--` 与 `<script` 字面量，
+// 组合起来会让真实闭合标签失效）——`\!` 在 JS 字符串/正则中均等价 `!`，语义不变。
+const inlineScript = script.replace(/<\/script/gi, "<\\/script").replace(/<!--/g, "<\\!--");
 html = html.replace(scriptMatch[0], () => `<script type="module">${inlineScript}</script>`);
 
 const styleMatch = html.match(/<link[^>]+href="\.\/([^"]+\.css)"[^>]*>/);

@@ -89,6 +89,8 @@ import {
 } from "./lib/terminalTrzsz";
 import { Osc7DirectoryParser } from "./lib/terminalDirectoryTracking";
 import { handleOsc52ClipboardWrite, handleTerminalColorQuery } from "./lib/terminalOsc";
+import { confirmDialog, useConfirmDialogHost } from "./lib/confirmDialog";
+import { applyAppearanceColorVars, subscribeHostEnvironment } from "../../shared/frontend/hostThemeRuntime";
 import {
   cwdFromUserVar,
   parseOsc1337SetUserVar,
@@ -1466,6 +1468,10 @@ let terminalMouseUpHandler: ((event: MouseEvent) => void) | undefined;
 let terminalMouseDownAt: { clientX: number; clientY: number } | undefined;
 let pasteConfirmResolver: ((accepted: boolean) => void) | undefined;
 let dropUploadResolver: ((choice: "cancel" | "cwd" | { dir: string }) => void) | undefined;
+// 通用应用内确认弹窗（SSH-H1）：原语在 lib/confirmDialog（SettingsDialog/
+// QuickCommandsSection 等子组件共用），此处只挂宿主渲染；模板/关框/Esc/
+// teardown 统一经 resolvePendingConfirmDialog 结算。
+const { pendingConfirmDialog, resolveConfirmDialog: resolvePendingConfirmDialog } = useConfirmDialogHost();
 let zoomNoticeTimer = 0;
 let resizeObserver: ResizeObserver | undefined;
 let disposeInput: { dispose(): void } | undefined;
@@ -1490,10 +1496,8 @@ let unsubscribeBinary: (() => void) | undefined;
 // 与终端/SFTP 面板共享同一道门禁，见 handleHostFileDrop。
 let unsubscribeFileDrag: (() => void) | undefined;
 let unsubscribeFileDrop: (() => void) | undefined;
-let unsubscribeAppearance: (() => void) | undefined;
-let unsubscribeTheme: (() => void) | undefined;
-let unsubscribeLocale: (() => void) | undefined;
-let unsubscribeContext: (() => void) | undefined;
+// X-P2/P3/P4 收敛：宿主环境订阅聚合句柄（shared/frontend/hostThemeRuntime）。
+let unsubscribeEnvironment: (() => void) | undefined;
 let persistTimer = 0;
 let resizeTimer = 0;
 let reconnectTimer = 0;
@@ -2458,6 +2462,8 @@ function removeImportedScheme(id: string) {
   if (scheme) showNotice(t("terminalAppearance.schemeRemoved", { name: scheme.name }));
 }
 
+// 颜色变量 → 宿主令牌名探测/回退循环收敛到 shared 单点（X-P4，kafka 策略为
+// 准）；此处只保留 ssh 特有的终端底色/字体处理。
 function applyAppearance(next: DbxPluginAppearanceInput) {
   // 宿主可能缺字段（1.0 或部分下发、1.1 theme 通道只带颜色令牌），按 DBX 规范色板补齐。
   const resolved = resolveAppearance(next);
@@ -2465,14 +2471,7 @@ function applyAppearance(next: DbxPluginAppearanceInput) {
   const root = document.documentElement;
   root.dataset.theme = resolved.colorScheme;
   root.style.colorScheme = resolved.colorScheme;
-  root.style.setProperty("--background", resolved.colors.background);
-  root.style.setProperty("--foreground", resolved.colors.foreground);
-  root.style.setProperty("--muted", resolved.colors.muted);
-  root.style.setProperty("--muted-foreground", resolved.colors.mutedForeground);
-  root.style.setProperty("--accent", resolved.colors.accent);
-  root.style.setProperty("--accent-foreground", resolved.colors.accentForeground);
-  root.style.setProperty("--border", resolved.colors.border);
-  root.style.setProperty("--destructive", resolved.colors.destructive);
+  applyAppearanceColorVars(root, resolved.colors);
   root.style.setProperty("--popover", DBX_POPOVER[resolved.colorScheme]);
   // 终端底色：启用配色方案且背景来源为「方案」时取方案底色，否则宿主面板色。
   root.style.setProperty("--ssh-terminal-background", terminalTheme().background);
@@ -4380,6 +4379,9 @@ function scheduleSessionReconnect() {
 }
 
 function handleEvent(event: DbxPluginEvent) {
+  // env（locale/theme）由 shared/frontend/hostThemeRuntime 的订阅分发；
+  // 此处只做窄化排除，后端事件走下方 method 分派。
+  if (event.type === "env") return;
   if (event.method === "ssh/terminal/inputAck") {
     terminalDiag.acks += 1;
     return;
@@ -6046,29 +6048,6 @@ async function confirmTransferHistoryClear() {
   }
 }
 
-// 通用确认弹窗（promise 化）：宿主沙箱 iframe 无 allow-modals，window.confirm
-// 恒返回 false（见文件头注释）。旧 window.confirm 调用点统一迁移为
-// await appConfirm(...)，语义与原生 confirm 等价（true=确认，false=取消）。
-const appConfirmState = ref<{ message: string; confirmLabel: string; danger: boolean }>();
-let appConfirmResolver: ((accepted: boolean) => void) | undefined;
-function appConfirm(message: string, options?: { confirmLabel?: string; danger?: boolean }): Promise<boolean> {
-  return new Promise((resolve) => {
-    // 理论不可达（弹窗互斥）：前一个未决确认按取消收敛，防止悬挂。
-    resolveAppConfirm(false);
-    appConfirmResolver = resolve;
-    appConfirmState.value = {
-      message,
-      confirmLabel: options?.confirmLabel ?? t("confirm"),
-      danger: options?.danger ?? false,
-    };
-  });
-}
-function resolveAppConfirm(accepted: boolean) {
-  appConfirmState.value = undefined;
-  const resolve = appConfirmResolver;
-  appConfirmResolver = undefined;
-  resolve?.(accepted);
-}
 
 /** Refresh every data source rendered by the transfer popover. */
 async function refreshTransferPanel() {
@@ -7966,7 +7945,8 @@ function sortIcon(column: SftpSortColumn) {
 }
 
 async function openEntry(entry: SftpEntry) {
-  if (previewOpen.value && previewDirty.value && !(await appConfirm(t("editSave.closeConfirm")))) return;
+  if (previewOpen.value && previewDirty.value && !(await confirmDialog(t("editSave.closeConfirm")))) return;
+
   if (entry.kind === "directory") {
     await loadDirectory(pathFromUri(entry.uri));
     return;
@@ -7983,7 +7963,8 @@ async function openEntry(entry: SftpEntry) {
     return;
   }
   // 大文件先询问：确认后仍预览，但只加载头部且只读。
-  if (size > MAX_INLINE_PREVIEW_BYTES && !(await appConfirm(t("previewDialog.tooLargeConfirm", { name: entry.name, size: formatBytes(size), limit: formatBytes(MAX_INLINE_PREVIEW_BYTES) })))) return;
+  if (size > MAX_INLINE_PREVIEW_BYTES && !(await confirmDialog(t("previewDialog.tooLargeConfirm", { name: entry.name, size: formatBytes(size), limit: formatBytes(MAX_INLINE_PREVIEW_BYTES) }), { danger: false }))) return;
+
   // 内容嗅探兜底：无后缀或改名的二进制文件在打开前拦下。
   if (size > 0 && (await remoteFileLooksBinary(entry))) {
     showNotice(t("binaryFile.notOpen", { name: entry.name }));
@@ -8104,8 +8085,9 @@ function hasBinaryExtension(name: string) {
   return BINARY_PREVIEW_EXTENSIONS.has(fileExtension(name));
 }
 
-async function confirmDiscardPreviewEdits(): Promise<boolean> {
-  return !previewDirty.value || appConfirm(t("editSave.closeConfirm"));
+async function confirmDiscardPreviewEdits() {
+  return !previewDirty.value || (await confirmDialog(t("editSave.closeConfirm")));
+
 }
 
 async function closePreview() {
@@ -8256,7 +8238,8 @@ async function commitRename(entry: SftpEntry) {
     } catch {
       // 预检不可用时保持原语义直接下发。
     }
-    if (targetExists && !(await appConfirm(t("sftpRename.overwriteConfirm", { name }), { danger: true }))) {
+    if (targetExists && !(await confirmDialog(t("sftpRename.overwriteConfirm", { name })))) {
+
       renamingPath.value = "";
       return;
     }
@@ -8638,7 +8621,8 @@ async function pasteClipboard() {
   }
   let overwrite = false;
   if (conflicting.length) {
-    if (!(await appConfirm(t("sftpPaste.overwriteConfirm", { count: conflicting.length, names: conflicting.slice(0, 5).join(", ") }), { danger: true }))) return;
+    if (!(await confirmDialog(t("sftpPaste.overwriteConfirm", { count: conflicting.length, names: conflicting.slice(0, 5).join(", ") })))) return;
+
     overwrite = true;
   }
   pasteBusy.value = true;
@@ -9197,7 +9181,8 @@ async function downloadEntry(entry: SftpEntry, forceSudo = false) {
   const fileTransfer = saveToLocal ? undefined : window.dbxPlugin.fileTransfer;
   // Web/Docker mode has no local sink and no host save dialog; the whole file
   // is buffered in browser memory before saving, so warn before large ones.
-  if (!fileTransfer && !saveToLocal && (entry.size || 0) > WEB_DOWNLOAD_WARNING_BYTES && !(await appConfirm(t("webDownload.largeWarning", { name: entry.name, size: formatBytes(entry.size || 0) })))) return;
+  if (!fileTransfer && !saveToLocal && (entry.size || 0) > WEB_DOWNLOAD_WARNING_BYTES && !(await confirmDialog(t("webDownload.largeWarning", { name: entry.name, size: formatBytes(entry.size || 0) }), { danger: false }))) return;
+
   let info: DownloadInfo | undefined;
   let target: { handleId: string; chunkBytes: number } | undefined;
   const chunks = fileTransfer || saveToLocal ? undefined : ([] as Uint8Array[]);
@@ -10672,7 +10657,8 @@ const visibleProcessRows = computed(() => sortedProcessRows.value.slice(0, PROCE
 async function killProcessRow(row: ProcessRow, signal: 15 | 9) {
   if (!session.value || !canKillProcess(row.pid)) return;
   const confirmKey = signal === 9 ? "procKillForceConfirm" : "procKillConfirm";
-  if (!(await appConfirm(t(confirmKey, { pid: row.pid, command: row.command }), { danger: true }))) return;
+  if (!(await confirmDialog(t(confirmKey, { pid: row.pid, command: row.command })))) return;
+
   try {
     await window.dbxPlugin.invoke("ssh/processes/kill", { sessionId: session.value.sessionId, pid: row.pid, signal });
     showNotice(t("procKilled", { pid: row.pid }));
@@ -11532,7 +11518,9 @@ const modalOpenStates = computed(() => [
   folderPickerTarget.value !== null,
   previewOpen.value,
   pasteConfirm.value,
-  appConfirmState.value,
+  // 通用确认弹窗（SSH-H1）：模板顺序在 pasteConfirm 之后、dropUpload 之前。
+  !!pendingConfirmDialog.value,
+
   dropUploadPrompt.value,
   downloadPrompt.value !== null,
   downloadConflictPrompt.value !== null,
@@ -11619,11 +11607,6 @@ function onDocumentKeydown(event: KeyboardEvent) {
     cancelRecordCountdown();
     return;
   }
-  // 通用确认弹窗盖在最上层：先收掉确认（false=取消），再走既有分层链。
-  if (appConfirmState.value) {
-    resolveAppConfirm(false);
-    return;
-  }
   if (previewOpen.value) {
     closePreview();
     return;
@@ -11635,6 +11618,10 @@ function onDocumentKeydown(event: KeyboardEvent) {
   }
   if (pasteConfirm.value) {
     resolvePasteConfirm(false);
+    return;
+  }
+  if (pendingConfirmDialog.value) {
+    resolvePendingConfirmDialog(false);
     return;
   }
   if (dropUploadPrompt.value) {
@@ -11832,13 +11819,18 @@ async function initialize() {
       else if (isDbxPluginTheme(api.theme)) applyAppearance(themeToAppearance(api.theme));
     }
   });
-  unsubscribeAppearance = api.onAppearanceChange?.(applyAppearance);
-  // appearance 契约缺失（当前 1.1 桥只推 theme）时订阅 env 主题推送，两套不同时挂。
-  if (!unsubscribeAppearance) unsubscribeTheme = onHostThemeChange((theme) => applyAppearance(themeToAppearance(theme)));
-  unsubscribeLocale = api.onLocaleChange?.((nextLocale) => (locale.value = nextLocale || "zh-CN"));
-  unsubscribeContext = api.onContextChange?.((context) => {
-    hostContext.value = context;
-  });
+  // X-P2/P3/P4 收敛：env（locale/theme）+ context + appearance 订阅统一走
+  // shared/frontend/hostThemeRuntime 单点（真桥无 onLocaleChange/onContextChange
+  // 幽灵 API；onContext 旧桥回退 onContextChange；appearance 契约缺失时经
+  // theme 通道兜底，两套不同时挂）。
+  unsubscribeEnvironment = subscribeHostEnvironment<DbxPluginAppearance, DbxPluginTheme>(api, {
+    onLocale: (nextLocale) => (locale.value = nextLocale || "zh-CN"),
+    onContext: (context) => {
+      hostContext.value = context;
+    },
+    onAppearance: applyAppearance,
+    onTheme: (theme) => applyAppearance(themeToAppearance(theme)),
+  }, { themeChannel: onHostThemeChange });
   unsubscribeEvent = api.onEvent(handleEvent);
   unsubscribeBinary = api.onBinary(handleBinary);
   unsubscribeFileDrag = api.fileTransfer?.onDragState((active) => (dragActive.value = active));
@@ -12042,6 +12034,7 @@ onBeforeUnmount(() => {
   stopCommandMarkerTick();
   stopAgentPromptTimer();
   resolvePasteConfirm(false);
+  resolvePendingConfirmDialog(false);
   if (terminalHost.value) {
     if (terminalPasteHandler) terminalHost.value.removeEventListener("paste", terminalPasteHandler, true);
     if (terminalWheelHandler) terminalHost.value.removeEventListener("wheel", terminalWheelHandler, true);
@@ -12055,10 +12048,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("focusin", trackStableFocus);
   unsubscribeEvent?.();
   unsubscribeBinary?.();
-  unsubscribeAppearance?.();
-  unsubscribeTheme?.();
-  unsubscribeLocale?.();
-  unsubscribeContext?.();
+  unsubscribeEnvironment?.();
   resizeObserver?.disconnect();
   for (const disposable of oscColorQueryDisposables) disposable.dispose();
   oscColorQueryDisposables = [];
@@ -13727,17 +13717,6 @@ onBeforeUnmount(() => {
         <footer><button @click="auditClearOpen = false" :disabled="auditClearSubmitting">{{ t("cancel") }}</button><button class="danger-button" :disabled="auditClearSubmitting" @click="confirmAuditClear"><Loader2 v-if="auditClearSubmitting" class="spinning" /><Trash2 v-else />{{ t("delete") }}</button></footer>
       </DialogContent>
     </Dialog>
-    <!-- 通用确认弹窗：替代 window.confirm（沙箱 iframe 无 allow-modals，confirm 恒 false）。
-         Esc 关闭走 App 分层链（见 onDocumentKeydown），此处 .prevent 防 reka 双关。 -->
-    <Dialog :open="!!appConfirmState" @update:open="(open) => { if (!open) resolveAppConfirm(false); }">
-      <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <template v-if="appConfirmState">
-          <header><DialogTitle>{{ t("confirm") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="resolveAppConfirm(false)"><X /></button></header>
-          <div :class="appConfirmState.danger ? 'destructive-copy' : ''"><div><strong>{{ appConfirmState.message }}</strong></div></div>
-          <footer><button @click="resolveAppConfirm(false)">{{ t("cancel") }}</button><button :class="appConfirmState.danger ? 'danger-button' : 'primary-button'" @click="resolveAppConfirm(true)">{{ appConfirmState.confirmLabel }}</button></footer>
-        </template>
-      </DialogContent>
-    </Dialog>
     <!-- 安全弹窗：不允许 Esc / 点击遮罩关闭，必须显式信任或拒绝（不在 Esc 链中） -->
     <Dialog :open="!!hostKeyPrompt">
       <DialogContent class="modal host-key-modal" @escape-key-down.prevent @pointer-down-outside.prevent>
@@ -13855,6 +13834,25 @@ onBeforeUnmount(() => {
         <footer>
           <button @click="resolvePasteConfirm(false)">{{ t("cancel") }}</button>
           <button :class="pasteConfirm.danger ? 'danger-button' : 'primary-button'" @click="resolvePasteConfirm(true)">{{ t("terminalPasteConfirm.confirm") }}</button>
+        </footer>
+        </template>
+      </DialogContent>
+    </Dialog>
+
+    <!-- SSH-H1：通用应用内确认弹窗（宿主沙箱 iframe 无 allow-modals，window.confirm
+         恒 false）——预览关闭/大文件预览/重命名覆盖/粘贴覆盖/网页大文件下载/进程强杀
+         此前在真机上全部静默失效，现统一走本弹窗（Promise 原语同 pasteConfirm）。 -->
+    <Dialog :open="!!pendingConfirmDialog" @update:open="(open) => { if (!open) resolvePendingConfirmDialog(false); }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <template v-if="pendingConfirmDialog">
+        <header>
+          <DialogTitle>{{ t("confirm") }}</DialogTitle>
+          <button :title="t('close')" class="icon-button" @click="resolvePendingConfirmDialog(false)"><X /></button>
+        </header>
+        <p class="muted">{{ pendingConfirmDialog.message }}</p>
+        <footer>
+          <button @click="resolvePendingConfirmDialog(false)">{{ t("cancel") }}</button>
+          <button :class="pendingConfirmDialog.danger ? 'danger-button' : 'primary-button'" @click="resolvePendingConfirmDialog(true)">{{ t("confirm") }}</button>
         </footer>
         </template>
       </DialogContent>

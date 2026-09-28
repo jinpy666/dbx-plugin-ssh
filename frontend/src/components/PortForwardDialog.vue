@@ -136,7 +136,8 @@ async function stopForward(id: string) {
 
 // ssh/forward/state 是 sidecar 的广播事件（含本工作台未发起的变更），挂在
 // 自己的监听器上，面板关着也保持列表新鲜；停止的行由事件摘除。
-function handleForwardEvent(event: { method: string; params: Record<string, unknown> }) {
+function handleForwardEvent(event: DbxPluginEvent) {
+  if (event.type === "env") return; // 宿主环境推送（locale/theme）不携带 method
   if (event.method !== "ssh/forward/state") return;
   forwards.value = applyForwardState(forwards.value, event.params);
   if (event.params.state === "stopped") {

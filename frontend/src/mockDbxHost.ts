@@ -35,10 +35,10 @@ const slowSessionOpenMs = Math.max(0, Number(fixtureParams.get("slow")) || 0) * 
 // 供连接成功过渡动画（success 卡片）等 open 路径的浏览器视觉验证。
 const freshSessionOpen = fixtureParams.get("fresh") === "1";
 // 初始 locale 支持 ?locale= 覆盖（镜像真实桥 api.locale）；运行时经
-// __dbxMockSetLocale 切换（镜像宿主桥 updateLocale 的"改字段 + 推监听"语义），
-// 供 i18n 切换链（onLocaleChange）的浏览器与单测验证。
+// __dbxMockSetLocale 切换——镜像真桥 updateLocale 的"改字段 + onEvent 投递
+// {type:"env", locale}"语义（真桥无 onLocaleChange 订阅，X-P2/P5 对齐），
+// 供 i18n 切换链的浏览器与单测验证。
 let currentLocale = fixtureParams.get("locale") || "en";
-const localeListeners = new Set<(locale: string) => void>();
 // 与 DBX globals.css 的 :root（pearl 浅色）和 .dark 规范块保持一致。
 const light = fixtureParams.get("theme") === "light";
 
@@ -1678,10 +1678,9 @@ window.dbxPlugin = {
   onEvent: (listener) => { eventListeners.add(listener); return () => eventListeners.delete(listener); },
   onBinary: (listener) => { binaryListeners.add(listener); return () => binaryListeners.delete(listener); },
   onAppearanceChange: (listener) => { appearanceListeners.add(listener); listener(appearance); return () => appearanceListeners.delete(listener); },
-  // 镜像 env.d.ts 声明的宿主 1.1 形状（(listener) => unsubscribe）；立即回调
-  // 当前 locale 与 mock 的 onAppearanceChange/onContextChange 同构。
-  onLocaleChange: (listener) => { localeListeners.add(listener); listener(currentLocale); return () => localeListeners.delete(listener); },
-  onContextChange: (listener) => { contextListeners.add(listener); listener(context); return () => contextListeners.delete(listener); },
+  // 镜像真桥 API 面（X-P5 裁剪幽灵 API）：真桥只有 onContext（注册不立即回调，
+  // 初始 context 经 api.ready / host.getContext）；locale 经 onEvent 的 env 推送。
+  onContext: (listener) => { contextListeners.add(listener); return () => contextListeners.delete(listener); },
   decodeBase64: (value) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0)),
   encodeBase64: base64,
   workbenchState: { set: async () => undefined },
@@ -1752,14 +1751,15 @@ window.dbxPlugin = {
   })(),
 };
 
-// mock 专有调试入口（真实桥无此字段）：切换 locale 并推送 onLocaleChange
-// 监听，供 mock.html 控制台 / 单测走查 i18n 切换链（瞬态 notice 不随切语
-// 重译的 R5-P2-2 维持豁免，不在本夹具模拟范围）。
+// mock 专有调试入口（真实桥无此字段）：切换 locale 并经 onEvent 投递
+// {type:"env", locale}（镜像真桥 updateLocale），供 mock.html 控制台 / 单测
+// 走查 i18n 切换链（瞬态 notice 不随切语重译的 R5-P2-2 维持豁免，不在本夹具
+// 模拟范围）。
 // Sequence number of mock host instances injected by openWorkbench (host-authority simulation, spec §11).
 let mockOpenWorkbenchSeq = 0;
 (window as unknown as { __dbxMockSetLocale?: (next: string) => void }).__dbxMockSetLocale = (next: string) => {
   currentLocale = next || "en";
-  for (const listener of localeListeners) listener(currentLocale);
+  for (const listener of eventListeners) listener({ type: "env", locale: currentLocale });
 };
 
 // mock 专有调试入口：把本地终端打入退出态（验证退出覆盖层/退出码显示）。
