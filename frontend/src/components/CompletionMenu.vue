@@ -1,15 +1,16 @@
 <script setup lang="ts">
-// 结构化补全下拉菜单（对标 Warp/fig，线 2）：按 spec 命中的层级展示候选——
-// sub（子命令）/ flag（flag）/ value（静态枚举值）+ hint（动态占位提示，如
-// <branch>）。纯展示组件：键盘（↑↓/Tab/Enter/Esc）由 App 的
-// handleTerminalKey 在浮层开启时优先消费，浮层只反映 activeIndex 并把
-// 点击/悬停上抛；定位复用 CommandSuggestions 的光标像素锚点语义（y 为行
-// 顶；下方放不下翻到光标上方，两侧都不够选更大侧收窄内滚，issue #120）。
-// 样式沿用既有建议浮层的面板视觉（同一 --popover/--border/--accent 令牌
-// 体系，随宿主主题），不引 reka 弹层——避免与 xterm 键盘捕获争焦点。
+// 结构化补全下拉菜单（FIG wave-1 最终架构，方案 §24 解耦映射）：候选直接
+// 使用引擎的 CompletionItem（label/description/kind 直用，接受回传 item.edit
+// ——替换范围由 source 的 CompletionEdit 给出，UI 只执行不拼接）。纯展示
+// 组件：键盘（↑↓/Tab/Enter/Esc）由 App 的 handleTerminalKey 经
+// keyboard.ts 规则表消费，浮层只反映 activeIndex 并把点击/悬停上抛；
+// 定位复用 CommandSuggestions 的光标像素锚点语义（y 为行顶；下方放不下
+// 翻到光标上方，两侧都不够选更大侧收窄内滚，issue #120）。样式沿用既有
+// 建议浮层的面板视觉（同一 --popover/--border/--accent 令牌体系，随宿主
+// 主题），不引 reka 弹层——避免与 xterm 键盘捕获争焦点。
 import { computed, ref, watchEffect } from "vue";
 import { ChevronRight, CornerDownRight, Flag, Info, SlidersHorizontal } from "@lucide/vue";
-import type { CompletionLevel, CompletionRow } from "../lib/completions/spec";
+import type { CompletionItem, CompletionItemKind } from "../lib/completion/core/types";
 import {
   chooseOverlayPlacement,
   flippedOverlayBottom,
@@ -20,10 +21,8 @@ import {
 } from "../lib/overlayPlacement";
 
 const props = defineProps<{
-  rows: CompletionRow[];
-  level: CompletionLevel;
-  /** 解析到的命令节点路径（如 ["git", "checkout"]），作菜单头面包屑。 */
-  commandPath: string[];
+  /** 引擎候选（已过 rankItems 排序截断）。 */
+  items: CompletionItem[];
   activeIndex: number;
   /** 光标格像素坐标（y 为光标行顶）；null = 定位不可用，贴终端底部。 */
   anchor: SuggestionAnchor | null;
@@ -34,21 +33,20 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   activate: [index: number];
-  accept: [row: CompletionRow];
+  accept: [item: CompletionItem];
 }>();
 
 const rootEl = ref<HTMLElement | null>(null);
 const placement = ref<"below" | "above">("below");
 const overlayBottom = ref(0);
 const constrainedHeight = ref(0);
-const clampedLeft = ref(0);
 
 // DOM 更新后按浮层实际高度选放置侧：条目数/锚点变化都重测。宿主高度取
 // 包含块（terminal-pane）实测，不依赖外部下发，batch-bar 让位等也自动正确。
 watchEffect(() => {
   const el = rootEl.value;
   const anchor = props.anchor;
-  void props.rows.length;
+  void props.items.length;
   if (!el || !anchor) {
     placement.value = "below";
     constrainedHeight.value = 0;
@@ -82,45 +80,33 @@ const style = computed(() => {
   return { left: `${left}px`, top: `${overlayBelowTop(props.anchor.y, props.anchor.cellHeight ?? 0)}px`, ...maxHeight };
 });
 
-const levelLabel = computed(() => {
-  if (props.level === "flag") return props.t("completionMenu.levelFlag");
-  if (props.level === "value") return props.t("completionMenu.levelValue");
-  return props.t("completionMenu.levelSub");
-});
-
-const breadcrumb = computed(() => props.commandPath.join(" › "));
-
-function rowIcon(kind: CompletionRow["kind"]) {
-  if (kind === "sub") return ChevronRight;
-  if (kind === "flag") return SlidersHorizontal;
-  if (kind === "value") return CornerDownRight;
-  return Info;
+function rowIcon(kind: CompletionItemKind) {
+  if (kind === "command" || kind === "subcommand") return ChevronRight;
+  if (kind === "option") return SlidersHorizontal;
+  if (kind === "hint") return Info;
+  return CornerDownRight;
 }
 </script>
 
 <template>
   <div ref="rootEl" class="completion-menu" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="listbox" :aria-label="t('completionMenu.title')">
-    <div class="completion-head">
-      <span class="completion-crumb mono">{{ breadcrumb }}</span>
-      <span class="completion-level">{{ levelLabel }}</span>
-    </div>
     <button
-      v-for="(row, index) in rows"
-      :key="`${row.kind}-${row.label}`"
+      v-for="(item, index) in items"
+      :key="item.id"
       type="button"
       class="completion-row"
-      :class="{ active: index === activeIndex, hint: row.kind === 'hint' }"
+      :class="{ active: index === activeIndex, hint: item.kind === 'hint' }"
       role="option"
       :aria-selected="index === activeIndex"
-      :title="`${row.description} · ${t('completionMenu.acceptHint')}`"
+      :title="`${item.description ?? item.label} · ${t('completionMenu.acceptHint')}`"
       @mouseenter="emit('activate', index)"
       @mousedown.prevent
-      @click="emit('accept', row)"
+      @click="emit('accept', item)"
     >
-      <component :is="rowIcon(row.kind)" class="completion-icon" aria-hidden="true" />
-      <span class="completion-label mono">{{ row.label }}</span>
-      <span class="completion-description">{{ row.description }}</span>
-      <Flag v-if="row.kind === 'flag'" class="completion-kind-mark" aria-hidden="true" />
+      <component :is="rowIcon(item.kind)" class="completion-icon" aria-hidden="true" />
+      <span class="completion-label mono">{{ item.label }}</span>
+      <span class="completion-description">{{ item.description }}</span>
+      <Flag v-if="item.kind === 'option'" class="completion-kind-mark" aria-hidden="true" />
     </button>
   </div>
 </template>
@@ -149,31 +135,6 @@ function rowIcon(kind: CompletionRow["kind"]) {
 .completion-menu.anchor-fallback {
   left: 12px;
   bottom: 12px;
-}
-
-.completion-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 4px 8px 2px;
-  border-bottom: 1px solid var(--border);
-}
-
-.completion-crumb {
-  font-size: 11px;
-  opacity: 0.7;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.completion-level {
-  flex: none;
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  opacity: 0.6;
 }
 
 .completion-row {
