@@ -5,6 +5,9 @@ export const messages = {
     // 工作台标签标题取自 iframe document.title（见 App.vue 对 locale 的 watch），
     // 插件名与 manifest localizations.name 保持一致。
     pluginName: "Terminal",
+    dividerResizeHint: "Drag or use the ←/→ arrow keys to resize",
+    showPassword: "Show password",
+    hidePassword: "Hide password",
     docker: {
       title: "Docker",
       refresh: "Refresh",
@@ -494,6 +497,9 @@ export const messages = {
   },
   "es": {
     pluginName: "Terminal",
+    dividerResizeHint: "Arrastra o usa las flechas ←/→ para ajustar el ancho",
+    showPassword: "Mostrar contraseña",
+    hidePassword: "Ocultar contraseña",
     docker: {
       title: "Docker",
       refresh: "Actualizar",
@@ -976,6 +982,9 @@ export const messages = {
   },
   "it": {
     pluginName: "Terminal",
+    dividerResizeHint: "Trascina o usa le frecce ←/→ per regolare la larghezza",
+    showPassword: "Mostra password",
+    hidePassword: "Nascondi password",
     docker: {
       title: "Docker",
       refresh: "Aggiorna",
@@ -1458,6 +1467,9 @@ export const messages = {
   },
   "ja": {
     pluginName: "Terminal",
+    dividerResizeHint: "ドラッグまたは ←/→ キーで幅を調整",
+    showPassword: "パスワードを表示",
+    hidePassword: "パスワードを隠す",
     docker: {
       title: "Docker",
       refresh: "更新",
@@ -1940,6 +1952,9 @@ export const messages = {
   },
   "pt-BR": {
     pluginName: "Terminal",
+    dividerResizeHint: "Arraste ou use as setas ←/→ para ajustar a largura",
+    showPassword: "Mostrar senha",
+    hidePassword: "Ocultar senha",
     docker: {
       title: "Docker",
       refresh: "Atualizar",
@@ -2422,6 +2437,9 @@ export const messages = {
   },
   "zh-CN": {
     pluginName: "终端",
+    dividerResizeHint: "拖动或按 ←/→ 方向键调整宽度",
+    showPassword: "显示密码",
+    hidePassword: "隐藏密码",
     docker: {
       title: "Docker",
       refresh: "刷新",
@@ -2911,6 +2929,9 @@ export const messages = {
   },
   "zh-TW": {
     pluginName: "終端",
+    dividerResizeHint: "拖動或按 ←/→ 方向鍵調整寬度",
+    showPassword: "顯示密碼",
+    hidePassword: "隱藏密碼",
     docker: {
       title: "Docker",
       refresh: "重新整理",

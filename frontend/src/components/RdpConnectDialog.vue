@@ -5,6 +5,7 @@
 // Telnet/VNC 同款常驻（远端可读写会话剪贴板，仅连接可信主机）。
 import { reactive, ref, watch } from "vue";
 import { TriangleAlert, X } from "@lucide/vue";
+import PasswordField from "./PasswordField.vue";
 import { workbenchMessage } from "../lib/i18n";
 import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
@@ -159,7 +160,7 @@ function submit() {
         </label>
         <label class="settings-field">
           <span>{{ t("rdp.password") }}</span>
-          <input v-model="form.password" type="password" autocomplete="off" spellcheck="false" :placeholder="t('rdp.passwordHint')" @keydown.enter="submit" />
+          <PasswordField v-model="form.password" :placeholder="t('rdp.passwordHint')" @keydown.enter="submit" :t="t" />
         </label>
         <label class="settings-field">
           <span>{{ t("rdp.domain") }}</span>
