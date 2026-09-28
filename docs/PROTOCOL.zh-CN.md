@@ -37,6 +37,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `ssh/host-key/resolve` | 处理工作台内的主机密钥确认 |
 | `ssh/exec` | 在会话连接上执行远程命令，可选 Quick Sudo 提权 |
 | `ssh/exec/cancel` | 中止进行中的远程命令（按 `execId`） |
+| `completion/execute` | FIG 补全引擎的 generator 命令执行（local / ssh 双 target、超时竞速、输出上限、只读拒绝，见「completion/execute（补全 generator 执行）」节） |
 | `ssh/forward/interfaces` | 本机网卡地址探测（供端口映射面板的监听地址选择器）：无参 → `{interfaces: [{name, addr, isLoopback}]}`，回环优先、v4 先于 v6、按 IP 去重；探测失败返回空数组（选择器隐藏，手输不受影响）。`if-addrs`（getifaddrs）实现，无会话依赖 |
 | `ssh/forward/list`、`ssh/forward/start`、`ssh/forward/stop` | 用户级端口映射（ssh(1) -L/-R，见「端口映射」节）：`list` 按 `{connectionId?}`/`{sessionId?}` 过滤返回 `{forwards: [row]}`；`start` `{sessionId, kind: "local"\|"remote", listenHost?, listenPort, targetHost, targetPort}`（`listenHost` 缺省 127.0.0.1；`listenPort: 0` 由本机/服务端挑选，`boundPort` 回报实际端口）→ `{forward: row}`；`stop` `{id}` → `{success, forward}`，未知 id 报错。row 字段 camelCase：`id/sessionId/connectionId/kind/listenHost/listenPort/boundPort/targetHost/targetPort/state("starting"\|"active"\|"stopped"\|"error")/error?/connectionsTotal/connectionsActive/bytesUp/bytesDown`。状态迁移发 `ssh/forward/state`（notify）`{id, sessionId, connectionId, state, error?}` |
 | `ssh/agent/resolve` | 处理 AI 终端同步执行的命令审批（按 `challengeId`，一次性；approve 可携 `command` 编辑后原文与 `remember: true` 记住标记，见「审批记忆」节） |
@@ -1049,3 +1050,34 @@ sidecar 启动与偏好写入时同步进程内快速标志（同 `x11_forwardin
 则跳过。两种情形均经事件 `ssh/recording/auto` 提示一次，负载 `{ sessionId, recordingId? }` 或
 `{ sessionId, skipped: true }`，只含 id 不含内容。Transcript 纯文本导出在前端完成（复用
 `ssh/recording/get` 分页 + 既有保存桥，ANSI 剥离/时间戳拼接为纯前端逻辑），不新增协议面。
+
+## completion/execute（补全 generator 执行）
+
+FIG 补全引擎的专用执行通道（wave-1 lane B）：把一条 generator 命令执行到**正确的 target 侧**（桌面 OS 与补全目标 OS 解耦——local 目标在 sidecar 所在机器、ssh 目标在远端会话机器），与普通用户 RPC（`ssh/exec`）不耦合，可单独限时、限输出、做安全策略。线协议冻结于 `frontend/src/lib/completion/host/protocol.ts`，字段逐字一致。
+
+参数（camelCase）：
+
+- `target`：`{ kind: "local" | "ssh", sessionId }`（internally tagged）。local 的 `sessionId` 标识发起补全的本地终端会话（wave-1 仅透传）；ssh 的 `sessionId` 是既有 SSH 会话 id。
+- `command`：generator 程序名（非空、不含 NUL）。
+- `args`：参数数组（≤32 个、每个不含 NUL）。
+- `cwd`（可选）：工作目录。local target 生效（子进程 `current_dir`）；**ssh target wave-1 不支持，非空即报 `completion: cwd is not supported for ssh targets in wave 1`**（远端 cwd 语义留 wave 2 定义，显式失败优于静默在错误目录执行）。
+- `timeoutMs`：completion 层超时，clamp 到 [200, 3000]，缺省（0/缺字段）1200。
+- `maxOutputBytes`：单流输出上限，stdout 与 stderr **各自**截断；缺省（0）或超过 256 KiB 时取 256 KiB。
+- `mode`：必须为 `"completion-generator"`（防止普通 RPC 复用本通道）。
+
+返回 `{ exitCode: number | null, stdout, stderr, truncated, timedOut }`：
+
+- `timedOut=true` 表示 completion 层竞速超时（底层执行已尝试取消回收），此时 `exitCode=null`、输出为空；
+- `truncated=true` 表示 stdout 或 stderr 到达 `maxOutputBytes` 上限被截断；
+- ssh target 复用 `SshRuntime::exec` 通道，其返回的 `output` 是 **stdout+stderr 合并流**，显式映射到 `stdout`、`stderr` 恒为空（generator 按约定写 stdout，合并流对解析无影响）。
+
+语义要点：
+
+- **sudo 恒 false**：本通道永不提权；
+- **只读连接拒绝**（决策 D4）：ssh target 在只读连接上一律报错——generator 即命令执行，不能绕过只读承诺；local target 无只读概念；
+- **超时竞速**（决策 D3）：超时在 completion 层用 `tokio::time::timeout` 实现，不改 `ssh/exec` 内部的 5–300 秒下限；ssh 路径超时后以 `execId`（`completion-<uuid>` 前缀，与用户手写 execId 命名空间区分）走 `ssh/exec/cancel` 同路径回收在途任务，local 路径超时杀子进程并收尸；
+- **远端拼装**：`command` 原样 + `args` 逐个 `exec::shell_quote` 单引号转义后拼为一行，由远端默认 shell 解释（注入面只在 args，全部转义）；local 路径 argv 直 exec 不经 shell（Windows 无需引号处理）；
+- **local 隔离**：短生命周期子进程（stdin 接 /dev/null、`kill_on_drop`），不占用 `local/terminal/*` 的交互 PTY；
+- 错误统一字符串 Err 惯例并带 **`completion:` 前缀** 分类（如 `completion: mode not allowed`、`completion: invalid command`、`completion: too many args (max 32)`）。
+
+wave-1 不做 `completion/listDirectory`、`completion/environment`（wave 2+）。端到端冒烟：`scripts/smoke_completion.py`（方法未注册时 SKIP 而非 FAIL）。

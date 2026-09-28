@@ -3477,6 +3477,14 @@ impl SshRuntime {
         }
     }
 
+    /// Completion-host read-only gate (FIG wave-1 lane B, decision D4):
+    /// `completion/execute` must refuse SSH targets on read-only
+    /// connections. Minimal read-only query only — no other behavior of
+    /// this module changes.
+    pub async fn completion_session_read_only(&self, session_id: &str) -> Result<bool, String> {
+        Ok(self.session(session_id).await?.read_only)
+    }
+
     /// Connection-level sudoers-style allowlist for privileged commands
     /// (`sudo_whitelist` in the connection's external config). Empty config
     /// = gate off; otherwise the command (minus a leading `sudo` token) must
