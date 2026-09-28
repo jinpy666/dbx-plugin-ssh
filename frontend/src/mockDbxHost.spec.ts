@@ -426,4 +426,14 @@ describe("mockDbxHost fixture", () => {
     // off 叙事下动作直接失败（面板 actionFailed 错误态走查）。
     await expect((await loadMock("?docker=off")).invoke("docker/action", { containerId: "d4a7c9f1e2b3", action: "stop" })).rejects.toThrow(/docker CLI not found/);
   });
+
+  it("throws for unimplemented methods instead of silently succeeding (strictness)", async () => {
+    const plugin = await loadMock("");
+    // 严格化（docs/MOCK_HOST_STRICTNESS_PLAN.zh-CN.md）：未实现方法显式
+    // 报错，错误信息必须带方法名与处理指引；已实现方法不受影响。
+    await expect(plugin.invoke("ssh/status", {})).rejects.toThrow(/unimplemented method: ssh\/status/);
+    await expect(plugin.invoke("watch/start", { sessionId: "s" })).rejects.toThrow(/unimplemented method: watch\/start/);
+    const listed = await plugin.invoke("docker/list", {}) as { available: boolean };
+    expect(listed.available).toBe(true);
+  });
 });

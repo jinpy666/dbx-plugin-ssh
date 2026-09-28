@@ -68,3 +68,22 @@
 
 全套门禁 + 比对脚本对当前仓库 zero-diff（mock 实现集 ∪ 白名单 ∪ SKIP ⊇
 后端方法全集），并把结果计数写入本文件附录。
+<<<<<<< HEAD
+=======
+
+## 实施结果（review-fix-5 轮，2026-09-29）
+
+- 默认分支已改 throw（`frontend/src/mockDbxHost.ts` 分发链末分支），错误
+  信息带方法名并指向 `scripts/mock_host_registry_check.mjs`。
+- 比对脚本 `scripts/mock_host_registry_check.mjs` 已落库并加入
+  `.github/agent-flow.yml` validation.local（connection-forms 之后）。
+- 缺口全景实测：后端分派表 153 个方法，mock 已实现 90；改 throw 后跑
+  smoke_ui_mock / smoke_ui_settings 与前端全量单测，**39 个缺口方法零触达**
+  ——全部进 SKIP（`SKIP_PREFIXES` 6 个域 + `SKIP_EXACT` 39 条，逐条注释
+  触达判定依据），ALLOWLIST 暂空（未发现必须保留默认成功语义的幂等方法），
+  未补任何凭空形状的桩。
+- spec 新增用例：未实现方法 reject 且错误信息带方法名；已实现方法
+  （docker/list）不受影响。
+- 比对结果：`backend 153 methods, mock 90 implemented, allowlist 0, skip 45`，
+  zero-diff PASS。
+>>>>>>> codex/ssh/review-fix-5
