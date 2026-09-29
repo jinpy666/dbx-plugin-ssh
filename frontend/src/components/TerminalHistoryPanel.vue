@@ -1,13 +1,15 @@
 <script setup lang="ts">
 // Warp 式终端 history 面板（↑ 唤起）：把 commandHistory 过滤结果渲染成可
 // 键盘/鼠标快速选择的面板；选中只回填输入行不执行（回车留给用户）。
+// 面板内搜索框（query 上抛 App 重过滤）：打开即聚焦，↑↓/Enter/Tab/Esc 经
+// panel-key 转发给 App 的面板按键处理（preventDefault 挡输入框默认行为），
+// 其余字符键进 query 实时过滤；Esc 关闭后焦点由 App 的 close 归还终端。
 // 版式对标 Warp command history：占满终端宽度、底边贴输入行上一行向上展开
 // （光标贴顶等极端场景按既有 overlay 规则翻到下方），条目为 `>_` 提示符
-// 图标 + 命令文本 + 右侧相对时间。键盘（↑↓/Enter/Tab/Esc）由 App 的
-// handleTerminalKey 面板分支统一消费；样式沿用 --popover/--border/--accent
+// 图标 + 命令文本 + 右侧相对时间。样式沿用 --popover/--border/--accent
 // 令牌体系随宿主主题，不引 reka 弹层——避免与 xterm 键盘捕获争焦点。
-import { computed, ref, watchEffect } from "vue";
-import { Terminal as TerminalIcon, X } from "@lucide/vue";
+import { computed, onMounted, ref, watchEffect } from "vue";
+import { Search, Terminal as TerminalIcon, X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
 import type { HistoryPanelEntry } from "../lib/historyPanel";
 import { chooseHistoryPanelPlacement, relativeHistoryAge } from "../lib/historyPanel";
@@ -19,6 +21,8 @@ interface Props {
   activeIndex: number;
   /** 光标格像素坐标（y 为光标行顶）；null = 定位不可用，贴终端底部。 */
   anchor: SuggestionAnchor | null;
+  /** 搜索词（受控：App 持有，输入框只回显与上抛）。 */
+  query: string;
   /** 终端可视底界（terminal-host 净高）；缺省时回落实测包含块高度。 */
   viewport?: { height: number };
 }
@@ -28,6 +32,8 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   activate: [index: number];
   select: [command: string];
+  "update:query": [value: string];
+  "panel-key": [event: KeyboardEvent];
   close: [];
 }>();
 
@@ -35,6 +41,7 @@ const t = (key: string, values: Record<string, string | number> = {}) => workben
 
 const rootEl = ref<HTMLElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
+const searchEl = ref<HTMLInputElement | null>(null);
 // 悬停武装（用户反馈同 CompletionMenu）：浮层弹出位置恰在鼠标下时，静止的
 // 指针也会抢走键盘选择；指针在浮层上真实移动过才允许 hover 激活。
 const hoverArmed = ref(false);
@@ -43,6 +50,17 @@ watchEffect(() => {
   void props.entries.length;
   hoverArmed.value = false;
 }, { flush: "post" });
+
+// 打开即聚焦搜索框（Warp 语义：面板 = 搜索/选择界面，打字即过滤）；焦点
+// 离开 xterm 后终端打字进 query，回填/关闭路径由 App 归还终端焦点。
+onMounted(() => {
+  searchEl.value?.focus({ preventScroll: true });
+});
+
+/** 面板导航/回填/关闭键上抛 App 消费；字符键放行进搜索框。 */
+function onPanelKeydown(event: KeyboardEvent) {
+  emit("panel-key", event);
+}
 
 // Warp 语义：面板底边贴输入行上一行（光标行顶留 gap）向上展开；光标贴视口
 // 顶部等上方放不下的场景按 chooseHistoryPanelPlacement 翻到下方。空间判定用
@@ -106,6 +124,22 @@ function onRowMousedown(event: MouseEvent, index: number) {
     <div class="terminal-history-row">
       <span class="terminal-history-title">{{ titleText }}</span>
       <button type="button" class="terminal-history-btn" :title="t('terminalHistory.close')" :aria-label="t('terminalHistory.close')" @click="emit('close')"><X /></button>
+    </div>
+    <div class="terminal-history-search">
+      <Search class="terminal-history-search-icon" aria-hidden="true" />
+      <input
+        ref="searchEl"
+        class="terminal-history-search-input"
+        type="text"
+        :value="query"
+        :placeholder="t('terminalHistory.search')"
+        :aria-label="t('terminalHistory.search')"
+        spellcheck="false"
+        autocomplete="off"
+        @input="emit('update:query', ($event.target as HTMLInputElement).value)"
+        @keydown="onPanelKeydown"
+      />
+      <button v-if="query" type="button" class="terminal-history-btn" :title="t('terminalHistory.clearSearch')" :aria-label="t('terminalHistory.clearSearch')" @click="emit('update:query', '')"><X /></button>
     </div>
     <ul v-if="entries.length" ref="listEl" class="terminal-history-list" role="listbox" :aria-label="t('terminalHistory.title')">
       <li v-for="(entry, index) in entries" :key="`${index}-${entry.command}`">
@@ -203,6 +237,38 @@ function onRowMousedown(event: MouseEvent, index: number) {
   width: 13px;
   height: 13px;
   stroke-width: 1.7;
+}
+
+.terminal-history-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 10px;
+}
+
+.terminal-history-search-icon {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  color: var(--muted-foreground);
+  stroke-width: 1.7;
+}
+
+.terminal-history-search-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: var(--popover-foreground);
+  font-family: var(--ui-font-family);
+  font-size: 11.5px;
+  outline: none;
+}
+
+.terminal-history-search-input::placeholder {
+  color: var(--muted-foreground);
 }
 
 .terminal-history-list {
