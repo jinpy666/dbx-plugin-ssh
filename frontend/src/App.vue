@@ -16,7 +16,6 @@ import {
   Film,
   Pause,
   Play,
-  ArrowDown,
   ArrowLeftRight,
   ArrowUp,
   ArrowUpDown,
@@ -119,9 +118,8 @@ import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib
 import { filesFromClipboard } from "./lib/clipboardFiles";
 import { friendlySftpError } from "./lib/sftpErrors";
 import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "./lib/paneLayout";
-import { computeWindow } from "./lib/virtualWindow";
 import { isCountdownActive } from "./lib/recordingCountdown";
-import { filterSftpEntries, type SftpTypeFilter } from "./lib/sftpFileFilters";
+import { type SftpTypeFilter } from "./lib/sftpFileFilters";
 import {
   defaultBookmarkLabel,
   deleteBookmark,
@@ -194,6 +192,7 @@ import {
 import { transferPausable } from "./lib/transferResume";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useSftpListLayout } from "./composables/useSftpListLayout";
 import { useSftpSelectionClipboard } from "./composables/useSftpSelectionClipboard";
 import { useSftpNavigation } from "./composables/useSftpNavigation";
 import { useTerminalAppearance } from "./composables/useTerminalAppearance";
@@ -640,7 +639,6 @@ const sftpColumnWidths = reactive<Record<SftpColumn, number>>({ ...DEFAULT_COLUM
 /** 名称列宽度（px）；null = 未拖过，弹性填充剩余空间。 */
 const sftpNameWidth = ref<number | null>(null);
 /** 正在拖拽的列（含 name）；null 表示没在拖。 */
-let sftpResizing: { column: SftpColumn | "name"; startX: number; startWidth: number } | null = null;
 const sort = ref<{ column: SftpSortColumn; direction: "asc" | "desc" }>({ column: "name", direction: "asc" });
 // 传输队列核心：任务账本/进度/暂停取消/偏好收口在 composables/useTransferQueue。
 const {
@@ -1486,101 +1484,34 @@ const orderedPaneClass = computed(() => [
   sftpPaneOpen.value ? "" : "panes--solo",
   dockerPanelOpen.value ? "panes--docker" : "",
 ].filter(Boolean).join(" "));
-const sortedEntries = computed(() => {
-  const direction = sort.value.direction === "asc" ? 1 : -1;
-  return [...entries.value].sort((left, right) => {
-    if (left.kind === "directory" && right.kind !== "directory") return -1;
-    if (left.kind !== "directory" && right.kind === "directory") return 1;
-    let result = 0;
-    if (sort.value.column === "size") result = (left.size ?? -1) - (right.size ?? -1);
-    else if (sort.value.column === "modified") result = (left.modifiedAt ?? 0) - (right.modifiedAt ?? 0);
-    else result = left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" });
-    return result * direction;
-  });
+// 列表排序/搜索/列布局/虚拟滚动：收口在 composables/useSftpListLayout。
+const {
+  sortedEntries,
+  visibleEntries,
+  virtualFileWindow,
+  windowedEntries,
+  fileRowsEl,
+  onFileRowsScroll,
+  sftpSearchDraft,
+  clearSftpSearch,
+  sftpGridStyle,
+  sftpFiltersActive,
+  toggleColumn,
+  onColResizeStart,
+  onColResizeMove,
+  onColResizeEnd,
+  toggleSort,
+  sortIcon,
+} = useSftpListLayout({
+  entries, sort, visibleColumns, sftpColumnWidths, sftpNameWidth,
+  sftpSearch, sftpTypeFilter, sftpShowHidden,
+  session, sudoMode,
+  loadDirectory: (path?: string) => loadDirectory(path),
+  persistState,
 });
+
 // 文件传输占用统一语义：ZMODEM 或 trzsz 任一持有终端流即视为 busy。
 const terminalTransferBusy = computed(() => zmodemBusy.value || trzszBusy.value);
-const sftpGridStyle = computed(() => {
-  // 名称列：未拖过 = 弹性填充剩余空间；拖动后锁定为固定宽度。
-  const nameTrack = sftpNameWidth.value != null ? `${sftpNameWidth.value}px` : `minmax(${NAME_COLUMN_MIN}px, 1fr)`;
-  const cols: string[] = [nameTrack];
-  const nameMin = sftpNameWidth.value ?? NAME_COLUMN_MIN;
-  const list: SftpColumn[] = ["size", "modified", "owner", "group", "permissions"];
-  for (const col of list) {
-    if (visibleColumns.value.includes(col)) {
-      cols.push(`${sftpColumnWidths[col]}px`);
-    }
-  }
-  // 总宽超出容器时靠 .file-rows 的 overflow:auto 出横向滚动条。
-  let minWidth = nameMin + 16; // + 左右 padding
-  for (const col of list) if (visibleColumns.value.includes(col)) minWidth += sftpColumnWidths[col] + 6; // 6px column-gap
-  return {
-    gridTemplateColumns: cols.join(" "),
-    minWidth: `${minWidth}px`,
-  };
-});
-const sftpFiltersActive = computed(() => sftpSearch.value.trim() !== "" || sftpTypeFilter.value !== "all" || sftpShowHidden.value);
-const visibleEntries = computed(() => filterSftpEntries(sortedEntries.value, sftpSearch.value, sftpTypeFilter.value, sftpShowHidden.value));
-
-// —— 文件列表窗口化（虚拟滚动）——
-// 渲染层只挂可见窗口的行（.file-row 30px + 上下 spacer 撑总高，滚动条比例
-// 真实）；选中、范围选择等逻辑层始终作用于全量 visibleEntries，与窗口无关。
-// 方案：docs/SFTP_LIST_VIRTUAL_SCROLL_PLAN.zh-CN.md。
-const FILE_ROW_HEIGHT_PX = 30;
-const FILE_ROW_OVERSCAN = 10;
-const fileRowsEl = ref<HTMLElement | null>(null);
-const fileRowsViewportHeight = ref(0);
-const fileScrollTop = ref(0);
-const virtualFileWindow = computed(() =>
-  computeWindow({
-    scrollTop: fileScrollTop.value,
-    viewportHeight: fileRowsViewportHeight.value,
-    rowHeight: FILE_ROW_HEIGHT_PX,
-    total: visibleEntries.value.length,
-    overscan: FILE_ROW_OVERSCAN,
-  }),
-);
-const windowedEntries = computed(() => visibleEntries.value.slice(virtualFileWindow.value.start, virtualFileWindow.value.end));
-
-function onFileRowsScroll(event: Event) {
-  fileScrollTop.value = (event.target as HTMLElement).scrollTop;
-}
-
-watch(fileRowsEl, (el, previous) => {
-  if (previous === el) return;
-  if (fileRowsResizeObserver) {
-    fileRowsResizeObserver.disconnect();
-    fileRowsResizeObserver = undefined;
-  }
-  if (!el) return;
-  fileRowsViewportHeight.value = el.clientHeight;
-  fileRowsResizeObserver = new ResizeObserver(() => {
-    if (fileRowsResizeTarget) fileRowsViewportHeight.value = fileRowsResizeTarget.clientHeight;
-  });
-  fileRowsResizeTarget = el;
-  fileRowsResizeObserver.observe(el);
-});
-let fileRowsResizeObserver: ResizeObserver | undefined;
-let fileRowsResizeTarget: HTMLElement | undefined;
-
-// 搜索输入防抖：大目录下每个按键 O(n) 过滤 + 全量 diff 明显掉帧；150ms
-// 静默期后一次性生效（footer 计数与过滤随之滞后一拍，可接受）。
-const SFTP_SEARCH_DEBOUNCE_MS = 150;
-const sftpSearchDraft = ref("");
-let sftpSearchDebounce: number | undefined;
-watch(sftpSearchDraft, (value) => {
-  window.clearTimeout(sftpSearchDebounce);
-  sftpSearchDebounce = window.setTimeout(() => {
-    sftpSearch.value = value;
-  }, SFTP_SEARCH_DEBOUNCE_MS);
-});
-onBeforeUnmount(() => window.clearTimeout(sftpSearchDebounce));
-
-function clearSftpSearch() {
-  window.clearTimeout(sftpSearchDebounce);
-  sftpSearchDraft.value = "";
-  sftpSearch.value = "";
-}
 const selectedEntries = computed(() => entries.value.filter((entry) => selectedUriSet.value.has(entry.uri)));
 const previewDirty = computed(() => previewEditable.value && previewDraft.value !== previewBaseline.value);
 // 编辑保存走 sftp/write 整文件覆写：只有完整加载（未截断）且不超直写上限的
@@ -5584,62 +5515,6 @@ function nudgeDockerDivider(deltaPx: number) {
   persistState();
 }
 
-function toggleColumn(column: SftpColumn) {
-  const hadOwnerData = visibleColumns.value.includes("owner") || visibleColumns.value.includes("group");
-  visibleColumns.value = visibleColumns.value.includes(column) ? visibleColumns.value.filter((value) => value !== column) : [...visibleColumns.value, column];
-  persistState();
-  // 属主/属组列从关到开：当前列表可能没有 owner/group 数据（此前请求没带
-  // includeOwner），重拉一次目录；关列不需要重拉。
-  if ((column === "owner" || column === "group") && !hadOwnerData && session.value && !sudoMode.value) {
-    void loadDirectory();
-  }
-}
-
-// —— SFTP 列宽拖拽 ——
-// 名称列（弹性填充）从 DOM 实时宽度起算；固定列从记录宽度起算。
-function onColResizeStart(column: SftpColumn | "name", event: PointerEvent) {
-  event.preventDefault();
-  event.stopPropagation();
-  (event.target as Element).setPointerCapture?.(event.pointerId);
-  let startWidth: number;
-  if (column === "name") {
-    const cell = (event.target as Element).closest(".col-wrap");
-    startWidth = cell ? Math.round(cell.getBoundingClientRect().width) : (sftpNameWidth.value ?? NAME_COLUMN_MIN);
-  } else {
-    startWidth = sftpColumnWidths[column];
-  }
-  sftpResizing = { column, startX: event.clientX, startWidth };
-  document.body.classList.add("resizing-col");
-  document.addEventListener("pointermove", onColResizeMove);
-  document.addEventListener("pointerup", onColResizeEnd);
-}
-function onColResizeMove(event: PointerEvent) {
-  if (!sftpResizing) return;
-  const delta = event.clientX - sftpResizing.startX;
-  const next = Math.round(sftpResizing.startWidth + delta);
-  if (sftpResizing.column === "name") {
-    sftpNameWidth.value = Math.max(NAME_COLUMN_MIN, Math.min(NAME_COLUMN_MAX, next));
-  } else {
-    sftpColumnWidths[sftpResizing.column] = Math.max(COLUMN_MIN_WIDTHS[sftpResizing.column], Math.min(COLUMN_WIDTH_MAX, next));
-  }
-}
-function onColResizeEnd() {
-  if (!sftpResizing) return;
-  sftpResizing = null;
-  document.body.classList.remove("resizing-col");
-  document.removeEventListener("pointermove", onColResizeMove);
-  document.removeEventListener("pointerup", onColResizeEnd);
-  persistState();
-}
-
-function toggleSort(column: SftpSortColumn) {
-  sort.value = sort.value.column === column ? { column, direction: sort.value.direction === "asc" ? "desc" : "asc" } : { column, direction: "asc" };
-}
-
-function sortIcon(column: SftpSortColumn) {
-  if (sort.value.column !== column) return ArrowUpDown;
-  return sort.value.direction === "asc" ? ArrowUp : ArrowDown;
-}
 
 async function openEntry(entry: SftpEntry) {
   if (previewOpen.value && previewDirty.value && !(await confirmDialog(t("editSave.closeConfirm")))) return;
