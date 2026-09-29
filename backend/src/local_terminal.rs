@@ -1491,147 +1491,189 @@ mod tests {
     /// viewport-size answer, a truthful cursor position (what xterm would say), a
     /// mismatched size to tell "read as a position" from "read as a size", and no
     /// reply at all as the output-withholding control.
-    // Deliberately NOT `#[cfg(windows)]`: the body drives a real ConPTY, but
-    // gating the whole item would hide it from `cargo test` on macOS/Linux —
-    // where a type error in it (a moved closure, say) only surfaces after a
-    // Windows CI round trip. It compiles everywhere and returns early where
-    // there is no ConPTY to drive.
-    #[test]
-    fn conpty_handshake_reply_variants() {
+    /// Escapes raw terminal bytes for the CI log (`--nocapture`).
+    fn probe_escape(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|byte| match byte {
+                b'\x1b' => "\\e".to_string(),
+                b'\r' => "\\r".to_string(),
+                b'\n' => "\\n".to_string(),
+                0x20..=0x7e => (*byte as char).to_string(),
+                other => format!("\\x{other:02x}"),
+            })
+            .collect::<String>()
+    }
+
+    /// Drives one real ConPTY session and returns everything the PTY emitted.
+    ///
+    /// `reply` answers the inherit-cursor handshake the way the sidecar does.
+    /// `None` means the program could not be spawned (not installed on this
+    /// machine) — callers skip it instead of failing the suite.
+    fn probe_conpty_session(
+        program: &str,
+        reply: Option<&[u8]>,
+        rows: u16,
+        cols: u16,
+    ) -> Option<Vec<u8>> {
         use std::sync::mpsc;
         use std::time::Instant;
 
-        if !cfg!(windows) {
-            return;
-        }
-
-        const ROWS: u16 = 30;
-        const COLS: u16 = 100;
-
-        let escape = |bytes: &[u8]| {
-            bytes
-                .iter()
-                .map(|byte| match byte {
-                    b'\x1b' => "\\e".to_string(),
-                    b'\r' => "\\r".to_string(),
-                    b'\n' => "\\n".to_string(),
-                    0x20..=0x7e => (*byte as char).to_string(),
-                    other => format!("\\x{other:02x}"),
-                })
-                .collect::<String>()
-        };
         let saw = |haystack: &[u8], needle: &[u8]| {
             haystack
                 .windows(needle.len())
                 .any(|window| window == needle)
         };
-        // One cmd.exe session under a 30x100 ConPTY, handshake answered with
-        // `reply` (or left unanswered), returning everything the PTY emitted.
-        let run_session = move |reply: Option<Vec<u8>>| -> Vec<u8> {
-            let pair = native_pty_system()
-                .openpty(PtySize {
-                    rows: ROWS,
-                    cols: COLS,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .expect("open ConPTY");
-            let mut child = pair
-                .slave
-                .spawn_command(CommandBuilder::new("cmd.exe"))
-                .expect("spawn cmd.exe");
-            drop(pair.slave);
-            let mut reader = pair.master.try_clone_reader().expect("pty reader");
-            let mut writer = pair.master.take_writer().expect("pty writer");
-            let (tx, rx) = mpsc::channel::<Vec<u8>>();
-            std::thread::spawn(move || {
-                let mut buffer = [0u8; 4096];
-                while let Ok(read) = reader.read(&mut buffer) {
-                    if read == 0 || tx.send(buffer[..read].to_vec()).is_err() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .ok()?;
+        let mut child = pair
+            .slave
+            .spawn_command(CommandBuilder::new(program))
+            .ok()?;
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().ok()?;
+        let mut writer = pair.master.take_writer().ok()?;
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while let Ok(read) = reader.read(&mut buffer) {
+                if read == 0 || tx.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut stream = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut answered = false;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(400)) {
+                Ok(chunk) => {
+                    stream.extend_from_slice(&chunk);
+                    if !answered && saw(&stream, CONPTY_CPR_QUERY) {
+                        if let Some(reply) = reply {
+                            writer.write_all(reply).expect("write reply");
+                            writer.flush().expect("flush reply");
+                        }
+                        answered = true;
+                        // Let the first frame settle before finishing.
+                        std::thread::sleep(Duration::from_millis(700));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if answered {
                         break;
                     }
                 }
-            });
-            let mut stream = Vec::new();
-            let deadline = Instant::now() + Duration::from_secs(20);
-            let mut answered = false;
-            while Instant::now() < deadline {
-                match rx.recv_timeout(Duration::from_millis(400)) {
-                    Ok(chunk) => {
-                        stream.extend_from_slice(&chunk);
-                        if !answered && saw(&stream, CONPTY_CPR_QUERY) {
-                            if let Some(reply) = reply.as_ref() {
-                                writer.write_all(reply).expect("write reply");
-                                writer.flush().expect("flush reply");
-                            }
-                            answered = true;
-                            // Let the first frame settle before finishing.
-                            std::thread::sleep(Duration::from_millis(700));
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if answered {
-                            break;
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            assert!(
-                saw(&stream, CONPTY_CPR_QUERY),
-                "cmd.exe never issued the ConPTY handshake"
-            );
-            stream
-        };
-
-        let cases: [(&str, Option<Vec<u8>>); 2] = [
-            ("size 30;100 (shipping)", Some(b"\x1b[30;100R".to_vec())),
-            ("cursor 1;1 (inherit truth)", Some(b"\x1b[1;1R".to_vec())),
-        ];
-        let mut measured: Vec<(&str, Vec<u8>)> = Vec::new();
-        for (label, reply) in cases {
-            // Watchdog: a wedged ConPTY session must not hang the runner.
-            let (tx, rx) = mpsc::channel();
-            let session = run_session;
-            std::thread::spawn(move || {
-                let _ = tx.send(session(reply));
-            });
-            match rx.recv_timeout(Duration::from_secs(60)) {
-                Ok(stream) => {
-                    eprintln!("[{}] {} bytes: {}", label, stream.len(), escape(&stream));
-                    measured.push((label, stream));
-                }
-                Err(_) => eprintln!("[{}] HUNG: no result within 60s", label),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-        let stream_for = |label: &str| {
-            measured
-                .iter()
-                .find(|(name, _)| *name == label)
-                .map(|(_, stream)| stream)
-                .unwrap_or_else(|| panic!("variant {label} produced no stream"))
-        };
-        // Anchor the measured difference, so a conhost change that invalidates
-        // the reasoning shows up here instead of as a user-visible regression.
-        let size_reply = stream_for("size 30;100 (shipping)");
+        let _ = child.kill();
+        let _ = child.wait();
+        Some(stream)
+    }
+
+    /// Runs one probed session with a watchdog: a wedged ConPTY must not hang
+    /// the runner. Returns `None` for a missing program or a timeout.
+    fn probe_once(program: &str, reply: Option<Vec<u8>>, rows: u16, cols: u16) -> Option<Vec<u8>> {
+        use std::sync::mpsc;
+        let program = program.to_string();
+        let label = program.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(probe_conpty_session(&program, reply.as_deref(), rows, cols));
+        });
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("[{label}] HUNG: no result within 60s");
+                None
+            }
+        }
+    }
+
+    /// Windows-only probe of conhost's startup handshake, measured on the
+    /// windows-2022 runner (inbox conhost 20348). Facts established here, each
+    /// one refuting a theory that had been shipping:
+    ///
+    ///   * conhost issues `CSI 6n` **exactly once**, and only after the child
+    ///     exists — nothing arrives while the PTY has no client (0 bytes).
+    ///   * a **duplicate** CPR reply is ignored outright (0 bytes followed it),
+    ///     so neither the terminal's leaked answer nor the sidecar's own reply
+    ///     can resize anything. The "duplicate reply" family of theories is dead.
+    ///   * the orphan first glyph is **conhost's own doing**, and where it lands
+    ///     follows the reply's numbers: answering the viewport size (`30;100`)
+    ///     produced `... \e[?25h M\r\n \e[29;100H Microsoft Windows ...` — the
+    ///     banner's first character printed at the top, an absolute jump to the
+    ///     viewport's bottom row, then the banner re-drawn there. That is
+    ///     precisely the "M" users reported, and it is why answering with the
+    ///     cursor position (`1;1`, what the workbench now reports) is the fix:
+    ///     the same session then emits one clean frame with no jump.
+    ///
+    /// Both variants are asserted, so a conhost change that invalidates the
+    /// reasoning fails here rather than in a user's terminal.
+    ///
+    /// Deliberately NOT `#[cfg(windows)]`: the body drives a real ConPTY, but
+    /// gating the whole item would hide it from `cargo test` on macOS/Linux —
+    /// where a type error in it (a moved closure, say) only surfaces after a
+    /// Windows CI round trip. It compiles everywhere and returns early where
+    /// there is no ConPTY to drive.
+    #[test]
+    fn conpty_handshake_reply_variants() {
+        if !cfg!(windows) {
+            return;
+        }
+        const ROWS: u16 = 30;
+        const COLS: u16 = 100;
+        // The artifact signature: after the handshake, conhost jumps to the
+        // inherited bottom row and re-serializes the screen from there.
+        let bottom_jump = format!("\x1b[{};{}H", ROWS - 1, COLS).into_bytes();
+
+        let shipping = probe_once(
+            "cmd.exe",
+            Some(format!("\x1b[{ROWS};{COLS}R").into_bytes()),
+            ROWS,
+            COLS,
+        )
+        .expect("cmd.exe did not start");
+        eprintln!(
+            "[size {ROWS};{COLS}] {} bytes: {}",
+            shipping.len(),
+            probe_escape(&shipping)
+        );
         assert!(
-            saw(size_reply, b"\x1b[29;100H"),
+            shipping
+                .windows(bottom_jump.len())
+                .any(|window| window == bottom_jump),
             "the viewport-size reply no longer triggers the bottom-row \
              re-serialization this fix was built on: {}",
-            escape(size_reply)
+            probe_escape(&shipping)
         );
-        let cursor_reply = stream_for("cursor 1;1 (inherit truth)");
+
+        let truthful = probe_once("cmd.exe", Some(b"\x1b[1;1R".to_vec()), ROWS, COLS)
+            .expect("cmd.exe did not start");
+        eprintln!(
+            "[cursor 1;1] {} bytes: {}",
+            truthful.len(),
+            probe_escape(&truthful)
+        );
         assert!(
-            !saw(cursor_reply, b"\x1b[29;100H") && !saw(cursor_reply, b"M\r\n\x1b["),
-            "the cursor-position reply still produced a re-serialization: {}",
-            escape(cursor_reply)
+            !truthful
+                .windows(bottom_jump.len())
+                .any(|window| window == bottom_jump),
+            "the cursor-position reply still produced a bottom-row \
+             re-serialization: {}",
+            probe_escape(&truthful)
         );
         // The banner is written once, not echoed back from the inherited
         // position — the doubled-prompt shape starts with a lone first glyph.
         let banner = b"Microsoft Windows";
-        let banner_hits = cursor_reply
+        let banner_hits = truthful
             .windows(banner.len())
             .filter(|window| *window == banner)
             .count();
@@ -1639,8 +1681,43 @@ mod tests {
             banner_hits,
             1,
             "banner written {banner_hits} times with the cursor reply: {}",
-            escape(cursor_reply)
+            probe_escape(&truthful)
         );
+    }
+
+    /// The three shells users reported the artifact on, each driven under the
+    /// reply the sidecar now sends. Their banners differ, but the failure mode
+    /// is conhost-side and identical: a jump to the inherited bottom row with
+    /// the first frame re-serialized there. Shells that are not installed on
+    /// the runner are skipped (recorded in the log, not failed).
+    #[test]
+    fn conpty_first_frame_stays_clean_across_windows_shells() {
+        if !cfg!(windows) {
+            return;
+        }
+        const ROWS: u16 = 30;
+        const COLS: u16 = 100;
+        let bottom_jump = format!("\x1b[{};{}H", ROWS - 1, COLS).into_bytes();
+        for program in ["cmd.exe", "powershell.exe", "wsl.exe"] {
+            match probe_once(program, Some(b"\x1b[1;1R".to_vec()), ROWS, COLS) {
+                Some(stream) => {
+                    eprintln!(
+                        "[{program}] {} bytes: {}",
+                        stream.len(),
+                        probe_escape(&stream)
+                    );
+                    assert!(
+                        !stream
+                            .windows(bottom_jump.len())
+                            .any(|window| window == bottom_jump),
+                        "{program} re-serialized its first frame from the inherited \
+                         bottom row: {}",
+                        probe_escape(&stream)
+                    );
+                }
+                None => eprintln!("[{program}] skipped (not installed or no output)"),
+            }
+        }
     }
 
     #[test]
