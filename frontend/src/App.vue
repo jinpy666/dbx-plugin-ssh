@@ -207,6 +207,8 @@ import { transferPausable } from "./lib/transferResume";
 import { isLiveTransferStatus, sortTransferTasks } from "./lib/transferOrder";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useConnectionInfo } from "./composables/useConnectionInfo";
+import { useSftpArchive } from "./composables/useSftpArchive";
 import { useSftpPathHistory } from "./composables/useSftpPathHistory";
 import { useSymlink } from "./composables/useSymlink";
 import { useZmodem } from "./composables/useZmodem";
@@ -720,7 +722,6 @@ const previewBaseline = ref("");
 // 仅加载了文件头部（大文件确认预览）时置位：预览只读，禁止保存以免整文件覆盖。
 const previewTruncated = ref(false);
 const sudoMode = ref(false);
-const archiveBusy = ref(false);
 const operationDialog = ref<"mkdir" | null>(null);
 const operationDraft = ref("");
 
@@ -995,13 +996,6 @@ function toggleQuickExpand(id: string) {
   quickExpandedId.value = quickExpandedId.value === id ? null : id;
 }
 // 批量发送命令条（Electerm quick-command bar 风格）：常驻贴在终端底部，回车
-// 连接信息面板（只读摘要 + echo 往返延迟）。
-const connectionInfoOpen = ref(false);
-const connectionLatency = ref<number | null>(null);
-const connectionLatencyBusy = ref(false);
-const connectionLatencyFailed = ref(false);
-// 认证方式只读名称（来自 ssh/sessions/list 的 authMethod；仅方法名，无凭据）。
-const connectionAuthMethod = ref("");
 // 生效只读门禁（来自 ssh/sessions/list 行的 readOnly：表单 read_only ∥
 // 宿主标准 read_only）。后端门禁为权威来源，前端据此禁用写操作。
 const connectionReadOnly = ref(false);
@@ -7158,58 +7152,17 @@ async function savePreview() {
   }
 }
 
-function isArchiveName(name: string) {
-  return /\.(tar\.gz|tgz|tar)$/i.test(name);
-}
-
-function archiveDirectoryName(name: string) {
-  if (/\.(tar\.gz|tgz)$/i.test(name)) return name.replace(/\.(tar\.gz|tgz)$/i, "");
-  return name.replace(/\.tar$/i, "");
-}
-
-async function archiveEntry(entry: SftpEntry) {
-  const sessionId = session.value?.sessionId;
-  // 目录与单文件都可压缩（sftp/archive 支持任意路径列表）。
-  if (!sessionId || archiveBusy.value) return;
-  fileMenu.value = undefined;
-  archiveBusy.value = true;
-  const archiveName = `${entry.name}.tar.gz`;
-  try {
-    await window.dbxPlugin.invoke("sftp/archive", {
-      sessionId,
-      sourcePaths: [pathFromUri(entry.uri)],
-      archivePath: joinRemote(currentPath.value, archiveName),
-    }, { timeoutMs: 30 * 60 * 1000 });
-    showNotice(t("archive.done", { name: archiveName }));
-    await loadDirectory();
-  } catch (cause) {
-    showError(cause);
-  } finally {
-    archiveBusy.value = false;
-  }
-}
-
-async function extractEntry(entry: SftpEntry) {
-  const sessionId = session.value?.sessionId;
-  if (!sessionId || archiveBusy.value) return;
-  fileMenu.value = undefined;
-  archiveBusy.value = true;
-  const directoryName = archiveDirectoryName(entry.name);
-  try {
-    await window.dbxPlugin.invoke("sftp/extract", {
-      sessionId,
-      archivePath: pathFromUri(entry.uri),
-      destinationPath: joinRemote(currentPath.value, directoryName),
-      overwrite: false,
-    }, { timeoutMs: 30 * 60 * 1000 });
-    showNotice(t("extract.done", { name: directoryName }));
-    await loadDirectory();
-  } catch (cause) {
-    showError(cause);
-  } finally {
-    archiveBusy.value = false;
-  }
-}
+// 压缩/解压：行内归档与解包收口在 composables/useSftpArchive。
+const {
+  archiveBusy,
+  isArchiveName,
+  archiveDirectoryName,
+  archiveEntry,
+  extractEntry,
+} = useSftpArchive({
+  t, showNotice, showError, session, currentPath, pathFromUri, joinRemote, loadDirectory,
+  closeFileMenu: () => { fileMenu.value = undefined; },
+});
 
 function beginRename(entry: SftpEntry) {
   if (!canWrite.value) return;
@@ -9010,46 +8963,17 @@ function toggleTransferPanel() {
 
 // 认证方式：读取 ssh/sessions/list 当前会话行的 authMethod（只读方法名，
 // 不含任何凭据材料）。失败时面板显示占位符，不影响其他信息。
-async function refreshConnectionAuthMethod() {
-  const sessionId = session.value?.sessionId;
-  if (!sessionId) return;
-  try {
-    const result = await window.dbxPlugin.invoke<{ sessions: Array<{ sessionId?: string; authMethod?: string; readOnly?: boolean }> }>(
-      "ssh/sessions/list",
-      {},
-      { timeoutMs: 15_000 },
-    );
-    const mine = result.sessions?.find((row) => row.sessionId === sessionId);
-    connectionAuthMethod.value = typeof mine?.authMethod === "string" && mine.authMethod ? mine.authMethod : "";
-    connectionReadOnly.value = mine?.readOnly === true;
-  } catch {
-    connectionAuthMethod.value = "";
-  }
-}
+// 连接信息面板：延迟探测/认证方式只读名称收口在 composables/useConnectionInfo。
+const {
+  connectionInfoOpen,
+  connectionLatency,
+  connectionLatencyBusy,
+  connectionLatencyFailed,
+  connectionAuthMethod,
+  refreshConnectionAuthMethod,
+  measureLatency,
+} = useConnectionInfo({ t, session, connectionReadOnly });
 
-// 延迟测量：复用既有 ssh/exec 跑一条 echo 只读命令，计时整个 RPC 往返
-// （含通道建立），无需新增后端方法。测量值仅用于展示，不参与任何逻辑。
-async function measureLatency() {
-  const sessionId = session.value?.sessionId;
-  if (!sessionId || connectionLatencyBusy.value) return;
-  connectionLatencyBusy.value = true;
-  connectionLatencyFailed.value = false;
-  const startedAt = performance.now();
-  try {
-    const result = await window.dbxPlugin.invoke<ExecResult>("ssh/exec", {
-      sessionId,
-      command: "echo dbx-rtt-probe",
-      timeoutSecs: 8,
-    }, { timeoutMs: 15_000 });
-    if (!result.output.includes("dbx-rtt-probe")) throw new Error(t("errors.probeOutput"));
-    connectionLatency.value = performance.now() - startedAt;
-  } catch {
-    connectionLatency.value = null;
-    connectionLatencyFailed.value = true;
-  } finally {
-    connectionLatencyBusy.value = false;
-  }
-}
 
 
 // 终端录制 + 回放（asciicast v2）：状态与交互收口在 composables/useRecording。

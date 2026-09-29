@@ -240,7 +240,7 @@ describe("workbench localization", () => {
     // App.vue / sftpErrors.ts 里的 t("errors.*") 字面量，新 key 漏补即在
     // 此处红，防止同类问题复发。
     const keys = new Set<string>();
-    for (const source of [appScript, sftpErrorsSource]) {
+    for (const source of [appScript, composablesScript, sftpErrorsSource]) {
       for (const match of source.matchAll(/\bt\("errors\.[A-Za-z0-9.]+"/g)) {
         keys.add(match[0].slice(3, -1));
       }
