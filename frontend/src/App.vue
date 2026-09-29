@@ -188,6 +188,7 @@ import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/audit
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
 import { useSessionReconnect } from "./composables/useSessionReconnect";
 import { usePluginEvents } from "./composables/usePluginEvents";
+import { useRdpSession } from "./composables/useRdpSession";
 import { useConnectCard } from "./composables/useConnectCard";
 import { useProtocolFrameBuffers } from "./composables/useProtocolFrameBuffers";
 import { useUploadChain } from "./composables/useUploadChain";
@@ -322,10 +323,8 @@ import RdpConnectDialog, { type RdpConnectOptions } from "./components/RdpConnec
 import RdpSurface from "./components/RdpSurface.vue";
 import {
   initialRdpSessionState,
-  rdpCertRemainingSecs,
   rdpCertStatusKey,
   rdpErrorKindKey,
-  type RdpInputEvent,
   type RdpSessionStateView,
 } from "./lib/rdpFrame";
 import { ToastAction, ToastClose, ToastProvider, ToastRoot, ToastViewport } from "./components/ui/toast";
@@ -563,22 +562,6 @@ const entries = ref<SftpEntry[]>([]);
 const selectedPath = ref("");
 const loadingFiles = ref(false);
 const hostKeyPrompt = ref<HostKeyPrompt>();
-// RDP 证书确认（connection/challenge kind=rdp-certificate，RDP-3 前端）：
-// 复用 host-key 挑战的 kind 分支入口，展示 SHA256 指纹 + 120s 倒计时 +
-// remember 勾选；应答走 rdp/certificate/resolve（fail-closed，超时即拒绝）。
-interface RdpCertPrompt {
-  challengeId: string;
-  sessionId: string;
-  host: string;
-  port: number;
-  fingerprint: string;
-  knownHostStatus: string;
-  receivedAt: number;
-}
-const rdpCertPrompt = ref<RdpCertPrompt | null>(null);
-const rdpCertRemember = ref(false);
-const rdpCertRemaining = ref(0);
-let rdpCertTimer = 0;
 const rememberHostKey = ref(true);
 const splitRatio = ref(58);
 const paneOrder = ref<SshWorkbenchPaneOrder>("terminal-left");
@@ -1201,6 +1184,20 @@ const connectionId = computed(() => normalizeConnectionText(hostContext.value.co
 // hosts that omit the injection — see lib/pluginContext.spec.ts).
 const fallbackWorkbenchId = randomUUID();
 const workbenchId = computed(() => resolveWorkbenchId(hostContext.value, fallbackWorkbenchId));
+// RDP 会话生命周期与证书确认：收口在 composables/useRdpSession（rdpSession/
+// rdpState/rdpSurface 等模板共享态留守 App.vue，经 options 注入）。
+const {
+  rdpCertPrompt, rdpCertRemember, rdpCertRemaining,
+  startRdpSession, closeRdpSession, sendRdpInput, sendRdpClipboard,
+  reconnectRdpSession, resolveRdpCertificate,
+} = useRdpSession({
+  t, showError, showNotice,
+  rdpSession, rdpState, rdpSurface, rdpScaleMode, rdpClipboardChunks,
+  workbenchId,
+  isDisposed: () => disposed,
+  getTerminal: () => terminal,
+});
+
 const restored = computed(() => hostContext.value.restored === true);
 const runtimeEndpoint = computed<RuntimeEndpoint>(() => {
   const value = hostContext.value.runtime;
@@ -3098,74 +3095,6 @@ const rdpClosedTitle = computed(() => {
   return kind ? t(`rdp.error.${kind}`) : t("rdp.closed");
 });
 
-async function startRdpSession(options: RdpConnectOptions): Promise<boolean> {
-  // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
-  if (rdpSession.value && rdpState.value.state !== "closed") await closeRdpSession();
-  try {
-    const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("rdp/start", {
-      workbenchId: workbenchId.value,
-      host: options.host,
-      port: options.port,
-      username: options.username,
-      width: options.width,
-      height: options.height,
-      certificatePolicy: options.certificatePolicy,
-      clipboard: options.clipboard,
-      ...(options.password ? { password: options.password } : {}),
-      ...(options.domain ? { domain: options.domain } : {}),
-    });
-    if (disposed) {
-      void window.dbxPlugin.invoke("rdp/close", { sessionId: info.sessionId }).catch(() => undefined);
-      return false;
-    }
-    rdpSession.value = { sessionId: info.sessionId, host: info.host, port: info.port };
-    rdpScaleMode.value = options.scaleMode;
-    rdpState.value = { state: "connecting", error: "", errorKind: "", attempt: 0, maxAttempts: 0 };
-    rdpSurface.value?.reset();
-    await nextTick();
-    rdpSurface.value?.$el?.querySelector("canvas")?.focus();
-    return true;
-  } catch (cause) {
-    showError(cause, "terminal");
-    return false;
-  }
-}
-
-async function closeRdpSession() {
-  const sessionId = rdpSession.value?.sessionId;
-  rdpSession.value = null;
-  rdpState.value = initialRdpSessionState();
-  dismissRdpCertPrompt();
-  rdpClipboardChunks.delete(sessionId ?? "");
-  if (!sessionId) return;
-  await window.dbxPlugin.invoke("rdp/close", { sessionId }).catch(() => undefined);
-  terminal?.focus();
-}
-
-function sendRdpInput(event: RdpInputEvent) {
-  const sessionId = rdpSession.value?.sessionId;
-  if (!sessionId) return;
-  void window.dbxPlugin.invoke("rdp/input", { sessionId, ...event }).catch(() => undefined);
-}
-
-function sendRdpClipboard(text: string) {
-  const sessionId = rdpSession.value?.sessionId;
-  if (!sessionId || !text) return;
-  void window.dbxPlugin.invoke("rdp/set-clipboard", { sessionId, text }).catch(() => undefined);
-  showNotice(t("rdp.clipboardSent"));
-}
-
-// 手动重连（graceful disconnect / 终态错误后的出口）：generation 递增由
-// sidecar 负责，前端只触发并让 rdp/session/state 事件驱动状态条。
-async function reconnectRdpSession() {
-  const sessionId = rdpSession.value?.sessionId;
-  if (!sessionId) return;
-  try {
-    await window.dbxPlugin.invoke("rdp/reconnect", { sessionId });
-  } catch (cause) {
-    showError(cause, "terminal");
-  }
-}
 
 // —— 串口会话生命周期（P3，与 Telnet 同款互斥展示；无 replay，掉帧仅按
 // pending 上限清空兜底）——
@@ -3611,53 +3540,6 @@ async function resolveHostKey(accept: boolean) {
   }
 }
 
-// —— RDP 证书确认（rdp-certificate challenge）：120s 倒计时 + fail-closed ——
-// 倒计时基于队首 receivedAt + 120s 绝对期限（与 AI 审批弹窗同一 tick 模式），
-// 到 0 仅关弹窗——sidecar 侧超时同样拒绝该挑战，两侧语义一致。
-watch(rdpCertPrompt, (prompt) => {
-  if (rdpCertTimer) {
-    window.clearInterval(rdpCertTimer);
-    rdpCertTimer = 0;
-  }
-  if (!prompt) {
-    rdpCertRemaining.value = 0;
-    return;
-  }
-  const tick = () => {
-    const current = rdpCertPrompt.value;
-    if (!current) return;
-    rdpCertRemaining.value = rdpCertRemainingSecs(current.receivedAt, Date.now());
-    if (rdpCertRemaining.value <= 0) dismissRdpCertPrompt();
-  };
-  tick();
-  rdpCertTimer = window.setInterval(tick, 250);
-});
-
-// 挑战一次性：先出弹窗再 resolve（超时/取消/未知 id 一律按拒绝处理）。
-function dismissRdpCertPrompt() {
-  if (rdpCertTimer) {
-    window.clearInterval(rdpCertTimer);
-    rdpCertTimer = 0;
-  }
-  rdpCertPrompt.value = null;
-  rdpCertRemaining.value = 0;
-}
-
-async function resolveRdpCertificate(accept: boolean) {
-  const prompt = rdpCertPrompt.value;
-  if (!prompt) return;
-  const remember = accept && rdpCertRemember.value;
-  dismissRdpCertPrompt();
-  try {
-    await window.dbxPlugin.invoke("rdp/certificate/resolve", {
-      challengeId: prompt.challengeId,
-      accept,
-      remember,
-    });
-  } catch (cause) {
-    showError(cause, "terminal");
-  }
-}
 
 // AI 终端同步执行：审批队列/执行横幅/模式切换收口在 composables/useAgentTerminalMode。
 const {
