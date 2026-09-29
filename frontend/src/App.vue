@@ -7228,7 +7228,7 @@ async function loadDirectory(path = currentPath.value, fromTerminal = false) {
     // 缺 kind 的行降级为 file），单行坏数据不再让列表僵死或抛 pageerror。
     entries.value = sanitizeSftpEntries(result.entries);
     linkTargets.value = {};
-    void hydrateLinkTargets(entries.value);
+    void hydrateLinkTargets(entries.value, epochId);
     currentPath.value = normalized;
     selectedPath.value = "";
     clearRowSelection();
@@ -9104,8 +9104,10 @@ function linkTargetTitle(entry: SftpEntry): string | undefined {
 }
 
 /** 列表加载后解析 symlink 条目的指向（只读 readlink，并发、失败静默——
- * 悬空链接也照常显示，tooltip 缺失只是没有 target 文案）。 */
-async function hydrateLinkTargets(list: SftpEntry[]) {
+ * 悬空链接也照常显示，tooltip 缺失只是没有 target 文案）。回写前按调用方
+ * 的列表 epoch 复核：快速连续导航时旧目录的 readlink 批次晚到，不得把
+ * 新目录的 linkTargets 整体覆盖回旧值。 */
+async function hydrateLinkTargets(list: SftpEntry[], epochId: number) {
   const sessionId = session.value?.sessionId;
   if (!sessionId) return;
   const links = list.filter((entry) => entry.kind === "symlink").slice(0, 50);
@@ -9120,6 +9122,7 @@ async function hydrateLinkTargets(list: SftpEntry[]) {
       if (result?.target) next[entry.uri] = result.target;
     }),
   );
+  if (!listEpoch.isCurrent(epochId)) return;
   linkTargets.value = next;
 }
 
@@ -12018,6 +12021,7 @@ onBeforeUnmount(() => {
   hideTooltip();
   window.clearTimeout(persistTimer);
   window.clearInterval(recordCountdownTimer);
+  window.clearInterval(recordingElapsedTimer);
   void writeWorkbenchState();
   window.clearTimeout(resizeTimer);
   window.clearTimeout(reconnectTimer);

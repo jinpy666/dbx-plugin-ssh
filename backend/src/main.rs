@@ -425,16 +425,19 @@ impl Plugin {
                 let sudo = params.get("sudo").and_then(Value::as_bool).unwrap_or(false);
                 let timeout_secs = params.get("timeoutSecs").and_then(Value::as_u64);
                 let exec_id = params.get("execId").and_then(Value::as_str);
-                if sudo {
-                    // Connection-level sudoers-style allowlist (mirrors the
-                    // MCP gate); structured sudo_fs ops stay exempt.
+                // Connection-level sudoers-style allowlist (mirrors the MCP
+                // gate); structured sudo_fs ops stay exempt. With the gate on
+                // the rebuild — not the raw text — is what executes.
+                let command: String = if sudo {
                     self.runtime
-                        .block_on(self.ssh.ensure_sudo_allowed(session_id, command))?;
-                }
+                        .block_on(self.ssh.ensure_sudo_allowed(session_id, command))?
+                } else {
+                    command.to_string()
+                };
                 self.runtime.block_on(self.ssh.exec(
                     session_id,
                     exec_id,
-                    command,
+                    &command,
                     sudo,
                     timeout_secs,
                 ))
@@ -1225,17 +1228,17 @@ impl Plugin {
                 // 提权重采。只读连接/白名单拒绝/提权失败都退回原 payload，
                 // 保留 needsSudo 提示而不是让只读调用报错。
                 let body = docker::list_body(&engine);
-                if self
+                let sudo_body = match self
                     .runtime
                     .block_on(self.ssh.ensure_sudo_allowed(session_id, &body))
-                    .is_err()
                 {
-                    return Ok(payload);
-                }
+                    Ok(rebuilt) => rebuilt,
+                    Err(_) => return Ok(payload),
+                };
                 if let Ok(sudo_response) = self.runtime.block_on(self.ssh.exec(
                     session_id,
                     None,
-                    &body,
+                    &sudo_body,
                     true,
                     Some(docker::LIST_TIMEOUT.as_secs()),
                 )) {
@@ -1319,15 +1322,14 @@ impl Plugin {
                 // Sudo 提权重采；任何失败都退回原输出，payload 恒良构。
                 if docker::is_daemon_permission_failure(1, &output) {
                     let body = docker::sudo_logs_body(&engine, container_id, tail)?;
-                    if self
+                    if let Ok(sudo_body) = self
                         .runtime
                         .block_on(self.ssh.ensure_sudo_allowed(session_id, &body))
-                        .is_ok()
                     {
                         if let Ok(sudo_response) = self.runtime.block_on(self.ssh.exec(
                             session_id,
                             None,
-                            &body,
+                            &sudo_body,
                             true,
                             Some(docker::LOGS_TIMEOUT.as_secs()),
                         )) {
@@ -1414,13 +1416,15 @@ impl Plugin {
                     // daemon socket 权限失败是唯一允许回落 sudo 的失败形态：
                     // 其余失败重试可能把半执行的动作应用两次。回落走与
                     // ssh/exec 同一条 Quick Sudo 管线（编排凭据、use_pty、
-                    // keepalive 全部复用），连接级 sudoers 白名单同语义生效。
-                    self.runtime
+                    // keepalive 全部复用），连接级 sudoers 白名单同语义生效，
+                    // 白名单放行时以重建后的 token 命令提权重跑。
+                    let sudo_exec = self
+                        .runtime
                         .block_on(self.ssh.ensure_sudo_allowed(session_id, &exec_text))?;
                     return match self.runtime.block_on(self.ssh.exec(
                         session_id,
                         None,
-                        &exec_text,
+                        &sudo_exec,
                         true,
                         Some(docker::ACTION_TIMEOUT.as_secs()),
                     )) {

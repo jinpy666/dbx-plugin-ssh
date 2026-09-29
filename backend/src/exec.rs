@@ -795,10 +795,12 @@ pub(crate) fn can_respond_to_prompt(
                 && (mode != AuthFlowMode::PasswordThenOtp || password_answered)
         }
         PromptKind::Combined => {
-            // 合并提问（同一条提问里既有密码又有验证码）：四种模式都会应答，
-            // 只是应答内容不同——OTP 模式拼接验证码，密码类模式只回密码半边。
-            // 拒绝应答只会把会话晾在提示上（见 flow-modes 测试）。
-            true
+            // 合并提问（同一条提问里既有密码又有验证码）：密码尚未通过管道
+            // 喂入/此前未应答时四种模式都会应答——OTP 模式拼接验证码，密码
+            // 类模式只回密码半边。密码已经喂过后再出现的"合并提问"只可能
+            // 来自命令自身的输出（伪提示词）：再答一次会把 Quick Sudo 密码
+            // （甚至烧掉一枚 TOTP 码）写进命令 stdin，随命令输出回显泄漏。
+            !password_answered
         }
     }
 }
@@ -1051,6 +1053,21 @@ const SUDO_WAIT_TIMEOUT_MESSAGE: &str =
      package-manager locks before retrying; for long jobs start them \
      detached (ssh_run_bg + ssh_task_status) instead of extending the wait.";
 
+/// Per-stream output ceiling for `run_to_completion`. A hostile or merely
+/// over-productive remote (`cat /dev/urandom`) would otherwise balloon
+/// sidecar memory until the deadline; past the cap chunks are dropped while
+/// the read loop keeps draining so the channel never back-pressures.
+const MAX_EXEC_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+fn append_capped(buffer: &mut Vec<u8>, data: &[u8]) {
+    if buffer.len() >= MAX_EXEC_OUTPUT_BYTES {
+        return;
+    }
+    let remaining = MAX_EXEC_OUTPUT_BYTES - buffer.len();
+    let take = data.len().min(remaining);
+    buffer.extend_from_slice(&data[..take]);
+}
+
 async fn run_to_completion(
     channel: &mut russh::Channel<russh::client::Msg>,
     timeout: Duration,
@@ -1078,7 +1095,7 @@ async fn run_to_completion(
         };
         match message {
             ChannelMsg::Data { ref data } => {
-                stdout.extend_from_slice(data);
+                append_capped(&mut stdout, data);
                 if let Some((auth, use_pty, _)) = prompt_context.as_ref() {
                     if *use_pty {
                         if let Some(error) = maybe_answer_prompt(
@@ -1097,7 +1114,7 @@ async fn run_to_completion(
                 }
             }
             ChannelMsg::ExtendedData { ref data, .. } => {
-                stderr.extend_from_slice(data);
+                append_capped(&mut stderr, data);
                 if let Some((auth, _, _)) = prompt_context.as_ref() {
                     if let Some(error) = maybe_answer_prompt(
                         channel,
@@ -2015,6 +2032,19 @@ mod tests {
             PromptKind::Combined,
             false
         ));
+        // Piped-credential replay guard: a "merged prompt" surfacing after
+        // the password went down the stdin pipe is command output spoofing
+        // it — answering would echo the credential into the command's stdin.
+        assert!(!can_respond_to_prompt(
+            AuthFlowMode::PasswordOnly,
+            PromptKind::Combined,
+            true
+        ));
+        assert!(!can_respond_to_prompt(
+            AuthFlowMode::PasswordPlusOtp,
+            PromptKind::Combined,
+            true
+        ));
     }
 
     #[test]
@@ -2031,6 +2061,18 @@ mod tests {
             PromptKind::Password,
             false
         ));
+    }
+
+    #[test]
+    fn append_capped_truncates_at_the_ceiling_and_keeps_head_bytes() {
+        let mut buffer = vec![b'x'; MAX_EXEC_OUTPUT_BYTES - 1];
+        append_capped(&mut buffer, &[b'a'; 16]);
+        assert_eq!(buffer.len(), MAX_EXEC_OUTPUT_BYTES);
+        assert_eq!(*buffer.last().unwrap(), b'a');
+        // Past the cap the chunk is dropped entirely (drain keeps flowing).
+        append_capped(&mut buffer, &[b'y'; 16]);
+        assert_eq!(buffer.len(), MAX_EXEC_OUTPUT_BYTES);
+        assert_eq!(*buffer.last().unwrap(), b'a');
     }
 
     #[test]

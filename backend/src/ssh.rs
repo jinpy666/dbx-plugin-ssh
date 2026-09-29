@@ -3495,7 +3495,16 @@ impl SshRuntime {
     /// = gate off; otherwise the command (minus a leading `sudo` token) must
     /// match one entry. Mirrors the MCP gate on the workbench exec path;
     /// structured `sudo_fs` operations are user-driven and stay exempt.
-    pub async fn ensure_sudo_allowed(&self, session_id: &str, command: &str) -> Result<(), String> {
+    ///
+    /// Returns the command that may actually execute: with the gate on, this
+    /// is the allowlist's token-quoted rebuild (`allowed_rebuilt_command`) —
+    /// assignments stripped, metacharacters quarantined — so a passed match
+    /// can never regain shell semantics under the root `sh -c`.
+    pub async fn ensure_sudo_allowed(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> Result<String, String> {
         let session = self.session(session_id).await?;
         let connection = self
             .connections
@@ -3505,11 +3514,11 @@ impl SshRuntime {
             .cloned()
             .ok_or("Connection is not active; reopen it from DBX".to_string())?;
         if connection.sudo_whitelist.is_empty() {
-            return Ok(());
+            return Ok(command.to_string());
         }
         let entries = crate::sudo_allowlist::entries_from_lines(&connection.sudo_whitelist);
-        if crate::sudo_allowlist::is_allowed(&entries, command) {
-            return Ok(());
+        if let Some(rebuilt) = crate::sudo_allowlist::allowed_rebuilt_command(&entries, command) {
+            return Ok(rebuilt);
         }
         Err(format!(
             "sudo command is not allowed by this connection's whitelist. \

@@ -407,6 +407,10 @@ function openInTerminal(container: DockerContainer): void {
   }, 2000);
 }
 
+onUnmounted(() => {
+  if (fillReset) clearTimeout(fillReset);
+});
+
 const running = (container: DockerContainer): boolean => container.state === "running";
 </script>
 
