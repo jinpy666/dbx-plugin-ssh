@@ -35,5 +35,5 @@ jobs:
       - name: Probe
         run: |
           cargo test --locked --manifest-path backend/Cargo.toml `
-            conpty_handshake_timing_and_first_serialization `
+            conpty_ `
             -- --nocapture --test-threads=1
