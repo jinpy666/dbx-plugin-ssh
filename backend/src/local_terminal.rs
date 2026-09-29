@@ -1506,6 +1506,18 @@ mod tests {
             saw(&stream, BANNER),
             "cmd banner never arrived (captured {quiet_bytes} bytes)"
         );
+        // The filter's "swallow the first query only" rule rests on conhost
+        // asking exactly once, before any child output. Bare cmd.exe emits no
+        // DSR queries of its own, so every query in this window is conhost's.
+        let query_count = stream
+            .windows(CONPTY_CPR_QUERY.len())
+            .filter(|window| *window == CONPTY_CPR_QUERY)
+            .count();
+        assert_eq!(
+            query_count, 1,
+            "conhost issued {query_count} handshake queries during startup; the \
+             first-query-only rule needs revisiting"
+        );
 
         // Phase 3: deliver the reply a leaked terminal answer carries.
         writer.write_all(BOGUS_REPLY).expect("write bogus reply");
