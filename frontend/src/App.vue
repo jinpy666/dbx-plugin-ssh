@@ -2052,6 +2052,10 @@ function openHistoryPanel() {
   // 是简单字符模型,Ctrl+U/方向键/Ctrl+W 等编辑后会残留残影,曾把面板过滤得
   // 只剩一条)。过滤只走面板内搜索框。
   historyPanelQuery.value = "";
+  // 远端历史导入尚未成功时(首次拉取赶上会话未就绪/超时),打开面板顺带重试
+  // 一次;loadRemoteShellHistory 按会话去重,成功过即跳过。
+  const panelSessionId = session.value?.sessionId;
+  if (panelSessionId && !isLocalMode.value) void loadRemoteShellHistory(panelSessionId);
   const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, ""), commandHistoryTimes.value);
   historyPanelEntries.value = next;
   // shell ↑ 语义:初始高亮最底部(最新执行的命令),↑ 一直往上翻更旧的。
@@ -5584,9 +5588,11 @@ function pushTerminalCommandHistory(command: string) {
 
 // —— 远端 shell 历史导入(↑ history 面板内容对齐 shell)——插件自采集只覆盖
 // 本会话键入的命令;连接建立后经 ssh/exec(非交互通道,不进终端视图、不回显)
-// 拉取一次远端历史文件存量(~/.bash_history / ~/.zsh_history,HISTFILE 优先),
-// 解析合并进命令环。每会话只拉一次;失败静默(受限 shell/无历史文件时回落
-// 仅本会话采集,真实降级)。
+// 拉取远端历史文件存量(~/.bash_history / ~/.zsh_history,HISTFILE 优先),
+// 解析合并进命令环。成功过即不再拉;失败(超时/受限 shell/无历史文件)时移出
+// 已加载集合,面板下次打开会再试一次——首次拉取赶上会话未就绪也不至于永远
+// 只有本会话采集。命令兼容 BusyBox tail(无 `--` 分隔符)与未设 HISTFILE 的
+// 非交互 shell(~ 展开回落固定文件名)。
 const REMOTE_HISTORY_FETCH_LIMIT = 500;
 const remoteHistoryLoadedSessions = new Set<string>();
 
@@ -5594,20 +5600,27 @@ async function loadRemoteShellHistory(sessionId: string) {
   if (!sessionId || remoteHistoryLoadedSessions.has(sessionId)) return;
   remoteHistoryLoadedSessions.add(sessionId);
   try {
-    const command = `for f in "$HISTFILE" "$HOME/.bash_history" "$HOME/.zsh_history" "$HOME/.zhistory"; do [ -f "$f" ] && { tail -n ${REMOTE_HISTORY_FETCH_LIMIT} -- "$f"; break; }; done`;
+    const command = `for f in "$HISTFILE" ~/.bash_history ~/.zsh_history ~/.zhistory; do [ -f "$f" ] && { tail -n ${REMOTE_HISTORY_FETCH_LIMIT} "$f"; break; }; done`;
     const result = await window.dbxPlugin.invoke<{ success: boolean; output?: string; exitCode?: number }>("ssh/exec", {
       sessionId,
       execId: randomUUID(),
       command,
       sudo: false,
     }, { timeoutMs: 15_000 });
-    if (!result?.success || !result.output?.trim()) return;
+    if (!result?.success || !result.output?.trim()) {
+      remoteHistoryLoadedSessions.delete(sessionId);
+      return;
+    }
     const shellLines = parseShellHistoryText(result.output);
-    if (!shellLines.length) return;
+    if (!shellLines.length) {
+      remoteHistoryLoadedSessions.delete(sessionId);
+      return;
+    }
     commandHistory.value = mergeShellHistory(commandHistory.value, shellLines);
     persistCommandHistory();
   } catch {
-    // 通道不可用/超时:静默降级,面板回落到仅本会话采集的命令。
+    // 通道不可用/超时:静默降级;移出集合允许面板下次打开时重试。
+    remoteHistoryLoadedSessions.delete(sessionId);
   }
 }
 
