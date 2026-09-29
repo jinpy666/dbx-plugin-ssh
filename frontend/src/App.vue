@@ -186,6 +186,7 @@ import {
 import { transferPausable } from "./lib/transferResume";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useProtocolFrameBuffers } from "./composables/useProtocolFrameBuffers";
 import { useUploadChain } from "./composables/useUploadChain";
 import { useFilePreview } from "./composables/useFilePreview";
 import { useSftpDownload } from "./composables/useSftpDownload";
@@ -1000,10 +1001,6 @@ const localSession = ref<{ sessionId: string; shell: string } | null>(null);
 const localState = ref<"starting" | "running" | "exited">("exited");
 const localExitCode = ref<number | null>(null);
 const localOpenConfirmOpen = ref(false);
-const localLastSequence = ref(0);
-const localPendingFrames = new Map<number, { stream: number; data: Uint8Array }>();
-let localReplayInFlight = false;
-let localReplayNoProgress = 0;
 const isLocalMode = computed(() => localSession.value !== null);
 // A4 restored shell (spec §7.6/§8.4): a restored local tab never auto-starts a shell; the exit
 // overlay as the shell state waiting for an explicit start; cleared once a shell actually comes up (startLocalTerminal succeeds)
@@ -1017,10 +1014,6 @@ const telnetSession = ref<{ sessionId: string; host: string; port: number } | nu
 const telnetDialogOpen = ref(false);
 const telnetState = ref<"idle" | "connecting" | "running" | "closed">("idle");
 const telnetError = ref("");
-const telnetLastSequence = ref(0);
-const telnetPendingFrames = new Map<number, { stream: number; data: Uint8Array }>();
-let telnetReplayInFlight = false;
-let telnetReplayNoProgress = 0;
 const isTelnetMode = computed(() => telnetSession.value !== null);
 const telnetTarget = computed(() => (telnetSession.value ? `${telnetSession.value.host}:${telnetSession.value.port}` : ""));
 // 串口会话（P3 + B1 增强）：与 SSH/本地/Telnet 同款互斥展示，并入
@@ -1031,14 +1024,7 @@ const serialSession = ref<{ sessionId: string; port: string; baudRate: number } 
 const serialDialogOpen = ref(false);
 const serialState = ref<"idle" | "running" | "closed">("idle");
 const serialError = ref("");
-const serialLastSequence = ref(0);
-const serialPendingFrames = new Map<number, { stream: number; data: Uint8Array }>();
-// 序号缺口回放（设计稿 §3）：与 telnet/local 的 drain/replay 体系同构，
-// 复用既有 gap 检测 + 无进度重试上限，不新写恢复逻辑。
-let serialReplayInFlight = false;
-let serialReplayNoProgress = 0;
 // B1 解码契约：输出帧遇到未知流标签（> Stdin=3）一律静默丢弃并计数。
-let serialUnknownStreamFrames = 0;
 // B1 能力开关：true = 键盘走二进制写通道。初始值取 serial/start 的
 // binaryInput 能力字段（未声明 = 旧 sidecar → JSON 兼容路径）；通道报错
 // （未知方法/会话消失）时 send 回调一次性降级 JSON。
@@ -2414,6 +2400,36 @@ const {
   revealTransferTarget: (path) => revealTransferTarget(path),
 });
 
+// 协议帧缓冲（local/telnet/serial）：收口在 composables/useProtocolFrameBuffers。
+const {
+  localLastSequence,
+  localPendingFrames,
+  localReplayInFlight,
+  localReplayNoProgress,
+  markLocalExited,
+  drainLocalTerminalFrames,
+  telnetLastSequence,
+  telnetPendingFrames,
+  telnetReplayInFlight,
+  telnetReplayNoProgress,
+  markTelnetClosed,
+  drainTelnetFrames,
+  serialLastSequence,
+  serialPendingFrames,
+  serialReplayInFlight,
+  serialReplayNoProgress,
+  serialUnknownStreamFrames,
+  markSerialClosed,
+  drainSerialFrames,
+  requestLocalReplay,
+} = useProtocolFrameBuffers({
+  t,
+  dispatchTerminalOutput, showNotice,
+  localSession, localState, localExitCode, stopCommandMarkerTick,
+  telnetSession, telnetState, telnetError,
+  serialSession, serialState, serialError,
+});
+
 function handleBinary(event: DbxPluginBinaryEvent) {
   if (event.channel.startsWith("local/terminal/out/")) {
     const localId = event.channel.slice("local/terminal/out/".length);
@@ -2448,7 +2464,7 @@ function handleBinary(event: DbxPluginBinaryEvent) {
     if (payload.length < 9) return;
     // B1 解码契约：未知流标签（> Stdin=3）一律静默丢帧并计数，不断连。
     if (!isKnownStreamTag(payload[0])) {
-      serialUnknownStreamFrames += 1;
+      serialUnknownStreamFrames.value += 1;
       return;
     }
     const sequence = readU64(payload, 1);
@@ -2578,67 +2594,6 @@ function drainTerminalFrames() {
 // 本地终端输出与 SSH 同一帧协议（stream + u64 sequence），复用乱序重组与
 // 空洞补发；State 帧到来即落退出态。补发不完整只 resync 到缓冲尾部——
 // 环形缓冲淘汰不可恢复，但活会话不能被误判成已退出。
-function drainLocalTerminalFrames() {
-  let frame = localPendingFrames.get(localLastSequence.value + 1);
-  while (frame) {
-    localPendingFrames.delete(localLastSequence.value + 1);
-    localLastSequence.value += 1;
-    if (frame.stream === 2) {
-      if (new TextDecoder().decode(frame.data) === "local-terminal-exited") markLocalExited(null);
-    } else {
-      dispatchTerminalOutput(frame.data);
-    }
-    frame = localPendingFrames.get(localLastSequence.value + 1);
-  }
-  if (localPendingFrames.size > TERMINAL_PENDING_FRAME_LIMIT) {
-    // 洪峰把有序帧一并丢弃后必须主动补拉一次：清空后 firstPending 变
-    // Infinity，下面的洞检测永不触发——会话活着、输入正常、画面停在洪峰前。
-    localPendingFrames.clear();
-    requestLocalReplay(localLastSequence.value, null);
-    return;
-  }
-  const firstPending = Math.min(...localPendingFrames.keys());
-  if (Number.isFinite(firstPending) && firstPending > localLastSequence.value + 1) {
-    requestLocalReplay(localLastSequence.value, firstPending - 1);
-  }
-}
-
-// 本地会话统一的补发拉取：从 afterSequence 起 拉 sidecar 环形缓冲。
-// complete=false 表示缓冲淘汰过帧、[hole, firstAvailable) 不可恢复——resync
-// 到缓冲首帧继续收尾部（协议承诺 webview 重载可接回活 shell，判死即违背）；
-// complete=true 但洞始终补不上时保留"连续三轮无进展就跳洞"的梯子。
-function requestLocalReplay(holeAt: number, resyncTarget: number | null) {
-  const session = localSession.value;
-  if (!session || localReplayInFlight) return;
-  localReplayInFlight = true;
-  void window.dbxPlugin
-    .invoke<ReplayResult>(
-      "local/terminal/replay",
-      { sessionId: session.sessionId, afterSequence: holeAt },
-      // 启动引导路径会经过这里：桥丢响应时不能无限 pending 卡住工作台。
-      { timeoutMs: 10_000 },
-    )
-    .then((result) => {
-      if (!result.complete) {
-        localLastSequence.value = Math.max(0, result.firstAvailableSequence - 1);
-        return;
-      }
-      if (localLastSequence.value === holeAt) {
-        localReplayNoProgress += 1;
-        if (localReplayNoProgress >= 3 && resyncTarget !== null) {
-          localLastSequence.value = resyncTarget;
-          localReplayNoProgress = 0;
-        }
-      } else {
-        localReplayNoProgress = 0;
-      }
-    })
-    .catch(() => markLocalExited(null))
-    .finally(() => {
-      localReplayInFlight = false;
-      drainLocalTerminalFrames();
-    });
-}
 
 // 传输断开/会话被杀的统一入口：有界退避自动重连，梯子耗尽才落到
 // disconnected 终态等待手动重连。
@@ -3219,12 +3174,6 @@ async function closeSession(updateStatus = true) {
 // —— 本地终端生命周期 ——
 // 退出态统一入口：exitCode 为 null 表示 sidecar 未上报（进程被杀/会话已回收），
 // 覆盖层对 null 只显示"已退出"，有值时显示退出码。
-function markLocalExited(code: number | null) {
-  if (!localSession.value || localState.value === "exited") return;
-  localState.value = "exited";
-  if (code !== null) localExitCode.value = code;
-  stopCommandMarkerTick();
-}
 
 async function startLocalTerminal(shellOverride?: string) {
   if (localState.value === "starting" || isLocalMode.value) return;
@@ -3255,7 +3204,7 @@ async function startLocalTerminal(shellOverride?: string) {
     localExitCode.value = null;
     localLastSequence.value = 0;
     localPendingFrames.clear();
-    localReplayNoProgress = 0;
+    localReplayNoProgress.value = 0;
     resetCommandMarker();
     await nextTick();
     scheduleFit();
@@ -3282,56 +3231,6 @@ async function closeLocalTerminal() {
 // —— Telnet 会话生命周期（P2-3，与本地终端同款互斥与补发机制）——
 // 退出态统一入口：error 为 null 表示 sidecar 未带原因（会话已被回收），
 // 非空时在退出覆盖层展示（连接失败/对端断开）。
-function markTelnetClosed(error: string | null) {
-  if (!telnetSession.value || telnetState.value === "closed") return;
-  telnetState.value = "closed";
-  if (error !== null) telnetError.value = error;
-}
-
-function drainTelnetFrames() {
-  let frame = telnetPendingFrames.get(telnetLastSequence.value + 1);
-  while (frame) {
-    telnetPendingFrames.delete(telnetLastSequence.value + 1);
-    telnetLastSequence.value += 1;
-    if (frame.stream === 2) {
-      if (new TextDecoder().decode(frame.data) === "telnet-session-closed") markTelnetClosed(null);
-    } else {
-      dispatchTerminalOutput(frame.data);
-    }
-    frame = telnetPendingFrames.get(telnetLastSequence.value + 1);
-  }
-  if (telnetPendingFrames.size > TERMINAL_PENDING_FRAME_LIMIT) {
-    telnetPendingFrames.clear();
-  }
-  const firstPending = Math.min(...telnetPendingFrames.keys());
-  if (Number.isFinite(firstPending) && firstPending > telnetLastSequence.value + 1 && !telnetReplayInFlight && telnetSession.value) {
-    const sessionId = telnetSession.value.sessionId;
-    telnetReplayInFlight = true;
-    const holeAt = telnetLastSequence.value;
-    void window.dbxPlugin
-      .invoke<ReplayResult>("telnet/replay", { sessionId, afterSequence: telnetLastSequence.value })
-      .then((result) => {
-        if (!result.complete) {
-          markTelnetClosed(null);
-          return;
-        }
-        if (telnetLastSequence.value === holeAt) {
-          telnetReplayNoProgress += 1;
-          if (telnetReplayNoProgress >= 3) {
-            telnetLastSequence.value = firstPending - 1;
-            telnetReplayNoProgress = 0;
-          }
-        } else {
-          telnetReplayNoProgress = 0;
-        }
-      })
-      .catch(() => markTelnetClosed(null))
-      .finally(() => {
-        telnetReplayInFlight = false;
-        drainTelnetFrames();
-      });
-  }
-}
 
 async function startTelnetSession(options: TelnetConnectOptions): Promise<boolean> {
   // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
@@ -3369,7 +3268,7 @@ async function startTelnetSession(options: TelnetConnectOptions): Promise<boolea
     telnetError.value = "";
     telnetLastSequence.value = 0;
     telnetPendingFrames.clear();
-    telnetReplayNoProgress = 0;
+    telnetReplayNoProgress.value = 0;
     await nextTick();
     scheduleFit();
     terminal?.focus();
@@ -3602,58 +3501,6 @@ async function reconnectRdpSession() {
 // pending 上限清空兜底）——
 // 退出态统一入口：error 为 null 表示 sidecar 未带原因（主动关闭），
 // 非空时在退出覆盖层展示（读线程 IO 失败/设备拔线）。
-function markSerialClosed(error: string | null) {
-  if (!serialSession.value || serialState.value === "closed") return;
-  serialState.value = "closed";
-  if (error !== null) serialError.value = error;
-}
-
-function drainSerialFrames() {
-  let frame = serialPendingFrames.get(serialLastSequence.value + 1);
-  while (frame) {
-    serialPendingFrames.delete(serialLastSequence.value + 1);
-    serialLastSequence.value += 1;
-    dispatchTerminalOutput(frame.data);
-    frame = serialPendingFrames.get(serialLastSequence.value + 1);
-  }
-  if (serialPendingFrames.size > TERMINAL_PENDING_FRAME_LIMIT) {
-    serialPendingFrames.clear();
-  }
-  // 序号缺口 → serial/replay（序号制回放）：重发帧从既有二进制通道到货后
-  // 由同一 drain 消费；缺口永不可填（缓冲绕回/会话重建）时按无进度上限
-  // resync 游标，避免 replay 循环空转冻结工作台。
-  const firstPending = Math.min(...serialPendingFrames.keys());
-  if (Number.isFinite(firstPending) && firstPending > serialLastSequence.value + 1 && !serialReplayInFlight && serialSession.value) {
-    serialReplayInFlight = true;
-    const holeAt = serialLastSequence.value;
-    void window.dbxPlugin
-      .invoke<ReplayResult>("serial/replay", { sessionId: serialSession.value.sessionId, afterSequence: serialLastSequence.value })
-      .then((result) => {
-        // complete: false = 缓冲已绕回、回放不完整（设计稿 §3）——提示截断。
-        if (!result.complete) showNotice(t("serial.replayTruncated"));
-        if (serialLastSequence.value === holeAt) {
-          serialReplayNoProgress += 1;
-          if (serialReplayNoProgress >= 3) {
-            serialLastSequence.value = firstPending - 1;
-            serialReplayNoProgress = 0;
-          }
-        } else {
-          serialReplayNoProgress = 0;
-        }
-      })
-      .catch(() => {
-        // 会话不存在（已关闭/未重建）：resync 过缺口放出后续帧。
-        if (firstPending > serialLastSequence.value) {
-          serialLastSequence.value = firstPending - 1;
-          serialReplayNoProgress = 0;
-        }
-      })
-      .finally(() => {
-        serialReplayInFlight = false;
-        drainSerialFrames();
-      });
-  }
-}
 
 async function startSerialSession(options: SerialConnectOptions) {
   // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
@@ -3680,7 +3527,7 @@ async function startSerialSession(options: SerialConnectOptions) {
     serialError.value = "";
     serialLastSequence.value = 0;
     serialPendingFrames.clear();
-    serialUnknownStreamFrames = 0;
+    serialUnknownStreamFrames.value = 0;
     // 能力探测降级（设计稿 §2）：未声明 binaryInput 的 sidecar 走 JSON
     // serial/write；通道报错时再一次性降级（send 回调）。
     serialBinaryInput.value = supportsBinaryInput(info);
@@ -3701,7 +3548,7 @@ async function closeSerialSession() {
   serialState.value = "idle";
   serialError.value = "";
   serialPendingFrames.clear();
-  serialUnknownStreamFrames = 0;
+  serialUnknownStreamFrames.value = 0;
   serialBinaryInput.value = true;
   serialInputQueue.reset();
   // 上传挂在会话上：随会话关闭一并终止（sidecar cancel 幂等）。
