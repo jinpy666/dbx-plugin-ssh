@@ -153,7 +153,7 @@ import { loadTerminalFontOverride, resolveTerminalFont, type TerminalFontOverrid
 import { MIB } from "./lib/settingsModel";
 import type { DownloadConflictPolicy } from "./lib/downloadPrefs";
 import { commandMarkerTooltip, formatCommandDuration, Osc633CommandParser, runningCommandElapsedMs, type Osc633StreamUpdates } from "./lib/terminalCommandMarkers";
-import { advanceBatchProgress, batchProgressPercent, createBatchProgress, type BatchProgressState } from "./lib/sftpBatchProgress";
+import { batchProgressPercent, type BatchProgressState } from "./lib/sftpBatchProgress";
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
 import { sanitizeCommandOutput } from "./lib/terminalOutputText";
 import { normalizeTerminalInputBytes } from "./lib/terminalInput";
@@ -192,6 +192,7 @@ import {
 import { transferPausable } from "./lib/transferResume";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useSftpDelete } from "./composables/useSftpDelete";
 import { useSftpListLayout } from "./composables/useSftpListLayout";
 import { useSftpSelectionClipboard } from "./composables/useSftpSelectionClipboard";
 import { useSftpNavigation } from "./composables/useSftpNavigation";
@@ -5751,32 +5752,6 @@ const {
   createDirectory,
 } = useSftpCreateDirectory({ showError, session, sudoMode, currentPath, joinRemote, loadDirectory });
 
-async function confirmDelete() {
-  if (!session.value || !deleteTarget.value) return;
-  deleteSubmitting.value = true;
-  try {
-    const path = pathFromUri(deleteTarget.value.uri);
-    if (sudoMode.value) {
-      await window.dbxPlugin.invoke(deleteTarget.value.kind === "directory" ? "sudo/removeAll" : "sudo/remove", {
-        sessionId: session.value.sessionId,
-        path,
-      });
-    } else {
-      await window.dbxPlugin.invoke("sftp/delete", {
-        sessionId: session.value.sessionId,
-        path,
-        recursive: deleteTarget.value.kind === "directory",
-      });
-    }
-    deleteTarget.value = undefined;
-    await loadDirectory();
-    showNotice(t("deleted"));
-  } catch (cause) {
-    showError(cause);
-  } finally {
-    deleteSubmitting.value = false;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // SFTP 面板：搜索/多选/批量/新建文件/属性/路径历史/复制粘贴
@@ -5858,77 +5833,18 @@ watch(pathHistoryOpen, (open) => {
 });
 
 
-async function confirmBatchDelete() {
-  const sessionId = session.value?.sessionId;
-  const targets = selectedEntries.value;
-  if (!sessionId || !targets.length || batchDeleteSubmitting.value) return;
-  batchDeleteSubmitting.value = true;
-  let progress = createBatchProgress(targets.length);
-  batchProgress.value = progress;
-  try {
-    for (const entry of targets) {
-      const path = pathFromUri(entry.uri);
-      try {
-        if (sudoMode.value) {
-          await window.dbxPlugin.invoke(entry.kind === "directory" ? "sudo/removeAll" : "sudo/remove", { sessionId, path });
-        } else {
-          await window.dbxPlugin.invoke("sftp/delete", { sessionId, path, recursive: entry.kind === "directory" });
-        }
-        progress = advanceBatchProgress(progress, { name: entry.name, ok: true });
-      } catch (cause) {
-        progress = advanceBatchProgress(progress, { name: entry.name, ok: false });
-        throw cause;
-      }
-      batchProgress.value = progress;
-    }
-    batchDeleteOpen.value = false;
-    clearRowSelection();
-    await loadDirectory();
-    showNotice(t("deleted"));
-  } catch (cause) {
-    showError(cause);
-    await loadDirectory();
-  } finally {
-    batchDeleteSubmitting.value = false;
-    batchProgress.value = null;
-  }
-}
-
-async function batchArchive() {
-  const sessionId = session.value?.sessionId;
-  const targets = selectedEntries.value;
-  if (!sessionId || !targets.length || archiveBusy.value) return;
-  archiveBusy.value = true;
-  let progress = createBatchProgress(targets.length);
-  batchProgress.value = progress;
-  try {
-    let done = 0;
-    for (const entry of targets) {
-      const archiveName = `${entry.name}.tar.gz`;
-      try {
-        await window.dbxPlugin.invoke("sftp/archive", {
-          sessionId,
-          sourcePaths: [pathFromUri(entry.uri)],
-          archivePath: joinRemote(currentPath.value, archiveName),
-        }, { timeoutMs: 30 * 60 * 1000 });
-        progress = advanceBatchProgress(progress, { name: archiveName, ok: true });
-      } catch (cause) {
-        progress = advanceBatchProgress(progress, { name: archiveName, ok: false });
-        throw cause;
-      }
-      batchProgress.value = progress;
-      done += 1;
-    }
-    showNotice(t("sftpBatch.archiveDone", { count: done }));
-    await loadDirectory();
-  } catch (cause) {
-    showError(cause);
-    await loadDirectory();
-  } finally {
-    archiveBusy.value = false;
-    batchProgress.value = null;
-  }
-}
+// 删除与批量操作：收口在 composables/useSftpDelete。
+const {
+  confirmDelete,
+  confirmBatchDelete,
+  batchArchive,
+} = useSftpDelete({
+  t, showNotice, showError, session, sudoMode, currentPath,
+  deleteTarget, deleteSubmitting, batchDeleteOpen, batchDeleteSubmitting, batchProgress,
+  selectedEntries, pathFromUri, joinRemote, loadDirectory,
+  clearRowSelection: () => clearRowSelection(),
+  archiveBusy,
+});
 
 function openNewFileDialog() {
   if (!connected.value || !canWrite.value) return;
