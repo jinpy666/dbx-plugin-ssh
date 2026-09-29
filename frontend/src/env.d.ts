@@ -30,7 +30,9 @@ interface DbxPluginFileTransferApi {
   finish(handleId: string): Promise<void>;
   cancel(handleId: string): Promise<void>;
   onDragState(listener: (active: boolean) => void): () => void;
-  onDrop(listener: (files: Array<{ handleId: string; name: string; size: number; contentType: string }>) => void): () => void;
+  /** onDrop 条目：relativePath 为可选增量——宿主遍历拖入目录后按树内相对路径
+   * （`/` 分隔，含文件名）附带，文件夹上传据此重建目录结构；旧宿主不带。 */
+  onDrop(listener: (files: Array<{ handleId: string; name: string; size: number; contentType: string; relativePath?: string }>) => void): () => void;
 }
 
 interface DbxPluginTheme {

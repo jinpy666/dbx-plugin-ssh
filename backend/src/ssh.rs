@@ -1620,6 +1620,7 @@ impl UploadPhase {
 
 /// Shared shape of every upload progress event; `fileName` is only present on
 /// task-start events (the workbench keeps the name it already displayed).
+#[allow(clippy::too_many_arguments)]
 fn upload_progress_payload(
     task_id: &str,
     session_id: &str,
@@ -1628,6 +1629,7 @@ fn upload_progress_payload(
     size: u64,
     phase: UploadPhase,
     status: &str,
+    compression: CompressionMode,
 ) -> Value {
     let mut payload = json!({
         "taskId": task_id,
@@ -1637,6 +1639,9 @@ fn upload_progress_payload(
         "size": size,
         "phase": phase.as_str(),
         "status": status,
+        // M33 压缩通道标记与下载事件同语义：gzip=压缩通道，none=普通管线
+        // （含预压回退后的后续事件——前端据 none 清掉徽标）。
+        "compression": compression.as_str(),
     });
     if let Some(file_name) = file_name {
         payload["fileName"] = json!(file_name);
@@ -5595,6 +5600,7 @@ impl SshRuntime {
                         size,
                         UploadPhase::Staging,
                         "running",
+                        compression,
                     ),
                 )
                 .map_err(plugin_error)?;
@@ -5653,6 +5659,7 @@ impl SshRuntime {
                     size,
                     UploadPhase::Staging,
                     "queued",
+                    compression,
                 ),
             )
             .map_err(plugin_error)?;
@@ -5837,6 +5844,7 @@ impl SshRuntime {
                         upload.expected_size,
                         UploadPhase::Staging,
                         "running",
+                        upload.compression,
                     ),
                 )
                 .map_err(plugin_error)?;
@@ -5915,6 +5923,9 @@ impl SshRuntime {
         let emitter = emitter.clone();
         let task_id = task_id.to_string();
         let response_task_id = task_id.clone();
+        // 实际送达通道（M33）：决策 gzip 但预压不划算/推送或远端解压失败回退
+        // 时降级 none——终态与普通推送段的事件据此回传，前端徽标随之清除。
+        let mut served_compression = compression;
         tokio::spawn(async move {
             let result: Result<(), String> = async {
                 // 压缩通道预压（M33）：spool → `<spool>.gz`。取消即中止；
@@ -5937,11 +5948,13 @@ impl SshRuntime {
                         SpoolCompression::Done(path, size) => gz_local = Some((path, size)),
                         SpoolCompression::Cancelled(error) => return Err(error),
                         SpoolCompression::NotWorthwhile => {
+                            served_compression = CompressionMode::None;
                             eprintln!(
                                 "[sftp] upload {task_id} compression not worthwhile, plain push"
                             );
                         }
                         SpoolCompression::Failed(error) => {
+                            served_compression = CompressionMode::None;
                             eprintln!(
                                 "[sftp] upload {task_id} compress failed, plain push: {error}"
                             );
@@ -5979,6 +5992,7 @@ impl SshRuntime {
                                             expected_size,
                                             UploadPhase::Uploading,
                                             "running",
+                                            compression,
                                         ),
                                     )
                                     .map_err(plugin_error)
@@ -6025,6 +6039,7 @@ impl SshRuntime {
                     )
                     .await
                     {
+                        served_compression = CompressionMode::None;
                         let _ = sftp.lock().await.remove_file(gz_temporary.clone()).await;
                         if cancelled.load(Ordering::Acquire) {
                             return Err(error);
@@ -6073,6 +6088,7 @@ impl SshRuntime {
                                         .await;
                                     return Err(upload_cancel_error(None));
                                 }
+                                served_compression = CompressionMode::Gzip;
                                 return commit_remote_file(
                                     &sftp,
                                     &temporary,
@@ -6082,6 +6098,7 @@ impl SshRuntime {
                                 .await;
                             }
                             Err(error) => {
+                                served_compression = CompressionMode::None;
                                 let _ =
                                     sftp.lock().await.remove_file(gz_temporary.clone()).await;
                                 eprintln!(
@@ -6147,6 +6164,7 @@ impl SshRuntime {
                                 expected_size,
                                 UploadPhase::Uploading,
                                 "running",
+                                served_compression,
                             ),
                         )
                         .map_err(plugin_error)?;
@@ -6180,6 +6198,7 @@ impl SshRuntime {
                         expected_size,
                         UploadPhase::Uploading,
                         "completed",
+                        served_compression,
                     );
                     this.record_transfer(task.clone());
                     if let Err(error) = emitter.event("sftp/transfer/progress", task) {
@@ -6204,6 +6223,7 @@ impl SshRuntime {
                         expected_size,
                         UploadPhase::Uploading,
                         status,
+                        served_compression,
                     );
                     task["error"] = json!(error);
                     this.record_transfer(task.clone());
@@ -6241,6 +6261,7 @@ impl SshRuntime {
                     expected_size,
                     UploadPhase::Compressing,
                     "running",
+                    CompressionMode::Gzip,
                 ),
             )
             .ok();
@@ -6271,6 +6292,7 @@ impl SshRuntime {
                         expected_size,
                         UploadPhase::Compressing,
                         "running",
+                        CompressionMode::Gzip,
                     ),
                 );
             })
@@ -6391,6 +6413,7 @@ impl SshRuntime {
                         compressed_size,
                         UploadPhase::Uploading,
                         "running",
+                        CompressionMode::Gzip,
                     ),
                 )
                 .map_err(plugin_error)?;
@@ -8251,6 +8274,7 @@ impl SshRuntime {
                     upload.size,
                     UploadPhase::Uploading,
                     "cancelled",
+                    upload.compression,
                 );
                 task["error"] = json!(upload_cancel_error(reason));
                 (task, upload.session_id.clone(), upload.remote_path.clone())
@@ -8369,6 +8393,7 @@ impl SshRuntime {
                     upload.expected_size,
                     UploadPhase::Staging,
                     "cancelled",
+                    upload.compression,
                 );
                 task["error"] = json!(upload_cancel_error(reason));
                 task
@@ -8716,6 +8741,7 @@ impl SshRuntime {
                         upload.expected_size,
                         UploadPhase::Staging,
                         "running",
+                        upload.compression,
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -8737,6 +8763,7 @@ impl SshRuntime {
                         } else {
                             "running"
                         },
+                        upload.compression,
                     )
                 }),
         );
@@ -8762,7 +8789,7 @@ impl SshRuntime {
             .map_err(|_| "Upload registry is poisoned".to_string())?
             .get(task_id)
         {
-            let mut status = upload_progress_payload(
+            let status = upload_progress_payload(
                 task_id,
                 &upload.session_id,
                 Some(upload.remote_path.rsplit('/').next().unwrap_or("upload")),
@@ -8770,8 +8797,8 @@ impl SshRuntime {
                 upload.expected_size,
                 UploadPhase::Staging,
                 "running",
+                upload.compression,
             );
-            status["compression"] = json!(upload.compression.as_str());
             return Ok(status);
         }
         if let Some(upload) = self
@@ -8780,7 +8807,7 @@ impl SshRuntime {
             .map_err(|_| "Finishing upload registry is poisoned".to_string())?
             .get(task_id)
         {
-            let mut status = upload_progress_payload(
+            let status = upload_progress_payload(
                 task_id,
                 &upload.session_id,
                 Some(upload.remote_path.rsplit('/').next().unwrap_or("upload")),
@@ -8792,8 +8819,8 @@ impl SshRuntime {
                 } else {
                     "running"
                 },
+                upload.compression,
             );
-            status["compression"] = json!(upload.compression.as_str());
             return Ok(status);
         }
         if let Some(download) = self
@@ -11558,6 +11585,7 @@ mod tests {
             1024,
             UploadPhase::Staging,
             "running",
+            CompressionMode::Gzip,
         );
         assert_eq!(staging["phase"], "staging");
         assert_eq!(staging["direction"], "upload");
@@ -11565,6 +11593,8 @@ mod tests {
         assert_eq!(staging["transferred"], 256);
         assert_eq!(staging["size"], 1024);
         assert_eq!(staging["status"], "running");
+        // M33：上传进度事件与下载同语义，恒带 compression 字段（含 none）。
+        assert_eq!(staging["compression"], "gzip");
 
         let pushing = upload_progress_payload(
             "t1",
@@ -11574,8 +11604,10 @@ mod tests {
             1024,
             UploadPhase::Uploading,
             "running",
+            CompressionMode::None,
         );
         assert_eq!(pushing["phase"], "uploading");
+        assert_eq!(pushing["compression"], "none");
         // Non-start events carry no fileName; the workbench keeps its own.
         assert!(pushing.get("fileName").is_none());
     }

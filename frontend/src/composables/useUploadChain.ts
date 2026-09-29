@@ -1,5 +1,6 @@
 import { computed, nextTick, onMounted, ref, watch, type Ref } from "vue";
 import { filesFromClipboard } from "../lib/clipboardFiles";
+import { collectDropRootEntries, scanDroppedEntries, type DropRootEntry } from "../lib/dropEntries";
 import { advanceFolderUploadDirectories, buildFolderUploadPlan, createFolderUploadProgress, folderUploadOutcome, settleFolderUploadFile, type FolderUploadProgress } from "../lib/folderUpload";
 import { planHostFileDrop } from "../lib/hostFileDrop";
 import { displayPathToWire } from "../lib/sftpName";
@@ -9,8 +10,11 @@ import { X } from "@lucide/vue";
 
 // 拖入条目/上传重复弹窗的最小结构（App.vue 的 FolderUploadEntry/
 // UploadDuplicatePrompt 为局部接口，按消费字段收敛）。
-type FolderUploadEntry = { name: string; relativePath: string; file: File };
+type FolderUploadEntry = { name: string; relativePath: string; size: number; readChunk: (offset: number, length: number) => Promise<Uint8Array> };
 type UploadDuplicatePrompt = { name: string; path: string };
+// 宿主桥 filedrop 条目（relativePath 为可选增量：宿主遍历目录后附带，
+// 旧宿主不带——插件前向兼容，见 handleHostFileDrop）。
+type HostFileDropFile = { handleId: string; name: string; size: number; contentType: string; relativePath?: string };
 
 /** 上传链（大功能聚合）：fileTransfer 选择器 → 原生回退 → 本地/文件夹/
  * 拖拽/剪贴板五路上传入口，统一汇入 uploadSource 传输队列；重复目标策略
@@ -145,7 +149,7 @@ function fallbackToNativeUploadPicker() {
 // 成为绕过 readOnly 的旁路。落点按面板状态分流（planHostFileDrop）：SFTP 面板
 // 打开 → 当前目录；终端独占 → 走落点询问；否则忽略。桥故障时与工具栏上传一致
 // 回退原生选择器重挑，而不是只报错走死。
-async function handleHostFileDrop(files: Array<{ handleId: string; name: string; size: number; contentType: string }>) {
+async function handleHostFileDrop(files: HostFileDropFile[]) {
   dragActive.value = false;
   if (!canAcceptFileDrop({ connected: connected.value, canWrite: canWrite.value })) {
     showNotice(t("dropRefused"));
@@ -160,21 +164,47 @@ async function handleHostFileDrop(files: Array<{ handleId: string; name: string;
   });
   if (plan.kind === "ignore") return;
   openTransferPanel();
+  // 带相对路径的条目（宿主遍历目录后的增量契约）走文件夹管线，其余照旧。
+  const folderFiles = files.filter((file) => typeof file.relativePath === "string" && file.relativePath);
+  const plainFiles = files.filter((file) => !file.relativePath);
   try {
     if (plan.kind === "terminal") {
       const choice = await askDropUploadTarget(files);
       terminalGet()?.focus();
       if (choice === "cancel") return;
       // 落点转 wire 形式（M17 增量②，与终端拖拽同款分工）。
-      await uploadHandleFiles(files, choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir));
+      const targetDir = choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir);
+      if (folderFiles.length) await uploadHostFolderEntries(folderFiles, targetDir);
+      if (plainFiles.length) await uploadHandleFiles(plainFiles, targetDir);
     } else {
-      await uploadHandleFiles(files);
+      if (folderFiles.length) await uploadHostFolderEntries(folderFiles);
+      if (plainFiles.length) await uploadHandleFiles(plainFiles);
       await loadDirectory();
     }
-    if (files.length) showNotice(t("uploaded", { count: files.length }));
+    if (plainFiles.length) showNotice(t("uploaded", { count: plainFiles.length }));
   } catch (cause) {
     if (isHostBridgeReadFailure(cause)) fallbackToNativeUploadPicker();
     else showError(cause);
+  }
+}
+
+/** 宿主桥句柄的文件夹批量上传：readChunk 走 fileTransfer.read，整批结束后
+ * 统一回收句柄（readChunk 逐块调用，不能在块级 finally 里提前关闭）。 */
+async function uploadHostFolderEntries(files: HostFileDropFile[], targetDir?: string) {
+  try {
+    await uploadFolderFiles(files.map((file) => ({
+      name: file.name,
+      relativePath: file.relativePath as string,
+      size: file.size,
+      readChunk: async (offset: number, length: number) => {
+        const result = await window.dbxPlugin.fileTransfer!.read(file.handleId, offset, length);
+        return window.dbxPlugin.decodeBase64(result.dataBase64);
+      },
+    })), targetDir);
+  } finally {
+    for (const file of files) {
+      await window.dbxPlugin.fileTransfer!.cancel(file.handleId).catch(() => undefined);
+    }
   }
 }
 
@@ -289,8 +319,10 @@ interface FolderUploadEntry {
   readChunk: (offset: number, length: number) => Promise<Uint8Array>;
 }
 
-async function uploadFolderFiles(entries: readonly FolderUploadEntry[]) {
+async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?: string) {
   if (!session.value || !canWrite.value) return;
+  // baseDir：终端/宿主桥拖入的自定义落点；缺省仍是 SFTP 当前目录。
+  const base = baseDir ?? currentPath.value;
   const plan = buildFolderUploadPlan(entries);
   if (!plan.files.length) {
     showNotice(t("folderUpload.empty"));
@@ -305,7 +337,7 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[]) {
   // 逐目录 ensure：集合已去重且父先于子；单目录失败不阻断（文件上传会
   // 因目录缺失自然失败并计入 failed），创建失败只降级提示。
   for (const relative of plan.directories) {
-    const remotePath = joinRemote(currentPath.value, relative);
+    const remotePath = joinRemote(base, relative);
     try {
       await window.dbxPlugin.invoke("sftp/createDirectory", { sessionId: session.value.sessionId, path: remotePath });
     } catch {
@@ -323,7 +355,7 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[]) {
     const segments = file.relativePath.split("/");
     const dirSegments = segments.slice(0, -1);
     const fileName = segments[segments.length - 1];
-    const targetDir = dirSegments.length ? joinRemote(currentPath.value, dirSegments.join("/")) : currentPath.value;
+    const targetDir = dirSegments.length ? joinRemote(base, dirSegments.join("/")) : base;
     // ask 模式批量降级：已存在则跳过（rename/overwrite 走既有解析，不预检）。
     if (loadTransferDuplicatePolicy() === "ask") {
       const probe = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", { sessionId: session.value.sessionId, path: joinRemote(targetDir, fileName) }).catch(() => ({ exists: false }));
@@ -377,8 +409,34 @@ function onDrop(event: DragEvent) {
     showNotice(t("dropRefused"));
     return;
   }
-  const files = Array.from(event.dataTransfer?.files || []);
-  if (files.length) void uploadLocalFiles(files).catch(showError);
+  // 根条目必须在本处理器内同步收（事件让出后 dataTransfer.items 失效）。
+  const roots = event.dataTransfer ? collectDropRootEntries(event.dataTransfer.items) : null;
+  void (async () => {
+    if (roots) {
+      const scan = await scanDroppedEntries(roots);
+      if (scan.directories > 0) {
+        // 含目录（空目录也一样）走文件夹管线：零文件由管线给 folderUpload.empty 提示。
+        await uploadFolderFiles(scan.entries.map(folderEntryFromFile));
+      } else if (scan.entries.length) {
+        await uploadLocalFiles(scan.entries.map((entry) => entry.file));
+      }
+      return;
+    }
+    // webkitGetAsEntry 不可用（旧内核）时的回退：现状 files 车道。
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length) await uploadLocalFiles(files);
+  })().catch(showError);
+}
+
+/** 拖拽遍历结果 → 文件夹管线条目（readChunk 从 File 分片读）。 */
+function folderEntryFromFile(entry: { file: File; relativePath: string }): FolderUploadEntry {
+  const file = entry.file;
+  return {
+    name: file.name,
+    relativePath: entry.relativePath,
+    size: file.size,
+    readChunk: (offset: number, length: number) => file.slice(offset, offset + length).arrayBuffer().then((buffer) => new Uint8Array(buffer)),
+  };
 }
 
 function onSftpDragEnter(event: DragEvent) {
@@ -404,19 +462,34 @@ function onTerminalDrop(event: DragEvent) {
   // Files dropped on the terminal ask for a landing directory first: the
   // shell's cwd (SFTP directory tracking) or any absolute directory typed in
   // the prompt — silence would make a wrong-guess overwrite too easy.
-  const files = Array.from(event.dataTransfer?.files || []);
-  if (!files.length) return;
-  void runTerminalDropUpload(files);
+  // 根条目同样在本处理器内同步收（与 SFTP 面板拖拽同款约束）。
+  const roots = event.dataTransfer ? collectDropRootEntries(event.dataTransfer.items) : null;
+  const fallbackFiles = Array.from(event.dataTransfer?.files || []);
+  // Firefox 等浏览器对文件夹拖拽不给 dataTransfer.files：弹窗清单回退显示
+  // 根目录名（同步可得，不受异步遍历影响）。
+  const promptFiles = fallbackFiles.length
+    ? fallbackFiles
+    : (roots ?? []).filter((root) => root.isDirectory).map((root) => ({ name: root.name }));
+  if (!promptFiles.length) return;
+  void runTerminalDropUpload(fallbackFiles, roots, promptFiles);
 }
 
-async function runTerminalDropUpload(files: File[]) {
-  const choice = await askDropUploadTarget(files);
+async function runTerminalDropUpload(files: File[], roots: DropRootEntry[] | null, promptFiles: Array<{ name: string }>) {
+  const choice = await askDropUploadTarget(promptFiles);
   terminalGet()?.focus();
   if (choice === "cancel") return;
   try {
     // 落点转 wire 形式（M17 增量②）：cwd 选项取 wire 化的解析结果，自定义
     // 目录是手输显示文本，latin-1 下经 wireDropDir 转换（auto 原样）。
-    await uploadLocalFiles(files, choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir));
+    const targetDir = choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir);
+    if (roots) {
+      const scan = await scanDroppedEntries(roots);
+      if (scan.directories > 0) {
+        await uploadFolderFiles(scan.entries.map(folderEntryFromFile), targetDir);
+        return;
+      }
+    }
+    if (files.length) await uploadLocalFiles(files, targetDir);
   } catch (cause) {
     showError(cause);
   }
