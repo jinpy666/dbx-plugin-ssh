@@ -127,7 +127,7 @@ import {
   validateBookmarkInput,
   type SftpBookmark,
 } from "./lib/sftpBookmarks";
-import { isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
+import { isPersistableCommand, mergeShellHistory, parseShellHistoryText, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
@@ -2049,11 +2049,13 @@ function historyPanelGateOpen(): boolean {
 function openHistoryPanel() {
   if (!terminal) return;
   terminalMenuOpen.value = false;
-  // 每次打开都是全量视图：清掉上一次的搜索词，打开瞬间的行内容仍作为初始
-  // 过滤 query（裸 ↑ 唤起时行通常为空；热键唤起时保留行内语义）。
+  // 每次打开都是全量视图:清掉上一次的搜索词,打开瞬间的行内容仍作为初始
+  // 过滤 query(裸 ↑ 唤起时行通常为空;热键唤起时保留行内语义)。
   historyPanelQuery.value = "";
-  historyPanelEntries.value = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, pendingTerminalInput), commandHistoryTimes.value);
-  historyPanelActiveIndex.value = 0;
+  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, pendingTerminalInput), commandHistoryTimes.value);
+  historyPanelEntries.value = next;
+  // shell ↑ 语义:初始高亮最底部(最新执行的命令),↑ 一直往上翻更旧的。
+  historyPanelActiveIndex.value = clampHistoryPanelIndex(next.length - 1, next.length);
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
   hideGhostSuggestion();
   closeSuggestionsOnly();
@@ -2074,14 +2076,15 @@ function moveHistoryPanelActive(delta: number) {
   historyPanelActiveIndex.value = moveHistoryPanelIndex(historyPanelActiveIndex.value, delta, historyPanelEntries.value.length);
 }
 
-/** 开启期间的过滤联动：搜索框 query 优先（焦点在输入框），回落行缓冲（旧
- *  打字过滤路径）；重算条目后高亮项越界收拢，锚点跟随光标。 */
+/** 开启期间的过滤联动:搜索框 query 优先(焦点在输入框),回落行缓冲(旧
+ *  打字过滤路径);重算条目后高亮置底(最新/最相关匹配,shell ↑ 语义),
+ *  锚点跟随光标。 */
 function updateHistoryPanelFilter() {
   if (!historyPanelOpen.value) return;
   const query = historyPanelQuery.value || pendingTerminalInput;
   const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, query), commandHistoryTimes.value);
   historyPanelEntries.value = next;
-  historyPanelActiveIndex.value = clampHistoryPanelIndex(historyPanelActiveIndex.value, next.length);
+  historyPanelActiveIndex.value = clampHistoryPanelIndex(next.length - 1, next.length);
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
 }
 
@@ -3015,6 +3018,10 @@ async function afterSessionConnected() {
   void probeLocalCapabilities();
   // 侧栏 tree tab 可见时补拉根节点（首连/重连后缓存仍为空的场景）。
   ensureSideTreeRoot();
+  // 远端 shell 历史导入(↑ history 面板内容对齐 shell history):异步拉取,
+  // 不阻塞会话建立;失败静默(受限 shell/无历史文件时回落仅本会话采集)。
+  const connectedSessionId = session.value?.sessionId;
+  if (connectedSessionId) void loadRemoteShellHistory(connectedSessionId);
   // After an auto-reconnect succeeds, tell the user the session is back and
   // which working directory context it resumed with (pure-function chosen).
   if (reconnectWasPending.value) {
@@ -5575,6 +5582,35 @@ function pushTerminalCommandHistory(command: string) {
   commandHistoryTimes.value = recordHistoryTime(commandHistoryTimes.value, command, Date.now());
   persistCommandHistory();
   persistCommandHistoryTimes();
+}
+
+// —— 远端 shell 历史导入(↑ history 面板内容对齐 shell)——插件自采集只覆盖
+// 本会话键入的命令;连接建立后经 ssh/exec(非交互通道,不进终端视图、不回显)
+// 拉取一次远端历史文件存量(~/.bash_history / ~/.zsh_history,HISTFILE 优先),
+// 解析合并进命令环。每会话只拉一次;失败静默(受限 shell/无历史文件时回落
+// 仅本会话采集,真实降级)。
+const REMOTE_HISTORY_FETCH_LIMIT = 500;
+const remoteHistoryLoadedSessions = new Set<string>();
+
+async function loadRemoteShellHistory(sessionId: string) {
+  if (!sessionId || remoteHistoryLoadedSessions.has(sessionId)) return;
+  remoteHistoryLoadedSessions.add(sessionId);
+  try {
+    const command = `for f in "$HISTFILE" "$HOME/.bash_history" "$HOME/.zsh_history" "$HOME/.zhistory"; do [ -f "$f" ] && { tail -n ${REMOTE_HISTORY_FETCH_LIMIT} -- "$f"; break; }; done`;
+    const result = await window.dbxPlugin.invoke<{ success: boolean; output?: string; exitCode?: number }>("ssh/exec", {
+      sessionId,
+      execId: randomUUID(),
+      command,
+      sudo: false,
+    }, { timeoutMs: 15_000 });
+    if (!result?.success || !result.output?.trim()) return;
+    const shellLines = parseShellHistoryText(result.output);
+    if (!shellLines.length) return;
+    commandHistory.value = mergeShellHistory(commandHistory.value, shellLines);
+    persistCommandHistory();
+  } catch {
+    // 通道不可用/超时:静默降级,面板回落到仅本会话采集的命令。
+  }
 }
 
 

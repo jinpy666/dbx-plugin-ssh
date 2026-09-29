@@ -109,20 +109,22 @@ export function chooseHistoryPanelPlacement(
 }
 
 /**
- * 过滤面板条目：空 query 返回历史全量（截断到上限）；否则优先模糊检索
- * （子序列评分排序），无命中或 query 超出检索长度门时退化为大小写不敏感
- * 子串过滤（保持历史顺序，最新置顶语义不丢）。
+ * 过滤面板条目。输出统一为「旧上新下」(与 shell readline 的 ↑ 方向一致:
+ * 底部是最新执行的命令,↑ 一直往上翻更旧的);空 query 返回全量历史的最新
+ * limit 条。检索命中时保持 searchCommands 的相关性排序再反转(最相关在
+ * 底部,初始高亮即它);无命中或 query 超出检索长度门时退化为大小写不敏感
+ * 子串过滤,同样保持旧上新下。
  */
 export function filterHistoryEntries(history: readonly string[], query: string, limit = HISTORY_PANEL_LIMIT): string[] {
   const max = Math.max(0, limit);
   const trimmed = query.trim();
-  if (!trimmed) return history.slice(0, max);
+  if (!trimmed) return history.slice(0, max).reverse();
   if (commandSuggestionQueryAcceptable(trimmed, 1, SEARCH_COMMANDS_DEFAULTS.maxLength)) {
     const ranked = searchCommands(trimmed, { history, quickCommands: [] }, { limit: max, minLength: 1 });
-    if (ranked.length) return ranked.map((row) => row.command);
+    if (ranked.length) return ranked.map((row) => row.command).reverse();
   }
   const needle = trimmed.toLowerCase();
-  return history.filter((command) => command.toLowerCase().includes(needle)).slice(0, max);
+  return history.filter((command) => command.toLowerCase().includes(needle)).slice(0, max).reverse();
 }
 
 /** 循环移动高亮项（↑↓ 到边缘回绕）；空列表恒为 0。 */

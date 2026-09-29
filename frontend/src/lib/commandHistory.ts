@@ -86,3 +86,55 @@ export function sanitizeCommandHistory(raw: unknown, limit = COMMAND_HISTORY_LIM
   }
   return out;
 }
+
+// —— 远端 shell 历史导入（↑ history 面板的内容补全）——插件自采集的历史只
+// 覆盖本插件会话期间敲的命令;面板要与 shell 原生 history 对齐,还需远端
+// 历史文件(~/.bash_history / ~/.zsh_history)里的存量记录。ssh/exec 拉取
+// tail 输出后,这里做纯解析与合并。
+
+/**
+ * 解析远端历史文件的 tail 文本为命令列表(旧→新)。处理两种格式:
+ * - zsh EXTENDED_HISTORY 元数据前缀 `: <ts>:<dur>;`;
+ * - 尾反斜杠续行(bash/zsh 历史文件把续行命令存成多行,拼接为一整条;
+ *   bash 真实多行命令不带尾反斜杠,会被拆成多条——可接受的近似)。
+ */
+export function parseShellHistoryText(raw: string): string[] {
+  const out: string[] = [];
+  let pending = "";
+  for (const line of raw.split("\n")) {
+    let text = line;
+    const zshMeta = /^:\s*\d+:\d+;/.exec(text);
+    if (zshMeta) text = text.slice(zshMeta[0].length);
+    // 反斜杠续行:奇数个尾反斜杠才是续行(偶数个是字面量转义)。
+    const trailingBackslashes = /\\+$/.exec(text)?.[0].length ?? 0;
+    if (trailingBackslashes % 2 === 1) {
+      pending += text.slice(0, -1);
+      continue;
+    }
+    pending += text;
+    const joined = pending.trim();
+    pending = "";
+    if (joined) out.push(joined);
+  }
+  const tail = pending.trim();
+  if (tail) out.push(tail);
+  return out;
+}
+
+/**
+ * 把远端历史(旧→新)合并进命令环(最新在前):环里已有的命令不动,
+ * 新增的按新旧插在环尾(更旧端),整体截断到上限。逐条过持久化过滤
+ * (凭据/超长拒收),保证合并结果可直接持久化。
+ */
+export function mergeShellHistory(current: string[], shellLines: readonly (string)[], limit = COMMAND_HISTORY_LIMIT): string[] {
+  const seen = new Set(current);
+  const extra: string[] = [];
+  for (const line of shellLines) {
+    const trimmed = line.trim();
+    if (!trimmed || seen.has(trimmed) || !isPersistableCommand(trimmed)) continue;
+    seen.add(trimmed);
+    extra.push(trimmed);
+  }
+  extra.reverse();
+  return [...current, ...extra].slice(0, limit);
+}

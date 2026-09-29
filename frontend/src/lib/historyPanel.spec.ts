@@ -25,23 +25,26 @@ const HISTORY = [
 ];
 
 describe("filterHistoryEntries", () => {
-  it("empty query returns the full history capped at the limit, order preserved", () => {
-    expect(filterHistoryEntries(HISTORY, "")).toEqual(HISTORY);
-    expect(filterHistoryEntries(HISTORY, "   ")).toEqual(HISTORY);
+  it("empty query returns the newest entries capped at the limit, oldest on top (shell ↑ direction)", () => {
+    const expected = [...HISTORY].reverse();
+    expect(filterHistoryEntries(HISTORY, "")).toEqual(expected);
+    expect(filterHistoryEntries(HISTORY, "   ")).toEqual(expected);
     const long = Array.from({ length: HISTORY_PANEL_LIMIT + 10 }, (_, i) => `cmd-${i}`);
     expect(filterHistoryEntries(long, "")).toHaveLength(HISTORY_PANEL_LIMIT);
-    expect(filterHistoryEntries(long, "")[0]).toBe("cmd-0");
+    // 取最新的 50 条(cmd-0..cmd-49,cmd-0 最新)后反转:底部是最新。
+    expect(filterHistoryEntries(long, "")[0]).toBe("cmd-49");
+    expect(filterHistoryEntries(long, "")[HISTORY_PANEL_LIMIT - 1]).toBe("cmd-0");
   });
 
-  it("ranks fuzzy matches by subsequence score", () => {
+  it("ranks fuzzy matches by subsequence score, most-relevant at the bottom", () => {
     const rows = filterHistoryEntries(HISTORY, "kube");
     expect(rows[0]).toBe("kubectl get pods -n prod");
   });
 
-  it("ranks multiple fuzzy hits by score", () => {
+  it("ranks multiple fuzzy hits by score and reverses into oldest-on-top order", () => {
     // "up"：docker 的 "up" 词首+连续命中得分最高；kubectl 里 u…p 的跨段子序列
-    // 次之；其余无子序列命中。
-    expect(filterHistoryEntries(HISTORY, "up")).toEqual(["docker compose up -d", "kubectl get pods -n prod"]);
+    // 次之；其余无子序列命中。输出旧上新下:相关性最高的 docker 在底部。
+    expect(filterHistoryEntries(HISTORY, "up")).toEqual(["kubectl get pods -n prod", "docker compose up -d"]);
   });
 
   it("handles over-long queries (beyond the search length gate) via substring fallback", () => {
