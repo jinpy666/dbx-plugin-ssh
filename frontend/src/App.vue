@@ -136,8 +136,8 @@ import {
 } from "./lib/sftpBookmarks";
 import { isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "./lib/commandSuggestions";
-import { classifyGhostInput, createGhostState, evaluateGhost, nextGhostState, ghostMenuSuppressed, type TerminalGhostState } from "./lib/terminalGhostSuggest";
-import { cursorAbsoluteRow, cursorViewportRow, measureCellSizeFromDom } from "./lib/terminalAnchor";
+import { evaluateGhost } from "./lib/terminalGhostSuggest";
+import { cursorViewportRow, measureCellSizeFromDom } from "./lib/terminalAnchor";
 import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "./lib/suggestionGuard";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
 // （vendored amazon-q parser + 全量语料，经冻结接缝 FigCompletionSource 注入
@@ -207,6 +207,8 @@ import { transferPausable } from "./lib/transferResume";
 import { isLiveTransferStatus, sortTransferTasks } from "./lib/transferOrder";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useGhostSuggest } from "./composables/useGhostSuggest";
+import { useQuickSelect } from "./composables/useQuickSelect";
 import { useSftpRename } from "./composables/useSftpRename";
 import { useSftpCreateDirectory } from "./composables/useSftpCreateDirectory";
 import { useConnectionInfo } from "./composables/useConnectionInfo";
@@ -302,7 +304,6 @@ import JsonPreviewPanel from "./components/JsonPreviewPanel.vue";
 import { buildJsonPreview, type JsonPreviewState } from "./lib/jsonPreview";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
 import TerminalQuickSelectPanel from "./components/TerminalQuickSelectPanel.vue";
-import { collectQuickSelectHits, type QuickSelectHit } from "./lib/quickSelect";
 import TerminalGutter from "./components/TerminalGutter.vue";
 import CommandSuggestions from "./components/CommandSuggestions.vue";
 import CompletionMenu from "./components/CompletionMenu.vue";
@@ -787,24 +788,6 @@ const suggestionQuery = ref("");
 let suggestionGuardState: SuggestionGuardState = createSuggestionGuardState();
 // 最近一次执行的命令行（onData 回车行 + OSC 633 E 帧），抑制门据此判定。
 const lastTerminalCommand = ref<string | null>(null);
-// —— 终端行内 ghost 自动建议（对标 Warp/fish autosuggest）——状态机纯逻辑在
-// lib/terminalGhostSuggest.ts；数据源即上方 commandHistory/quickCommands refs
-// （经 evaluateGhost 选项注入，不新建存储）。开关持久化在 SettingsDialog
-// （pluginStore 键 ssh-terminal-ghost-suggest，组件内自治），App 只持内存态、
-// 经 update:ghost-suggest 即时跟随；acceptPayload 直接写 PTY，等价用户键入。
-const GHOST_SUGGEST_KEY = "ssh-terminal-ghost-suggest";
-function loadGhostSuggestEnabled(): boolean {
-  try {
-    return pluginStore.getItem(GHOST_SUGGEST_KEY) !== "0";
-  } catch {
-    return true;
-  }
-}
-const ghostEnabled = ref(loadGhostSuggestEnabled());
-const ghostMatch = ref<{ command: string; remainder: string } | null>(null);
-const ghostAnchor = ref<{ x: number; y: number } | null>(null);
-// 门状态非响应式：只有 evaluateGhost 的产物（ghostMatch）进渲染。
-let ghostGate: TerminalGhostState = createGhostState();
 
 // 结构化补全浮层（FIG wave-1 最终架构）：唯一来源 = fig 引擎，经冻结接缝
 // FigCompletionSource 注入 CompletionController（解析→防抖→guard→菜单）。
@@ -1012,11 +995,6 @@ const searchMatchState = ref<TerminalSearchMatchState>("idle");
 const searchResultIndex = ref(0);
 const searchResultCount = ref(0);
 // Quick Select Mode（WT-1，对标 WezTerm）：注册表动作 quick-select 唤起，
-// collectQuickSelectHits 抽取可视区 URL/路径/IPv4/hash，浮层逐项复制。
-// 焦点不离开终端：Esc/↑↓/Enter 由 handleTerminalKey 的浮层分支统一消费。
-const quickSelectOpen = ref(false);
-const quickSelectHits = ref<QuickSelectHit[]>([]);
-const quickSelectActive = ref(0);
 const pasteConfirm = ref<PasteConfirmation>();
 // 终端拖入文件的落点询问：null 表示取消；"cwd" 用解析后的 shell/SFTP 当前
 // 目录（resolveDropTargetDir：终端 cwd 跟随 → SFTP home → 面板当前目录），
@@ -2782,61 +2760,21 @@ function resetSearchResults() {
 // 纯逻辑模块抽取可视区命中（正则/容量/去重见 lib/quickSelect.ts），这里只做
 // 状态与复制接线。复制链与选中复制一致（插件视图副本 + 剪贴板桥逐级降级）。
 // ---------------------------------------------------------------------------
-function openQuickSelect() {
-  if (!terminal) return;
-  terminalMenuOpen.value = false;
-  quickSelectHits.value = collectQuickSelectHits(terminal.buffer.active, terminal.rows);
-  quickSelectActive.value = 0;
-  quickSelectOpen.value = true;
-}
-
-function closeQuickSelect() {
-  if (!quickSelectOpen.value) return;
-  quickSelectOpen.value = false;
-  quickSelectHits.value = [];
-  quickSelectActive.value = 0;
-  terminal?.focus();
-}
-
-function moveQuickSelectActive(delta: number) {
-  const count = quickSelectHits.value.length;
-  if (!count) return;
-  quickSelectActive.value = (quickSelectActive.value + delta + count) % count;
-}
-
-async function copyQuickSelectHit(hit: QuickSelectHit) {
-  terminalCopyCache.set(hit.text);
-  try {
-    await writeClipboardText(hit.text, clipboardDeps());
-    showNotice(t("quickSelect.copied"));
-    // 与 WezTerm 同语义：选取完成即收浮层、焦点交还终端。
-    closeQuickSelect();
-  } catch {
-    showError(new Error(t("terminalCopyUnavailable")), "terminal");
-  }
-}
-
-/** Quick Select 浮层的按键消费：命中返回 true（由调用方吞键），未命中放行。 */
-function handleQuickSelectKey(event: KeyboardEvent): boolean {
-  if (event.key === "Escape") {
-    closeQuickSelect();
-    return true;
-  }
-  if (event.key === "ArrowDown") {
-    moveQuickSelectActive(1);
-    return true;
-  }
-  if (event.key === "ArrowUp") {
-    moveQuickSelectActive(-1);
-    return true;
-  }
-  if (event.key === "Enter") {
-    const hit = quickSelectHits.value[quickSelectActive.value];
-    if (hit) void copyQuickSelectHit(hit);
-    return true;
-  }
-  return false;
-}
+// Quick Select：命中抽取/浮层/按键消费收口在 composables/useQuickSelect。
+const {
+  quickSelectOpen,
+  quickSelectHits,
+  quickSelectActive,
+  openQuickSelect,
+  closeQuickSelect,
+  moveQuickSelectActive,
+  copyQuickSelectHit,
+  handleQuickSelectKey,
+} = useQuickSelect({
+  t, showNotice, showError,
+  terminal: () => terminal,
+  terminalMenuOpen, terminalCopyCache, clipboardDeps,
+});
 
 function runTerminalSearch(query: string, options: { caseSensitive: boolean; regex: boolean; wholeWord: boolean }, direction: "next" | "prev") {
   if (!searchAddon || !query) return;
@@ -3168,105 +3106,26 @@ function fillSuggestion(item: CommandSuggestion) {
 // ---------------------------------------------------------------------------
 
 /** 设置开关（SettingsDialog 自治持久化，经 update:ghost-suggest 即时上抛）。 */
-function setGhostEnabled(next: boolean) {
-  ghostEnabled.value = next;
-  if (!next) hideGhostSuggestion();
-}
-
-function hideGhostSuggestion() {
-  ghostMatch.value = null;
-}
-
-/** 会话切换/断开：门锁存与展示一并复位（与 closeSuggestions 同点调用）。 */
-function resetGhostSuggestion() {
-  ghostGate = createGhostState();
-  ghostMatch.value = null;
-}
-
-/**
- * 光标行采样：光标右侧到行尾无字符、且逻辑行未向下折行时视为「光标在行尾」。
- * 纯 buffer 读取，与字宽无关；读不到 buffer（渲染器未就绪/备用屏）时保守返回
- * false——不出 ghost 优于错位注入。
- */
-function terminalCursorAtLineEnd(): boolean {
-  if (!terminal) return false;
-  try {
-    const buffer = terminal.buffer.active;
-    if (buffer.type !== "normal") return false;
-    // 光标行按缓冲绝对行号采样：baseY + cursorY（cursorY 是视口内相对行，
-    // viewportY 随用户滚动偏移，`cursorY + viewportY` 上滚时会采到滚回区旧行）。
-    const rowY = cursorAbsoluteRow(buffer);
-    const row = buffer.getLine(rowY);
-    if (!row) return false;
-    for (let x = buffer.cursorX; x < terminal.cols; x += 1) {
-      if (row.getCell(x)?.getChars()) return false;
-    }
-    // 折行命令的后续视觉行仍属同一逻辑行：光标在视觉行尾 ≠ 逻辑行尾。
-    if (buffer.getLine(rowY + 1)?.isWrapped) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** ghost 专用锚点：光标像素坐标（灰字从光标格起绘，y 取光标行行顶）。 */
-/** ghost 行内建议锚点：与建议浮层同一光标格换算（含 .xterm-screen 原点，
- *  可配置内边距自动计入），盖在光标行上。 */
-function readGhostAnchor(): { x: number; y: number } | null {
-  const frame = readTerminalCellFrame();
-  if (!frame) return null;
-  return {
-    x: Math.round(frame.originLeft + frame.cursorX * frame.cellWidth),
-    y: Math.round(frame.originTop + frame.visibleRow * frame.cellHeight),
-  };
-}
-
-/** onData 每次输入后调用：推进门状态并重算 ghost（与浮层建议同一采样点）。 */
-function refreshGhostAfterInput(data: string) {
-  ghostGate = nextGhostState(ghostGate, classifyGhostInput(data));
-  updateGhostSuggestion();
-}
-
-function updateGhostSuggestion() {
-  // 浮层建议/结构化补全菜单开着时不出 ghost：菜单占用 →/Enter/Esc，与
-  // 「→ 仅在无菜单态下接受」一致，同屏叠两层建议也无法阅读。
-  if (ghostMenuSuppressed(suggestionOpen.value, completionOpen.value)) {
-    ghostMatch.value = null;
-    return;
-  }
-  const evaluation = evaluateGhost({
-    state: ghostGate,
-    line: pendingTerminalInput,
-    cursorAtLineEnd: terminalCursorAtLineEnd(),
-    enabled: ghostEnabled.value,
-    // 远端命令执行中 / zmodem、trzsz 传输占用流时不出建议（任务约束）。
-    commandRunning: commandRunning.value || terminalTransferBusy.value,
-    compositionActive: false,
-    sources: { history: commandHistory.value, quickCommands: quickCommands.value },
-    bounds: {
-      minLength: Math.max(1, suggestionMinCharsState.value),
-      maxLength: Math.max(suggestionMinCharsState.value, suggestionMaxCharsState.value),
-      limit: 12,
-    },
-  });
-  ghostMatch.value = evaluation.match;
-  if (evaluation.match) ghostAnchor.value = readGhostAnchor();
-}
-
-/** → 接受：向 PTY 注入剩余字节（等价用户逐键键入；按键轨迹缓冲同步补齐）。 */
-function acceptGhostSuggestion() {
-  const match = ghostMatch.value;
-  if (!match || !match.remainder) return;
-  ghostMatch.value = null;
-  pendingTerminalInput += match.remainder;
-  sendTerminalBytes(new TextEncoder().encode(match.remainder));
-  // ghost 接受同样推进行缓冲（FIG wave-1 锚点）：作废在途结构化补全结果
-  // 并防抖重算（补全后的行可能命中引擎候选）。
-  completionController.lineChanged();
-  // 接受后按新行重算：更长同前缀历史可继续 → 扩展（fish 同款行为）。
-  updateGhostSuggestion();
-}
-
+// ghost 行内建议：状态机/门/接受语义收口在 composables/useGhostSuggest。
+const {
+  ghostEnabled,
+  ghostMatch,
+  ghostAnchor,
+  setGhostEnabled,
+  hideGhostSuggestion,
+  resetGhostSuggestion,
+  refreshGhostAfterInput,
+  acceptGhostSuggestion,
+} = useGhostSuggest({
+  terminal: () => terminal,
+  sendTerminalBytes,
+  getPendingTerminalInput: () => pendingTerminalInput,
+  appendToPendingTerminalInput: (data) => { pendingTerminalInput += data; },
+  commandRunning, terminalTransferBusy, commandHistory, quickCommands,
+  suggestionOpen, completionOpen, completionController,
+  suggestionMinCharsState, suggestionMaxCharsState,
+  readTerminalCellFrame,
+});
 function sendTerminalBytes(data: Uint8Array) {
   // 串口会话优先：B1 主路径走 `serial/terminal/in/{id}` 二进制写通道（专用
   // 有序队列 + Stdin 流标签帧）；宿主报错（未知通道/旧 sidecar）一次性降级
