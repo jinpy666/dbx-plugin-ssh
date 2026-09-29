@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # aws-lc-sys falls back to its bundled prebuilt NASM objects when the
+  # assembler is missing on the MSVC toolchain (same as the main CI).
+  AWS_LC_SYS_PREBUILT_NASM: "1"
+
 jobs:
   probe:
     name: ConPTY handshake probe (windows-2022)
