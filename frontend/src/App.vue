@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type CSSProperties } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
@@ -134,7 +134,7 @@ import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib
 import { filesFromClipboard } from "./lib/clipboardFiles";
 import { friendlySftpError, shouldOfferSudoRetryAfterFollowFailure } from "./lib/sftpErrors";
 import { filterDiskMounts, filterNetworkInterfaces } from "./lib/metricsView";
-import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "./lib/paneLayout";
+import { terminalFlexBasis } from "./lib/paneLayout";
 import { computeWindow } from "./lib/virtualWindow";
 import type { GpuOverviewView, NpuOverviewView } from "./lib/metricsGpuNpu";
 import { isCountdownActive, nextCountdownValue, RECORD_COUNTDOWN_START } from "./lib/recordingCountdown";
@@ -484,8 +484,6 @@ interface WorkbenchState {
   splitRatio?: number;
   paneOrder?: SshWorkbenchPaneOrder;
   sftpPaneOpen?: boolean;
-  /** Docker 停靠面板拖宽后的 px 宽度（未拖过不落盘，走 CSS 默认）。 */
-  dockerPaneWidth?: number;
   visibleColumns?: SftpColumn[];
   sftpColumnWidths?: Partial<Record<SftpColumn, number>>;
   sftpNameWidth?: number | null;
@@ -1973,17 +1971,15 @@ const connectionAuthMethodLabel = computed(() => formatAuthMethodLabel(connectio
 }));
 // 连接色染色按主题分级（light 压低 alpha 保 muted 文字 AA 对比度，P2-4）。
 const toolbarStyle = computed(() => toolbarTintStyle(connection.value.color, appearance.value.colorScheme));
-// 终端让宽（纯计算在 lib/paneLayout）：SFTP 分栏按用户拖拽比例；Docker 停靠
-// 面板宽度可拖（--docker-pane-width，见 style.css .panes 与 startDockerDividerDrag）。
-// 两者同开时终端在「(100% - Docker 宽)」内按 SFTP 比例取份额，SFTP flex:1 吸收
-// 剩余——两栏同显，不再互相挤没。
+// 终端让宽（纯计算在 lib/paneLayout）：SFTP 分栏按用户拖拽比例。Docker 面板
+// 已改 metrics-float 同款浮层（终端面板内右上角，自右缘向左覆盖终端一角），
+// 不再占分栏宽度，终端与 SFTP 布局不受其开合影响。
 const terminalBasis = computed(() => ({
-  flexBasis: terminalFlexBasis({ sftpOpen: sftpPaneOpen.value, dockerOpen: dockerPanelOpen.value, splitRatio: splitRatio.value }),
+  flexBasis: terminalFlexBasis({ sftpOpen: sftpPaneOpen.value, splitRatio: splitRatio.value }),
 }));
 const orderedPaneClass = computed(() => [
   paneOrder.value === "sftp-left" ? "panes panes--reversed" : "panes",
   sftpPaneOpen.value ? "" : "panes--solo",
-  dockerPanelOpen.value ? "panes--docker" : "",
 ].filter(Boolean).join(" "));
 const sortedEntries = computed(() => {
   const direction = sort.value.direction === "asc" ? 1 : -1;
@@ -2114,15 +2110,6 @@ function restoreUiState() {
   const state = initialState();
   currentPath.value = typeof state.sftpPath === "string" ? normalizeRemotePath(state.sftpPath) : "/";
   splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : 58;
-  dockerPaneWidth.value = typeof state.dockerPaneWidth === "number" ? clampDockerPaneWidth(state.dockerPaneWidth, window.innerWidth) : null;
-  // 恢复时 .panes 未必完成布局，上面以 window.innerWidth 近似容器宽；窗口窄于
-  // 窗口宽时持久化宽度可能越过容器 70% 上限，挂帧后用实测宽复钳一次校正。
-  void nextTick(() => {
-    const containerWidth = paneContainer.value?.clientWidth;
-    if (dockerPaneWidth.value != null && containerWidth) {
-      dockerPaneWidth.value = clampDockerPaneWidth(dockerPaneWidth.value, containerWidth);
-    }
-  });
   paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : "terminal-left";
   // Dock panel surface: the SFTP pane stays closed (no auto-list/auto-connect);
   // users who want SFTP open the workbench tab.
@@ -2156,7 +2143,6 @@ function writeWorkbenchState() {
     splitRatio: splitRatio.value,
     paneOrder: paneOrder.value,
     sftpPaneOpen: sftpPaneOpen.value,
-    dockerPaneWidth: dockerPaneWidth.value ?? undefined,
     visibleColumns: visibleColumns.value,
     columnsV2: true,
     sftpColumnWidths: { ...sftpColumnWidths },
@@ -6307,19 +6293,11 @@ function openAlertTriage() {
 // 这里只保留工具栏入口的开关状态。
 const forwardsOpen = ref(false);
 
-// Docker 停靠面板（P2-4 迁移后二迁）：工具条鲸鱼按钮开合，与 SFTP 面板同款
-// 分栏停靠（paneContainer 末尾的 .docker-pane，终端经 terminalBasis 让宽），
-// 不再是 portal 弹层。面板本体仍由 DockerPanel 自治（会话解析/轮询/动作/
-// 引擎设置都在组件内），关闭即卸载并停轮询。
+// Docker 浮层（三迁：SFTP tab → 分栏停靠 → metrics-float 同款浮层）：工具条
+// 鲸鱼按钮开合，面板挂在终端面板内右上角（.docker-float），出现即自右缘向左
+// 覆盖终端一角，不占分栏宽度；关闭即卸载并停轮询。面板本体仍由 DockerPanel
+// 自治（会话解析/轮询/动作/引擎设置都在组件内）。
 const dockerPanelOpen = ref(false);
-// Docker 面板可拖宽度（px，null = 用 CSS 默认 clamp）。经 .panes 上的内联
-// CSS 变量 --docker-pane-width 下发：终端让宽（terminalBasis）与 .docker-pane
-// 的 flex-basis 引用同一变量，拖宽后两段口径自动一致。容器表列多时面板可
-// 拖到容器 70% 宽（lib/paneLayout 的钳制口径）。
-const dockerPaneWidth = ref<number | null>(null);
-const panesStyle = computed(() =>
-  dockerPaneWidth.value == null ? undefined : ({ "--docker-pane-width": `${dockerPaneWidth.value}px` } as CSSProperties),
-);
 
 async function runAlertTriage() {
   if (alertTriageBusy.value) return;
@@ -7828,47 +7806,6 @@ function startDividerDrag(event: PointerEvent) {
   container.addEventListener("pointercancel", release);
 }
 
-/** Docker 分栏拖宽：与 SFTP divider 同款 pointer-capture 交互；把手始终在
- *  Docker 面板贴 SFTP 一侧，SFTP 左置（row-reverse）时面板靠容器左缘，其余
- *  情况靠右缘。宽度经 --docker-pane-width 下发，终端/SFTP 让宽自动跟随。 */
-function startDockerDividerDrag(event: PointerEvent) {
-  const container = paneContainer.value;
-  if (!container) return;
-  const pointerId = event.pointerId;
-  const move = (next: PointerEvent) => {
-    if (next.pointerId !== pointerId) return;
-    const bounds = container.getBoundingClientRect();
-    const distance = paneOrder.value === "sftp-left" ? next.clientX - bounds.left : bounds.right - next.clientX;
-    dockerPaneWidth.value = clampDockerPaneWidth(distance, bounds.width);
-    scheduleFit();
-  };
-  // release 先摘监听再守卫释放捕获，原因同 startDividerDrag 的 pointercancel 注释。
-  const release = (next: PointerEvent) => {
-    if (next.pointerId !== pointerId) return;
-    container.removeEventListener("pointermove", move);
-    container.removeEventListener("pointerup", release);
-    container.removeEventListener("pointercancel", release);
-    if (container.hasPointerCapture(pointerId)) {
-      try { container.releasePointerCapture(pointerId); } catch { /* 已被隐式释放 */ }
-    }
-    // pointerup 后浏览器会向捕获目标（容器）合成一次 click：在捕获阶段吞掉这
-    // 一发，document 收口（onDocumentClickCloseMenus）就不会把它当「点空白」
-    // 误关 Docker 面板。pointercancel 不合成 click，无需布防；超时拆除兜底个
-    // 别内核在 pointer capture 下不合成 click 的情形，防止守卫滞留吞掉用户下
-    // 一次真实点击。
-    if (next.type === "pointerup") {
-      const swallowSyntheticClick = (click: MouseEvent) => click.stopPropagation();
-      container.addEventListener("click", swallowSyntheticClick, { capture: true, once: true });
-      setTimeout(() => container.removeEventListener("click", swallowSyntheticClick, { capture: true }), 1000);
-    }
-    persistState();
-  };
-  container.setPointerCapture(pointerId);
-  container.addEventListener("pointermove", move);
-  container.addEventListener("pointerup", release);
-  container.addEventListener("pointercancel", release);
-}
-
 // 分栏把手键盘通道（pointer 拖拽对键盘用户不可达）：左右方向键把手 ±16px，
 // Shift 加速 ×3。`delta > 0` 统一表示「把手向右移」。
 const DIVIDER_KEY_STEP_PX = 16;
@@ -7887,21 +7824,6 @@ function nudgeSplitDivider(deltaPx: number) {
   // splitRatio 是终端占比：terminal-left 时把手右移 = 终端变宽；否则反向。
   const sign = paneOrder.value === "terminal-left" ? 1 : -1;
   splitRatio.value = Math.max(35, Math.min(80, splitRatio.value + (deltaPx / bounds.width) * 100 * sign));
-  scheduleFit();
-  persistState();
-}
-
-function nudgeDockerDivider(deltaPx: number) {
-  const container = paneContainer.value;
-  if (!container) return;
-  const bounds = container.getBoundingClientRect();
-  if (!bounds.width) return;
-  // dockerPaneWidth 恒等于把手到「面板贴靠缘」的距离：sftp-left（面板靠
-  // 左缘）时把手右移 = 面板变宽；否则把手右移 = 面板变窄。null = 尚未
-  // 拖过（CSS 默认宽，钳制下限同源），从默认宽起算。
-  const sign = paneOrder.value === "sftp-left" ? 1 : -1;
-  const current = dockerPaneWidth.value ?? DOCKER_PANE_MIN_WIDTH;
-  dockerPaneWidth.value = clampDockerPaneWidth(current + deltaPx * sign, bounds.width);
   scheduleFit();
   persistState();
 }
@@ -11444,8 +11366,9 @@ function showTransferHistoryMenu(event: MouseEvent, entry: TransferHistoryEntry)
  * 设定自身状态。族成员 = 模板 class="popover" 的九个弹出层（quick-commands /
  * agent-mode / highlight-rules / connection-info / columns / transfer /
  * batch-targets / bookmark-save / path-history）。语义差异说明：metrics 浮层
- * （.metrics-float，closeMetrics 自带轮询清理）与批量保存态（batchSaveMode，
- * cancelBatchBarSave 带草稿清理）不属于本族，仍由 Esc 链单独收口；
+ * （.metrics-float，closeMetrics 自带轮询清理）、Docker 浮层（.docker-float，
+ * 与 metrics 同款右上浮层）与批量保存态（batchSaveMode，cancelBatchBarSave
+ * 带草稿清理）不属于本族，仍由 Esc 链单独收口；
  * batch-targets 弹层另有 mousedown-capture 点空白收起，此处再关一次幂等无害。
  */
 function closeToolbarPopovers() {
@@ -11463,8 +11386,6 @@ function closeToolbarPopovers() {
   sessionMenuOpen.value = false;
   sessionMenuShellOpen.value = false;
   localShellSurfaceOpen.value = false;
-  // Docker 停靠面板：点空白/切 tab 等全局收口时一并关闭（幂等）。
-  dockerPanelOpen.value = false;
 }
 
 function closeMenus() {
@@ -11728,11 +11649,13 @@ function onDocumentKeydown(event: KeyboardEvent) {
   }
   // 右键菜单与九个工具栏 popover 均已迁移 reka（ContextMenu/Popover）：Esc 与外点
   // 由 reka 自行消费（见上方 content 守卫），不再占 Esc 链一层。本层只剩
-  // 指标浮层（.metrics-float 非 reka）与批量保存态（带草稿清理）。
-  if (metricsOpen.value || recordingsOpen.value || batchSaveMode.value) {
+  // 指标/录制浮层、Docker 浮层（.metrics-float/.docker-float 非 reka）与
+  // 批量保存态（带草稿清理）。
+  if (metricsOpen.value || recordingsOpen.value || batchSaveMode.value || dockerPanelOpen.value) {
     if (batchSaveMode.value) cancelBatchBarSave();
     if (metricsOpen.value) closeMetrics();
     if (recordingsOpen.value) recordingsOpen.value = false;
+    if (dockerPanelOpen.value) dockerPanelOpen.value = false;
   }
 }
 
@@ -11997,7 +11920,7 @@ async function reattachProtocolSession(): Promise<boolean> {
   return true;
 }
 
-watch([splitRatio, dockerPaneWidth, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
+watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
 
 onMounted(() => {
   document.addEventListener("click", onDocumentClickCloseMenus);
@@ -12246,7 +12169,7 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :disabled="!session" @click="forwardsOpen = true"><Network /></button>
-        <!-- Docker 停靠面板（鲸鱼 logo 独立入口，与 SFTP 面板同款分栏交互）：
+        <!-- Docker 浮层（鲸鱼 logo 独立入口，metrics-float 同款右上浮层）：
              SFTP 面板关闭时也可达；local 模式保留——本机 daemon（Docker
              Desktop/OrbStack）场景照常可用。面板自治，关闭即卸载停轮询。 -->
         <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
@@ -12428,7 +12351,7 @@ onBeforeUnmount(() => {
       <ToastViewport class="error-viewport" />
     </ToastProvider>
 
-    <section ref="paneContainer" :class="orderedPaneClass" :style="panesStyle">
+    <section ref="paneContainer" :class="orderedPaneClass">
       <ContextMenu :open="terminalMenuOpen" @update:open="(open) => { if (!open) terminalMenuOpen = false; }">
         <ContextMenuTrigger as-child>
       <section class="terminal-pane" :class="{ 'drag-active': terminalDragActive, 'batch-bar-open': connected && batchBarOpen, 'marker-visible': commandMarker.installed, 'gutter-visible': gutterPaneVisible, 'wallpaper-active': wallpaperActive }" :style="[terminalBasis, gutterPaneStyle]" @contextmenu="showTerminalMenu" @dragenter.prevent="onTerminalDragEnter" @dragover.prevent @dragleave.self="terminalDragActive = false" @drop.prevent="onTerminalDrop($event)">
@@ -12841,6 +12764,18 @@ onBeforeUnmount(() => {
               </article>
             </template>
           </div>
+        </section>
+        <!-- Docker 浮层（metrics-float 同款）：挂终端面板内右上角，出现即自右缘
+             向左覆盖终端一角，不占分栏、永不遮挡 SFTP 面板；X/Esc 随时可关，
+             关闭即卸载停轮询。与指标/录制浮条同角族（同开时后挂者置顶，语义同
+             recordings）。内嵌引擎设置 Popover 与确认/日志 Dialog 仍 portal 到
+             body。宽度按容器表自然宽给足，窄屏收 100%-16px。 -->
+        <section v-if="dockerPanelOpen" class="docker-float">
+          <header>
+            <h2>{{ t("docker.toolbarTitle") }}</h2>
+            <button class="icon-button" :title="t('close')" @click="dockerPanelOpen = false"><X /></button>
+          </header>
+          <DockerPanel :t="t" />
         </section>
         <!-- 回放弹窗：xterm 重放 + 倍速/进度/GIF 导出 -->
         <div v-if="replayState" class="replay-overlay" @click.self="closeReplay">
@@ -13270,29 +13205,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-if="dragActive" class="drop-overlay"><FileUp /><strong>{{ t("upload") }}</strong></div>
-      </section>
-      <!-- Docker 停靠面板（与 SFTP 面板同款分栏交互，终端经 terminalBasis 让宽）：
-           非 portal 弹层——面板内点击 @click.stop 防 document 收口误关；内嵌
-           引擎设置 Popover 与确认/日志 Dialog 仍 portal 到 body（收口守卫已排除
-           其 data-slot）。宽度可拖（前置 .divider），与 SFTP 同开时按
-           terminalBasis 分摊剩余宽度，两栏同显互不遮挡。 -->
-      <div
-        v-if="dockerPanelOpen"
-        class="divider"
-        role="separator"
-        aria-orientation="vertical"
-        :aria-valuenow="Math.round(dockerPaneWidth ?? 0)"
-        :title="t('dividerResizeHint')"
-        tabindex="0"
-        @pointerdown="startDockerDividerDrag"
-        @keydown="onDividerKeydown($event, nudgeDockerDivider)"
-      />
-      <section v-if="dockerPanelOpen" class="docker-pane" @click.stop>
-        <header>
-          <h2>{{ t("docker.toolbarTitle") }}</h2>
-          <button class="icon-button" :title="t('close')" @click="dockerPanelOpen = false"><X /></button>
-        </header>
-        <DockerPanel :t="t" />
       </section>
     </section>
 
