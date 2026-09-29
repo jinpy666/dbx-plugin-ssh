@@ -5054,100 +5054,17 @@ const {
   uploadWatchedFileAlways,
   handleWatchModified,
   joinLocalPath,
-} = useExternalEdits({ t, showNotice, showError, loadDirectory });
+  openInExternalEditor,
+} = useExternalEdits({
+  t, showNotice, showError, loadDirectory,
+  session,
+  openTransferPanel, transferTasks, pathFromUri, waitWhilePaused, cancelledTransferTasks, downloadChunkWaiters,
+  waitForDownloadChunk: (taskId, offset) => waitForDownloadChunk(taskId, offset),
+  probeLocalCapabilities: () => probeLocalCapabilities(),
+  loadDownloadDir, copyTextToClipboard,
+  closeFileMenu: () => { fileMenu.value = undefined; },
+});
 
-/** 精简单文件下载（外部编辑专用）：saveToLocal 直落 `downloadDir`，冲突直接
- * 覆盖（目录带时间戳不会撞名），完成后返回 sidecar 落盘的绝对路径。 */
-async function downloadForExternalEdit(entry: SftpEntry, downloadDir: string): Promise<string | undefined> {
-  if (!session.value || entry.kind !== "file") return undefined;
-  openTransferPanel();
-  const info = await window.dbxPlugin.invoke<DownloadInfo>("sftp/download/start", {
-    sessionId: session.value.sessionId,
-    remotePath: pathFromUri(entry.uri),
-    saveToLocal: true,
-    downloadDir,
-    conflict: "overwrite",
-  });
-  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now() };
-  try {
-    let offset = 0;
-    while (offset < info.size) {
-      await waitWhilePaused(info.taskId);
-      const chunkPromise = waitForDownloadChunk(info.taskId, offset);
-      const nextPromise = window.dbxPlugin.invoke<{ length: number; eof: boolean }>("sftp/download/next", { taskId: info.taskId, offset });
-      // 取消经 chunk waiter 中断；吞掉在途请求的 rejection 以免变成 unhandled。
-      nextPromise.catch(() => undefined);
-      const result = await nextPromise;
-      await chunkPromise;
-      offset += result.length;
-      const task = transferTasks[info.taskId];
-      if (task) {
-        task.status = "running";
-        task.transferred = offset;
-      }
-      if (result.eof) break;
-    }
-    const finish = await window.dbxPlugin.invoke<{ localPath?: string }>("sftp/download/finish", { taskId: info.taskId });
-    cancelledTransferTasks.delete(info.taskId);
-    const task = transferTasks[info.taskId];
-    if (task) {
-      task.status = "completed";
-      task.transferred = info.size;
-      if (finish?.localPath) task.localPath = finish.localPath;
-    }
-    return finish?.localPath;
-  } catch (cause) {
-    const waiter = downloadChunkWaiters.get(info.taskId);
-    if (waiter) {
-      window.clearTimeout(waiter.timer);
-      downloadChunkWaiters.delete(info.taskId);
-    }
-    await window.dbxPlugin.invoke("sftp/transfer/cancel", { taskId: info.taskId }).catch(() => undefined);
-    throw cause;
-  }
-}
-
-/** 「在外部编辑器中打开」：下载 → watch/start → 系统默认程序打开 → 通知。
- * 仅桌面端可用（web/docker 的 sidecar 不在本机，无法监听也无法回传）。
- * M15 起可并发打开多个文件：每次打开独立下载、独立注册 watch，互不顶替
- * （同远端路径的重复打开由注册表与 sidecar 的 per-path dedup 收敛为最新）。 */
-async function openInExternalEditor(entry: SftpEntry) {
-  fileMenu.value = undefined;
-  if (!session.value) return;
-  const local = await probeLocalCapabilities();
-  if (!local?.canSaveLocal) {
-    showNotice(t("sftpEdit.desktopOnly"));
-    return;
-  }
-  try {
-    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-    const dir = joinLocalPath(loadDownloadDir() || local.downloadsDir, `remote-edit/${stamp}`);
-    const localPath = await downloadForExternalEdit(entry, dir);
-    if (!localPath || !session.value) return;
-    const remotePath = pathFromUri(entry.uri);
-    const watch = await window.dbxPlugin.invoke<{ watchId: string }>("watch/start", {
-      sessionId: session.value.sessionId,
-      remotePath,
-      localPath,
-    });
-    alwaysUploadWatches.delete(watch.watchId);
-    activeExternalWatches.value = registerWatch(activeExternalWatches.value, {
-      watchId: watch.watchId,
-      name: entry.name,
-      remotePath,
-    });
-    // 宿主 local/open 校验该路径确为本插件完成的下载（防任意路径打开）。
-    try {
-      await window.dbxPlugin.invoke("local/open", { path: localPath });
-    } catch {
-      await window.dbxPlugin.invoke("local/reveal", { path: localPath });
-    }
-    copyTextToClipboard(localPath, "sftpEdit.pathCopied");
-    showNotice(t("sftpEdit.watching", { name: entry.name }));
-  } catch (cause) {
-    showError(cause, "sftp");
-  }
-}
 
 // 符号链接（P2-6）：对话框/提交/tooltip 缓存收口在 composables/useSymlink。
 const {

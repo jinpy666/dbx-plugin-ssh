@@ -1,16 +1,63 @@
-import { computed, ref, watch } from "vue";
-import { enqueueWatchModified, popWatchModified, watchName, type ModifiedPrompt, type WatchRegistry } from "../lib/watchEdits";
+import { computed, ref, watch, type Ref } from "vue";
+import { enqueueWatchModified, popWatchModified, registerWatch, watchName, type ModifiedPrompt, type WatchRegistry } from "../lib/watchEdits";
+import type { SftpEntryKind } from "../lib/sftpEntries";
+import type { TransferTask } from "../lib/transferQueue";
+
+/** 外部编辑条目（App.vue 局部接口 SftpEntry 按消费字段收敛）。 */
+interface ExternalEditEntry {
+  uri: string;
+  name: string;
+  kind: SftpEntryKind;
+}
+
+/** 外部编辑专用下载的 start 回显（App.vue 局部接口 DownloadInfo 按消费字段收敛）。 */
+interface ExternalEditDownloadInfo {
+  taskId: string;
+  fileName: string;
+  size: number;
+}
 
 /** 外部编辑器回传（P2-5，桌面端；M15 起逐文件化）：watch/file-modified 确认
- * 状态机 + watch/upload 串行链。「在外部编辑器中打开」的下载/打开入口与
- * 传输队列内部状态仍在 App.vue（与传输域耦合）。 */
+ * 状态机 + watch/upload 串行链 +「在外部编辑器中打开」的下载/打开入口。
+ * 下载走 saveToLocal 直落 remote-edit 目录，复用传输队列的暂停/chunk-waiter
+ * 原语（经 options 注入；waitForDownloadChunk/probeLocalCapabilities 所在
+ * composable 装配在本域之后，以惰性 getter 解 TDZ）。 */
 export function useExternalEdits(options: {
   t: (key: string, values?: Record<string, string | number>) => string;
   showNotice: (message: string) => void;
   showError: (cause: unknown, target?: "terminal" | "sftp") => void;
   loadDirectory: (path?: string) => Promise<void>;
+  session: Ref<{ sessionId: string } | undefined>;
+  openTransferPanel: () => void;
+  transferTasks: Record<string, TransferTask>;
+  pathFromUri: (uri: string) => string;
+  waitWhilePaused: (taskId: string) => Promise<void> | undefined;
+  waitForDownloadChunk: (taskId: string, offset: number) => Promise<unknown>;
+  cancelledTransferTasks: Set<string>;
+  downloadChunkWaiters: Map<string, { timer: number }>;
+  probeLocalCapabilities: () => Promise<{ canSaveLocal: boolean; downloadsDir: string } | null | undefined>;
+  loadDownloadDir: () => string;
+  copyTextToClipboard: (value: string, noticeKey: string, values?: Record<string, string | number>) => void;
+  closeFileMenu: () => void;
 }) {
-  const { t, showNotice, showError, loadDirectory } = options;
+  const {
+    t,
+    showNotice,
+    showError,
+    loadDirectory,
+    session,
+    openTransferPanel,
+    transferTasks,
+    pathFromUri,
+    waitWhilePaused,
+    waitForDownloadChunk,
+    cancelledTransferTasks,
+    downloadChunkWaiters,
+    probeLocalCapabilities,
+    loadDownloadDir,
+    copyTextToClipboard,
+    closeFileMenu,
+  } = options;
 
 // —— 外部编辑器回传（P2-5，桌面端；M15 起多文件并行）：文件先经 sftp/download
 // 落到 <下载目录>/remote-edit/<ts>/，watch/start 注册监听（同一会话可同时挂
@@ -99,6 +146,98 @@ function joinLocalPath(dir: string, suffix: string): string {
   return `${dir.replace(/[\\/]+$/, "")}/${suffix.replace(/^\/+/, "")}`;
 }
 
+/** 精简单文件下载（外部编辑专用）：saveToLocal 直落 `downloadDir`，冲突直接
+ * 覆盖（目录带时间戳不会撞名），完成后返回 sidecar 落盘的绝对路径。 */
+async function downloadForExternalEdit(entry: ExternalEditEntry, downloadDir: string): Promise<string | undefined> {
+  if (!session.value || entry.kind !== "file") return undefined;
+  openTransferPanel();
+  const info = await window.dbxPlugin.invoke<ExternalEditDownloadInfo>("sftp/download/start", {
+    sessionId: session.value.sessionId,
+    remotePath: pathFromUri(entry.uri),
+    saveToLocal: true,
+    downloadDir,
+    conflict: "overwrite",
+  });
+  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now() };
+  try {
+    let offset = 0;
+    while (offset < info.size) {
+      await waitWhilePaused(info.taskId);
+      const chunkPromise = waitForDownloadChunk(info.taskId, offset);
+      const nextPromise = window.dbxPlugin.invoke<{ length: number; eof: boolean }>("sftp/download/next", { taskId: info.taskId, offset });
+      // 取消经 chunk waiter 中断；吞掉在途请求的 rejection 以免变成 unhandled。
+      nextPromise.catch(() => undefined);
+      const result = await nextPromise;
+      await chunkPromise;
+      offset += result.length;
+      const task = transferTasks[info.taskId];
+      if (task) {
+        task.status = "running";
+        task.transferred = offset;
+      }
+      if (result.eof) break;
+    }
+    const finish = await window.dbxPlugin.invoke<{ localPath?: string }>("sftp/download/finish", { taskId: info.taskId });
+    cancelledTransferTasks.delete(info.taskId);
+    const task = transferTasks[info.taskId];
+    if (task) {
+      task.status = "completed";
+      task.transferred = info.size;
+      if (finish?.localPath) task.localPath = finish.localPath;
+    }
+    return finish?.localPath;
+  } catch (cause) {
+    const waiter = downloadChunkWaiters.get(info.taskId);
+    if (waiter) {
+      window.clearTimeout(waiter.timer);
+      downloadChunkWaiters.delete(info.taskId);
+    }
+    await window.dbxPlugin.invoke("sftp/transfer/cancel", { taskId: info.taskId }).catch(() => undefined);
+    throw cause;
+  }
+}
+
+/** 「在外部编辑器中打开」：下载 → watch/start → 系统默认程序打开 → 通知。
+ * 仅桌面端可用（web/docker 的 sidecar 不在本机，无法监听也无法回传）。
+ * M15 起可并发打开多个文件：每次打开独立下载、独立注册 watch，互不顶替
+ * （同远端路径的重复打开由注册表与 sidecar 的 per-path dedup 收敛为最新）。 */
+async function openInExternalEditor(entry: ExternalEditEntry) {
+  closeFileMenu();
+  if (!session.value) return;
+  const local = await probeLocalCapabilities();
+  if (!local?.canSaveLocal) {
+    showNotice(t("sftpEdit.desktopOnly"));
+    return;
+  }
+  try {
+    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+    const dir = joinLocalPath(loadDownloadDir() || local.downloadsDir, `remote-edit/${stamp}`);
+    const localPath = await downloadForExternalEdit(entry, dir);
+    if (!localPath || !session.value) return;
+    const remotePath = pathFromUri(entry.uri);
+    const watch = await window.dbxPlugin.invoke<{ watchId: string }>("watch/start", {
+      sessionId: session.value.sessionId,
+      remotePath,
+      localPath,
+    });
+    alwaysUploadWatches.delete(watch.watchId);
+    activeExternalWatches.value = registerWatch(activeExternalWatches.value, {
+      watchId: watch.watchId,
+      name: entry.name,
+      remotePath,
+    });
+    // 宿主 local/open 校验该路径确为本插件完成的下载（防任意路径打开）。
+    try {
+      await window.dbxPlugin.invoke("local/open", { path: localPath });
+    } catch {
+      await window.dbxPlugin.invoke("local/reveal", { path: localPath });
+    }
+    copyTextToClipboard(localPath, "sftpEdit.pathCopied");
+    showNotice(t("sftpEdit.watching", { name: entry.name }));
+  } catch (cause) {
+    showError(cause, "sftp");
+  }
+}
 
   return {
     externalEditBusy,
@@ -111,5 +250,6 @@ function joinLocalPath(dir: string, suffix: string): string {
     uploadWatchedFileOnce,
     uploadWatchedFileAlways,
     joinLocalPath,
+    openInExternalEditor,
   };
 }
