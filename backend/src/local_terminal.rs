@@ -1417,33 +1417,35 @@ mod tests {
         assert_eq!(conpty_cpr_reply(1, 1), b"\x1b[1;1R".to_vec());
     }
 
-    /// Windows-only probe of conhost's startup handshake timing.
+    /// Windows-only probe of conhost's startup handshake, measured on the
+    /// windows-2022 runner (inbox conhost 20348). Facts established here, each
+    /// one refuting a theory that had been shipping:
     ///
-    /// Measured facts (windows-2022 runner, inbox conhost 20348) worth keeping
-    /// in view — the earlier "a duplicate CPR reply resizes the console"
-    /// theory was *refuted* here, which is why the handshake work is framed as
-    /// "one sound reply" rather than "the duplicate breaks the size":
-    ///   * conhost issues the handshake query exactly once, before any child
-    ///     output [`ConptyHandshakeFilter`] leans on the "first query only".
-    ///   * a duplicate CPR reply (`CSI 1;1R`, what xterm answers with) draws
-    ///     no reaction at all — 0 bytes followed it.
+    ///   * conhost issues `CSI 6n` **exactly once**, and only after the child
+    ///     exists — nothing arrives while the PTY has no client (0 bytes).
+    ///   * a **duplicate** CPR reply is ignored outright (0 bytes followed it),
+    ///     so neither the terminal's leaked answer nor the sidecar's own reply
+    ///     can resize anything. The "duplicate reply" family of theories is dead.
+    ///   * the orphan first glyph is **conhost's own doing**, and where it lands
+    ///     follows the reply's numbers: replying `30;100` produced
+    ///     `... \e[?25h M\r\n \e[29;100H Microsoft Windows [Version ...` — the
+    ///     banner's first character printed at the top, an absolute jump to the
+    ///     viewport's bottom row, then the banner re-drawn there. That is
+    ///     precisely the "M" users report.
     ///
-    /// The remaining questions this probe answers are about *timing*: does the
-    /// query arrive before the child even exists (so the sidecar can answer it
-    /// with nothing on screen yet), and does a late reply make conhost's first
-    /// serialization capture a half-written first line — the orphan glyph
-    /// (cmd's `M`, WSL's `d`) and doubled prompt users report. Each phase
-    /// records its observation; the assertion only guards the one premise the
-    /// shipping filter depends on.
+    /// So the remaining variable is the reply's *value*. This runs one cmd.exe
+    /// session per variant and prints the raw bytes (`--nocapture`): the sidecar's
+    /// viewport-size answer, a truthful cursor position (what xterm would say), a
+    /// mismatched size to tell "read as a position" from "read as a size", and no
+    /// reply at all as the output-withholding control.
     #[cfg(windows)]
     #[test]
-    fn conpty_handshake_timing_and_first_serialization() {
+    fn conpty_handshake_reply_variants() {
         use std::sync::mpsc;
         use std::time::Instant;
 
         const ROWS: u16 = 30;
         const COLS: u16 = 100;
-        const BANNER: &[u8] = b"Microsoft Windows";
 
         let escape = |bytes: &[u8]| {
             bytes
@@ -1462,20 +1464,24 @@ mod tests {
                 .windows(needle.len())
                 .any(|window| window == needle)
         };
-        // Reads whatever the PTY has produced for `window`, then returns it.
-        let drain = |rx: &mpsc::Receiver<Vec<u8>>, window: Duration| {
-            let mut collected = Vec::new();
-            let deadline = Instant::now() + window;
-            while Instant::now() < deadline {
-                match rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(chunk) => collected.extend_from_slice(&chunk),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            collected
-        };
-        let spawn_reader = |mut reader: Box<dyn Read + Send>| {
+        // One cmd.exe session under a 30x100 ConPTY, handshake answered with
+        // `reply` (or left unanswered), returning everything the PTY emitted.
+        let run_session = |reply: Option<Vec<u8>>| -> Vec<u8> {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: ROWS,
+                    cols: COLS,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .expect("open ConPTY");
+            let mut child = pair
+                .slave
+                .spawn_command(CommandBuilder::new("cmd.exe"))
+                .expect("spawn cmd.exe");
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().expect("pty reader");
+            let mut writer = pair.master.take_writer().expect("pty writer");
             let (tx, rx) = mpsc::channel::<Vec<u8>>();
             std::thread::spawn(move || {
                 let mut buffer = [0u8; 4096];
@@ -1485,124 +1491,50 @@ mod tests {
                     }
                 }
             });
-            rx
-        };
-
-        // Phase 1: open a ConPTY with no child yet — is the query already there?
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: ROWS,
-                cols: COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("open ConPTY");
-        drop(pair.slave);
-        let rx = spawn_reader(pair.master.try_clone_reader().expect("pty reader"));
-        let before_spawn = drain(&rx, Duration::from_millis(800));
-        drop(pair.master);
-
-        // Phase 2: child first, handshake answered the moment it is seen.
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: ROWS,
-                cols: COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("open ConPTY");
-        let mut child = pair
-            .slave
-            .spawn_command(CommandBuilder::new("cmd.exe"))
-            .expect("spawn cmd.exe");
-        drop(pair.slave);
-        let rx = spawn_reader(pair.master.try_clone_reader().expect("pty reader"));
-        let mut writer = pair.master.take_writer().expect("pty writer");
-        let mut eager = Vec::new();
-        let eager_deadline = Instant::now() + Duration::from_secs(30);
-        let mut answered = false;
-        while Instant::now() < eager_deadline && !answered {
-            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(500)) {
-                eager.extend_from_slice(&chunk);
-                if saw(&eager, CONPTY_CPR_QUERY) {
-                    writer
-                        .write_all(&conpty_cpr_reply(ROWS, COLS))
-                        .expect("write cpr reply");
-                    writer.flush().expect("flush cpr reply");
-                    answered = true;
+            let mut stream = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut answered = false;
+            while Instant::now() < deadline {
+                match rx.recv_timeout(Duration::from_millis(400)) {
+                    Ok(chunk) => {
+                        stream.extend_from_slice(&chunk);
+                        if !answered && saw(&stream, CONPTY_CPR_QUERY) {
+                            if let Some(reply) = reply.as_ref() {
+                                writer.write_all(reply).expect("write reply");
+                                writer.flush().expect("flush reply");
+                            }
+                            answered = true;
+                            // Let the first frame settle before finishing.
+                            std::thread::sleep(Duration::from_millis(700));
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if answered {
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-        }
-        assert!(answered, "cmd.exe never issued the ConPTY handshake");
-        eager.extend_from_slice(&drain(&rx, Duration::from_millis(1500)));
-        let eager_queries = eager
-            .windows(CONPTY_CPR_QUERY.len())
-            .filter(|window| *window == CONPTY_CPR_QUERY)
-            .count();
-        let _ = child.kill();
-        let _ = child.wait();
-        drop(pair.master);
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(
+                saw(&stream, CONPTY_CPR_QUERY),
+                "cmd.exe never issued the ConPTY handshake"
+            );
+            stream
+        };
 
-        // Phase 3: same session shape, but the reply is held back so the child
-        // gets to write first — does the first serialization carry a partial
-        // first line?
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: ROWS,
-                cols: COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("open ConPTY");
-        let mut child = pair
-            .slave
-            .spawn_command(CommandBuilder::new("cmd.exe"))
-            .expect("spawn cmd.exe");
-        drop(pair.slave);
-        let rx = spawn_reader(pair.master.try_clone_reader().expect("pty reader"));
-        let mut writer = pair.master.take_writer().expect("pty writer");
-        let mut late = Vec::new();
-        let late_deadline = Instant::now() + Duration::from_secs(30);
-        let mut seen = false;
-        while Instant::now() < late_deadline && !seen {
-            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(500)) {
-                late.extend_from_slice(&chunk);
-                seen = saw(&late, CONPTY_CPR_QUERY);
-            }
+        let cases: [(&str, Option<Vec<u8>>); 4] = [
+            ("size 30;100 (shipping)", Some(conpty_cpr_reply(ROWS, COLS))),
+            ("cursor 1;1 (what xterm says)", Some(b"\x1b[1;1R".to_vec())),
+            ("size 24;80 (mismatched)", Some(conpty_cpr_reply(24, 80))),
+            ("no reply (control)", None),
+        ];
+        for (label, reply) in cases {
+            let stream = run_session(reply);
+            eprintln!("[{}] {} bytes: {}", label, stream.len(), escape(&stream));
         }
-        std::thread::sleep(Duration::from_millis(400));
-        writer
-            .write_all(&conpty_cpr_reply(ROWS, COLS))
-            .expect("write cpr reply");
-        writer.flush().expect("flush cpr reply");
-        late.extend_from_slice(&drain(&rx, Duration::from_millis(1500)));
-        let _ = child.kill();
-        let _ = child.wait();
-
-        // The premise the shipping filter needs: conhost asks exactly once.
-        assert_eq!(
-            eager_queries, 1,
-            "conhost issued {eager_queries} handshake queries; the first-query-only \
-             rule needs revisiting"
-        );
-        // Observations for the CI log (`--nocapture`): the raw startup bytes.
-        eprintln!(
-            "query-before-spawn({}B): {}",
-            before_spawn.len(),
-            escape(&before_spawn)
-        );
-        eprintln!(
-            "eager-reply({}B, banner={}): {}",
-            eager.len(),
-            saw(&eager, BANNER),
-            escape(&eager)
-        );
-        eprintln!(
-            "late-reply({}B, banner={}): {}",
-            late.len(),
-            saw(&late, BANNER),
-            escape(&late)
-        );
     }
 
     #[test]
