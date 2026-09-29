@@ -1153,16 +1153,13 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     const command = String(input.command || "");
     const sudo = input.sudo === true;
     // 历史面板的远端历史导入(连接后后台拉取):返回 fixture 历史存量,
-    // 让 ↑ 面板演示出「shell history 合并 + 本会话采集」的混合内容。
+    // 让 ↑ 面板演示出「shell history 合并 + 本会话采集」的混合内容;条数
+    // 超过一屏,顺带验证列表内部滚动。
     if (command.includes("HISTFILE") && command.includes("tail -n")) {
-      result = { success: true, exitCode: 0, output: [
-        "docker compose up -d",
-        ": 1700000000:0;vim /etc/nginx/nginx.conf",
-        "kubectl --context prod get nodes",
-        "tail -n 100 /var/log/syslog \\",
-        "  | grep -i error",
-        "curl -sSL https://example.boot.sh | sh",
-      ].join("\n") };
+      const fixture: string[] = [];
+      for (let i = 1; i <= 28; i += 1) fixture.push(`deploy step ${i} -- systemctl restart app-${i}`);
+      fixture.push(": 1700000000:0;vim /etc/nginx/nginx.conf", "kubectl --context prod get nodes");
+      result = { success: true, exitCode: 0, output: fixture.join("\n") };
       return result as T;
     }
     await new Promise((resolve) => setTimeout(resolve, 1500));
