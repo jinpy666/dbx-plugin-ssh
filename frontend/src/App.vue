@@ -239,7 +239,6 @@ import {
   sftpEntryIconKind,
   type SftpColumn,
 } from "./lib/sftpEntries";
-import { resolveRemotePath, splitRemotePathSegments } from "./lib/remotePathInput";
 import {
   folderUploadPercent,
 } from "./lib/folderUpload";
@@ -4681,6 +4680,8 @@ const {
   goParent,
   setDirectoryTracking,
   goToPath,
+  pathBarEditing, pathBarInputEl, pathBarDraft, pathCrumbs,
+  beginPathBarEdit, cancelPathBarEdit, submitPathInput,
 } = useSftpNavigation({
   t, showNotice, showError, session, sudoMode, connected, canWrite,
   currentPath, entries, loadingFiles, sftpError, sftpErrorOpen, sftpErrorKey, sftpHomePath,
@@ -5442,39 +5443,6 @@ const {
   closeFileMenu: () => { fileMenu.value = undefined; },
   joinRemote, remoteBasename, pathFromUri, loadDirectory,
 });
-
-
-// #54 路径栏分段回跳：非编辑态把路径渲染成一串分段 chip（根目录 / 也可点击
-// 回根），点击任一分段经 goToPath 直接回到对应前缀；点击分段以外区域或导航
-// 框聚焦后 Enter 进入编辑态，输入行为与原先完全一致（复用 submitPathInput）。
-const pathBarEditing = ref(false);
-const pathBarInputEl = ref<HTMLInputElement | null>(null);
-// 进入编辑瞬间的路径快照：Esc 是显式取消手势，把草稿还原成编辑前的显示值
-// （失焦仍保留草稿，与输入框既有语义一致——只有 Esc 回滚）。
-const pathBarDraft = ref("");
-const pathCrumbs = computed(() => splitRemotePathSegments(currentPath.value));
-
-function beginPathBarEdit() {
-  if (pathBarEditing.value) return;
-  pathBarDraft.value = currentPath.value;
-  pathBarEditing.value = true;
-  void nextTick(() => pathBarInputEl.value?.focus());
-}
-
-function cancelPathBarEdit() {
-  currentPath.value = pathBarDraft.value;
-  pathBarEditing.value = false;
-}
-
-// R3-P2-4：路径栏提交统一入口——`~`（home 已探测时）展开、`.`/`..` 段消解
-// 及基础归一，下游 joinRemote/exists 拼接与路径历史不再携带未规范路径。
-function submitPathInput() {
-  if (!connected.value) return;
-  const target = resolveRemotePath(currentPath.value, sftpHomePath.value || undefined);
-  currentPath.value = target;
-  pathBarEditing.value = false;
-  void loadDirectory(target);
-}
 
 // R3-P2-5：文件行键盘语义——Enter 打开（目录进入/文件预览）、F2 重命名、
 // Delete 删除，对齐主流文件管理器；动作决策走 fileRowKeydown 纯模块（有
