@@ -211,6 +211,7 @@ import { transferPausable } from "./lib/transferResume";
 import { isLiveTransferStatus, sortTransferTasks } from "./lib/transferOrder";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useSftpSidebar } from "./composables/useSftpSidebar";
 import { useBatchSend } from "./composables/useBatchSend";
 import { useMetricsPanel } from "./composables/useMetricsPanel";
 import { useTrzsz } from "./composables/useTrzsz";
@@ -289,7 +290,7 @@ import {
 import { cellFromMouseEvent, clickCursorArrows, resolveClickCursorMove } from "./lib/terminalClickCursor";
 import { bridgeBinaryBytes } from "../../shared/frontend/binaryEvent";
 import { standaloneArrayBuffer } from "./lib/standaloneBuffer";
-import { applyTreeChildren, createTreeRoot, findTreeNode, markTreeStale, type DirTreeNode } from "./lib/sftpDirTree";
+import { findTreeNode } from "./lib/sftpDirTree";
 import { workbenchMessage } from "./lib/i18n";
 import { randomUUID } from "./lib/uuid";
 import TextPreview from "./components/TextPreview.vue";
@@ -305,7 +306,7 @@ import type { SuggestionAnchor } from "./lib/overlayPlacement";
 import ConnectingCard from "./components/ConnectingCard.vue";
 import GpuNpuMonitor from "./components/GpuNpuMonitor.vue";
 import FolderPickerDialog from "./components/FolderPickerDialog.vue";
-import SideNavPanel, { type SftpSideQuickPath } from "./components/SideNavPanel.vue";
+import SideNavPanel from "./components/SideNavPanel.vue";
 import DockerPanel from "./components/DockerPanel.vue";
 import DockerWhaleLogo from "./components/DockerWhaleLogo.vue";
 import { Switch } from "./components/ui/switch";
@@ -544,7 +545,6 @@ const SFTP_PATH_HISTORY_LIMIT = 10;
 // Upper bound for out-of-order terminal frames held while waiting for the
 // missing sequence; the replay path re-delivers anything dropped beyond it.
 const TERMINAL_PENDING_FRAME_LIMIT = 1024;
-const SFTP_QUICK_PATHS = ["/", "/home", "/tmp", "/etc", "/var", "/root"];
 // 命令历史 / 终端字号：pluginStore 持久化（敏感命令不入持久层；快速命令已迁 sidecar，见 QUICK_COMMANDS_KEY）。
 const COMMAND_HISTORY_KEY = "ssh-command-history";
 // 终端字号/字体族键移入 lib/terminalFont.ts（issue #31 字体单独设置）统一管理。
@@ -553,9 +553,6 @@ const SFTP_PANE_OPEN_KEY = "ssh-sftp-pane-open";
 // 目录跟随全局偏好：pluginStore 持久化（"true" = 新工作台初始即开启；per-tab
 // 的 workbenchState.followDirectory 仍优先，恢复的 tab 不被全局值覆盖）。
 const FOLLOW_DIRECTORY_KEY = "ssh-follow-directory";
-// 侧栏形态偏好：tree/quick tab（默认 tree）与收起状态，pluginStore 全局持久化。
-const SFTP_SIDE_TAB_KEY = "ssh-sftp-side-tab";
-const SFTP_SIDE_COLLAPSED_KEY = "ssh-sftp-side-collapsed";
 const DOWNLOAD_DIR_KEY = "ssh-download-directory";
 // 是否默认下载到「下载保存目录」（默认开）；关闭则每次下载打开目录选择窗口。
 const DOWNLOAD_USE_DEFAULT_KEY = "ssh-download-use-default-dir";
@@ -673,11 +670,6 @@ const paneOrder = ref<SshWorkbenchPaneOrder>("terminal-left");
 // 新工作台的初始值取全局"默认打开"偏好（pluginStore）。
 const sftpPaneOpen = ref(loadSftpPaneDefaultOpen());
 const sftpPaneDefaultOpen = ref(loadSftpPaneDefaultOpen());
-// 侧栏导航形态偏好：tree（目录树，默认）/ quick（快捷路径）+ 收起状态。
-const sftpSideTab = ref<"tree" | "quick">(loadSftpSideTab());
-const sftpSideCollapsed = ref(loadSftpSideCollapsed());
-// 侧栏目录树：根 = 连接根 "/"，展开时经 sftp/list 懒加载子目录（仅目录）。
-const sftpTree = ref<DirTreeNode>(createTreeRoot("/", "/"));
 // sftp/home 探测结果：quick tab 置顶展示（获取失败时该项隐藏）。
 const sftpHomePath = ref("");
 // 终端行为偏好（对标 Tabby「Terminal」页）：右键语义、剪贴板、响铃、渲染细项，
@@ -6236,10 +6228,6 @@ watch(() => session.value?.sessionId, (next, previous) => {
   }
 });
 
-/** showHidden 切换后侧栏树缓存失效——下次展开节点时重新拉取、按新可见性过滤。 */
-watch(sftpShowHidden, () => {
-  markTreeStale(sftpTree.value);
-});
 
 // 审计日志查看：状态/拉取/清空确认收口在 composables/useAuditLogViewer。
 const {
@@ -6276,58 +6264,19 @@ async function refreshSftpHomePath() {
   }
 }
 
-// ---- SFTP 侧栏（tree/quick 双 tab）--------------------------------------------
-
-/** quick tab 条目：home 探测结果置顶 + SFTP_QUICK_PATHS 静态列表（去重）。 */
-const sideQuickPaths = computed<SftpSideQuickPath[]>(() => {
-  const list: SftpSideQuickPath[] = [];
-  if (sftpHomePath.value) list.push({ path: sftpHomePath.value, label: t("home"), home: true });
-  for (const path of SFTP_QUICK_PATHS) {
-    if (!list.some((item) => item.path === path)) list.push({ path, label: path });
-  }
-  return list;
-});
-
-/** 侧栏树懒加载：collapse 只翻标记保留缓存；未加载时拉 sftp/list 挂子节点。 */
-async function expandSideTreeNode(node: DirTreeNode) {
-  if (node.expanded) {
-    node.expanded = false;
-    return;
-  }
-  if (!node.loaded) {
-    if (!session.value) return;
-    node.loading = true;
-    try {
-      const result = await window.dbxPlugin.invoke<{ entries: SftpEntry[] }>(sudoMode.value ? "sudo/listDir" : "sftp/list", {
-        sessionId: session.value.sessionId,
-        path: node.path,
-      });
-      applyTreeChildren(sftpTree.value, node.path, result.entries.map((entry) => ({ path: pathFromUri(entry.uri), name: entry.name, kind: entry.kind })), sftpShowHidden.value);
-    } catch (cause) {
-      showError(cause); // 树展开失败要有反馈，不能静默（对标 files 插件 P-FILES 反馈）
-    } finally {
-      node.loading = false;
-    }
-    return;
-  }
-  node.expanded = true;
-}
-
-/** tree tab 可见时确保根已展开（未连接时跳过，接通后由 afterSessionConnected 触发）。 */
-function ensureSideTreeRoot() {
-  if (sftpSideTab.value !== "tree" || !session.value) return;
-  const root = sftpTree.value;
-  if (!root.loaded && !root.loading) void expandSideTreeNode(root);
-}
-
-/** 侧栏刷新按钮：整树标记重拉后重展开根。 */
-function refreshSideTree() {
-  const root = sftpTree.value;
-  markTreeStale(root);
-  root.expanded = false;
-  void expandSideTreeNode(root);
-}
-
+// SFTP 侧栏（tree/quick）：形态偏好/目录树/快捷路径收口在 composables/useSftpSidebar。
+const {
+  SFTP_QUICK_PATHS,
+  sftpSideTab,
+  sftpSideCollapsed,
+  sftpTree,
+  sideQuickPaths,
+  expandSideTreeNode,
+  ensureSideTreeRoot,
+  refreshSideTree,
+  setSftpSideTab,
+  setSftpSideCollapsed,
+} = useSftpSidebar({ t, showError, session, sudoMode, sftpHomePath, sftpShowHidden, pathFromUri });
 /** 侧栏（目录树/快捷路径）行右键：打开 / 复制路径 / 复制文件名 / 压缩。
  *  行处理器只记录负载并互斥收口；定位/打开由包裹侧栏的 reka ContextMenuTrigger
  *  从冒泡上来的原生 contextmenu 事件完成（DirTree/SideNavPanel 不能再 prevent/stop）。 */
@@ -6918,42 +6867,6 @@ async function resolveDownloadConflictFor(dir: string, fileName: string): Promis
   }
 }
 
-// 侧栏形态偏好：pluginStore 全局持久化（不可用时仅当前会话生效，默认 tree/展开）。
-function loadSftpSideTab(): "tree" | "quick" {
-  try {
-    return pluginStore.getItem(SFTP_SIDE_TAB_KEY) === "quick" ? "quick" : "tree";
-  } catch {
-    return "tree";
-  }
-}
-
-function loadSftpSideCollapsed(): boolean {
-  try {
-    return pluginStore.getItem(SFTP_SIDE_COLLAPSED_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function persistSftpSideShape() {
-  try {
-    pluginStore.setItem(SFTP_SIDE_TAB_KEY, sftpSideTab.value);
-    pluginStore.setItem(SFTP_SIDE_COLLAPSED_KEY, sftpSideCollapsed.value ? "true" : "false");
-  } catch {
-    // localStorage 不可用时偏好仅对当前会话生效。
-  }
-}
-
-function setSftpSideTab(tab: "tree" | "quick") {
-  sftpSideTab.value = tab;
-  persistSftpSideShape();
-  if (tab === "tree") ensureSideTreeRoot();
-}
-
-function setSftpSideCollapsed(collapsed: boolean) {
-  sftpSideCollapsed.value = collapsed;
-  persistSftpSideShape();
-}
 
 /**
  * 终端行为落地：把行为偏好写进 xterm 选项。字体/行高/字间距等外观项不在此处
