@@ -309,6 +309,18 @@ import { buildJsonPreview, type JsonPreviewState } from "./lib/jsonPreview";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
 import TerminalQuickSelectPanel from "./components/TerminalQuickSelectPanel.vue";
 import { collectQuickSelectHits, type QuickSelectHit } from "./lib/quickSelect";
+import TerminalHistoryPanel from "./components/TerminalHistoryPanel.vue";
+import {
+  canOpenHistoryPanel,
+  clampHistoryPanelIndex,
+  decorateHistoryEntries,
+  filterHistoryEntries,
+  moveHistoryPanelIndex,
+  pruneHistoryTimes,
+  recordHistoryTime,
+  sanitizeHistoryTimes,
+  type HistoryPanelEntry,
+} from "./lib/historyPanel";
 import TerminalGutter from "./components/TerminalGutter.vue";
 import CommandSuggestions from "./components/CommandSuggestions.vue";
 import CompletionMenu from "./components/CompletionMenu.vue";
@@ -597,6 +609,10 @@ const TERMINAL_PENDING_FRAME_LIMIT = 1024;
 const SFTP_QUICK_PATHS = ["/", "/home", "/tmp", "/etc", "/var", "/root"];
 // 命令历史 / 终端字号：pluginStore 持久化（敏感命令不入持久层；快速命令已迁 sidecar，见 QUICK_COMMANDS_KEY）。
 const COMMAND_HISTORY_KEY = "ssh-command-history";
+// 执行时间并行映射（Warp 式 history 面板的右侧相对时间）：command → 最近一次
+// 执行时刻。不改 commandHistory（string[]）的形状——suggestion/ghost/命令弹窗
+// 多处消费零波及；时间只有面板用。
+const COMMAND_HISTORY_TIMES_KEY = "ssh-command-history-times";
 // 快速命令旧键：迁移到 sidecar 全局存储后仅作一次性迁移种子（见 hydrateQuickCommands）。
 const QUICK_COMMANDS_KEY = "ssh-quick-commands";
 // 终端字号/字体族键移入 lib/terminalFont.ts（issue #31 字体单独设置）统一管理。
@@ -874,6 +890,8 @@ const commandResult = ref<ExecResult>();
 const commandError = ref("");
 // 命令历史：内存环形 + pluginStore 非敏感持久化；index 为 -1 表示未在浏览历史。
 const commandHistory = ref<string[]>(loadCommandHistory());
+// 命令 → 最近执行时刻（Warp 式 history 面板相对时间的数据面），与命令环同采集口推进。
+const commandHistoryTimes = ref<Record<string, number>>(loadCommandHistoryTimes());
 const commandHistoryIndex = ref(-1);
 const commandHistoryBackup = ref("");
 // 快速命令：用户自定义片段（≤20 条），全局存储在插件数据目录（sidecar），
@@ -1266,6 +1284,14 @@ const searchResultCount = ref(0);
 const quickSelectOpen = ref(false);
 const quickSelectHits = ref<QuickSelectHit[]>([]);
 const quickSelectActive = ref(0);
+// Warp 式 history 面板（↑ 唤起，对标 Warp command history）：commandHistory
+// 可视化快速回填（仅回填不执行）。焦点不离开终端：↑↓/Enter/Tab/Esc 由
+// handleTerminalKey 的面板分支统一消费；开启期间继续打字即实时过滤
+// （pendingTerminalInput 即 query），其余按键放行。
+const historyPanelOpen = ref(false);
+const historyPanelEntries = ref<HistoryPanelEntry[]>([]);
+const historyPanelActiveIndex = ref(0);
+const historyPanelAnchor = ref<SuggestionAnchor | null>(null);
 const pasteConfirm = ref<PasteConfirmation>();
 // 终端拖入文件的落点询问：null 表示取消；"cwd" 用解析后的 shell/SFTP 当前
 // 目录（resolveDropTargetDir：终端 cwd 跟随 → SFTP home → 面板当前目录），
@@ -1700,6 +1726,7 @@ function syncSuggestionAnchorsOnSettle() {
     suggestionAnchorSyncScheduled = false;
     if (suggestionOpen.value) suggestionAnchor.value = readTerminalSuggestionAnchor();
     if (completionOpen.value) completionAnchor.value = readTerminalSuggestionAnchor();
+    if (historyPanelOpen.value) historyPanelAnchor.value = readTerminalSuggestionAnchor();
   });
 }
 function settleOutputChunk(chunk: Uint8Array) {
@@ -2797,6 +2824,23 @@ function handleTerminalKey(event: KeyboardEvent) {
   // 结构化补全浮层（线 2）优先级更高，按键语义相同（↑↓/Tab/Enter/Esc）。
   if (completionOpen.value && handleCompletionKey(event)) return consume();
   if (suggestionOpen.value && handleSuggestionKey(event)) return consume();
+  // Warp 式 history 面板（↑ 唤起）：面板开启时优先消费导航/回填键（↑↓ 移动、
+  // Enter/Tab 回填、Esc 关闭），其余按键原样放行——继续打字即过滤（onData
+  // 链的 updateHistoryPanelFilter）。未开启时裸 ↑ 经 gate 打开（输入行内容即
+  // 过滤 query）；alternate 屏（vim/htop 靠 ↑ 导航）、命令运行中、传输占用、
+  // 既有浮层开启时不抢 ↑，shell 原生 readline 历史在那些场景依旧可达。
+  if (historyPanelOpen.value && handleHistoryPanelKey(event)) return consume();
+  if (
+    event.type === "keydown" &&
+    event.key === "ArrowUp" &&
+    !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) &&
+    !event.isComposing &&
+    event.keyCode !== 229 &&
+    historyPanelGateOpen()
+  ) {
+    openHistoryPanel();
+    return consume();
+  }
   // 搜索框已打开时 Esc 先关面板，不参与快捷键匹配（关闭键不可改写）。
   {
     const mod = event.metaKey || event.ctrlKey;
@@ -2822,6 +2866,11 @@ function handleTerminalKey(event: KeyboardEvent) {
     case "quick-select":
       if (quickSelectOpen.value) closeQuickSelect();
       else openQuickSelect();
+      return consume();
+    case "command-history":
+      // ↑ 裸键之外的补充唤起（可配置键位）：同一 gate，开↔关 toggle。
+      if (historyPanelOpen.value) closeHistoryPanel();
+      else if (historyPanelGateOpen()) openHistoryPanel();
       return consume();
     case "copy":
       // 无选区时不消费：裸 Ctrl+C 仍要作为 SIGINT 发给远端。
@@ -3114,6 +3163,91 @@ function handleQuickSelectKey(event: KeyboardEvent): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Warp 式 history 面板（对标 Warp command history）：↑ 裸键（或注册表
+// command-history 动作）唤起，commandHistory 过滤结果可视化快速回填。
+// 纯逻辑（过滤/导航/门判定）在 lib/historyPanel.ts；这里只做状态接线——
+// 打开时以 pendingTerminalInput 为 query 快照过滤，开启期间 onData 链
+// （refreshSuggestionsAfterInput 早退分支）继续按行缓冲实时过滤；选中走
+// replaceTerminalLineWith 仅回填不执行（自动执行命令路径不新增）。
+// ---------------------------------------------------------------------------
+/** 打开门：任一浮层/alternate 屏/命令运行中/传输占用时不拦截 ↑。 */
+function historyPanelGateOpen(): boolean {
+  return canOpenHistoryPanel({
+    completionOpen: completionOpen.value,
+    suggestionOpen: suggestionOpen.value,
+    quickSelectOpen: quickSelectOpen.value,
+    searchOpen: searchOpen.value,
+    alternateActive: terminal?.buffer.active.type === "alternate",
+    commandRunning: commandRunning.value,
+    transferBusy: terminalTransferBusy.value,
+  });
+}
+
+function openHistoryPanel() {
+  if (!terminal) return;
+  terminalMenuOpen.value = false;
+  // 打开瞬间的行内容即过滤 query（空行 = 全量）；ghost 与行内建议同屏不让位。
+  historyPanelEntries.value = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, pendingTerminalInput), commandHistoryTimes.value);
+  historyPanelActiveIndex.value = 0;
+  historyPanelAnchor.value = readTerminalSuggestionAnchor();
+  hideGhostSuggestion();
+  closeSuggestionsOnly();
+  historyPanelOpen.value = true;
+}
+
+function closeHistoryPanel() {
+  if (!historyPanelOpen.value) return;
+  historyPanelOpen.value = false;
+  historyPanelEntries.value = [];
+  historyPanelActiveIndex.value = 0;
+  historyPanelAnchor.value = null;
+  terminal?.focus();
+}
+
+function moveHistoryPanelActive(delta: number) {
+  historyPanelActiveIndex.value = moveHistoryPanelIndex(historyPanelActiveIndex.value, delta, historyPanelEntries.value.length);
+}
+
+/** 开启期间的过滤联动：按最新行缓冲重算条目，高亮项越界收拢，锚点跟随光标。 */
+function updateHistoryPanelFilter() {
+  if (!historyPanelOpen.value) return;
+  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, pendingTerminalInput), commandHistoryTimes.value);
+  historyPanelEntries.value = next;
+  historyPanelActiveIndex.value = clampHistoryPanelIndex(historyPanelActiveIndex.value, next.length);
+  historyPanelAnchor.value = readTerminalSuggestionAnchor();
+}
+
+/** 选中回填：抹掉当前行缓冲后写入命令文本，不回车（用户可再编辑/自行执行）。 */
+function selectHistoryEntry(command: string) {
+  closeHistoryPanel();
+  replaceTerminalLineWith(command, false);
+}
+
+/** 面板开启时的按键消费：↑↓ 移动、Enter/Tab 回填、Esc 关闭，未命中放行。 */
+function handleHistoryPanelKey(event: KeyboardEvent): boolean {
+  if (event.type !== "keydown" || event.isComposing || event.keyCode === 229) return false;
+  if (event.key === "Escape") {
+    closeHistoryPanel();
+    return true;
+  }
+  if (event.key === "ArrowDown") {
+    moveHistoryPanelActive(1);
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    moveHistoryPanelActive(-1);
+    return true;
+  }
+  if (event.key === "Enter" || event.key === "Tab") {
+    const entry = historyPanelEntries.value[historyPanelActiveIndex.value];
+    if (entry) selectHistoryEntry(entry.command);
+    else closeHistoryPanel();
+    return true;
+  }
+  return false;
+}
+
 function runTerminalSearch(query: string, options: { caseSensitive: boolean; regex: boolean; wholeWord: boolean }, direction: "next" | "prev") {
   if (!searchAddon || !query) return;
   const searchOptions: ISearchOptions = {
@@ -3198,6 +3332,13 @@ function suggestionTypingChar(data: string): string | null {
  * 与 guard 抑制面一律关门。
  */
 function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
+  // Warp 式 history 面板开启期间：建议/补全/ghost 浮层全部让位（同屏不叠
+  // 两层浮层），面板按最新行缓冲实时过滤；面板关闭后的下一次键入恢复常规
+  // 调度（guard 锁存暂停推进——面板期间 ↑↓/Enter 均被吞键，不会产生命令）。
+  if (historyPanelOpen.value) {
+    updateHistoryPanelFilter();
+    return;
+  }
   const alternateActive = terminal?.buffer.active.type === "alternate";
   const typingChar = suggestionTypingChar(data);
 
@@ -3410,8 +3551,7 @@ function replaceTerminalLineWith(nextLine: string, pressEnter: boolean) {
   pendingTerminalInput = pressEnter ? "" : nextLine;
   if (pressEnter) {
     lastTerminalCommand.value = nextLine;
-    commandHistory.value = pushCommandHistory(commandHistory.value, nextLine);
-    persistCommandHistory();
+    pushTerminalCommandHistory(nextLine);
   }
   sendTerminalBytes(new TextEncoder().encode(payload));
   // 整行替换也是行缓冲变更点（FIG wave-1 锚点）：作废在途结果并防抖刷新；
@@ -3505,8 +3645,9 @@ function refreshGhostAfterInput(data: string) {
 
 function updateGhostSuggestion() {
   // 浮层建议/结构化补全菜单开着时不出 ghost：菜单占用 →/Enter/Esc，与
-  // 「→ 仅在无菜单态下接受」一致，同屏叠两层建议也无法阅读。
-  if (ghostMenuSuppressed(suggestionOpen.value, completionOpen.value)) {
+  // 「→ 仅在无菜单态下接受」一致，同屏叠两层建议也无法阅读；history 面板
+  // 同理（面板开启期间继续打字是过滤输入，不出 ghost）。
+  if (ghostMenuSuppressed(suggestionOpen.value, completionOpen.value) || historyPanelOpen.value) {
     ghostMatch.value = null;
     return;
   }
@@ -3702,6 +3843,7 @@ function resetCommandMarker() {
   // 会话切换/断开：建议浮层与抑制门锁存一并复位（P1-1）；ghost 门同步复位；
   // 结构化补全在途结果经 resetSession 作废（sessionId guard 另有兜底）。
   closeSuggestions();
+  closeHistoryPanel();
   suggestionGuardState = createSuggestionGuardState();
   completionInputAllowed = false;
   completionController.resetSession();
@@ -3726,12 +3868,14 @@ function applyCommandMarker(updates: Osc633StreamUpdates) {
     // 命令历史采集（P1-1）：shell integration 会话（本地 + SSH）把 E 帧命令行
     // 写入 commandHistory 环形；持久化沿用 SECRET_LIKE/长度过滤，命令执行中
     // 顺带收起浮层。与 onData 回车行采集去重由 pushCommandHistory 保证。
-    commandHistory.value = pushCommandHistory(commandHistory.value, command);
-    persistCommandHistory();
+    pushTerminalCommandHistory(command);
     if (isLocalMode.value && command !== localRecentCommands.value[0]) {
       localRecentCommands.value = [command, ...localRecentCommands.value.filter((c) => c !== command)].slice(0, 20);
     }
     closeSuggestions();
+    // 命令开始执行：history 面板一并收起（面板开启时 ↑↓/Enter 均被吞键，
+    // 正常到不了这里；E 帧旁路（粘贴多行/快速命令）执行时兜底关闭）。
+    closeHistoryPanel();
   }
   if (updates.commandActive === true) {
     commandMarker.exitCode = null;
@@ -9991,6 +10135,7 @@ function selectAllTerminal() {
 
 function clearTerminal() {
   terminal?.clear();
+  closeHistoryPanel();
   resetGutterTimestamps();
   terminalMenuOpen.value = false;
   terminal?.focus();
@@ -10023,6 +10168,36 @@ function persistCommandHistory() {
   } catch {
     // localStorage 不可用时命令历史仅保留在内存中。
   }
+}
+
+// —— 执行时间映射（Warp 式 history 面板右侧相对时间）：wire 形态为
+// [{c,t}] 条目数组，读回经 sanitizeHistoryTimes，写前按历史环修剪。——
+function loadCommandHistoryTimes(): Record<string, number> {
+  try {
+    return sanitizeHistoryTimes(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_TIMES_KEY) || "null"));
+  } catch {
+    return {};
+  }
+}
+
+function persistCommandHistoryTimes() {
+  try {
+    pluginStore.setItem(COMMAND_HISTORY_TIMES_KEY, JSON.stringify(pruneHistoryTimes(commandHistoryTimes.value, commandHistory.value)));
+  } catch {
+    // 存储不可用时时间戳仅保留在内存中（面板回退为不显示时间）。
+  }
+}
+
+/**
+ * 终端命令历史的统一采集口：命令环 + 执行时间映射同步推进、一并持久化。
+ * 四个采集点（replaceTerminalLineWith 回车执行 / OSC 633 E 帧 / 命令弹窗
+ * runCommand / 批量发送）共用，保证环与时间映射不漂移。
+ */
+function pushTerminalCommandHistory(command: string) {
+  commandHistory.value = pushCommandHistory(commandHistory.value, command);
+  commandHistoryTimes.value = recordHistoryTime(commandHistoryTimes.value, command, Date.now());
+  persistCommandHistory();
+  persistCommandHistoryTimes();
 }
 
 // ↑↓ 在命令输入框中浏览历史；进入浏览态前备份当前草稿，回到最新一条之下时恢复。
@@ -10073,8 +10248,10 @@ function rerunHistoryCommand(command: string) {
 
 function clearCommandHistory() {
   commandHistory.value = [];
+  commandHistoryTimes.value = {};
   commandHistoryIndex.value = -1;
   persistCommandHistory();
+  persistCommandHistoryTimes();
 }
 
 async function runCommand() {
@@ -10094,8 +10271,7 @@ async function runCommand() {
       sudo: commandUseSudo.value,
     }, { timeoutMs: 120_000 });
     // 执行成功提交即入历史（不论退出码），与输入框 ↑↓、一键重发共用同一份。
-    commandHistory.value = pushCommandHistory(commandHistory.value, command);
-    persistCommandHistory();
+    pushTerminalCommandHistory(command);
     commandHistoryIndex.value = -1;
     commandHistoryBackup.value = "";
   } catch (cause) {
@@ -10362,8 +10538,7 @@ async function sendBatchCommand() {
     batchSummary.value = summarizeBatchResults(results);
     if (batchSummary.value.sent) {
       // 发送成功即清空输入与下拉选中（对齐原弹窗语义），命令入历史供 ↑↓ 回选。
-      commandHistory.value = pushCommandHistory(commandHistory.value, command);
-      persistCommandHistory();
+      pushTerminalCommandHistory(command);
       batchDraft.value = "";
       batchQuickPickId.value = "";
       batchHistoryIndex.value = -1;
@@ -12519,6 +12694,21 @@ onBeforeUnmount(() => {
           @activate="(index) => (quickSelectActive = index)"
           @copy="copyQuickSelectHit"
           @close="closeQuickSelect"
+        />
+        <!-- Warp 式 history 面板（↑ 唤起）：commandHistory 可视化快速回填（仅
+             回填不执行）；↑↓/Enter/Tab/Esc 由 handleTerminalKey 的面板分支消费，
+             焦点不离开终端；开启期间继续打字即过滤（pendingTerminalInput 即
+             query），锚点定位与翻转语义同建议浮层。 -->
+        <TerminalHistoryPanel
+          v-if="historyPanelOpen"
+          :locale="locale"
+          :entries="historyPanelEntries"
+          :active-index="historyPanelActiveIndex"
+          :anchor="historyPanelAnchor"
+          :viewport="suggestionViewport"
+          @activate="(index) => (historyPanelActiveIndex = index)"
+          @select="selectHistoryEntry"
+          @close="closeHistoryPanel"
         />
         <div v-if="reconnectPending" class="reconnect-banner" role="status">
           <Loader2 class="spinning" />

@@ -254,6 +254,55 @@ try {
   );
   await webglPage.close();
 
+  // --- Warp-style history panel: ↑ opens, typing filters, Enter fills only --
+  // 独立页面 + addInitScript 种子：commandHistory 水合在 App setup（晚于
+  // addInitScript），mock 宿主 storage 的兜底档正是 window.localStorage。
+  console.log("==> history panel walkthrough");
+  const historyPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  historyPage.on("pageerror", (err) => pageError.push(String(err)));
+  await historyPage.addInitScript(() => {
+    window.localStorage.setItem(
+      "ssh-command-history",
+      JSON.stringify(["echo ui-mock-history-a", "tail -f /var/log/ui-mock.log", "kubectl get pods -n ui-mock"]),
+    );
+  });
+  await historyPage.goto(`${baseUrl}?render=dom`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await sleep(2_500);
+  await historyPage.bringToFront();
+  await historyPage.click(".terminal-host");
+  await historyPage.keyboard.press("ArrowUp");
+  await expect(historyPage, ".terminal-history-panel", "history panel opens on ArrowUp");
+  // mock PTY 启动回放会额外入一条 E 帧命令，计数不固定——只断言种子条目在列。
+  await expectText(historyPage, ".terminal-history-hit", "echo ui-mock-history-a", "history panel lists the seeded history");
+  // 开启期间继续打字即过滤（行缓冲即 query）。
+  await historyPage.keyboard.type("tail");
+  const filteredRows = await historyPage.locator(".terminal-history-hit").count();
+  check("typing filters the panel to the single fuzzy hit", filteredRows === 1, `rows=${filteredRows}`);
+  await expectText(historyPage, ".terminal-history-hit", "tail -f /var/log/ui-mock.log", "filtered entry text");
+  await historyPage.screenshot({ path: `${SHOT_DIR}/04-history-panel.png`, fullPage: false }).catch(() => undefined);
+  // Enter 仅回填不执行：面板关闭、命令文本落在输入行（无 \r，mock 只回显）。
+  await historyPage.keyboard.press("Enter");
+  const panelsAfterEnter = await historyPage.locator(".terminal-history-panel").count();
+  check("Enter fills and closes the panel (no auto-run)", panelsAfterEnter === 0, `panels=${panelsAfterEnter}`);
+  try {
+    await historyPage.waitForFunction(
+      () => document.querySelector(".terminal-host")?.textContent?.includes("tail -f /var/log/ui-mock.log"),
+      null,
+      { timeout: 10_000 },
+    );
+    console.log('  ok  selected command echoed into the input line ("tail -f …")');
+  } catch {
+    failures.push('selected command not echoed ("tail -f /var/log/ui-mock.log")');
+    console.log('  FAIL selected command echo');
+  }
+  // Esc 关闭语义：重开 → Esc → 面板消失。
+  await historyPage.keyboard.press("ArrowUp");
+  await expect(historyPage, ".terminal-history-panel", "history panel reopens");
+  await historyPage.keyboard.press("Escape");
+  const panelsAfterEsc = await historyPage.locator(".terminal-history-panel").count();
+  check("Escape closes the panel", panelsAfterEsc === 0, `panels=${panelsAfterEsc}`);
+  await historyPage.close();
+
   // --- global quick commands: delete --------------------------------------
   console.log("==> quick commands: delete");
   // M32-A3：删除动作随管理视图在设置·终端（工具条卡片只剩执行）。
