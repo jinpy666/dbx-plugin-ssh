@@ -128,6 +128,8 @@ import {
   type SftpBookmark,
 } from "./lib/sftpBookmarks";
 import { isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
+import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
+import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
 // （vendored amazon-q parser + 全量语料，经冻结接缝 FigCompletionSource 注入
@@ -795,6 +797,8 @@ const searchResultCount = ref(0);
 // handleTerminalKey 的面板分支统一消费；开启期间继续打字即实时过滤
 // （pendingTerminalInput 即 query），其余按键放行。
 const historyPanelOpen = ref(false);
+// 面板内搜索框的 query（开启期间焦点在输入框，打字即过滤；关闭随面板清空）。
+const historyPanelQuery = ref("");
 const historyPanelEntries = ref<HistoryPanelEntry[]>([]);
 const historyPanelActiveIndex = ref(0);
 const historyPanelAnchor = ref<SuggestionAnchor | null>(null);
@@ -2045,7 +2049,9 @@ function historyPanelGateOpen(): boolean {
 function openHistoryPanel() {
   if (!terminal) return;
   terminalMenuOpen.value = false;
-  // 打开瞬间的行内容即过滤 query（空行 = 全量）；ghost 与行内建议同屏不让位。
+  // 每次打开都是全量视图：清掉上一次的搜索词，打开瞬间的行内容仍作为初始
+  // 过滤 query（裸 ↑ 唤起时行通常为空；热键唤起时保留行内语义）。
+  historyPanelQuery.value = "";
   historyPanelEntries.value = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, pendingTerminalInput), commandHistoryTimes.value);
   historyPanelActiveIndex.value = 0;
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
@@ -2057,6 +2063,7 @@ function openHistoryPanel() {
 function closeHistoryPanel() {
   if (!historyPanelOpen.value) return;
   historyPanelOpen.value = false;
+  historyPanelQuery.value = "";
   historyPanelEntries.value = [];
   historyPanelActiveIndex.value = 0;
   historyPanelAnchor.value = null;
@@ -2067,10 +2074,12 @@ function moveHistoryPanelActive(delta: number) {
   historyPanelActiveIndex.value = moveHistoryPanelIndex(historyPanelActiveIndex.value, delta, historyPanelEntries.value.length);
 }
 
-/** 开启期间的过滤联动：按最新行缓冲重算条目，高亮项越界收拢，锚点跟随光标。 */
+/** 开启期间的过滤联动：搜索框 query 优先（焦点在输入框），回落行缓冲（旧
+ *  打字过滤路径）；重算条目后高亮项越界收拢，锚点跟随光标。 */
 function updateHistoryPanelFilter() {
   if (!historyPanelOpen.value) return;
-  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, pendingTerminalInput), commandHistoryTimes.value);
+  const query = historyPanelQuery.value || pendingTerminalInput;
+  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, query), commandHistoryTimes.value);
   historyPanelEntries.value = next;
   historyPanelActiveIndex.value = clampHistoryPanelIndex(historyPanelActiveIndex.value, next.length);
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
@@ -2106,6 +2115,16 @@ function handleHistoryPanelKey(event: KeyboardEvent): boolean {
   return false;
 }
 
+/** 面板搜索框的键盘转发：焦点在输入框时导航/回填/关闭键由 App 的同一
+ *  handleHistoryPanelKey 消费（preventDefault 挡住输入框的光标移动/焦点
+ *  转移/表单提交），其余字符键放行进 query。 */
+function handleHistoryPanelPanelKey(event: KeyboardEvent) {
+  if (handleHistoryPanelKey(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
+
 function runTerminalSearch(query: string, options: { caseSensitive: boolean; regex: boolean; wholeWord: boolean }, direction: "next" | "prev") {
   if (!searchAddon || !query) return;
   const searchOptions: ISearchOptions = {
@@ -2126,7 +2145,13 @@ function runTerminalSearch(query: string, options: { caseSensitive: boolean; reg
 function trackPendingInput(data: string) {
   if (data.includes("\u001b")) return;
   for (const character of data) {
-    if (character === "\r" || character === "\n" || character === "\u0003") pendingTerminalInput = "";
+    if (character === "\r" || character === "\n" || character === "\u0003") {
+      // 回车执行点（Ctrl+C 是清行不是执行）：远端未装 shell integration 的
+      // SSH 会话没有 OSC 633 E 帧，手动键入的命令只有这里能入 commandHistory
+      // （↑ history 面板的数据源）。门过滤 + 回显对照见 lib/terminalEnterCapture.ts。
+      if (character !== "\u0003") captureEnterLine(pendingTerminalInput);
+      pendingTerminalInput = "";
+    }
     else if (character === "\u007f") pendingTerminalInput = pendingTerminalInput.slice(0, -1);
     else if (character >= " ") pendingTerminalInput += character;
   }
@@ -2136,11 +2161,63 @@ function trackPendingInput(data: string) {
   completionController.lineChanged();
 }
 
+/** 回车行兜底采集：门过滤 + 回显对照后写入 commandHistory；与 E 帧/命令
+ *  弹窗采集共用 pushTerminalCommandHistory，重复命令由环去重置顶，时间戳
+ *  覆盖更新（回车先采、E 帧后到，最终值一致）。 */
+function captureEnterLine(line: string) {
+  if (
+    !canCaptureEnterLine(line, {
+      alternateActive: terminal?.buffer.active.type === "alternate",
+      transferBusy: terminalTransferBusy.value || serialUploadBusy.value,
+      shellCommandActive: commandMarker.active,
+    })
+  ) {
+    return;
+  }
+  if (!echoConfirmsLine(readEchoTextBeforeCursor(), line)) return;
+  pushTerminalCommandHistory(line);
+}
+
+/**
+ * 读光标前（含向上折行链）的屏幕文本，作回显对照源。拼接含提示符前缀
+ * （prompt 边界不可知），对照语义因此是「模型行是屏幕文本的子串」而非全等；
+ * buffer 不可测（测试/渲染器未就绪）返回 null，由 echoConfirmsLine 放行。
+ */
+function readEchoTextBeforeCursor(): string | null {
+  if (!terminal) return null;
+  try {
+    const buffer = terminal.buffer.active;
+    if (buffer.type !== "normal") return null;
+    const rowY = cursorAbsoluteRow(buffer);
+    const cursorRow = buffer.getLine(rowY);
+    if (!cursorRow) return null;
+    const parts: string[] = [];
+    let text = "";
+    for (let x = 0; x < buffer.cursorX; x += 1) text += cursorRow.getCell(x)?.getChars() ?? "";
+    parts.push(text);
+    let row = cursorRow;
+    while (row.isWrapped && rowY - parts.length >= 0) {
+      const previous = buffer.getLine(rowY - parts.length);
+      if (!previous) break;
+      row = previous;
+      let wrapped = "";
+      for (let x = 0; x < terminal.cols; x += 1) wrapped += row.getCell(x)?.getChars() ?? "";
+      parts.unshift(wrapped);
+    }
+    return parts.join("");
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 命令输入建议浮层（P1-1）：采集→抑制门→检索→定位→按键消费。
-// 采集只走两条真实来源：① 命令弹窗/命令条执行（已入 commandHistory）；
-// ② OSC 633 shell-integration E 帧（applyCommandMarker）。无 shell
-// integration 的 SSH 会话不做按键模拟式采集（真实降级）；Expect/OTP 自动
+// 采集走三条真实来源：① 命令弹窗/命令条执行（已入 commandHistory）；
+// ② OSC 633 shell-integration E 帧（applyCommandMarker）；③ 回车行兜底
+// 采集（trackPendingInput 的 \r 分支 → captureEnterLine，覆盖无 shell
+// integration 的 SSH/本地会话——远端没装 integration 时 E 帧不存在，
+// 手动键入的命令此前从不入史）。兜底路径的门过滤 + 回显对照（凭据类
+// 关回显输入绝不入史）在 lib/terminalEnterCapture.ts。Expect/OTP 自动
 // 应答由 sidecar 直接注入 PTY，与 onData 用户输入不同源，永不入历史。
 // ---------------------------------------------------------------------------
 
@@ -5441,7 +5518,9 @@ function loadCommandHistory(): string[] {
 function persistCommandHistory() {
   try {
     // 疑似内嵌凭据 / 超长 / 多行的命令只留在内存，不写持久层。
-    pluginStore.setItem(COMMAND_HISTORY_KEY, JSON.stringify(commandHistory.value.filter(isPersistableCommand)));
+    // 显式单参：裸传 isPersistableCommand 会把 filter 的 index 喂进 maxLength
+    // 形参，任何命令都「超长」被滤掉，历史环从未真正落盘（刷新即清空）。
+    pluginStore.setItem(COMMAND_HISTORY_KEY, JSON.stringify(commandHistory.value.filter((command) => isPersistableCommand(command))));
   } catch {
     // localStorage 不可用时命令历史仅保留在内存中。
   }
@@ -5488,8 +5567,8 @@ function persistCommandHistoryTimes() {
 
 /**
  * 终端命令历史的统一采集口：命令环 + 执行时间映射同步推进、一并持久化。
- * 四个采集点（replaceTerminalLineWith 回车执行 / OSC 633 E 帧 / 命令弹窗
- * runCommand / 批量发送）共用，保证环与时间映射不漂移。
+ * 五个采集点（trackPendingInput 回车行兜底 / OSC 633 E 帧 / 命令弹窗
+ * runCommand / 批量发送 / 建议自动执行）共用，保证环与时间映射不漂移。
  */
 function pushTerminalCommandHistory(command: string) {
   commandHistory.value = pushCommandHistory(commandHistory.value, command);
@@ -6939,17 +7018,20 @@ onBeforeUnmount(() => {
           @close="closeQuickSelect"
         />
         <!-- Warp 式 history 面板（↑ 唤起）：commandHistory 可视化快速回填（仅
-             回填不执行）；↑↓/Enter/Tab/Esc 由 handleTerminalKey 的面板分支消费，
-             焦点不离开终端；开启期间继续打字即过滤（pendingTerminalInput 即
-             query），锚点定位与翻转语义同建议浮层。 -->
+             回填不执行）；面板内搜索框聚焦过滤，↑↓/Enter/Tab/Esc 经 panel-key
+             转发给 handleHistoryPanelKey（焦点留在输入框，回填后回终端），
+             锚点定位与翻转语义同建议浮层。 -->
         <TerminalHistoryPanel
           v-if="historyPanelOpen"
           :locale="locale"
           :entries="historyPanelEntries"
           :active-index="historyPanelActiveIndex"
           :anchor="historyPanelAnchor"
+          :query="historyPanelQuery"
           :viewport="suggestionViewport"
           @activate="(index) => (historyPanelActiveIndex = index)"
+          @update:query="(value: string) => { historyPanelQuery = value; updateHistoryPanelFilter(); }"
+          @panel-key="handleHistoryPanelPanelKey"
           @select="selectHistoryEntry"
           @close="closeHistoryPanel"
         />

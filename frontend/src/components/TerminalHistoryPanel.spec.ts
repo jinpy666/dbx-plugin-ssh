@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // TerminalHistoryPanel 组件测试：标题计数、逐条渲染（提示符图标 + 命令文本 +
 // 相对时间）、点击回填、悬停/按下激活（悬停武装）、关闭按钮、空态、锚点降级
-// 与 Warp 版式（全宽、bottom 贴输入行上方）。
+// 与 Warp 版式（全宽、bottom 贴输入行上方）、搜索框（聚焦/上抛 query/清除/键盘转发）。
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import TerminalHistoryPanel from "./TerminalHistoryPanel.vue";
@@ -15,9 +15,9 @@ const entries: HistoryPanelEntry[] = [
 ];
 const anchor = { x: 40, y: 300, cellHeight: 17, cellWidth: 8 };
 
-function mountPanel(props: { entries?: HistoryPanelEntry[]; activeIndex?: number; anchor?: typeof anchor | null; viewport?: { height: number } } = {}) {
+function mountPanel(props: { entries?: HistoryPanelEntry[]; activeIndex?: number; anchor?: typeof anchor | null; viewport?: { height: number }; query?: string } = {}) {
   return mount(TerminalHistoryPanel, {
-    props: { locale: "en", entries, activeIndex: 0, anchor, ...props },
+    props: { locale: "en", entries, activeIndex: 0, anchor, query: "", ...props },
   });
 }
 
@@ -97,5 +97,38 @@ describe("TerminalHistoryPanel", () => {
     expect(style).toContain("bottom: 306px");
     // 全宽版式：水平定位归 CSS（left/right 8px），内联样式不再携带 left。
     expect(style).not.toContain("left");
+  });
+
+  it("focuses the search input on mount and echoes the controlled query", () => {
+    // focus 生效要求真实挂进 document：默认 mount 只建离屏容器，activeElement 不会变。
+    const wrapper = mount(TerminalHistoryPanel, {
+      attachTo: document.body,
+      props: { locale: "en", entries, activeIndex: 0, anchor, query: "kubectl" },
+    });
+    const input = wrapper.find<HTMLInputElement>(".terminal-history-search-input");
+    expect(input.element.value).toBe("kubectl");
+    expect(input.attributes("placeholder")).toBe("Search history");
+    expect(document.activeElement).toBe(input.element);
+    wrapper.unmount();
+  });
+
+  it("typing in the search box emits update:query", async () => {
+    const wrapper = mountPanel();
+    await wrapper.find(".terminal-history-search-input").setValue("git st");
+    expect(wrapper.emitted("update:query")?.[0]).toEqual(["git st"]);
+  });
+
+  it("shows the clear button only with a query and emits an empty update:query on click", async () => {
+    const wrapper = mountPanel();
+    expect(wrapper.find(".terminal-history-search .terminal-history-btn").exists()).toBe(false);
+    await wrapper.setProps({ query: "git" });
+    await wrapper.find(".terminal-history-search .terminal-history-btn").trigger("click");
+    expect(wrapper.emitted("update:query")?.[0]).toEqual([""]);
+  });
+
+  it("forwards panel keys from the search box for App-side consumption", async () => {
+    const wrapper = mountPanel();
+    await wrapper.find(".terminal-history-search-input").trigger("keydown", { key: "ArrowDown" });
+    expect(wrapper.emitted("panel-key")?.[0]?.[0]).toBeInstanceOf(KeyboardEvent);
   });
 });
