@@ -396,8 +396,8 @@ fn spawn_pump(
         let mut pty_cols = pty_cols;
         let mut closing = false;
         let mut exit_code: Option<Option<u32>> = None;
-        let mut handshake_pending = current_platform() == Platform::Windows;
-        let mut handshake_scan: Vec<u8> = Vec::new();
+        let mut handshake_filter =
+            ConptyHandshakeFilter::new(current_platform() == Platform::Windows);
         // Startup-window resize gate (Windows): host-driven geometry changes
         // racing the shell's opening output are merged here and flushed once
         // output stays quiet — see [`StartupResizeGate`]. The flush timer is
@@ -437,13 +437,15 @@ fn spawn_pump(
                 chunk = out_rx.recv() => match chunk {
                     Some(data) => {
                         resize_gate.on_output(session_started_at.elapsed());
-                        if handshake_pending && detect_conpty_handshake(&mut handshake_scan, &data) {
-                            handshake_pending = false;
+                        let (forward, handshake) = handshake_filter.filter(&data);
+                        if handshake {
                             let reply = conpty_cpr_reply(pty_rows, pty_cols);
                             let mut writer = writer.lock().unwrap_or_else(|poison| poison.into_inner());
                             let _ = writer.write_all(&reply).and_then(|_| writer.flush());
                         }
-                        publish_local_terminal(&session_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                        if !forward.is_empty() {
+                            publish_local_terminal(&session_id, TerminalStream::Stdout, forward, &replay, &emitter).await;
+                        }
                     }
                     None => closing = true,
                 },
@@ -528,6 +530,19 @@ fn spawn_pump(
             publish_local_terminal(&session_id, TerminalStream::Stdout, data, &replay, &emitter)
                 .await;
         }
+        // A handshake prefix held back at the very end of the stream is the
+        // terminal's last visible bytes — never drop them.
+        let residue = handshake_filter.flush();
+        if !residue.is_empty() {
+            publish_local_terminal(
+                &session_id,
+                TerminalStream::Stdout,
+                residue,
+                &replay,
+                &emitter,
+            )
+            .await;
+        }
         publish_local_terminal(
             &session_id,
             TerminalStream::State,
@@ -560,23 +575,75 @@ const CONPTY_CPR_QUERY: &[u8] = b"\x1b[6n";
 /// keystrokes — and when that path drops it, every local shell sits alive but
 /// permanently silent: no banner, no prompt, no echo (the terminal looks
 /// dead while the child process runs). So the sidecar answers the FIRST
-/// query itself with the PTY size — exactly the value conhost wants. A real
-/// terminal's own reply is then a duplicate, which conhost tolerates; later
-/// `CSI 6n` queries from applications (PSReadLine, vim) still pass through
-/// untouched for the terminal to answer truthfully.
-fn detect_conpty_handshake(scan: &mut Vec<u8>, chunk: &[u8]) -> bool {
-    scan.extend_from_slice(chunk);
-    if scan
-        .windows(CONPTY_CPR_QUERY.len())
-        .any(|window| window == CONPTY_CPR_QUERY)
-    {
-        return true;
+/// query itself with the PTY size — exactly the value conhost wants.
+///
+/// That answer must be the ONLY one. Forwarding the query on to the terminal
+/// as well invites a second reply that answers the literal question rather
+/// than conhost's implied one: xterm reports its cursor position
+/// (`CSI 1;1R` at startup — locked by our terminalProtocolMatrix spec), and
+/// conhost reads those two numbers as a 1x1 viewport. The console re-wraps
+/// and re-serializes its whole screen mid-startup, which is what users see as
+/// an orphan first glyph (cmd's `M`, WSL's `d`) and PowerShell's prompt drawn
+/// twice. So the handshake query is swallowed here, before it ever reaches
+/// the terminal: conhost's handshake stays a private exchange between conhost
+/// and the sidecar, and only the sidecar's true-size reply is on the wire.
+/// `CSI ?6n` (DECDSR) and every later `CSI 6n` from applications (PSReadLine,
+/// vim) still pass through untouched for the terminal to answer truthfully.
+/// Stripping at the source also keeps the user's reply out of the replay
+/// buffer, so a workbench reload cannot re-deliver it.
+struct ConptyHandshakeFilter {
+    /// Handshake already answered (or not needed on this platform): from here
+    /// on every byte passes through verbatim.
+    done: bool,
+    /// Trailing bytes that may begin the query; held until the next chunk can
+    /// complete — or rule out — the match.
+    held: Vec<u8>,
+}
+
+impl ConptyHandshakeFilter {
+    fn new(needed: bool) -> Self {
+        Self {
+            done: !needed,
+            held: Vec::new(),
+        }
     }
-    // Retain a short tail so a query split across chunk boundaries still
-    // matches on the next chunk.
-    let keep_from = scan.len().saturating_sub(CONPTY_CPR_QUERY.len() - 1);
-    scan.drain(..keep_from);
-    false
+
+    /// Filters one PTY chunk. Returns the bytes to forward to the terminal and
+    /// whether this chunk carries the handshake query — which the caller must
+    /// answer through the PTY input instead of the terminal.
+    fn filter(&mut self, chunk: &[u8]) -> (Vec<u8>, bool) {
+        if self.done {
+            return (chunk.to_vec(), false);
+        }
+        let mut scan = std::mem::take(&mut self.held);
+        scan.extend_from_slice(chunk);
+        if let Some(at) = scan
+            .windows(CONPTY_CPR_QUERY.len())
+            .position(|window| window == CONPTY_CPR_QUERY)
+        {
+            self.done = true;
+            let mut forward = Vec::with_capacity(scan.len() - CONPTY_CPR_QUERY.len());
+            forward.extend_from_slice(&scan[..at]);
+            forward.extend_from_slice(&scan[at + CONPTY_CPR_QUERY.len()..]);
+            return (forward, true);
+        }
+        // No query yet: hold back a trailing proper prefix of it so a query
+        // split across chunks is still caught, and forward everything else.
+        let keep = (1..CONPTY_CPR_QUERY.len())
+            .rev()
+            .find(|length| scan.ends_with(&CONPTY_CPR_QUERY[..*length]))
+            .unwrap_or(0);
+        let split = scan.len() - keep;
+        let forward = scan[..split].to_vec();
+        self.held = scan[split..].to_vec();
+        (forward, false)
+    }
+
+    /// Releases bytes still held when the stream ends.
+    fn flush(&mut self) -> Vec<u8> {
+        self.done = true;
+        std::mem::take(&mut self.held)
+    }
 }
 
 /// The CPR reply ConPTY expects: `CSI rows;cols R` (1-based viewport size).
@@ -1277,31 +1344,194 @@ mod tests {
     use crate::model::TerminalFrame;
 
     #[test]
-    fn conpty_handshake_detected_in_first_chunk() {
-        let mut scan = Vec::new();
-        assert!(detect_conpty_handshake(&mut scan, b"noise\x1b[6n"));
+    fn handshake_filter_swallows_the_query_and_reports_it() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, handshake) = filter.filter(b"noise\x1b[6n");
+        assert!(handshake);
+        assert_eq!(forward, b"noise");
+        // Once answered, everything passes through — terminal-visible bytes
+        // never lose their tail and the terminal never sees the query.
+        let (forward, handshake) = filter.filter(b"banner");
+        assert!(!handshake);
+        assert_eq!(forward, b"banner");
     }
 
     #[test]
-    fn conpty_handshake_detected_when_split_across_chunks() {
-        let mut scan = Vec::new();
-        assert!(!detect_conpty_handshake(&mut scan, b"banner\x1b[6"));
-        assert!(detect_conpty_handshake(&mut scan, b"n rest"));
+    fn handshake_filter_catches_a_query_split_across_chunks() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, handshake) = filter.filter(b"banner\x1b[6");
+        // The partial query is held, not forwarded, and not yet answered.
+        assert!(!handshake);
+        assert_eq!(forward, b"banner");
+        let (forward, handshake) = filter.filter(b"n rest");
+        assert!(handshake);
+        assert_eq!(forward, b" rest");
     }
 
     #[test]
-    fn conpty_detection_ignores_private_dsr_and_later_queries() {
-        let mut scan = Vec::new();
-        assert!(!detect_conpty_handshake(&mut scan, b"\x1b[?6n\x1b[?25h"));
-        // After a hit the caller stops scanning; the detector itself must not
-        // confuse DECDSR (`CSI ?6n`) with the plain query.
-        assert!(!detect_conpty_handshake(&mut scan, b"\x1b[?6n"));
+    fn handshake_filter_flushes_held_bytes_that_never_complete() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, handshake) = filter.filter(b"prompt\x1b[");
+        assert!(!handshake);
+        assert_eq!(forward, b"prompt");
+        // Not a query after all: the held prefix reaches the terminal.
+        let (forward, handshake) = filter.filter(b"?6n");
+        assert!(!handshake);
+        assert_eq!(forward, b"\x1b[?6n");
+    }
+
+    #[test]
+    fn handshake_filter_ignores_private_dsr_and_leaves_stream_intact() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, handshake) = filter.filter(b"\x1b[?6n\x1b[?25h");
+        assert!(!handshake);
+        assert_eq!(forward, b"\x1b[?6n\x1b[?25h");
+        // DECDSR is not the handshake, so the real query is still answered —
+        // and swallows only itself.
+        let (forward, handshake) = filter.filter(b"\x1b[?6n\x1b[6n\x1b[?25h");
+        assert!(handshake);
+        assert_eq!(forward, b"\x1b[?6n\x1b[?25h");
+    }
+
+    #[test]
+    fn handshake_filter_passes_everything_when_not_needed() {
+        // Unix openpty has no handshake: not a byte is held back or dropped.
+        let mut filter = ConptyHandshakeFilter::new(false);
+        let (forward, handshake) = filter.filter(b"\x1b[6n");
+        assert!(!handshake);
+        assert_eq!(forward, b"\x1b[6n");
+    }
+
+    #[test]
+    fn handshake_filter_flush_releases_a_trailing_prefix() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, _) = filter.filter(b"bye\x1b[6");
+        assert_eq!(forward, b"bye");
+        assert_eq!(filter.flush(), b"\x1b[6");
+        assert!(filter.flush().is_empty());
     }
 
     #[test]
     fn conpty_cpr_reply_carries_viewport_size() {
         assert_eq!(conpty_cpr_reply(24, 80), b"\x1b[24;80R".to_vec());
         assert_eq!(conpty_cpr_reply(1, 1), b"\x1b[1;1R".to_vec());
+    }
+
+    /// Windows-only probe of the mechanism behind the startup artifact.
+    ///
+    /// conhost's handshake `CSI 6n` asks for a cursor position but is read as
+    /// the viewport size, so *any* reply on that wire resizes the console.
+    /// xterm answers the literal question — `CSI 1;1R` at startup (locked by
+    /// `frontend/src/lib/terminalProtocolMatrix.spec.ts`) — so a terminal
+    /// reply that reaches the PTY input collapses conhost to 1x1 and makes it
+    /// re-wrap and re-serialize the screen mid-banner: the orphan first glyph
+    /// (cmd's `M`, WSL's `d`) and PowerShell's doubled prompt. This drives a
+    /// real ConPTY by hand: answer the handshake like the sidecar does, let
+    /// cmd render its banner, then deliver the bogus reply a leaked terminal
+    /// answer carries and observe conhost re-serializing its screen.
+    ///
+    /// If this test ever fails, conhost stopped consuming later CPR replies:
+    /// the artifact has another cause and [`ConptyHandshakeFilter`] is free to
+    /// forward the query again.
+    #[cfg(windows)]
+    #[test]
+    fn conpty_consumes_a_duplicate_cursor_position_reply() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        const ROWS: u16 = 30;
+        const COLS: u16 = 100;
+        const BANNER: &[u8] = b"Microsoft Windows";
+        // What xterm sends when it is handed the handshake query.
+        const BOGUS_REPLY: &[u8] = b"\x1b[1;1R";
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: ROWS,
+                cols: COLS,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open ConPTY");
+        let command = CommandBuilder::new("cmd.exe");
+        let mut child = pair.slave.spawn_command(command).expect("spawn cmd.exe");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("pty reader");
+        let mut writer = pair.master.take_writer().expect("pty writer");
+        let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while let Ok(read) = reader.read(&mut buffer) {
+                if read == 0 || chunk_tx.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let saw = |haystack: &[u8], needle: &[u8]| {
+            haystack
+                .windows(needle.len())
+                .any(|window| window == needle)
+        };
+
+        // Phase 1: release conhost's handshake the way the sidecar does.
+        let mut stream = Vec::new();
+        let handshake_deadline = Instant::now() + Duration::from_secs(30);
+        let mut answered = false;
+        while Instant::now() < handshake_deadline && !answered {
+            if let Ok(chunk) = chunk_rx.recv_timeout(Duration::from_millis(500)) {
+                stream.extend_from_slice(&chunk);
+                if saw(&stream, CONPTY_CPR_QUERY) {
+                    writer
+                        .write_all(&conpty_cpr_reply(ROWS, COLS))
+                        .expect("write cpr reply");
+                    writer.flush().expect("flush cpr reply");
+                    answered = true;
+                }
+            }
+        }
+        assert!(answered, "cmd.exe never issued the ConPTY handshake");
+
+        // Phase 2: let the banner render and the startup output go quiet.
+        let banner_deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < banner_deadline {
+            match chunk_rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(chunk) => stream.extend_from_slice(&chunk),
+                Err(mpsc::RecvTimeoutError::Timeout) if saw(&stream, BANNER) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let quiet_bytes = stream.len();
+        assert!(
+            saw(&stream, BANNER),
+            "cmd banner never arrived (captured {quiet_bytes} bytes)"
+        );
+
+        // Phase 3: deliver the reply a leaked terminal answer carries.
+        writer.write_all(BOGUS_REPLY).expect("write bogus reply");
+        writer.flush().expect("flush bogus reply");
+        let mut reaction = Vec::new();
+        let reaction_deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < reaction_deadline {
+            match chunk_rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(chunk) => reaction.extend_from_slice(&chunk),
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            !reaction.is_empty(),
+            "conhost ignored the duplicate CPR reply ({quiet_bytes} bytes before it, \
+             {} bytes after) — the startup artifact has another cause",
+            reaction.len()
+        );
+        eprintln!(
+            "conhost re-serialized {} bytes after the duplicate CPR reply ({} bytes before it)",
+            reaction.len(),
+            quiet_bytes
+        );
     }
 
     #[test]
