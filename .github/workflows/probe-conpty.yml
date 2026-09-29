@@ -1,0 +1,34 @@
+# TEMPORARY diagnostic workflow (branch-only; deleted before merging).
+#
+# Runs the ConPTY handshake probe with --nocapture so the raw startup byte
+# captures land in the job log. Exists to gather evidence on real Windows
+# conhost behaviour for the local-terminal startup artifact (orphan first
+# glyph / doubled prompt), not to gate anything.
+name: Probe ConPTY handshake
+
+on:
+  push:
+    branches: [codex/ssh/conpty-handshake-answer-swap]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ConPTY handshake probe (windows-2022)
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: Probe
+        run: |
+          cargo test --locked --manifest-path backend/Cargo.toml `
+            conpty_handshake_timing_and_first_serialization `
+            -- --nocapture --test-threads=1
