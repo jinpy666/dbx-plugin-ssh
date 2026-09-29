@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import struct
 import sys
@@ -1564,6 +1566,316 @@ def main() -> None:
         report.run("ssh/metrics/history samples", "ssh/metrics/history", case_metrics_history)
         report.run("ssh/recording start/stop/list/get/delete", "ssh/recording/start",
                    case_recording_flow)
+
+        # -- 压缩传输（M33，gzip 混合方案）group --------------------------------
+        # 阈值 0 + 开关开：可压缩文件走压缩通道（响应 compression=gzip、终态
+        # 内容一致、两侧无临时件残留）；黑名单类型决策层回退（compression=
+        # none）；随机数据触发比率守卫回退仍正确落盘；压缩下载/树下载的
+        # ready 握手与内容校验；压缩上传推送期取消的临时件清理。容器缺
+        # gzip/gunzip/tar 时整组 SKIP（能力探测用例抛 SkipSignal）。
+        compress_state: dict = {}
+
+        def compress_remote_ls(pattern: str) -> str:
+            listing = req("ssh/exec", {"sessionId": session_id,
+                                       "command": f"ls -A '{home}' | grep -F '{pattern}' || true"},
+                          timeout=30)
+            return (listing.get("output") or "").strip()
+
+        def compress_remote_digest(path: str) -> str:
+            verify = req("ssh/exec", {"sessionId": session_id,
+                                      "command": f"sha256sum '{path}'"}, timeout=60)
+            return (verify.get("output") or "").split()[0] if verify.get("output") else ""
+
+        def compress_wait_terminal(task_id: str, timeout: float = 300.0) -> dict:
+            """等任务的终态 progress 事件（ack/进度事件混流，按 taskId 过滤）。"""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                for event in list(client.events):
+                    params = event.get("params", {})
+                    if (event.get("method") == "sftp/transfer/progress"
+                            and params.get("taskId") == task_id
+                            and params.get("status") in ("completed", "failed", "cancelled")):
+                        client.events = [e for e in client.events if e is not event]
+                        return params
+                client.events = [e for e in client.events
+                                 if e.get("method") != "sftp/transfer/progress"
+                                 or e.get("params", {}).get("taskId") != task_id
+                                 or e.get("params", {}).get("status") in ("completed", "failed", "cancelled")]
+                client.timeout = min(2.0, max(0.5, deadline - time.monotonic()))
+                try:
+                    client._pump(None)
+                except SidecarError:
+                    continue
+                finally:
+                    client.timeout = 30.0
+            raise AssertionError(f"task {task_id} terminal progress event timeout")
+
+        def compress_spool_upload(remote_path: str, data: bytes) -> tuple[str, dict]:
+            """spool 分块上传（256KiB + ack 背压）→ finish；返回 (taskId, start 响应)。"""
+            info = req("sftp/upload/start", {"sessionId": session_id,
+                                             "remotePath": remote_path, "size": len(data)})
+            task_id = info["taskId"]
+            for offset in range(0, len(data), 256 * 1024):
+                chunk = data[offset:offset + 256 * 1024]
+                client.send_binary(f"sftp/upload/{task_id}", struct.pack(">Q", offset) + chunk)
+                while True:
+                    ack = next((event for event in reversed(client.events)
+                                if event.get("method") == "sftp/upload/ack"
+                                and event.get("params", {}).get("taskId") == task_id
+                                and event.get("params", {}).get("offset") == offset), None)
+                    if ack is not None:
+                        client.events = [event for event in client.events
+                                         if event.get("method") != "sftp/upload/ack"]
+                        break
+                    client.timeout = 2.0
+                    try:
+                        client._pump(None)
+                    except SidecarError:
+                        raise AssertionError(f"ack timeout at offset {offset}")
+                    finally:
+                        client.timeout = 30.0
+            req("sftp/upload/finish", {"taskId": task_id}, timeout=60)
+            return task_id, info
+
+        def compress_wait_ready(task_id: str, timeout: float = 120.0) -> dict:
+            """轮询 status 直到压缩 prep ready（与前端 waitForDownloadReady 同语义）。"""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                status = req("sftp/transfer/status", {"taskId": task_id}, timeout=30)
+                if status.get("ready"):
+                    return status
+                if status.get("status") in ("failed", "cancelled"):
+                    raise AssertionError(f"task {task_id} died pre-ready: {json.dumps(status)[:160]}")
+                time.sleep(0.5)
+            raise AssertionError(f"compressed prep for {task_id} not ready in {timeout}s")
+
+        def case_compress_prefs_roundtrip():
+            """偏好键读写 + 阈值钳制；记录先前值供收尾恢复。"""
+            before = req("local/preferences/get", {})
+            compress_state["prev_mode"] = before.get("transfer_compress_mode")
+            compress_state["prev_threshold"] = before.get("transfer_compress_threshold_mib")
+            # on 策略：豁免弱 CPU 门槛（冒烟机核数不可假定），阈值 0 全量启用。
+            req("local/preferences/set", {"transfer_compress_mode": "on",
+                                          "transfer_compress_threshold_mib": 0})
+            current = req("local/preferences/get", {})
+            if current.get("transfer_compress_mode") != "on" or current.get("transfer_compress_threshold_mib") != 0:
+                raise AssertionError(f"compress prefs roundtrip failed: mode={current.get('transfer_compress_mode')} threshold={current.get('transfer_compress_threshold_mib')}")
+            # 超界钳制到 65536；再回到 0 供后续用例全量启用。
+            req("local/preferences/set", {"transfer_compress_threshold_mib": 999999})
+            clamped = req("local/preferences/get", {}).get("transfer_compress_threshold_mib")
+            if clamped != 65536:
+                raise AssertionError(f"threshold clamp {clamped} != 65536")
+            req("local/preferences/set", {"transfer_compress_threshold_mib": 0})
+            print("    prefs set (enabled, threshold=0), clamp 999999->65536 verified")
+
+        def case_compress_tool_probe():
+            probe = req("ssh/exec", {"sessionId": session_id,
+                                     "command": "command -v gzip >/dev/null 2>&1 && command -v gunzip >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 && echo DBX_COMPRESS_OK"},
+                        timeout=30)
+            if probe.get("exitCode") != 0 or "DBX_COMPRESS_OK" not in (probe.get("output") or ""):
+                raise SkipSignal("remote container lacks gzip/gunzip/tar; compressed channel unavailable")
+            print("    remote gzip/gunzip/tar present")
+
+        def case_upload_compressed_roundtrip():
+            payload = (b"2026-09-29 compressed upload smoke line\n" * 60000)  # ~2MiB 高冗余
+            remote_path = f"{home}/.dbx-compress-src.log"
+            digest = hashlib.sha256(payload).hexdigest()
+            task_id, info = compress_spool_upload(remote_path, payload)
+            if info.get("compression") != "gzip":
+                raise AssertionError(f"start compression={info.get('compression')!r}, want gzip")
+            terminal = compress_wait_terminal(task_id)
+            if terminal.get("status") != "completed":
+                raise AssertionError(f"upload terminal {terminal.get('status')!r}: {terminal.get('error')!r}")
+            if compress_remote_digest(remote_path) != digest:
+                raise AssertionError("compressed upload digest mismatch")
+            residue = compress_remote_ls(".dbx-upload-")
+            if residue:
+                raise AssertionError(f"remote upload temp residue: {residue!r}")
+            compress_state["src_path"] = remote_path
+            print(f"    compressed upload verified ({len(payload)} bytes, gzip channel)")
+
+        def case_upload_blacklist_decision_fallback():
+            payload = b"blacklist-smoke-payload\n" * 1000
+            remote_path = f"{home}/.dbx-compress-photo.png"
+            digest = hashlib.sha256(payload).hexdigest()
+            task_id, info = compress_spool_upload(remote_path, payload)
+            if info.get("compression") != "none":
+                raise AssertionError(f"blacklist compression={info.get('compression')!r}, want none (.png)")
+            terminal = compress_wait_terminal(task_id)
+            if terminal.get("status") != "completed":
+                raise AssertionError(f"upload terminal {terminal.get('status')!r}: {terminal.get('error')!r}")
+            if compress_remote_digest(remote_path) != digest:
+                raise AssertionError("blacklist upload digest mismatch")
+            req("sftp/delete", {"sessionId": session_id, "path": remote_path})
+            print("    .png decision fallback verified (compression=none)")
+
+        def case_upload_incompressible_ratio_fallback():
+            payload = secrets.token_bytes(512 * 1024)
+            remote_path = f"{home}/.dbx-compress-rand.bin"
+            digest = hashlib.sha256(payload).hexdigest()
+            task_id, info = compress_spool_upload(remote_path, payload)
+            if info.get("compression") != "gzip":
+                raise AssertionError(f"random .bin compression={info.get('compression')!r}, want gzip (ratio guard is a mid-flight fallback)")
+            terminal = compress_wait_terminal(task_id)
+            if terminal.get("status") != "completed":
+                raise AssertionError(f"upload terminal {terminal.get('status')!r}: {terminal.get('error')!r}")
+            if compress_remote_digest(remote_path) != digest:
+                raise AssertionError("ratio-fallback upload digest mismatch")
+            residue = compress_remote_ls(".dbx-upload-")
+            if residue:
+                raise AssertionError(f"remote upload temp residue after fallback: {residue!r}")
+            req("sftp/delete", {"sessionId": session_id, "path": remote_path})
+            print("    random payload ratio fallback verified (content identical)")
+
+        def case_download_compressed_roundtrip():
+            remote_path = compress_state.get("src_path") or f"{home}/.dbx-compress-src.log"
+            expected_digest = compress_remote_digest(remote_path)
+            info = req("sftp/download/start", {"sessionId": session_id, "remotePath": remote_path,
+                                               "saveToLocal": True})
+            if info.get("compression") != "gzip":
+                raise AssertionError(f"download compression={info.get('compression')!r}, want gzip")
+            task_id = info["taskId"]
+            compress_wait_ready(task_id)
+            offset = 0
+            size = info["size"]
+            while True:
+                result = req("sftp/download/next", {"taskId": task_id, "offset": offset})
+                offset += result["length"]
+                if result["eof"] or offset >= size:
+                    break
+            finish = req("sftp/download/finish", {"taskId": task_id})
+            local_path = finish.get("localPath")
+            if not local_path:
+                raise AssertionError(f"finish returned no localPath: {json.dumps(finish)[:160]}")
+            saved = Path(local_path)
+            if not saved.is_file() or hashlib.sha256(saved.read_bytes()).hexdigest() != expected_digest:
+                raise AssertionError(f"compressed download content mismatch: {local_path}")
+            residue = compress_remote_ls(".dbx-download-")
+            if residue:
+                raise AssertionError(f"remote download temp residue: {residue!r}")
+            req("sftp/delete", {"sessionId": session_id, "path": remote_path})
+            compress_state.pop("src_path", None)
+            print(f"    compressed download verified -> {local_path}")
+
+        def case_download_tree_compressed():
+            tree_root = f"{home}/.dbx-compress-tree"
+            # 幂等前置清理：非空目录 sftp/delete 会 FAILURE，且上一次失败
+            # 运行的残留目录会让本轮 mkdir 直接 FAILURE——统一 rm -rf。
+            req("ssh/exec", {"sessionId": session_id, "command": f"rm -rf '{tree_root}'"}, timeout=30)
+            req("sftp/createDirectory", {"sessionId": session_id, "path": tree_root})
+            req("sftp/createDirectory", {"sessionId": session_id, "path": f"{tree_root}/sub"})
+            expected = {}
+            for name, body in (("a.log", b"tree smoke a\n" * 500),
+                               ("sub/b.log", b"tree smoke b\n" * 500),
+                               ("sub/c.txt", b"tree smoke c\n")):
+                req("sftp/write", {"sessionId": session_id, "remotePath": f"{tree_root}/{name}",
+                                   "dataBase64": base64.b64encode(body).decode()})
+                expected[name] = body
+            info = req("sftp/download/tree/start", {"sessionId": session_id, "remotePath": tree_root},
+                       timeout=120)
+            if info.get("compression") != "gzip":
+                raise AssertionError(f"tree compression={info.get('compression')!r}, want gzip")
+            task_id = info["taskId"]
+            compress_wait_ready(task_id, timeout=180)
+            offset = 0
+            while True:
+                result = req("sftp/download/next", {"taskId": task_id, "offset": offset})
+                offset += result["length"]
+                if result["eof"]:
+                    break
+            finish = req("sftp/download/finish", {"taskId": task_id}, timeout=120)
+            local_root = finish.get("localPath")
+            if not local_root:
+                raise AssertionError(f"tree finish returned no localPath: {json.dumps(finish)[:160]}")
+            for name, body in expected.items():
+                saved = Path(local_root, *name.split("/"))
+                if not saved.is_file() or saved.read_bytes() != body:
+                    raise AssertionError(f"tree file mismatch: {name}")
+            residue = compress_remote_ls(".dbx-tree-")
+            if residue:
+                raise AssertionError(f"remote tree temp residue: {residue!r}")
+            if any(part.endswith(".staging") for part in Path(local_root).parts):
+                raise AssertionError(f"local staging name leaked into final path: {local_root}")
+            shutil.rmtree(local_root, ignore_errors=True)
+            # 远端整树递归清理（sftp/delete 只能删空目录）。
+            req("ssh/exec", {"sessionId": session_id, "command": f"rm -rf '{tree_root}'"}, timeout=30)
+            print(f"    compressed tree download verified ({len(expected)} files) -> {local_root}")
+
+        def case_upload_compressed_cancel_cleanup():
+            # 96MiB 可压缩数据：完整 spool（finish 要求完整）→ finish 触发后台
+            # 压缩+推送（本机窗口约 2-4s）→ 立即 cancel，取消旗标在压缩/推送/
+            # gunzip 的逐块检查点命中，终态 cancelled 且两侧无临时件残留。
+            payload = (b"cancel smoke compressed payload line\n" * 1677722)[:96 * 1024 * 1024]
+            remote_path = f"{home}/.dbx-compress-cancel.log"
+            task_id = compress_spool_upload_cancel_friendly(remote_path, payload)
+            terminal = compress_wait_terminal(task_id, timeout=600)
+            if terminal.get("status") != "cancelled":
+                raise AssertionError(f"cancel terminal {terminal.get('status')!r}, want cancelled")
+            time.sleep(1.0)
+            exists = req("sftp/exists", {"sessionId": session_id, "path": remote_path})
+            if exists.get("exists") is True:
+                raise AssertionError("cancelled upload left the target file behind")
+            residue = compress_remote_ls(".dbx-upload-")
+            if residue:
+                raise AssertionError(f"remote temp residue after cancel: {residue!r}")
+            print("    cancelled compressed upload cleaned remote temps")
+
+        def compress_spool_upload_cancel_friendly(remote_path: str, data: bytes) -> str:
+            info = req("sftp/upload/start", {"sessionId": session_id,
+                                             "remotePath": remote_path, "size": len(data)})
+            task_id = info["taskId"]
+            for offset in range(0, len(data), 256 * 1024):
+                chunk = data[offset:offset + 256 * 1024]
+                client.send_binary(f"sftp/upload/{task_id}", struct.pack(">Q", offset) + chunk)
+                while True:
+                    ack = next((event for event in reversed(client.events)
+                                if event.get("method") == "sftp/upload/ack"
+                                and event.get("params", {}).get("taskId") == task_id
+                                and event.get("params", {}).get("offset") == offset), None)
+                    if ack is not None:
+                        client.events = [event for event in client.events
+                                         if event.get("method") != "sftp/upload/ack"]
+                        break
+                    client.timeout = 2.0
+                    try:
+                        client._pump(None)
+                    except SidecarError:
+                        raise AssertionError(f"ack timeout at offset {offset}")
+                    finally:
+                        client.timeout = 30.0
+            # finish 一返回就取消：后台压缩/推送窗口内命中取消旗标。
+            req("sftp/upload/finish", {"taskId": task_id}, timeout=60)
+            req("sftp/transfer/cancel", {"taskId": task_id, "reason": "user"})
+            return task_id
+
+        def case_compress_prefs_restore():
+            restore: dict = {}
+            if compress_state.get("prev_mode") is not None:
+                restore["transfer_compress_mode"] = compress_state["prev_mode"]
+            if compress_state.get("prev_threshold") is not None:
+                restore["transfer_compress_threshold_mib"] = int(compress_state["prev_threshold"])
+            req("local/preferences/set", restore or {"transfer_compress_mode": "auto",
+                                                     "transfer_compress_threshold_mib": 64})
+            print(f"    prefs restored: {json.dumps(restore)}")
+
+        report.run("compress prefs roundtrip + clamp", "local/preferences/set",
+                   case_compress_prefs_roundtrip)
+        report.run("compress remote tools probe", "ssh/exec", case_compress_tool_probe,
+                   needs="compress prefs roundtrip + clamp")
+        report.run("compressed upload round-trip", "sftp/upload/start",
+                   case_upload_compressed_roundtrip, needs="compress remote tools probe")
+        report.run("blacklist type decision fallback (.png)", "sftp/upload/start",
+                   case_upload_blacklist_decision_fallback, needs="compress remote tools probe")
+        report.run("incompressible ratio fallback keeps content", "sftp/upload/start",
+                   case_upload_incompressible_ratio_fallback, needs="compress remote tools probe")
+        report.run("compressed download round-trip + temp cleanup", "sftp/download/start",
+                   case_download_compressed_roundtrip, needs="compressed upload round-trip")
+        report.run("compressed tree download round-trip + cleanup", "sftp/download/tree/start",
+                   case_download_tree_compressed, needs="compress remote tools probe")
+        report.run("cancelled compressed upload cleans temps", "sftp/upload/finish",
+                   case_upload_compressed_cancel_cleanup, needs="compress remote tools probe")
+        report.run("compress prefs restore", "local/preferences/set",
+                   case_compress_prefs_restore, needs="compress prefs roundtrip + clamp")
 
         # -- dock「+」launch-options 本地终端分组 group -------------------------
         # 宿主侧 options_action 下发 locale；launch-options 首项为默认 Shell

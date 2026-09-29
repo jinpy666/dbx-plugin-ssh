@@ -1,5 +1,7 @@
 
 // 传输任务统一账本行（progress 事件归并产物，updateTransfer 维护）。
+import type { TransferPhase } from "./transferProgress";
+
 export interface TransferTask {
   taskId: string;
   sessionId?: string;
@@ -14,8 +16,12 @@ export interface TransferTask {
   // 上传分两阶段计数（issue #60）：staging=字节缓存进本地 spool（快），
   // uploading=字节真正推到 SFTP 服务器（慢）。transferred 只反映 uploading，
   // staged 单独记录 staging 字节，面板不再出现"3G→100M"回跳与假速度。
-  phase?: "staging" | "uploading";
+  // 压缩通道（M33）阶段扩展见 transferProgress.TransferPhase。
+  phase?: TransferPhase;
   staged?: number;
+  // 压缩通道标记（M33）：事件/start 响应携带 compression=gzip 时展示徽标；
+  // prep 回退（compression=none）时清除。
+  compression?: "gzip";
   // 本工作台首次见到该任务的时间（issue #18 排序：live 行缺 startedAt 时
   // 用它兜底，保证活跃区顺序稳定可解释）。
   joinedAt?: number;

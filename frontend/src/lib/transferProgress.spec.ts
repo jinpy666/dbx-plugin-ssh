@@ -44,6 +44,44 @@ describe("mergeTransferProgress", () => {
     merged = mergeTransferProgress(merged, { transferred: 120, size: 1000, status: "completed" });
     expect(merged.transferred).toBe(1000);
   });
+
+  // —— 压缩通道（M29）：本地 CPU 阶段与网络阶段的计数隔离 ——
+
+  it("keeps upload compressing bytes out of the transferred counter", () => {
+    let merged = mergeTransferProgress(undefined, { transferred: 500, size: 1000, phase: "staging" });
+    merged = mergeTransferProgress(merged, { transferred: 700, size: 1000, phase: "compressing" });
+    // compressing 的字节记 staged（压缩输入进度），推送计数不动。
+    expect(merged).toEqual({ transferred: 0, staged: 700, size: 1000, phase: "compressing" });
+    // compressing→uploading 换阶段允许计数重置（分母切到压缩后体积）。
+    merged = mergeTransferProgress(merged, { transferred: 40, size: 620, phase: "uploading" });
+    expect(merged.transferred).toBe(40);
+    expect(merged.size).toBe(620);
+  });
+
+  it("resets the download counter at each compressed prep phase boundary", () => {
+    // 远端 gzip：压缩中不产字节。
+    let merged = mergeTransferProgress(undefined, { transferred: 0, size: 1000, phase: "compressing" });
+    expect(merged.staged).toBe(0);
+    // fetching 按压缩流计（分母=压缩后体积）；乱序回退被钳制。
+    merged = mergeTransferProgress(merged, { transferred: 100, size: 400, phase: "fetching" });
+    expect(merged).toEqual({ transferred: 100, staged: 0, size: 400, phase: "fetching" });
+    merged = mergeTransferProgress(merged, { transferred: 60, size: 400, phase: "fetching" });
+    expect(merged.transferred).toBe(100);
+    // decompressing 换计数器（分母=原始体积）；ready 保持计数不清零。
+    merged = mergeTransferProgress(merged, { transferred: 10, size: 1000, phase: "decompressing" });
+    expect(merged.transferred).toBe(10);
+    merged = mergeTransferProgress(merged, { transferred: 0, size: 1000, phase: "ready" });
+    expect(merged.phase).toBe("ready");
+    // transferring 从 0 重新计（本地 staging 分块供给，分母=原始体积）。
+    merged = mergeTransferProgress(merged, { transferred: 0, size: 1000, phase: "transferring" });
+    expect(merged.transferred).toBe(0);
+    merged = mergeTransferProgress(merged, { transferred: 50, size: 1000, phase: "transferring" });
+    expect(merged.transferred).toBe(50);
+  });
+
+  it("drops unknown compression phases instead of poisoning the phase marker", () => {
+    expect(mergeTransferProgress(undefined, { transferred: 5, size: 1000, phase: "hologram" }).phase).toBeUndefined();
+  });
 });
 
 describe("transferCancelReason", () => {

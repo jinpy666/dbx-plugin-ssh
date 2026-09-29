@@ -82,21 +82,24 @@ function updateTransfer(params: Record<string, unknown>) {
   const existing = transferTasks[taskId];
   const status = normalizeTransferStatus(params.status, existing?.status);
   const progress = mergeTransferProgress(existing, params);
-  // 速度只采样真实网络推送（uploading 阶段）：staging 字节走本机内存/磁盘，
-  // 计入会显示 20MB/s 级别的假速度（issue #60）。阶段切换时重置采样窗口。
+  // 速度只采样真实网络推送（uploading/fetching/transferring 阶段）：
+  // staging 字节走本机内存/磁盘，压缩/解压是本机 CPU 段，计入都会显示
+  // 假速度（issue #60；M33 扩展本地阶段集合）。阶段切换时重置采样窗口。
   const phaseChanged = progress.phase !== existing?.phase;
-  if (progress.phase === "staging") {
-    transferSamples.delete(taskId);
-    transferSpeeds[taskId] = 0;
-  } else {
+  if (progress.phase === undefined || progress.phase === "uploading" || progress.phase === "fetching" || progress.phase === "transferring") {
     const sample = sampleTransferSpeed(phaseChanged ? undefined : transferSamples.get(taskId), progress.transferred, performance.now());
     transferSamples.set(taskId, sample);
     transferSpeeds[taskId] = sample.speed;
+  } else {
+    transferSamples.delete(taskId);
+    transferSpeeds[taskId] = 0;
   }
   // 目录下载事件附带的树内字段（fileCount/currentFile）有则透传；
   // 文件下载事件不带这些键，保持原有行为。（issue #46）
   const fileCount = params.fileCount !== undefined ? Number(params.fileCount) : existing?.fileCount;
   const currentFile = typeof params.currentFile === "string" ? params.currentFile : existing?.currentFile;
+  // 压缩通道标记（M33）：prep 回退事件（compression=none）清掉徽标。
+  const compression = params.compression === "gzip" ? "gzip" as const : params.compression === "none" ? undefined : existing?.compression;
   transferTasks[taskId] = {
     taskId,
     sessionId: String(params.sessionId || existing?.sessionId || ""),
@@ -106,6 +109,7 @@ function updateTransfer(params: Record<string, unknown>) {
     transferred: progress.transferred,
     staged: progress.staged,
     phase: progress.phase,
+    compression,
     status,
     error: typeof params.error === "string" ? params.error : existing?.error,
     joinedAt: existing?.joinedAt ?? Date.now(),
@@ -422,14 +426,19 @@ function transferPercent(task: TransferTask) {
   return task.size > 0 ? Math.min(100, Math.round((task.transferred / task.size) * 100)) : task.status === "completed" ? 100 : 0;
 }
 
-/** staging 阶段进度条走不定态（推送计数尚未开始），uploading 用真实百分比。 */
+/** 本机 CPU/磁盘阶段（staging/compressing/decompressing）与 prep 就绪标记
+ * 走不定态进度条；网络阶段（uploading/fetching/transferring）用真实百分比
+ * （压缩任务各阶段事件自带分母，切换自然衔接）。 */
+const INDETERMINATE_BAR_PHASES: ReadonlySet<string> = new Set(["staging", "compressing", "decompressing", "ready"]);
+
 function transferBarValue(task: TransferTask): number | undefined {
-  return task.phase === "staging" ? undefined : transferPercent(task);
+  return task.phase !== undefined && INDETERMINATE_BAR_PHASES.has(task.phase) ? undefined : transferPercent(task);
 }
 
-/** staging 行展示的字节数：spool 进度；其余阶段是已推送/已接收计数。 */
+/** staging/compressing 行展示的字节数：本地阶段计数（spool 缓存/压缩输入）；
+ * 其余阶段是已推送/已接收计数。 */
 function transferShownBytes(task: TransferTask): number {
-  return task.phase === "staging" ? task.staged ?? 0 : task.transferred;
+  return task.phase === "staging" || task.phase === "compressing" ? task.staged ?? 0 : task.transferred;
 }
 
 /** 精确字节数 tooltip：化解 5.9GB(十进制) vs 5.49GiB(二进制) 的口径困惑（issue #60）。 */

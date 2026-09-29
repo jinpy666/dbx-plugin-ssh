@@ -38,10 +38,28 @@ export function useSftpDownload(options: {
 
 // 列表条目/下载起始信息的最小结构（App.vue 的 SftpEntry/DownloadInfo 为局部接口）。
 type DownloadListEntry = { uri: string; name: string; kind: SftpEntryKind; size?: number };
-type DownloadStartInfo = { taskId: string; fileName: string; size: number; chunkSize: number; resumeOffset?: number; fileCount?: number; [key: string]: unknown };
+type DownloadStartInfo = { taskId: string; fileName: string; size: number; chunkSize: number; resumeOffset?: number; fileCount?: number; compression?: string; [key: string]: unknown };
 
 // Above this size the browser download path buffers the whole file in memory, so ask first.
 const WEB_DOWNLOAD_WARNING_BYTES = 512 * MIB;
+
+/** 压缩下载的 prep 等待（M33）：start 返回 compression=gzip 时，sidecar 正
+ * 在后台做「远端 gzip/tar → 拉取 → 本地解压」，分块泵必须等 ready 才能开
+ * 始（staging 未就绪时 download/next 直接报错）。事件丢失时以 status 轮询
+ * 兜底（1s 间隔，ready 标记 / 任务消失 / 用户取消三种出口），上限 15 分钟
+ * ——16GiB 归档的打包+解压在本机盘上也不该更久。 */
+async function waitForDownloadReady(taskId: string, compression: string | undefined): Promise<void> {
+  if (compression !== "gzip") return;
+  const deadline = Date.now() + 15 * 60 * 1000;
+  while (Date.now() < deadline) {
+    if (cancelledTransferTasks.has(taskId)) throw new Error(t("transferStatus.cancelled"));
+    const status = await window.dbxPlugin.invoke<{ ready?: boolean } | undefined>("sftp/transfer/status", { taskId }).catch(() => undefined);
+    if (!status) throw new Error(t("errors.downloadChunkTimeout"));
+    if (status.ready) return;
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+  throw new Error(t("transferCompress.prepTimeout"));
+}
 
 // 本机落盘能力探测（sidecar local/capabilities）：宿主缺 fileTransfer API 时，
 // 桌面端 sidecar 可直接把下载写进本机下载目录；web/docker 模式探测失败或
@@ -116,7 +134,9 @@ async function downloadEntry(entry: DownloadListEntry, forceSudo = false) {
     info = forceSudo
       ? await window.dbxPlugin.invoke<DownloadStartInfo>("sudo/download/start", { ...startParams, path: pathFromUri(entry.uri) })
       : await window.dbxPlugin.invoke<DownloadStartInfo>("sftp/download/start", { ...startParams, remotePath: pathFromUri(entry.uri) });
-    transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now() };
+    transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now(), compression: info.compression === "gzip" ? "gzip" : undefined };
+    // 压缩任务等 prep 就绪（M33）：普通任务（含 sudo/回退）立即返回。
+    await waitForDownloadReady(info.taskId, info.compression);
     // beginSave 在用户取消原生保存框时按契约返回 null：必须立刻终止整个下载，
     // 否则 target=null 会让循环滑进「只推进度不写盘」分支，最终提示成功却无文件。
     target = fileTransfer ? (await fileTransfer.beginSave({ name: info.fileName, size: info.size })) ?? undefined : undefined;
@@ -248,7 +268,10 @@ async function downloadDirectoryEntry(entry: DownloadListEntry) {
       transferred: 0,
       status: "running",
       fileCount: info.fileCount,
+      compression: info.compression === "gzip" ? "gzip" : undefined,
     };
+    // 压缩树等「远端 tar.gz → 拉取 → 本地解包」prep 就绪（M33）。
+    await waitForDownloadReady(info.taskId, info.compression);
     let offset = 0;
     while (true) {
       await waitWhilePaused(info.taskId);

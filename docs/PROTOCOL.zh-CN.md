@@ -56,16 +56,16 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `sftp/diskUsage` | 路径所在挂载的磁盘用量 |
 | `sftp/home`、`sftp/list`、`sftp/read` | 浏览、预览远端文件（`sftp/list` 支持可选 `includeOwner` 附加属主/属组；`sftp/read` 支持可选 `offset` 分片续读，见下文）。`sftp/home` 走高层客户端 `canonicalize(".")`（`ssh.rs:3505`；MCP `sftp_pwd` 同源，`mcp.rs:2473`）——**编码边界（登记，M28-A）**：家目录名非 UTF-8 时返回串已含 U+FFFD（高层 lossy 解码，原始字节不可恢复），以其为基准拼接的后续路径无法命中，与 `sftp/list` 节 M17 段登记的 shell cwd 回读同类不可恢复边界 |
 | `sftp/createDirectory`、`sftp/rename`、`sftp/delete`、`sftp/exists`、`sftp/rename-unique`、`sftp/touch`、`sftp/write`、`sftp/symlink-create/read/update`、`sftp/upload/start/finish`、`sftp/upload-local`、`watch/upload` | SFTP 写操作/预检（`sftp_name_encoding` 为 `latin-1` 时走裸包客户端字节保真，路径来源分工见 `sftp/list` 节 M15-B/M16 段） |
-| `sftp/upload/start`、`finish` | 上传事务生命周期（`resumeTaskId` 断点续传；`finish` 校验后交后台任务推送并立即返回，见「上传两阶段计数与收尾语义」） |
+| `sftp/upload/start`、`finish` | 上传事务生命周期（`resumeTaskId` 断点续传；`finish` 校验后交后台任务推送并立即返回，见「上传两阶段计数与收尾语义」）。start/finish 响应附 `compression: "gzip"\|"none"`（M33 压缩通道决策结果，见「压缩传输（gzip 混合方案）」节；旧客户端可忽略） |
 | `watch/start`、`watch/stop`、`watch/stop-all`、`watch/upload` | 外部编辑器回写 watcher（仅桌面端，见「外部编辑器 watcher（watch/*）」节）：`start` 对 `remote-edit/` 下载目录内的本机文件登记监听并返回 `{watchId}`，内容确认变化后发 `watch/file-modified` 事件；`upload` 把监听文件当前字节按 `sftp/write` 同款原子提交推回远端（latin-1 按所属连接编码走裸包字节保真，M21） |
-| `sftp/download/start`、`next`、`finish` | 下载事务生命周期（`offset` 断点续传，见下文；桌面端可选 `downloadDir` 指定本机绝对保存目录）。**路径形态契约（M27-A）**：latin-1 生效时 `remotePath` 必须是 `sftp/list` 回传的 wire 形式（`pathFromUri(entry.uri)`）——wire 域内字面 `%` 已被 `escape_wire` 自转义为 `%25`，因此 wire 字符串中的 `%XX`（X∈hex）唯一解读就是转义还原（`has_wire_escapes` 判分支）；该入口不接受用户字面输入的显示文本，含字面 `%XX` 的真实文件名经列表回传时其 wire 形式为 `%25XX`，往返无损。**车道判定按生效编码区分（M28-B 修 D-7）**：latin-1 维持上述 raw 车道；auto 生效时一律走高层客户端——auto 列表 uri 由高层产出、字面 `%` 未经 `%25` 自转义，wire 串里的 `%XX` 是文件名字面量而非转义，不还原（auto 以字面量语义与列表一致） |
-| `sftp/download/tree/start` | 递归目录下载启动：远端 `read_dir` 走树扫描（有界），本地镜像目录布局后复用 `sftp/download/next`/`finish`/`sftp/transfer/cancel` 分块管线（见「递归目录下载」节）。`remotePath` 路径形态契约同 `sftp/download/start`（M27-A：列表回传的 wire 形式） |
+| `sftp/download/start`、`next`、`finish` | 下载事务生命周期（`offset` 断点续传，见下文；桌面端可选 `downloadDir` 指定本机绝对保存目录）。**路径形态契约（M27-A）**：latin-1 生效时 `remotePath` 必须是 `sftp/list` 回传的 wire 形式（`pathFromUri(entry.uri)`）——wire 域内字面 `%` 已被 `escape_wire` 自转义为 `%25`，因此 wire 字符串中的 `%XX`（X∈hex）唯一解读就是转义还原（`has_wire_escapes` 判分支）；该入口不接受用户字面输入的显示文本，含字面 `%XX` 的真实文件名经列表回传时其 wire 形式为 `%25XX`，往返无损。**车道判定按生效编码区分（M28-B 修 D-7）**：latin-1 维持上述 raw 车道；auto 生效时一律走高层客户端——auto 列表 uri 由高层产出、字面 `%` 未经 `%25` 自转义，wire 串里的 `%XX` 是文件名字面量而非转义，不还原（auto 以字面量语义与列表一致）。响应附 `compression: "gzip"\|"none"`（M33 压缩通道决策结果，见「压缩传输（gzip 混合方案）」节；`offset > 0` 续传恒为 `none`） |
+| `sftp/download/tree/start` | 递归目录下载启动：远端 `read_dir` 走树扫描（有界），本地镜像目录布局后复用 `sftp/download/next`/`finish`/`sftp/transfer/cancel` 分块管线（见「递归目录下载」节）。`remotePath` 路径形态契约同 `sftp/download/start`（M27-A：列表回传的 wire 形式）。响应附 `compression`（M33：满足压缩条件时改走「远端 tar.gz 单流 → 本地解包 staging 树」通道，见「压缩传输（gzip 混合方案）」节） |
 | `sftp/stat`、`sftp/exists`、`sftp/touch`、`sftp/write` | 扩展文件操作：元信息单查、存在性检查、空文件创建、小文件直写；latin-1 下 `sftp/stat` 整条 wire 还原走裸包 LSTAT，`sftp/exists` 按 `form` 参数分工还原（缺省「wire 前缀 + 显示末段」、`form: "wire"` 整条），均走裸包 LSTAT（M17，见 `sftp/exists` 节） |
 | `sftp/archive`、`sftp/extract` | 远端 tar.gz 打包与解压 |
 | `sftp/copy`、`sftp/move` | 服务器内复制 / 剪切（逐项执行，目标存在需 `overwrite`）；latin-1 下覆盖预检与同目录 move rename 快路径走裸包字节保真（M17，shell 执行层边界见 `sftp/list` 节） |
 | `sftp/bookmarks/list`、`sftp/bookmarks/save`、`sftp/bookmarks/delete` | SFTP 路径书签管理（全局命名清单，插件数据目录持久化，见下文） |
 | `sftp/transfer/cancel` | 取消并清理临时状态（可选 `reason` slug 落入账本，见「上传两阶段计数与收尾语义」） |
-| `sftp/transfer/list`、`sftp/transfer/status` | 查询会话传输任务列表 / 单任务状态（含历史，会话维度过滤） |
+| `sftp/transfer/list`、`sftp/transfer/status` | 查询会话传输任务列表 / 单任务状态（含历史，会话维度过滤）。status 对压缩任务附 `compression`/`ready`（下载）与 prep 进行中的 `phase`（M33，ready 等待的兜底轮询面） |
 | `sftp/transfer/history` | 跨重启传输历史查询（持久化 + 内存 live 合并，见下文） |
 | `sftp/transfer/history/clear` | 清空已持久化及当前进程中的传输历史 |
 | `sftp/transfer/resumable` | 可续传上传扫描（中断任务的 spool 前缀仍在磁盘上的清单，见下文） |
@@ -87,7 +87,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `local/shells/list` | 本机可启动 shell 清单（用户登录 shell 置顶，含 `isDefault`/`isUserShell`/`injectable` 标记——最后一项表示该 shell 是否支持 integration 注入，不支持的在选择器中灰掉开关；Unix 读 `/etc/shells`+`dscl`，Windows 枚举 PATH 下的 pwsh/PowerShell/cmd/wsl），工作台 shell 选择器数据源 |
 | `local/terminal/launch-options` | 宿主 dock「+」启动选项（PR-A4 通用契约）：`{entries: [{label, description, context, group?}]}`——首项为默认 Shell 启动项，**不带 `group`**（宿主顶层首位平铺，最快常用动作；`description` 为解析后的默认 Shell，`localShell` 偏好优先，否则 DS/`$SHELL`/平台默认链；`context` 携带 `mode`），其余为本机扫描到的 shell 子项（`context` 额外携带 `shell` 固定程序），`group` 同为本地化「本地SHELL」标签，宿主渲染为紧随其后的单个可折叠分组（默认折叠）。可选参数 `locale`（宿主 UI 语言，如 `zh-CN`/`zh-TW`/`ja`/`es`/`it`/`pt-BR`/`en`；宿主侧 `options_action` 调用统一下发）：本地化 label/group/description 前缀，未识别语言回落英文；旧宿主不传参数行为不变（`group` 字段被忽略，平铺渲染）。默认 Shell 在设置·终端配置（`localShell` 偏好，与工作台 shell 选择器同一存储键） |
 | `local/session/list`、`local/session/close` | 本地终端会话清单（webview 重载后接回）与关闭 |
-| `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。`transfer_concurrency`（u64，1..=10，默认 3）、`transfer_duplicate_policy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`transfer_max_active`（M14-B 会话级并发传输深度，u64，1..=8，默认 3；sidecar 每次任务启动现读现用——改动即时生效，新任务按新深度启动，进行中任务按旧深度自然完成）、`transfer_download_limit_kib`（M31-B 下载限速，issue #66：SFTP 下载速度上限，u64，0..=1048576 KiB/s，0=不限速（缺省）；超界钳制、非法回落 0。sidecar 在下载任务启动（`sftp/download/start`、`sftp/download/tree/start`）时对现值快照一次并整个任务沿用——改动对下一个下载任务生效，进行中任务按原节奏完成）、`sftp_compat_mode`（M14-B 老旧服务器兼容模式，bool，默认 false；开启后 SFTP 会话不做流水线并发（读写各 1 路）并把并发深度强制 1，对新建 SFTP 会话生效（重连后应用）；SFTP 探测失败时 sidecar 对该会话一次性在错误信息中附带建议开启的提示）、`sftp_name_encoding`（M14-B 文件名显示编码，`auto`/`latin-1`，默认 `auto`，语义见 `sftp/list` 节）、`sftp_name_encoding_overrides`（M16 连接级文件名编码覆盖，对象按 connectionId 分桶 `{ <connectionId>: "auto"|"latin-1" }`；整体非对象报错，桶内非法值/空 connectionId 清洗丢弃，桶数上限 512；缺省语义为「跟随全局」——桶内无本连接条目即回退全局 `sftp_name_encoding`，再缺省 `auto`；判定优先级 连接覆盖 > 全局偏好 > 缺省 auto，覆盖值非法（白名单外）同样按未覆盖回退；判定点现读现用（`sftp/list`、`sftp/rename`、`sftp/delete`、`sftp/createDirectory`、`sftp/download/tree/start`），改动对下一次调用即时生效；sessionId 无法映射到连接（已断开）时按未覆盖处理）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
+| `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。`transfer_concurrency`（u64，1..=10，默认 3）、`transfer_duplicate_policy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`transfer_max_active`（M14-B 会话级并发传输深度，u64，1..=8，默认 3；sidecar 每次任务启动现读现用——改动即时生效，新任务按新深度启动，进行中任务按旧深度自然完成）、`transfer_download_limit_kib`（M31-B 下载限速，issue #66：SFTP 下载速度上限，u64，0..=1048576 KiB/s，0=不限速（缺省）；超界钳制、非法回落 0。sidecar 在下载任务启动（`sftp/download/start`、`sftp/download/tree/start`）时对现值快照一次并整个任务沿用——改动对下一个下载任务生效，进行中任务按原节奏完成）、`transfer_compress_mode`（M33 压缩传输策略，`auto`/`on`/`off` 白名单，默认 `auto`，非法值报错。`auto`=智能综合判断：大小/类型/远端工具/只读/latin-1 之外再计本机 CPU——并行度 ≤2 核直接跳过，上传压缩预压另有运行时吞吐守卫（实测速率 <20 MiB/s 中止回退，对所有策略生效）；`on`=始终尝试（豁免 CPU 门槛，其余回退条件与吞吐守卫不变）；`off`=关闭。语义见「压缩传输（gzip 混合方案）」节——任务 start 时现读现决，改动对下一个任务生效）、`transfer_compress_threshold_mib`（M33 压缩生效阈值，u64，0..=65536 MiB，默认 64，0=不限下限；超界钳制、非法回落默认）、`sftp_compat_mode`（M14-B 老旧服务器兼容模式，bool，默认 false；开启后 SFTP 会话不做流水线并发（读写各 1 路）并把并发深度强制 1，对新建 SFTP 会话生效（重连后应用）；SFTP 探测失败时 sidecar 对该会话一次性在错误信息中附带建议开启的提示）、`sftp_name_encoding`（M14-B 文件名显示编码，`auto`/`latin-1`，默认 `auto`，语义见 `sftp/list` 节）、`sftp_name_encoding_overrides`（M16 连接级文件名编码覆盖，对象按 connectionId 分桶 `{ <connectionId>: "auto"|"latin-1" }`；整体非对象报错，桶内非法值/空 connectionId 清洗丢弃，桶数上限 512；缺省语义为「跟随全局」——桶内无本连接条目即回退全局 `sftp_name_encoding`，再缺省 `auto`；判定优先级 连接覆盖 > 全局偏好 > 缺省 auto，覆盖值非法（白名单外）同样按未覆盖回退；判定点现读现用（`sftp/list`、`sftp/rename`、`sftp/delete`、`sftp/createDirectory`、`sftp/download/tree/start`），改动对下一次调用即时生效；sessionId 无法映射到连接（已断开）时按未覆盖处理）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
 | `serial/upload/start`、`serial/upload/data`、`serial/upload/cancel` | 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：协议状态机在 sidecar（`backend/src/serial_xmodem.rs` 纯状态机，由串口读线程喂数据/取输出），文件字节由前端 File API 分块（≤64KiB）经 `data` 送入，sidecar 不落盘；单次上传总量上限 256 MiB；进度事件 `serial/upload/progress`（`sent`/`total`，不含文件内容）；同一会话同一时刻至多一个上传（并发第二次 `start` 报错），见「串口文件上传（X/Y/ZMODEM）」节 |
 | `serial/ports/list` | 本机串口清单（连接弹窗端口下拉数据源）：`{ports: [path], portDetails: [{path, description}]}`，按路径排序；枚举失败回落空清单，USB/PCI/Bluetooth 描述尽力标注 |
 | `local/wallpaper/get`、`local/wallpaper/set`、`local/wallpaper/clear` | 工作台背景图（桌面形态）：`get` 返回 `{dataUrl: "data:image/<png|jpeg|webp>;base64,…"}`，无背景时返回 `{}`；`set` 接受 `{imageBase64}`，≤8 MiB 且仅 png/jpeg/webp 魔数，原子落盘 `<plugin_data_dir>/wallpaper`，返回与 `get` 相同的 data URL 载荷；`clear` 幂等删除，返回 `{}` |
@@ -904,6 +904,65 @@ offset 语义不变）。中断来源不限：前端中止、sidecar 重启、�
 单文件与递归目录下载的分块循环（`sftp/download/next`，含 latin-1 raw 车道）按
 「该块理想耗时 − 实际耗时」的差额逐块等待，使平均速率不超过上限；限速为 0 时
 该路径零等待零开销。改动对下一个下载任务生效；sudo 下载（独立车道）本期不限速。
+
+### 压缩传输（gzip 混合方案，M33）
+
+SFTP 单文件上传/下载与目录下载的可选压缩通道：文件超过阈值且可压缩时先 gzip 压缩再过网络，
+对端解回原样。分工——压缩端用程序内置 flate2（纯 Rust，`backend/src/transfer_compress.rs`），
+对端由远端 `gzip`/`gunzip`/`tar` 工具承担（任务 start 时 `command -v` 探测一次）。无新增 RPC
+方法：现有传输方法增可选响应字段与新 `phase` 值，偏好开关走 `local/preferences` 白名单。
+
+**决策（任务 start 时一次定死，响应 `compression` 字段回传）**：`transfer_compress::decide`
+收敛全部本地条件——策略 `off` / 文件 < `transfer_compress_threshold_mib`（0=不限下限）/ 扩展名
+黑名单（jpg/png/mp4/mkv/mp3/flac/zip/7z/rar/gz/xz/bz2/zst/tgz/tar/iso/apk/deb/rpm/dll/exe/dmg/svgz/webp/gif/m4a/m4v/mov/mpeg/mpg/ogg/tbz 等大小写不敏感，无扩展名不拦）/ 远端缺工具 / 只读连接（下载侧远端要写临时件；上传侧 `ensure_writable` 已整体拦截）/ latin-1 裸包车道（用户路径不进 shell）——任一命中即 `none`，维持现状管线零变化；Gzip 判定再做远端工具探测，探测失败/超时（5s）也静默回退。
+
+**CPU 综合判断（M33 补充，弱机不加压）**：`auto` 策略下本机并行度（`available_parallelism`）
+≤2 核直接跳过压缩——压缩吃满单核在低配机上收益为负；`on` 策略是对该门槛的显式豁免（慢网快
+双核仍可能受益）。决策层核数门槛之上，上传预压另有**运行时吞吐守卫**（对所有策略生效）：
+压缩处理满 8 MiB 且耗时满 1s 时测一次速率，低于 20 MiB/s 即中止压缩、删半成品、按「不划算」
+回退普通推送——比核数更真实的「CPU 不行」信号，弱单核与被限流的容器都能兜住。下载方向的
+解压端速率约为压缩 3 倍且回退需重拉整流，不做运行时守卫，由决策层核数门槛覆盖。
+
+**上传**（`sftp/upload/finish` 后台推送段）：spool（存原始字节，分块协议与续传语义不变）→
+`compressing` 阶段本地 gzip 成 `upload-<taskId>.part.gz`（spawn_blocking，逐块检查取消旗标）→
+比率守卫：压缩后 ≥ 原始体积 95% 判不划算，删 .gz 回落普通推送 → 推送 .gz 到远端
+`<temporary>.gz`（`uploading` 事件分母切为压缩后体积）→ 远端 `gunzip -c '<tmp>.gz' > '<tmp>.part'`
+（exec 上限 300s，全路径 shell 单引号转义、临时件名固定派生自 taskId）→ 复用既有原子提交与
+权限保留 → 清理两侧 .gz。推送或 gunzip 失败（非取消）回落普通推送重传原始字节；取消立即终止。
+
+**下载**（`sftp/download/start` 压缩任务异步 prep）：远端 `gzip -c '<src>' > '<dir>/.dbx-download-<taskId>.gz'`
+（不改源文件；exec 上限 300s，超时后命令仍在远端跑，失败清理会把 .gz 摘目录）→ stat 比率
+守卫（同 95% 口径，不划算回退）→ `fetching` 拉取 .gz 到本地 `download-<taskId>.part.gz`
+（限速沿用 `transfer_download_limit_kib`，按压缩流计）→ `decompressing` 本地 MultiGzDecoder
+解压成 `download-<taskId>.plain`（体积与声明 size 不符视为损坏，回退）→ `ready` 事件
+（`phase: "ready"` + `compression` 标明实际通道）→ 此后 `sftp/download/next` 从本地解压暂存按
+offset 读（不再远端 seek），事件带 `compression: "gzip"`、分母回原始体积。saveToLocal 完成时
+`download-<taskId>.plain` rename 落位（沿用冲突让位语义）；浏览器模式字节照常经分片帧到前端，
+暂存在成功后清理。任一 prep 步失败回退：registry 改回 `none`、清理两侧临时件、发
+`ready + compression:"none"`，前端照普通管线直读远端。**压缩下载不支持 offset 续传**——
+`offset > 0` 的 start 恒走普通管线（前端无需特殊处理）。
+
+**目录下载**（树任务）：扫描前置后决策（latin-1 树/空树强制 `none`；树不做比率守卫——归档对
+混合内容几乎必赚）。满足时远端 `tar -czf '<dir>/.dbx-tree-<taskId>.tgz' -C '<root>' .`
+（相对打包，成员名 `./relative/...` 与扫描相对路径直接对齐，不依赖 `--strip-components`）→
+拉取 → 本地 `tar` crate 解包进落点目录内隐藏 staging 根 `.dbx-tree-<taskId>.staging`
+（仅普通文件与目录，链接/特殊文件跳过——与树管线「不跟随 symlink」语义对齐；`unpack_in` 自带
+路径穿越防护，`..`/绝对路径条目静默跳过不入账）→ `ready` → 分块管线从本地 staging 逐文件读。
+完成时 staging rename 成 `final_download_path` 让位名（同卷零拷贝，跨卷递归拷贝兜底）；取消/
+未完成整 staging 删除（沿用树任务 root_local 语义）。目录上传走逐文件压缩（各文件独立任务），
+不引入跨任务打包。
+
+**进度事件（`sftp/transfer/progress`）**：新增可选 `phase` 值与 `compression` 字段（"gzip"）。
+上传：`staging → compressing → uploading`（compressing 分母=原始大小、字节记 staged）；
+下载压缩任务：`compressing → fetching → decompressing → ready`，分块供给阶段无 phase 但带
+`compression`。各阶段事件 `transferred/size` 自描述（fetching 分母=压缩流体积，decompressing/
+transferring 分母=原始体积），普通下载事件无 phase（线上兼容）。前端归并按阶段切计数器，
+本地 CPU 阶段（staging/compressing/decompressing）不计速度。
+
+**清理与磁盘**：两侧临时件（本地 `.part.gz`/`.tgz`、远端 `.dbx-*-<taskId>.gz/.tgz`）在完成/
+失败/取消三态 best-effort 清理（重复删除无害；取消与 prep 建件的竞窗由取消路径的远端删除 +
+prep 退出兜底双保险）。磁盘放大：上传本地 spool 2×（原始 + .gz）、远端 .gz+plain 2×、下载
+本地 .gz+.plain 2×、树远端 .tgz+源树 2×；`MAX_TRANSFER_SIZE`（16 GiB）仍按原始大小语义。
 
 ### 递归目录下载（sftp/download/tree/start）
 

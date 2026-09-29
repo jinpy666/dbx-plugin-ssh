@@ -48,6 +48,13 @@ sha3 = "0.11"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
+# SFTP 压缩传输（src/transfer_compress.rs）：gzip 通道的本地编解码端。默认
+# feature 即纯 Rust miniz_oxide 后端（无 C 依赖，跨平台构建面不变）。对端
+# 解压/压缩由远端 gzip/gunzip/tar 工具承担（探测后回退）。
+flate2 = "1"
+# 树下载压缩通道的本地解包端（tar.gz 单流 → staging 树）；unpack 自带
+# 路径穿越防护。仅解包方向使用，读侧仍是逐文件分块管线。
+tar = { version = "0.4", default-features = false }
 # Xshell .xts session archives; deflate is all Xshell writes (zip-bomb
 # guards live in connection_import.rs).
 zip = { version = "2", default-features = false, features = ["deflate"] }

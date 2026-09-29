@@ -46,6 +46,7 @@ mod sudo_download;
 mod sudo_fs;
 mod sudo_profiles;
 mod telnet_session;
+mod transfer_compress;
 mod transfer_history;
 mod transfer_throttle;
 mod triggers;
@@ -1814,11 +1815,15 @@ impl Plugin {
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
+                // 压缩通道判定（M33）走连接级编码：latin-1 裸包车道强制
+                // 普通传输（远端 gunzip 的 shell 路径不做 latin-1 字节）。
+                let encoding = self.resolve_sftp_encoding(&session_id);
                 self.runtime.block_on(self.ssh.start_upload(
                     session_id,
                     remote_path,
                     size,
                     resume_task_id,
+                    encoding,
                     emitter,
                 ))
             }
