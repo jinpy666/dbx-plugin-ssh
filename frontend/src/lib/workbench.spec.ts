@@ -751,6 +751,12 @@ const appStyleIndex = appVueSource.indexOf("<style");
 const appTemplate = appVueSource.slice(appVueSource.indexOf("<template>"), appVueSource.lastIndexOf("</template>", appStyleIndex));
 const appScript = appVueSource.slice(appVueSource.indexOf("<script"), appVueSource.indexOf("</script>"));
 
+// App.vue 持续模块化（状态/接线迁 composables/）：结构守卫的扫描范围相应
+// 演进为 App.vue + composables 联合源，防止"迁走即失守"。
+const composablesScript = Object.values(
+  import.meta.glob("../composables/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>,
+).join("\n");
+
 /** 模板中 class 含 marker 且由 v-if 守卫的元素 → 守卫表达式的状态 ref 基名。
  *  reka Popover 面板（Phase 5）无 v-if：内容 portal、由包裹的 <Popover :open="ref">
  *  受控，向回找最近的 Popover 根提取守卫 ref。Phase 6 的 Dialog 同理：弹窗壳是
@@ -834,9 +840,11 @@ describe("App.vue popover/modal wiring structural guard", () => {
   it("routes every toolbar popover toggle through closeToolbarPopovers", () => {
     // M32-A2：toggleHighlightMenu 已随高亮弹层迁设置·终端而下线。
     for (const name of ["toggleQuickMenu", "toggleConnectionInfo", "toggleAgentModeMenu", "toggleBookmarkSave", "toggleColumnsMenu", "toggleTransferPanel", "togglePathHistoryMenu", "toggleSessionMenu"]) {
-      const start = appScript.indexOf(`function ${name}(`);
+      // toggle 可能随模块化迁入 composables/：App.vue 找不到时到联合源里找。
+      const haystack = appScript.includes(`function ${name}(`) ? appScript : `${appScript}\n${composablesScript}`;
+      const start = haystack.indexOf(`function ${name}(`);
       expect(start, `缺少 toggle 函数 ${name}()`).toBeGreaterThanOrEqual(0);
-      const body = appScript.slice(start, appScript.indexOf("\n}", start));
+      const body = haystack.slice(start, haystack.indexOf("\n}", start));
       expect(body, `${name}() 未走 closeToolbarPopovers 统一收口`).toContain("closeToolbarPopovers()");
     }
   });
