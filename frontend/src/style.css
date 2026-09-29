@@ -239,10 +239,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   min-height: 0;
   flex: 1;
   overflow: hidden;
-  /* Docker 停靠面板宽度默认值（App.vue 可拖宽后以内联变量覆盖，terminalBasis
-     的让宽计算引用同一变量）。默认加宽：容器表 5 列 + 7 个操作按钮自然宽约
-     670px，旧 clamp(320,30vw,520) 塞不下，单元格全被省略号截断。 */
-  --docker-pane-width: clamp(360px, 38vw, 720px);
 }
 .panes--reversed { flex-direction: row-reverse; }
 .terminal-pane, .sftp-pane { display: flex; height: 100%; min-width: 0; min-height: 0; flex-direction: column; background: var(--background); }
@@ -383,14 +379,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .divider::after { content: ""; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px; }
 .divider:hover { background: color-mix(in srgb, var(--foreground) 38%, var(--border)); }
 .sftp-pane { position: relative; z-index: 0; flex: 1; overflow: hidden; }
-/* Docker 停靠面板（鲸鱼按钮开合）：与 sftp-pane 同族分栏；宽度默认 clamp、
-   可经前置 .divider 拖宽（App.vue 内联覆盖 --docker-pane-width），终端经
-   terminalBasis 让宽，SFTP 分栏 flex:1 吸收剩余。面板头沿用 metrics-float
-   的紧凑头样式。 */
-.docker-pane { position: relative; z-index: 0; display: flex; height: 100%; min-width: 0; min-height: 0; flex-direction: column; flex: 0 0 var(--docker-pane-width); overflow: hidden; border-left: 1px solid var(--border); background: var(--background); }
-.docker-pane > header { display: flex; min-height: 34px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 3px 4px 3px 12px; }
-.docker-pane h2 { margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
-.docker-pane > .docker-panel { flex: 1 1 auto; min-height: 0; }
+/* Docker 浮层（鲸鱼按钮开合，metrics-float 同款）：挂终端面板内右上角，
+   出现即自右缘向左覆盖终端一角，不占分栏、永不遮挡 SFTP 面板；z=6 与
+   指标/录制浮条同族（同开时按 DOM 序后挂者置顶）。宽度沿用旧停靠面板的
+   口径：容器表 5 列 + 7 个操作按钮自然宽约 670px，给 min(680px, 100%-16px)，
+   更窄由 .docker-panel 自身 overflow:auto 横向滚动。 */
+.docker-float { position: absolute; z-index: 6; top: 8px; right: 8px; display: flex; width: min(680px, calc(100% - 16px)); max-height: calc(100% - 16px); flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--popover); box-shadow: var(--shadow-popover); }
+.docker-float > header { display: flex; min-height: 34px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 3px 4px 3px 12px; }
+.docker-float h2 { margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
+.docker-float > .docker-panel { flex: 1 1 auto; min-height: 0; }
 .sftp-pane.drag-active { background: color-mix(in srgb, var(--primary) 4%, var(--background)); }
 
 /* SFTP 面板主体：左侧 tree/quick 双 tab 侧栏（可收起为窄条）+ 右侧文件区。
@@ -632,14 +629,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   .divider::after { top: -3px; bottom: -3px; left: 0; right: 0; }
   /* SFTP 面板收起时终端占满整个工作台（含窄屏纵向布局）。 */
   .panes--solo .terminal-pane { height: 100%; }
-  /* Docker 停靠面板窄屏纵向占位；仅 Docker 开时终端固定 52%（见 .panes--docker）。 */
-  .docker-pane { width: 100%; height: 48%; flex-basis: 48%; border-left: none; border-top: 1px solid var(--border); }
-  .panes--docker .terminal-pane { height: 52%; }
-  /* SFTP+Docker 同开（纵向三段）：52%+48% 已占满，旧「SFTP flex 收缩吸收」
-     会把 SFTP 压成 0 高——改为 SFTP 固定份额，终端 flex 吸收剩余（与宽屏
-     terminalBasis 的让宽口径一致）。 */
-  .panes--docker:not(.panes--solo) .terminal-pane { height: auto; flex: 1 1 auto; min-height: 0; }
-  .panes--docker:not(.panes--solo) .sftp-pane { height: 26%; flex: 0 0 26%; }
 }
 
 @media (max-width: 640px) {

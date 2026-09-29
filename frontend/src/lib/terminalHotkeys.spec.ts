@@ -303,6 +303,31 @@ describe("quick-select 动作（WT-1，注册表真实派发）", () => {
   });
 });
 
+describe("command-history 动作（Warp 式 history 面板补充唤起键）", () => {
+  it("默认键位登记 Cmd/Ctrl+Shift+H，两平台默认表均无冲突", () => {
+    expect(defaultTerminalHotkeys(true)["command-history"]).toEqual(["Meta+Shift+H"]);
+    expect(defaultTerminalHotkeys(false)["command-history"]).toEqual(["Ctrl+Shift+H"]);
+    expect(findHotkeyConflicts(defaultTerminalHotkeys(true))).toEqual([]);
+    expect(findHotkeyConflicts(defaultTerminalHotkeys(false))).toEqual([]);
+  });
+
+  it("键盘事件经 keyComboFromEvent → matchTerminalHotkey 派发到 command-history", () => {
+    const otherCombo = keyComboFromEvent(event("KeyH", { ctrlKey: true, shiftKey: true }));
+    expect(otherCombo).toBe("Ctrl+Shift+H");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), otherCombo!)).toBe("command-history");
+    const appleCombo = keyComboFromEvent(event("KeyH", { metaKey: true, shiftKey: true }));
+    expect(appleCombo).toBe("Meta+Shift+H");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(true), appleCombo!)).toBe("command-history");
+    // 裸 ↑ 不经注册表派发（App.vue 键盘链的 history 面板分支直达）。
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), "Up")).toBeNull();
+  });
+
+  it("存量键位数据缺 command-history 字段时回填平台默认（新增动作不失效）", () => {
+    const legacy = sanitizeTerminalHotkeys({ search: ["Ctrl+Shift+F"] }, false);
+    expect(legacy["command-history"]).toEqual(["Ctrl+Shift+H"]);
+  });
+});
+
 describe("hotkeysEqual", () => {
   it("逐动作逐项比较", () => {
     const a = defaultTerminalHotkeys(true);

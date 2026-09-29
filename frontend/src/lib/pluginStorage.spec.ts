@@ -16,6 +16,8 @@ describe("ssh pluginStore wiring", () => {
       [
         "sftp-path-history",
         "ssh-command-history",
+        // 命令 → 最近执行时刻（Warp 式 history 面板相对时间），与命令环同采集口。
+        "ssh-command-history-times",
         "ssh-follow-directory",
         "ssh-sftp-pane-open",
         "ssh-sftp-side-tab",

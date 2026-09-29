@@ -1,3 +1,31 @@
+
+// 传输任务统一账本行（progress 事件归并产物，updateTransfer 维护）。
+export interface TransferTask {
+  taskId: string;
+  sessionId?: string;
+  direction: "upload" | "download";
+  fileName: string;
+  size: number;
+  transferred: number;
+  status: "queued" | "running" | "completed" | "cancelled" | "failed";
+  error?: string;
+  // saveToLocal 下载完成后的本机落盘路径（用于展示与在文件管理器中定位）。
+  localPath?: string;
+  // 上传分两阶段计数（issue #60）：staging=字节缓存进本地 spool（快），
+  // uploading=字节真正推到 SFTP 服务器（慢）。transferred 只反映 uploading，
+  // staged 单独记录 staging 字节，面板不再出现"3G→100M"回跳与假速度。
+  phase?: "staging" | "uploading";
+  staged?: number;
+  // 本工作台首次见到该任务的时间（issue #18 排序：live 行缺 startedAt 时
+  // 用它兜底，保证活跃区顺序稳定可解释）。
+  joinedAt?: number;
+  // 目录下载（sftp/download/tree/start）扩展：整树文件数、在传相对路径与
+  // 失败汇总（完成但部分文件失败时面板提示）。（issue #46）
+  fileCount?: number;
+  currentFile?: string;
+  failedCount?: number;
+  failureSample?: string;
+}
 // 传输并发调度（P1-5）：把 App 里"固定 3 路并发"的硬编码抽成可配置的
 // 调度策略。槽位语义：running 与 paused 都占位（暂停中的任务不释放并发
 // 槽，恢复后原地继续），done/cancelled 释放；多方向混合队列按方向计数

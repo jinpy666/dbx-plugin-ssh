@@ -8172,3 +8172,103 @@ const terminalOscMessages: Record<string, Record<string, string>> = {
 for (const locale of Object.keys(terminalOscMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...terminalOscMessages[locale] };
 }
+
+// —— Warp 式终端 history 面板（↑ 唤起，App.vue + TerminalHistoryPanel.vue）：
+// commandHistory 可视化快速回填（仅回填不执行），条目右侧相对时间。七语齐套，缺一即被
+// workbenchMessageTable 的键集对比测试拦下。——
+const terminalHistoryPanelMessages: Record<string, Record<string, string>> = {
+  en: {
+    "terminalHistory.title": "Command history",
+    "terminalHistory.count": "{count} entries",
+    "terminalHistory.empty": "No matching commands in history",
+    "terminalHistory.close": "Close",
+    "terminalHistory.navigate": "to navigate",
+    "terminalHistory.fill": "to fill",
+    "terminalHistory.justNow": "just now",
+    "terminalHistory.minutesAgo": "{count} min ago",
+    "terminalHistory.hoursAgo": "{count} h ago",
+    "terminalHistory.daysAgo": "{count} d ago",
+    "terminalHotkeys.actionHistory": "Command history panel (fill input line)",
+  },
+  "zh-CN": {
+    "terminalHistory.title": "历史命令",
+    "terminalHistory.count": "{count} 条",
+    "terminalHistory.empty": "历史中没有匹配的命令",
+    "terminalHistory.close": "关闭",
+    "terminalHistory.navigate": "导航",
+    "terminalHistory.fill": "回填",
+    "terminalHistory.justNow": "刚刚",
+    "terminalHistory.minutesAgo": "{count} 分钟前",
+    "terminalHistory.hoursAgo": "{count} 小时前",
+    "terminalHistory.daysAgo": "{count} 天前",
+    "terminalHotkeys.actionHistory": "历史命令面板（回填输入行）",
+  },
+  "zh-TW": {
+    "terminalHistory.title": "歷史命令",
+    "terminalHistory.count": "{count} 條",
+    "terminalHistory.empty": "歷史中沒有符合的命令",
+    "terminalHistory.close": "關閉",
+    "terminalHistory.navigate": "導航",
+    "terminalHistory.fill": "回填",
+    "terminalHistory.justNow": "剛剛",
+    "terminalHistory.minutesAgo": "{count} 分鐘前",
+    "terminalHistory.hoursAgo": "{count} 小時前",
+    "terminalHistory.daysAgo": "{count} 天前",
+    "terminalHotkeys.actionHistory": "歷史命令面板（回填輸入行）",
+  },
+  es: {
+    "terminalHistory.title": "Historial de comandos",
+    "terminalHistory.count": "{count} entradas",
+    "terminalHistory.empty": "No hay comandos coincidentes en el historial",
+    "terminalHistory.close": "Cerrar",
+    "terminalHistory.navigate": "para navegar",
+    "terminalHistory.fill": "para rellenar",
+    "terminalHistory.justNow": "ahora mismo",
+    "terminalHistory.minutesAgo": "hace {count} min",
+    "terminalHistory.hoursAgo": "hace {count} h",
+    "terminalHistory.daysAgo": "hace {count} d",
+    "terminalHotkeys.actionHistory": "Panel de historial de comandos (rellena la línea de entrada)",
+  },
+  it: {
+    "terminalHistory.title": "Cronologia comandi",
+    "terminalHistory.count": "{count} voci",
+    "terminalHistory.empty": "Nessun comando corrispondente nella cronologia",
+    "terminalHistory.close": "Chiudi",
+    "terminalHistory.navigate": "per spostarsi",
+    "terminalHistory.fill": "per compilare",
+    "terminalHistory.justNow": "proprio ora",
+    "terminalHistory.minutesAgo": "{count} min fa",
+    "terminalHistory.hoursAgo": "{count} h fa",
+    "terminalHistory.daysAgo": "{count} g fa",
+    "terminalHotkeys.actionHistory": "Pannello cronologia comandi (compila la riga di input)",
+  },
+  ja: {
+    "terminalHistory.title": "コマンド履歴",
+    "terminalHistory.count": "{count} 件",
+    "terminalHistory.empty": "履歴に一致するコマンドがありません",
+    "terminalHistory.close": "閉じる",
+    "terminalHistory.navigate": "で移動",
+    "terminalHistory.fill": "で反映",
+    "terminalHistory.justNow": "たった今",
+    "terminalHistory.minutesAgo": "{count} 分前",
+    "terminalHistory.hoursAgo": "{count} 時間前",
+    "terminalHistory.daysAgo": "{count} 日前",
+    "terminalHotkeys.actionHistory": "コマンド履歴パネル（入力行へ反映）",
+  },
+  "pt-BR": {
+    "terminalHistory.title": "Histórico de comandos",
+    "terminalHistory.count": "{count} entradas",
+    "terminalHistory.empty": "Nenhum comando correspondente no histórico",
+    "terminalHistory.close": "Fechar",
+    "terminalHistory.navigate": "para navegar",
+    "terminalHistory.fill": "para preencher",
+    "terminalHistory.justNow": "agora mesmo",
+    "terminalHistory.minutesAgo": "há {count} min",
+    "terminalHistory.hoursAgo": "há {count} h",
+    "terminalHistory.daysAgo": "há {count} d",
+    "terminalHotkeys.actionHistory": "Painel de histórico de comandos (preenche a linha de entrada)",
+  },
+};
+for (const locale of Object.keys(terminalHistoryPanelMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...terminalHistoryPanelMessages[locale] };
+}

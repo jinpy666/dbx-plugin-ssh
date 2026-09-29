@@ -240,7 +240,7 @@ describe("workbench localization", () => {
     // App.vue / sftpErrors.ts 里的 t("errors.*") 字面量，新 key 漏补即在
     // 此处红，防止同类问题复发。
     const keys = new Set<string>();
-    for (const source of [appScript, sftpErrorsSource]) {
+    for (const source of [appScript, composablesScript, sftpErrorsSource]) {
       for (const match of source.matchAll(/\bt\("errors\.[A-Za-z0-9.]+"/g)) {
         keys.add(match[0].slice(3, -1));
       }
@@ -751,6 +751,12 @@ const appStyleIndex = appVueSource.indexOf("<style");
 const appTemplate = appVueSource.slice(appVueSource.indexOf("<template>"), appVueSource.lastIndexOf("</template>", appStyleIndex));
 const appScript = appVueSource.slice(appVueSource.indexOf("<script"), appVueSource.indexOf("</script>"));
 
+// App.vue 持续模块化（状态/接线迁 composables/）：结构守卫的扫描范围相应
+// 演进为 App.vue + composables 联合源，防止"迁走即失守"。
+const composablesScript = Object.values(
+  import.meta.glob("../composables/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>,
+).join("\n");
+
 /** 模板中 class 含 marker 且由 v-if 守卫的元素 → 守卫表达式的状态 ref 基名。
  *  reka Popover 面板（Phase 5）无 v-if：内容 portal、由包裹的 <Popover :open="ref">
  *  受控，向回找最近的 Popover 根提取守卫 ref。Phase 6 的 Dialog 同理：弹窗壳是
@@ -834,9 +840,11 @@ describe("App.vue popover/modal wiring structural guard", () => {
   it("routes every toolbar popover toggle through closeToolbarPopovers", () => {
     // M32-A2：toggleHighlightMenu 已随高亮弹层迁设置·终端而下线。
     for (const name of ["toggleQuickMenu", "toggleConnectionInfo", "toggleAgentModeMenu", "toggleBookmarkSave", "toggleColumnsMenu", "toggleTransferPanel", "togglePathHistoryMenu", "toggleSessionMenu"]) {
-      const start = appScript.indexOf(`function ${name}(`);
+      // toggle 可能随模块化迁入 composables/：App.vue 找不到时到联合源里找。
+      const haystack = appScript.includes(`function ${name}(`) ? appScript : `${appScript}\n${composablesScript}`;
+      const start = haystack.indexOf(`function ${name}(`);
       expect(start, `缺少 toggle 函数 ${name}()`).toBeGreaterThanOrEqual(0);
-      const body = appScript.slice(start, appScript.indexOf("\n}", start));
+      const body = haystack.slice(start, haystack.indexOf("\n}", start));
       expect(body, `${name}() 未走 closeToolbarPopovers 统一收口`).toContain("closeToolbarPopovers()");
     }
   });
@@ -855,9 +863,10 @@ describe("issue #93 download fallback policy", () => {
   });
 
   it("routes the no-fileTransfer fallback through the host saveFile bridge", () => {
-    const start = appScript.indexOf("async function saveHostFile(");
+    const saveHaystack = appScript.includes("async function saveHostFile(") ? appScript : `${appScript}\n${composablesScript}`;
+    const start = saveHaystack.indexOf("async function saveHostFile(");
     expect(start).toBeGreaterThanOrEqual(0);
-    const body = appScript.slice(start, appScript.indexOf("\n}", start));
+    const body = saveHaystack.slice(start, saveHaystack.indexOf("\n}", start));
     // 必须走宿主桥、检查存在性、超限明确报错、取消显式抛错。
     expect(body).toContain("window.dbxPlugin.saveFile");
     expect(body).toContain('errors.localSaveUnavailable');
@@ -868,13 +877,15 @@ describe("issue #93 download fallback policy", () => {
   it("aborts the whole download when beginSave resolves null (user cancel)", () => {
     // beginSave 契约：用户取消原生保存框返回 null。旧代码只判 truthy，
     // null 会让分块循环滑进「只推进度不写盘」分支并最终提示下载成功。
-    const start = appScript.indexOf("async function downloadEntry(");
-    const body = appScript.slice(start, appScript.indexOf("\n  } catch (cause)", start));
+    const entryHaystack = appScript.includes("async function downloadEntry(") ? appScript : `${appScript}\n${composablesScript}`;
+    const start = entryHaystack.indexOf("async function downloadEntry(");
+    const body = entryHaystack.slice(start, entryHaystack.indexOf("\n  } catch (cause)", start));
     expect(body).toContain("?? undefined");
     expect(body).toContain("transferStatus.cancelled");
-    // trzsz 批量路径同样不得忽略 null 句柄。
-    const trzszStart = appScript.indexOf("async function saveTrzszDownloadedFiles(");
-    const trzszBody = appScript.slice(trzszStart, appScript.indexOf("\n  for (const file of saving) {\n    const target = await fileTransfer.beginSave", trzszStart));
+    // trzsz 批量路径同样不得忽略 null 句柄（函数可能随模块化迁入 composables/）。
+    const trzszHaystack = appScript.includes("async function saveTrzszDownloadedFiles(") ? appScript : `${appScript}\n${composablesScript}`;
+    const trzszStart = trzszHaystack.indexOf("async function saveTrzszDownloadedFiles(");
+    const trzszBody = trzszHaystack.slice(trzszStart, trzszHaystack.indexOf("\n  for (const file of saving) {\n    const target = await fileTransfer.beginSave", trzszStart));
     expect(trzszBody).toContain("if (!target)");
   });
 });
