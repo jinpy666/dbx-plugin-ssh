@@ -89,6 +89,8 @@ function applyForwardFormError(code: ForwardFormError) {
   forwardFormMessage.value = code ? t(`forwards.error.${code}`) : "";
 }
 
+const submitting = ref(false);
+
 async function submitForward() {
   const error = validateForwardForm(forwardForm);
   if (error) {
@@ -103,7 +105,14 @@ async function submitForward() {
     });
     return;
   }
-  if (!props.sessionId) return;
+  // 无会话时按钮本身已禁用，这里再兜底一次并给出可见提示，避免静默无响应。
+  if (!props.sessionId) {
+    forwardFormMessage.value = t("forwards.error.noSession");
+    return;
+  }
+  if (submitting.value) return;
+  submitting.value = true;
+  forwardFormMessage.value = "";
   try {
     const payload = await window.dbxPlugin.invoke(
       "ssh/forward/start",
@@ -115,8 +124,11 @@ async function submitForward() {
     }
     forwardFormMessage.value = "";
   } catch (cause) {
-    forwardFormMessage.value = "";
+    // 既在弹窗内显示错误文案，又向父级冒泡，确保任何失败都有可见反馈。
+    forwardFormMessage.value = cause instanceof Error ? cause.message : String(cause);
     emit("error", cause);
+  } finally {
+    submitting.value = false;
   }
 }
 
@@ -186,50 +198,58 @@ watch(
             <button class="forward-stop" :title="t('forwards.stop')" :disabled="forwardsBusyId !== null" @click="stopForward(row.id)"><Square v-if="forwardsBusyId === row.id" /><X v-else /></button>
           </li>
         </ul>
-        <form class="forward-form" :disabled="!props.sessionId" @submit.prevent="submitForward">
-          <div class="forward-form-row forward-form-kinds">
-            <label class="forward-kind-picker">
-              <input v-model="forwardForm.kind" type="radio" value="local" />{{ t("forwards.local") }}
-            </label>
-            <label class="forward-kind-picker">
-              <input v-model="forwardForm.kind" type="radio" value="remote" />{{ t("forwards.remote") }}
-            </label>
-          </div>
-          <div class="forward-form-row forward-form-addresses">
-            <label class="forward-field">
-              <span>{{ t("forwards.listen") }}</span>
-              <span class="forward-field-pair">
-                <input
-                  v-model="forwardForm.listenHost"
-                  :placeholder="t('forwards.listenHostPlaceholder')"
-                  :list="hostOptionListId"
-                />
-                <!-- 候选随方向切换：静态默认在前，本机网卡（仅 -L）去重后追加。
-                     ip+网卡名同框：datalist 候选 value=可绑定 IP，网卡名作说明
-                     文案；手输与点选同一输入框，探测失败自动退化为纯手输。 -->
-                <datalist :id="hostOptionListId">
-                  <option v-for="option in hostOptions" :key="option.value" :value="option.value">
-                    {{ t(option.labelKey) }}
-                  </option>
-                  <option v-for="iface in probedInterfaceOptions" :key="iface.addr" :value="iface.addr">
-                    {{ iface.isLoopback ? t("forwards.loopback") : iface.name }}
-                  </option>
-                </datalist>
-                <input v-model="forwardForm.listenPort" inputmode="numeric" :placeholder="t('forwards.portPlaceholder')" />
-              </span>
-            </label>
-            <label class="forward-field">
-              <span>{{ t("forwards.target") }}</span>
-              <span class="forward-field-pair">
-                <input v-model="forwardForm.targetHost" :placeholder="t('forwards.targetHostPlaceholder')" />
-                <input v-model="forwardForm.targetPort" inputmode="numeric" :placeholder="t('forwards.portPlaceholder')" />
-              </span>
-            </label>
-          </div>
+        <form class="forward-form" @submit.prevent="submitForward">
+          <!-- fieldset 的 disabled 才是真正禁用内部控件；原 <form disabled> 是无效
+               属性，会导致输入框仍可用、只有按钮变灰，造成「填了内容却点不动」的
+               静默死按钮。无会话或提交中统一禁用并给出可见提示。 -->
+          <fieldset class="forward-form-fields" :disabled="!props.sessionId || submitting" style="border:0;margin:0;padding:0;min-inline-size:0">
+            <div class="forward-form-row forward-form-kinds">
+              <label class="forward-kind-picker">
+                <input v-model="forwardForm.kind" type="radio" value="local" />{{ t("forwards.local") }}
+              </label>
+              <label class="forward-kind-picker">
+                <input v-model="forwardForm.kind" type="radio" value="remote" />{{ t("forwards.remote") }}
+              </label>
+            </div>
+            <div class="forward-form-row forward-form-addresses">
+              <label class="forward-field">
+                <span>{{ t("forwards.listen") }}</span>
+                <span class="forward-field-pair">
+                  <input
+                    v-model="forwardForm.listenHost"
+                    :placeholder="t('forwards.listenHostPlaceholder')"
+                    :list="hostOptionListId"
+                  />
+                  <!-- 候选随方向切换：静态默认在前，本机网卡（仅 -L）去重后追加。
+                       ip+网卡名同框：datalist 候选 value=可绑定 IP，网卡名作说明
+                       文案；手输与点选同一输入框，探测失败自动退化为纯手输。 -->
+                  <datalist :id="hostOptionListId">
+                    <option v-for="option in hostOptions" :key="option.value" :value="option.value">
+                      {{ t(option.labelKey) }}
+                    </option>
+                    <option v-for="iface in probedInterfaceOptions" :key="iface.addr" :value="iface.addr">
+                      {{ iface.isLoopback ? t("forwards.loopback") : iface.name }}
+                    </option>
+                  </datalist>
+                  <input v-model="forwardForm.listenPort" inputmode="numeric" :placeholder="t('forwards.portPlaceholder')" />
+                </span>
+              </label>
+              <label class="forward-field">
+                <span>{{ t("forwards.target") }}</span>
+                <span class="forward-field-pair">
+                  <input v-model="forwardForm.targetHost" :placeholder="t('forwards.targetHostPlaceholder')" />
+                  <input v-model="forwardForm.targetPort" inputmode="numeric" :placeholder="t('forwards.portPlaceholder')" />
+                </span>
+              </label>
+            </div>
+          </fieldset>
           <p v-if="forwardForm.kind === 'remote'" class="forward-form-hint">{{ t("forwards.remoteListenTip") }}</p>
+          <p v-if="!props.sessionId" class="forward-form-hint">{{ t("forwards.error.noSession") }}</p>
           <p v-if="forwardFormMessage" class="forward-form-error">{{ forwardFormMessage }}</p>
           <footer>
-            <button type="submit" class="primary-button" :disabled="!props.sessionId"><Plus />{{ t("forwards.add") }}</button>
+            <button type="submit" class="primary-button" :disabled="!props.sessionId || submitting">
+              <Loader2 v-if="submitting" class="spinning" /><Plus v-else />{{ t("forwards.add") }}
+            </button>
           </footer>
         </form>
       </div>
