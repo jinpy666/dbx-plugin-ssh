@@ -863,9 +863,10 @@ describe("issue #93 download fallback policy", () => {
   });
 
   it("routes the no-fileTransfer fallback through the host saveFile bridge", () => {
-    const start = appScript.indexOf("async function saveHostFile(");
+    const saveHaystack = appScript.includes("async function saveHostFile(") ? appScript : `${appScript}\n${composablesScript}`;
+    const start = saveHaystack.indexOf("async function saveHostFile(");
     expect(start).toBeGreaterThanOrEqual(0);
-    const body = appScript.slice(start, appScript.indexOf("\n}", start));
+    const body = saveHaystack.slice(start, saveHaystack.indexOf("\n}", start));
     // 必须走宿主桥、检查存在性、超限明确报错、取消显式抛错。
     expect(body).toContain("window.dbxPlugin.saveFile");
     expect(body).toContain('errors.localSaveUnavailable');
@@ -876,8 +877,9 @@ describe("issue #93 download fallback policy", () => {
   it("aborts the whole download when beginSave resolves null (user cancel)", () => {
     // beginSave 契约：用户取消原生保存框返回 null。旧代码只判 truthy，
     // null 会让分块循环滑进「只推进度不写盘」分支并最终提示下载成功。
-    const start = appScript.indexOf("async function downloadEntry(");
-    const body = appScript.slice(start, appScript.indexOf("\n  } catch (cause)", start));
+    const entryHaystack = appScript.includes("async function downloadEntry(") ? appScript : `${appScript}\n${composablesScript}`;
+    const start = entryHaystack.indexOf("async function downloadEntry(");
+    const body = entryHaystack.slice(start, entryHaystack.indexOf("\n  } catch (cause)", start));
     expect(body).toContain("?? undefined");
     expect(body).toContain("transferStatus.cancelled");
     // trzsz 批量路径同样不得忽略 null 句柄（函数可能随模块化迁入 composables/）。
