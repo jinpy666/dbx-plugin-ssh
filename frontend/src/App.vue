@@ -123,7 +123,6 @@ import { filesFromClipboard } from "./lib/clipboardFiles";
 import { friendlySftpError, shouldOfferSudoRetryAfterFollowFailure } from "./lib/sftpErrors";
 import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "./lib/paneLayout";
 import { computeWindow } from "./lib/virtualWindow";
-import type { GpuOverviewView, NpuOverviewView } from "./lib/metricsGpuNpu";
 import { isCountdownActive } from "./lib/recordingCountdown";
 import { expandSelection, filterSftpEntries, type SftpTypeFilter } from "./lib/sftpFileFilters";
 import { pushPathHistory, sanitizePathHistories } from "./lib/sftpPathHistory";
@@ -138,7 +137,7 @@ import {
   validateBookmarkInput,
   type SftpBookmark,
 } from "./lib/sftpBookmarks";
-import { browseCommandHistory, commandInputAction, isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
+import { isPersistableCommand, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "./lib/commandSuggestions";
 import { classifyGhostInput, createGhostState, evaluateGhost, nextGhostState, ghostMenuSuppressed, type TerminalGhostState } from "./lib/terminalGhostSuggest";
 import { cursorAbsoluteRow, cursorViewportRow, measureCellSizeFromDom } from "./lib/terminalAnchor";
@@ -159,7 +158,7 @@ import { GeneratorScheduler } from "./lib/completion/fig/generatorScheduler";
 import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, QUICK_COMMANDS_LIMIT } from "./lib/quickCommands";
-import { enqueueWatchModified, popWatchModified, registerWatch, watchName, type ModifiedPrompt, type WatchRegistry } from "./lib/watchEdits";
+import { registerWatch } from "./lib/watchEdits";
 import { batchTargetLabel } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
 import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./lib/pluginContext";
@@ -211,6 +210,8 @@ import { transferPausable } from "./lib/transferResume";
 import { isLiveTransferStatus, sortTransferTasks } from "./lib/transferOrder";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useCommandDialog } from "./composables/useCommandDialog";
+import { useExternalEdits } from "./composables/useExternalEdits";
 import { useSftpSidebar } from "./composables/useSftpSidebar";
 import { useBatchSend } from "./composables/useBatchSend";
 import { useMetricsPanel } from "./composables/useMetricsPanel";
@@ -726,21 +727,6 @@ const archiveBusy = ref(false);
 const operationDialog = ref<"mkdir" | null>(null);
 const operationDraft = ref("");
 
-// —— 外部编辑器回传（P2-5，桌面端；M15 起多文件并行）：文件先经 sftp/download
-// 落到 <下载目录>/remote-edit/<ts>/，watch/start 注册监听（同一会话可同时挂
-// 多个远端文件，注册表按 watchId 记、同远端路径按粒度顶替）；编辑器保存经
-// watch/file-modified 事件回来逐文件排队弹确认，上传走 watch/upload（sidecar
-// 从本机路径读字节、原子写回远端，写门禁与其他 SFTP 写一致）。
-const externalEditBusy = ref(false);
-const activeExternalWatches = ref<WatchRegistry>({});
-const watchModifiedQueue = ref<ModifiedPrompt[]>([]);
-/** 当前待确认 = 队列头：决议（上传/总是/取消）才出队，后到文件不顶替。 */
-const watchModifiedPrompt = computed<ModifiedPrompt | null>(() => watchModifiedQueue.value[0] ?? null);
-// 「总是上传」记住的 watchId：同一监听上的后续保存直接推回，不再逐次确认。
-const alwaysUploadWatches = new Set<string>();
-// watch/upload 串行链：sidecar 的 .dbx-part 暂存本就按调用隔离，前端再把
-// 回传排成一队，避免并发回传的 notice/目录刷新互相覆盖（上传不丢，逐个执行）。
-let watchUploadChain: Promise<void> = Promise.resolve();
 // —— 符号链接（P2-6）：新建/改指向小对话框 + 列表 tooltip 的 → target 缓存。
 // create 用 draft(链接名)+targetDraft(指向)；edit 复用 draft 承载指向。
 const symlinkDialog = ref<{ mode: "create" | "edit"; linkPath: string; name: string } | null>(null);
@@ -773,13 +759,7 @@ const zmodemFileName = ref("");
 const zmodemTransferred = ref(0);
 const zmodemTotalSize = ref(0);
 const zmodemSpeed = ref(0);
-const commandOpen = ref(false);
-const commandDraft = ref("");
-const commandUseSudo = ref(true);
 const commandRunning = ref(false);
-const commandExecId = ref("");
-const commandResult = ref<ExecResult>();
-const commandError = ref("");
 // 命令历史：内存环形 + pluginStore 非敏感持久化；index 为 -1 表示未在浏览历史。
 const commandHistory = ref<string[]>(loadCommandHistory());
 const commandHistoryIndex = ref(-1);
@@ -8005,76 +7985,19 @@ function waitForUploadAck(taskId: string, nextOffset: number) {
   });
 }
 
-// —— 外部编辑器回传（P2-5；M15 起逐文件化）——
-// watch/file-modified 的确认策略：「总是上传」的记忆命中直接进上传串行链；
-// 否则事件入队、逐个弹确认框（后到文件的 modified 事件排队等待，不顶替
-// 未决确认、不丢事件），用户对队头决议（上传一次 / 总是上传 / 取消）后才
-// 轮到下一个文件。watch/upload 由 sidecar 从 remote-edit 下载路径读字节、
-// 经 sftp/write 同款原子提交写回远端（写门禁 ensure_writable 在后端强制）。
-// 完成后刷新当前目录，让大小/修改时间立即反映编辑后的内容。
-function handleWatchModified(watchId: string) {
-  // 不认识的 watchId（监听已被顶替/会话已关）静默丢弃，不弹窗也不上传。
-  if (!activeExternalWatches.value[watchId]) return;
-  if (alwaysUploadWatches.has(watchId)) {
-    void uploadWatchedFile(watchId);
-    return;
-  }
-  watchModifiedQueue.value = enqueueWatchModified(watchModifiedQueue.value, activeExternalWatches.value, watchId);
-}
-
-/** 队头决议完成（上传/取消）：弹出队头，露出下一条待确认。过期决议
- * （watchId 已不是队头）由 popWatchModified 拒绝，不动后面的文件。 */
-function resolveWatchHead(watchId: string) {
-  const next = popWatchModified(watchModifiedQueue.value, watchId);
-  if (next) watchModifiedQueue.value = next;
-}
-
-/** watch/upload 串行链入口：排入队尾逐个执行，返回前不入队。 */
-function uploadWatchedFile(watchId: string) {
-  watchUploadChain = watchUploadChain.then(() => invokeWatchUpload(watchId));
-}
-
-async function invokeWatchUpload(watchId: string) {
-  externalEditBusy.value = true;
-  try {
-    await window.dbxPlugin.invoke<{ remotePath: string; size: number }>("watch/upload", { watchId });
-    showNotice(t("sftpEdit.uploaded", { name: watchName(activeExternalWatches.value, watchId) }));
-    // 刷新当前目录，让大小/修改时间立即反映编辑后的内容。
-    await loadDirectory();
-  } catch (cause) {
-    showError(cause, "sftp");
-  } finally {
-    externalEditBusy.value = false;
-  }
-}
-
-/** 取消当前队头的确认（该文件本次保存不回传）。 */
-function dismissWatchModified() {
-  const prompt = watchModifiedPrompt.value;
-  if (prompt) resolveWatchHead(prompt.watchId);
-}
-
-/** 「上传一次」：决议当前队头后排入上传链。 */
-function uploadWatchedFileOnce() {
-  const prompt = watchModifiedPrompt.value;
-  if (!prompt) return;
-  resolveWatchHead(prompt.watchId);
-  void uploadWatchedFile(prompt.watchId);
-}
-
-/** 「总是上传」：记住当前队头的 watchId 后决议并入上传链。 */
-function uploadWatchedFileAlways() {
-  const prompt = watchModifiedPrompt.value;
-  if (!prompt) return;
-  alwaysUploadWatches.add(prompt.watchId);
-  resolveWatchHead(prompt.watchId);
-  void uploadWatchedFile(prompt.watchId);
-}
-
-/** 本地路径拼接（下载目录 + remote-edit 子目录），兼容结尾分隔符。 */
-function joinLocalPath(dir: string, suffix: string): string {
-  return `${dir.replace(/[\\/]+$/, "")}/${suffix.replace(/^\/+/, "")}`;
-}
+// 外部编辑回传：watch 确认状态机/上传串行链收口在 composables/useExternalEdits。
+const {
+  externalEditBusy,
+  activeExternalWatches,
+  watchModifiedQueue,
+  watchModifiedPrompt,
+  alwaysUploadWatches,
+  handleWatchModified,
+  dismissWatchModified,
+  uploadWatchedFileOnce,
+  uploadWatchedFileAlways,
+  joinLocalPath,
+} = useExternalEdits({ t, showNotice, showError, loadDirectory });
 
 /** 精简单文件下载（外部编辑专用）：saveToLocal 直落 `downloadDir`，冲突直接
  * 覆盖（目录带时间戳不会撞名），完成后返回 sidecar 落盘的绝对路径。 */
@@ -9103,12 +9026,6 @@ function chooseZmodem() {
   zmodemInput.value?.click();
 }
 
-function openCommandDialog() {
-  commandOpen.value = true;
-  commandError.value = "";
-  commandHistoryIndex.value = -1;
-  commandHistoryBackup.value = "";
-}
 
 function loadCommandHistory(): string[] {
   try {
@@ -9127,92 +9044,25 @@ function persistCommandHistory() {
   }
 }
 
-// ↑↓ 在命令输入框中浏览历史；进入浏览态前备份当前草稿，回到最新一条之下时恢复。
-function browseCommandHistoryUp() {
-  commandHistoryBackup.value = commandHistoryIndex.value === -1 ? commandDraft.value : commandHistoryBackup.value;
-  const step = browseCommandHistory(commandHistory.value, commandHistoryIndex.value, "up", commandHistoryBackup.value);
-  commandHistoryIndex.value = step.index;
-  commandDraft.value = step.draft;
-}
-
-function browseCommandHistoryDown() {
-  const step = browseCommandHistory(commandHistory.value, commandHistoryIndex.value, "down", commandHistoryBackup.value);
-  commandHistoryIndex.value = step.index;
-  commandDraft.value = step.draft;
-}
-
-function handleCommandInputKeydown(event: KeyboardEvent) {
-  const target = event.currentTarget;
-  if (!(target instanceof HTMLTextAreaElement)) return;
-  const action = commandInputAction({
-    key: event.key,
-    ctrlKey: event.ctrlKey,
-    metaKey: event.metaKey,
-    shiftKey: event.shiftKey,
-    selectionStart: target.selectionStart,
-    selectionEnd: target.selectionEnd,
-    valueLength: target.value.length,
-  });
-  if (action === "run") {
-    event.preventDefault();
-    void runCommand();
-  } else if (action === "history-up") {
-    event.preventDefault();
-    browseCommandHistoryUp();
-  } else if (action === "history-down") {
-    event.preventDefault();
-    browseCommandHistoryDown();
-  }
-}
-
-// 一键重发：把历史条目回填输入框并立即执行。
-function rerunHistoryCommand(command: string) {
-  if (commandRunning.value) return;
-  commandDraft.value = command;
-  commandHistoryIndex.value = -1;
-  void runCommand();
-}
-
-function clearCommandHistory() {
-  commandHistory.value = [];
-  commandHistoryIndex.value = -1;
-  persistCommandHistory();
-}
-
-async function runCommand() {
-  const sessionId = session.value?.sessionId;
-  const command = commandDraft.value.trim();
-  if (!sessionId || !command || commandRunning.value) return;
-  commandRunning.value = true;
-  commandError.value = "";
-  commandResult.value = undefined;
-  const execId = randomUUID();
-  commandExecId.value = execId;
-  try {
-    commandResult.value = await window.dbxPlugin.invoke<ExecResult>("ssh/exec", {
-      sessionId,
-      execId,
-      command,
-      sudo: commandUseSudo.value,
-    }, { timeoutMs: 120_000 });
-    // 执行成功提交即入历史（不论退出码），与输入框 ↑↓、一键重发共用同一份。
-    commandHistory.value = pushCommandHistory(commandHistory.value, command);
-    persistCommandHistory();
-    commandHistoryIndex.value = -1;
-    commandHistoryBackup.value = "";
-  } catch (cause) {
-    commandError.value = cause instanceof Error ? cause.message : String(cause);
-  } finally {
-    commandRunning.value = false;
-    commandExecId.value = "";
-  }
-}
-
-async function cancelCommand() {
-  const execId = commandExecId.value;
-  if (!execId || !commandRunning.value) return;
-  await window.dbxPlugin.invoke("ssh/exec/cancel", { execId }).catch((cause) => showError(cause));
-}
+// 命令执行弹窗：状态/执行/历史浏览收口在 composables/useCommandDialog。
+const {
+  commandOpen,
+  commandDraft,
+  commandUseSudo,
+  commandExecId,
+  commandResult,
+  commandError,
+  openCommandDialog,
+  handleCommandInputKeydown,
+  browseCommandHistoryUp,
+  browseCommandHistoryDown,
+  rerunHistoryCommand,
+  clearCommandHistory,
+  runCommand,
+  cancelCommand,
+} = useCommandDialog({
+  showError, session, commandRunning, commandHistory, commandHistoryIndex, commandHistoryBackup, persistCommandHistory,
+});
 
 
 // 批量发送：状态/发送/跨工作台广播收口在 composables/useBatchSend。
