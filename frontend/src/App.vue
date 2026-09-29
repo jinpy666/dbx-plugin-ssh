@@ -70,7 +70,6 @@ import {
   X,
   Zap,
 } from "@lucide/vue";
-import type { Detection as ZmodemDetection, Session as ZmodemSession, Sentry as ZmodemSentry } from "zmodem.js";
 import {
   detectTrzszAnnounceFromBytes,
   resolveTerminalInputRoute,
@@ -115,7 +114,6 @@ import {
 } from "./lib/sessionTransportReuse";
 import { createConnectLog } from "./lib/connectLog";
 import { pickModalFocusTarget } from "./lib/modalFocus";
-import { createZmodemSentry, decideZmodemDetection, sendZmodemFiles, type ZmodemUploadProgress } from "./lib/terminalZmodem";
 import { sampleTransferSpeed, type TransferSpeedSample } from "./lib/transferSpeed";
 import { buildPasteConfirmation, type PasteConfirmation } from "./lib/dangerousCommands";
 import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib/clipboardBridge";
@@ -210,6 +208,7 @@ import { transferPausable } from "./lib/transferResume";
 import { isLiveTransferStatus, sortTransferTasks } from "./lib/transferOrder";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useZmodem } from "./composables/useZmodem";
 import { useCommandDialog } from "./composables/useCommandDialog";
 import { useExternalEdits } from "./composables/useExternalEdits";
 import { useSftpSidebar } from "./composables/useSftpSidebar";
@@ -537,7 +536,6 @@ const MAX_DIRECT_WRITE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGE_PREVIEW_BYTES = 20 * MIB;
 // Above this size the browser download path buffers the whole file in memory, so ask first.
 const WEB_DOWNLOAD_WARNING_BYTES = 512 * MIB;
-const ZMODEM_DETECTION_TIMEOUT_MS = 5000;
 // 粘贴防护：内容含换行或达到该字符数时先确认（对齐 tiny-rdm TerminalPane 阈值）。
 const PASTE_CONFIRM_CHAR_THRESHOLD = 200;
 // SFTP 路径历史：每连接最多保留 10 条，存 pluginStore（宿主 host.storage；对齐 tiny-rdm pathHistory）。
@@ -754,11 +752,6 @@ const blankMenu = ref(false);
 const sideMenu = ref<{ path: string }>();
 // 下载历史项右键：只为已有本机落盘路径提供定位/打开操作；taskId 用于按卡受控打开。
 const transferHistoryMenu = ref<{ taskId: string }>();
-const zmodemState = ref<"idle" | "waiting" | "uploading">("idle");
-const zmodemFileName = ref("");
-const zmodemTransferred = ref(0);
-const zmodemTotalSize = ref(0);
-const zmodemSpeed = ref(0);
 const commandRunning = ref(false);
 // 命令历史：内存环形 + pluginStore 非敏感持久化；index 为 -1 表示未在浏览历史。
 const commandHistory = ref<string[]>(loadCommandHistory());
@@ -1289,12 +1282,6 @@ let replayInFlight = false;
 // resync past the hole instead of spinning the replay loop forever.
 let replayNoProgress = 0;
 let commandMarkerTimer = 0;
-let zmodemSentry: ZmodemSentry | null = null;
-let zmodemSession: ZmodemSession | null = null;
-let pendingZmodemFiles: File[] = [];
-let zmodemDetectionTimer = 0;
-let zmodemSampledAt = 0;
-let zmodemSampledBytes = 0;
 let pendingTerminalInput = "";
 let activeTerminalSessionId = "";
 const pendingTerminalFrames = new Map<number, { stream: number; data: Uint8Array }>();
@@ -1768,8 +1755,6 @@ const transferList = computed(() =>
   sortTransferTasks(Object.values(transferTasks).filter((task) => isLiveTransferStatus(task.status))),
 );
 const activeTransfers = computed(() => transferList.value.filter((task) => task.status === "queued" || task.status === "running").length);
-const zmodemBusy = computed(() => zmodemState.value !== "idle");
-const zmodemPercent = computed(() => zmodemTotalSize.value > 0 ? Math.min(100, Math.round((zmodemTransferred.value / zmodemTotalSize.value) * 100)) : 0);
 // 文件传输占用统一语义：ZMODEM 或 trzsz 任一持有终端流即视为 busy。
 const terminalTransferBusy = computed(() => zmodemBusy.value || trzszBusy.value);
 const sftpGridStyle = computed(() => {
@@ -3533,85 +3518,25 @@ function dispatchTerminalOutput(data: Uint8Array) {
   ensureTrzszFilter().processServerOutput(data);
 }
 
-function resetZmodemSentry() {
-  zmodemSentry = createZmodemSentry({
-    send: sendTerminalBytes,
-    toTerminal: dispatchTerminalOutput,
-    onDetect: handleZmodemDetection,
-    onRetract() {},
-  });
-}
-
-function handleZmodemDetection(detection: ZmodemDetection) {
-  const decision = decideZmodemDetection(detection, pendingZmodemFiles.length > 0);
-  if (decision.action === "deny") {
-    detection.deny();
-    if (decision.reason === "roleMismatch") finishZmodemUpload(new Error(t("zmodemUploadOnly")));
-    return;
-  }
-  try {
-    zmodemSession = detection.confirm();
-  } catch (cause) {
-    finishZmodemUpload(cause);
-    return;
-  }
-  window.clearTimeout(zmodemDetectionTimer);
-  zmodemState.value = "uploading";
-  zmodemSampledAt = performance.now();
-  zmodemSampledBytes = 0;
-  const files = pendingZmodemFiles;
-  void sendZmodemFiles(zmodemSession, files, updateZmodemProgress)
-    .then(() => {
-      showNotice(t("zmodemUploadComplete", { count: files.length }));
-      finishZmodemUpload();
-      void loadDirectory();
-    })
-    .catch(finishZmodemUpload);
-}
-
-function updateZmodemProgress(progress: ZmodemUploadProgress) {
-  zmodemFileName.value = progress.file.name;
-  zmodemTransferred.value = progress.totalTransferred;
-  zmodemTotalSize.value = progress.totalSize;
-  const now = performance.now();
-  const elapsed = now - zmodemSampledAt;
-  if (elapsed >= 250 || progress.totalTransferred === progress.totalSize) {
-    const speed = elapsed > 0 ? ((progress.totalTransferred - zmodemSampledBytes) * 1000) / elapsed : 0;
-    zmodemSpeed.value = zmodemSpeed.value ? zmodemSpeed.value * 0.65 + speed * 0.35 : speed;
-    zmodemSampledAt = now;
-    zmodemSampledBytes = progress.totalTransferred;
-  }
-}
-
-function finishZmodemUpload(cause?: unknown) {
-  const wasActive = zmodemState.value !== "idle";
-  cancelZmodemUpload();
-  if (!wasActive) return;
-  if (cause) showError(new Error(t("zmodemUploadFailed", { error: cause instanceof Error ? cause.message : String(cause) })), "terminal");
-  terminal?.focus();
-}
-
-/**
- * Silently tears the ZMODEM state down (abort the wire session, drop pending
- * files, reset the overlay, rebuild the sentry). Used both after a completed
- * or failed upload and when the SSH session is closed mid-transfer — without
- * it a closed session would leave zmodemBusy stuck true and terminal input
- * routed into a dead sentry.
- */
-function cancelZmodemUpload() {
-  window.clearTimeout(zmodemDetectionTimer);
-  if (zmodemSession && !zmodemSession.has_ended()) {
-    try { zmodemSession.abort(); } catch {}
-  }
-  pendingZmodemFiles = [];
-  zmodemSession = null;
-  zmodemState.value = "idle";
-  zmodemFileName.value = "";
-  zmodemTransferred.value = 0;
-  zmodemTotalSize.value = 0;
-  zmodemSpeed.value = 0;
-  resetZmodemSentry();
-}
+// ZMODEM 上传：sentry/检测/进度/收尾收口在 composables/useZmodem。
+const {
+  zmodemState,
+  zmodemFileName,
+  zmodemTransferred,
+  zmodemTotalSize,
+  zmodemSpeed,
+  zmodemBusy,
+  zmodemPercent,
+  resetZmodemSentry,
+  finishZmodemUpload,
+  cancelZmodemUpload,
+  onZmodemInput,
+  consumeFrameViaZmodem,
+} = useZmodem({
+  t, showNotice, showError, connected,
+  terminal: () => terminal,
+  sendTerminalBytes, dispatchTerminalOutput, loadDirectory,
+});
 
 // trzsz (trz / tsz)：状态/进度/落盘收口在 composables/useTrzsz（终端流集成点在上方）。
 const {
@@ -3744,16 +3669,7 @@ function drainTerminalFrames() {
         terminalError.value = state === "ssh-transport-disconnected" ? t("transportDisconnected") : state || t("disconnected");
       }
     } else {
-      try {
-        if (!zmodemSentry) resetZmodemSentry();
-        zmodemSentry?.consume(frame.data.slice().buffer);
-      } catch (cause) {
-        if (zmodemBusy.value) finishZmodemUpload(cause);
-        else {
-          resetZmodemSentry();
-          dispatchTerminalOutput(frame.data);
-        }
-      }
+      consumeFrameViaZmodem(frame.data);
     }
     frame = pendingTerminalFrames.get(lastSequence + 1);
   }
@@ -9416,20 +9332,6 @@ async function confirmChmod() {
   }
 }
 
-function onZmodemInput(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const files = Array.from(input.files || []);
-  input.value = "";
-  if (!files.length || !connected.value) return;
-  pendingZmodemFiles = files;
-  zmodemState.value = "waiting";
-  zmodemFileName.value = files[0]?.name || "";
-  zmodemTransferred.value = 0;
-  zmodemTotalSize.value = files.reduce((sum, file) => sum + file.size, 0);
-  resetZmodemSentry();
-  sendTerminalBytes(new TextEncoder().encode("rz\r"));
-  zmodemDetectionTimer = window.setTimeout(() => finishZmodemUpload(new Error(t("zmodemNotAvailable"))), ZMODEM_DETECTION_TIMEOUT_MS);
-}
 
 function showTerminalMenu(event: MouseEvent) {
   // 右键四档（对标 Tabby「Mouse → Right click」）：off / menu / paste / clipboard。
@@ -10088,7 +9990,6 @@ onBeforeUnmount(() => {
   window.clearTimeout(resizeTimer);
   window.clearTimeout(reconnectTimer);
   window.clearInterval(reconnectCountdownTimer);
-  window.clearTimeout(zmodemDetectionTimer);
   window.clearTimeout(zoomNoticeTimer);
   stopCommandMarkerTick();
   stopAgentPromptTimer();
