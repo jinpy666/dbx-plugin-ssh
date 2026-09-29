@@ -75,9 +75,9 @@ import {
   resolveTerminalInputRoute,
 } from "./lib/terminalTrzsz";
 import { Osc7DirectoryParser } from "./lib/terminalDirectoryTracking";
-import { handleOsc52ClipboardWrite, handleTerminalColorQuery } from "./lib/terminalOsc";
+import { handleOsc52ClipboardWrite } from "./lib/terminalOsc";
 import { confirmDialog, useConfirmDialogHost } from "./lib/confirmDialog";
-import { applyAppearanceColorVars, subscribeHostEnvironment } from "../../shared/frontend/hostThemeRuntime";
+import { subscribeHostEnvironment } from "../../shared/frontend/hostThemeRuntime";
 import {
   cwdFromUserVar,
   parseOsc1337SetUserVar,
@@ -151,7 +151,7 @@ import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./lib/plugi
 import { clampFontSize } from "./lib/terminalZoom";
 import { loadLastConnectParams } from "./lib/connectLastParams";
 import { pluginStore } from "./lib/pluginStore";
-import { loadTerminalFontOverride, persistTerminalFontFamily, persistTerminalFontSize, resolveTerminalFont, type TerminalFontOverride } from "./lib/terminalFont";
+import { loadTerminalFontOverride, resolveTerminalFont, type TerminalFontOverride } from "./lib/terminalFont";
 import { MIB } from "./lib/settingsModel";
 import type { DownloadConflictPolicy } from "./lib/downloadPrefs";
 import { commandMarkerTooltip, formatCommandDuration, Osc633CommandParser, runningCommandElapsedMs, type Osc633StreamUpdates } from "./lib/terminalCommandMarkers";
@@ -159,11 +159,11 @@ import { advanceBatchProgress, batchProgressPercent, createBatchProgress, type B
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
 import { sanitizeCommandOutput } from "./lib/terminalOutputText";
 import { normalizeTerminalInputBytes } from "./lib/terminalInput";
-import { registerTerminalModeQueryHandlers, type TerminalSyncOutput } from "./lib/terminalModeQueries";
+import { type TerminalSyncOutput } from "./lib/terminalModeQueries";
 import { installMacWebkitInputFallback } from "./lib/terminalWebkitInput";
 import { looksBinary } from "./lib/textSniff";
 import { formatBytes, formatRate } from "./lib/format";
-import { DBX_POPOVER, resolveAppearance, TERMINAL_ANSI, type DbxPluginAppearanceInput } from "./lib/appearance";
+import { resolveAppearance } from "./lib/appearance";
 import { isDbxPluginTheme, onHostThemeChange, themeToAppearance } from "./lib/hostTheme";
 import { AGENT_MODES, enqueueAcceptedAgentPrompt, type AgentFinishPayload, type AgentNoticePayload, type AgentPromptPayload } from "./lib/agentTerminal";
 import { purposeKeyLabel, sanitizeTriagePayload, severityClass } from "./lib/alertTriage";
@@ -194,6 +194,10 @@ import {
 import { transferPausable } from "./lib/transferResume";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useTerminalAppearance } from "./composables/useTerminalAppearance";
+import { useTerminalBell } from "./composables/useTerminalBell";
+import { useTerminalFontZoom } from "./composables/useTerminalFontZoom";
+import { useTerminalMouse } from "./composables/useTerminalMouse";
 import { useTransferQueue } from "./composables/useTransferQueue";
 import { useCommandSuggestions } from "./composables/useCommandSuggestions";
 import { useGhostSuggest } from "./composables/useGhostSuggest";
@@ -250,22 +254,11 @@ import { decideFileRowAction } from "./lib/fileRowKeydown";
 import { attachWebglRenderer, loadWebglEnabled, persistWebglEnabled, syncWebglRenderer, type WebglRecoveryOptions, type WebglRendererLike } from "./lib/terminalWebgl";
 import {
   activeProfileId,
-  applySchemeToTerminalTheme,
-  CUSTOM_SCHEME_LIMIT,
-  CUSTOM_THEME_LIMIT,
   loadTerminalAppearance,
-  persistTerminalAppearance,
-  sanitizeAppearanceSettings,
   terminalOptionPatch,
-  terminalPaddingVars,
-  type TerminalAppearanceProfile,
-  type TerminalAppearanceSettings,
   type TerminalAppearanceState,
 } from "./lib/terminalAppearance";
-import { schemeIdFromName, schemeTone, uniqueSchemeId, type TerminalColorScheme, type TerminalThemeLike } from "./lib/terminalScheme";
-import { sanitizeTerminalBackground } from "./lib/terminalBackground";
 import {
-  isLinkModifierSatisfied,
   loadTerminalBehavior,
   persistTerminalBehavior,
   resolveRightClickBehavior,
@@ -282,7 +275,6 @@ import {
   sanitizeTerminalHotkeys,
   type TerminalHotkeyBindings,
 } from "./lib/terminalHotkeys";
-import { cellFromMouseEvent, clickCursorArrows, resolveClickCursorMove } from "./lib/terminalClickCursor";
 import { bridgeBinaryBytes } from "../../shared/frontend/binaryEvent";
 import { standaloneArrayBuffer } from "./lib/standaloneBuffer";
 import { findTreeNode } from "./lib/sftpDirTree";
@@ -1017,9 +1009,6 @@ const batchProgress = ref<BatchProgressState | null>(null);
 let terminal: Terminal | undefined;
 let fitAddon: FitAddon | undefined;
 let searchAddon: SearchAddon | undefined;
-// OSC 10/11 颜色查询应答 handler（registerOscHandler 的 disposable）：主题切换
-// 时重挂，终端销毁时统一释放；OSC 52 只在 createTerminal 挂一次。
-let oscColorQueryDisposables: { dispose(): void }[] = [];
 let osc52Disposable: { dispose(): void } | undefined;
 // WT-2：OSC 通知/SetUserVar 白名单通道（OSC 9 / 777 / 1337）的 disposable：
 // createTerminal 挂一次，终端销毁统一释放。解析与防御上限在 lib/terminalOscChannels.ts。
@@ -1027,42 +1016,24 @@ let oscFeedDisposables: { dispose(): void }[] = [];
 // SetUserVar cwd 元数据（优先通道）的最新上报；null 表示通道未启用，OSC 7
 // 提示符通道照旧跟随（回落语义不变）。裁决规则见 shouldOsc7FollowOverrideUserVarCwd。
 let userVarCwdEvent: { path: string; at: number } | null = null;
-// CSI 能力查询应答（kitty 键盘协议 / XTVERSION / DECRQM）：claude code 等
-// TUI 启动时探测并等待应答；xterm 内核对 `CSI ? u` 静默吞掉不回、XTVERSION
-// 无 handler，TUI 卡在 raw-mode 初始化——表现为"卡住、键盘没反应"。
-let modeQueryDisposables: { dispose(): void }[] = [];
 // 主题色解析失败时颜色查询的兜底应答（深色系常规值，仅在宿主下发非法颜色时触达）。
-const OSC_COLOR_FALLBACK = { foreground: "#c9d1d9", background: "#0d1117" };
 let terminalPasteHandler: ((event: ClipboardEvent) => void) | undefined;
 let terminalWheelHandler: ((event: WheelEvent) => void) | undefined;
 // 点击定位光标（iTerm2 风格）：按下位置记忆 + 松开时判定“原地点击”。
 let terminalMouseDownHandler: ((event: MouseEvent) => void) | undefined;
 let terminalMouseUpHandler: ((event: MouseEvent) => void) | undefined;
-let terminalMouseDownAt: { clientX: number; clientY: number } | undefined;
 let pasteConfirmResolver: ((accepted: boolean) => void) | undefined;
 let dropUploadResolver: ((choice: "cancel" | "cwd" | { dir: string }) => void) | undefined;
 // 通用应用内确认弹窗（SSH-H1）：原语在 lib/confirmDialog（SettingsDialog/
 // QuickCommandsSection 等子组件共用），此处只挂宿主渲染；模板/关框/Esc/
 // teardown 统一经 resolvePendingConfirmDialog 结算。
 const { pendingConfirmDialog, resolveConfirmDialog: resolvePendingConfirmDialog } = useConfirmDialogHost();
-let zoomNoticeTimer = 0;
 let resizeObserver: ResizeObserver | undefined;
 let disposeInput: { dispose(): void } | undefined;
 let disposeWebkitInputFallback: (() => void) | undefined;
 let disposeSelectionCopy: { dispose(): void } | undefined;
 let disposeTerminalBell: { dispose(): void } | undefined;
-/** 视觉响铃高亮时长（对标 Tabby bell: visual 的一次闪烁）。 */
-const TERMINAL_BELL_FLASH_MS = 150;
-/** 连响时先摘类、下一帧再加回，否则浏览器认为动画仍在播放不会重播。 */
-const TERMINAL_BELL_RETRIGGER_MS = 0;
-/** 听觉响铃的合成参数：短促一声 A5 正弦音，音量取保守值避免惊吓。 */
-const TERMINAL_BELL_FREQUENCY_HZ = 880;
-const TERMINAL_BELL_GAIN = 0.08;
-const TERMINAL_BELL_DURATION_S = 0.15;
 /** 响铃视觉提示的短暂高亮（xterm 6.x 无 bellStyle，须自行实现）。 */
-const terminalBellFlash = ref(false);
-let terminalBellFlashTimer = 0;
-let bellAudioContext: AudioContext | undefined;
 let unsubscribeEvent: (() => void) | undefined;
 let unsubscribeBinary: (() => void) | undefined;
 // 宿主 fileTransfer 桥拖放事件（宿主 1.1 optional）注销句柄：OS 级拖入上传
@@ -1815,263 +1786,28 @@ function showError(cause: unknown, target: "terminal" | "sftp" = "sftp", retry?:
 
 // 宿主派生的终端主题（未启用配色方案时的最终结果）：DBX 面板色 + 内置 16 色
 // ANSI。作为「跟随宿主」基底，也是设置页预览的基准。
-function hostTerminalTheme(): TerminalThemeLike {
-  const colors = appearance.value.colors;
-  // issue #73：宿主设了背景图片时下发的底色常是 transparent 或
-  // var()/color-mix() 这类需级联求值的形态，xterm 的 ITheme 颜色解析拿不到值
-  // 就静默回退内建默认底 #000（另有 alpha=0 被压成不透明黑）。进 xterm 前净化
-  // 一次；净化只覆盖终端底色（含同源的 --ssh-terminal-background 变量），
-  // --background 等 UI 变量仍用宿主原值。
-  const terminalBackground = sanitizeTerminalBackground(colors.background, appearance.value.colorScheme);
-  return {
-    background: terminalBackground,
-    foreground: colors.foreground,
-    cursor: colors.foreground,
-    cursorAccent: terminalBackground,
-    selectionBackground: appearance.value.colorScheme === "dark" ? "#5f6f8a88" : "#93b4e088",
-    ...TERMINAL_ANSI[appearance.value.colorScheme],
-  };
-}
-
-// 实际生效的主题：宿主基底 + 用户选定方案（未启用方案时原样返回基底）。
-function terminalTheme(): TerminalThemeLike {
-  return applySchemeToTerminalTheme(
-    hostTerminalTheme(),
-    terminalAppearance.value.settings,
-    terminalAppearance.value.customSchemes,
-    appearance.value.colorScheme,
-  );
-}
-
-// 终端内边距经 CSS 变量下发（style.css 的 .terminal-host .xterm 读取）；
-// 未设置的方向删变量，回落内置值（左 10 / 右 0 / 上 5 / 下 8）。
-function applyTerminalPaddingVars() {
-  const root = document.documentElement;
-  const padding = terminalPaddingVars(terminalAppearance.value.settings);
-  const entries: Array<[string, string | null]> = [
-    ["--ssh-terminal-padding-left", padding.left],
-    ["--ssh-terminal-padding-right", padding.right],
-    ["--ssh-terminal-padding-top", padding.top],
-    ["--ssh-terminal-padding-bottom", padding.bottom],
-  ];
-  for (const [name, value] of entries) {
-    if (value === null) root.style.removeProperty(name);
-    else root.style.setProperty(name, value);
-  }
-}
-
-/**
- * 外观改动落地：CSS 变量 + xterm 选项 + 主题 + OSC 颜色应答重挂。
- * 行高/字间距/内边距都会改变单元格尺寸，末尾必须 scheduleFit 重算行列。
- */
-function applyTerminalAppearance() {
-  applyTerminalPaddingVars();
-  const theme = terminalTheme();
-  document.documentElement.style.setProperty("--ssh-terminal-background", theme.background);
-  if (!terminal) return;
-  const patch = terminalOptionPatch(terminalAppearance.value.settings);
-  terminal.options.fontWeight = patch.fontWeight;
-  terminal.options.fontWeightBold = patch.fontWeightBold;
-  terminal.options.lineHeight = patch.lineHeight;
-  terminal.options.letterSpacing = patch.letterSpacing;
-  terminal.options.cursorStyle = patch.cursorStyle;
-  terminal.options.cursorBlink = patch.cursorBlink;
-  terminal.options.cursorInactiveStyle = patch.cursorInactiveStyle;
-  terminal.options.drawBoldTextInBrightColors = patch.drawBoldTextInBrightColors;
-  terminal.options.minimumContrastRatio = patch.minimumContrastRatio;
-  terminal.options.theme = theme;
-  // 10/11 应答闭包捕获注册时的颜色值：配色切换后重挂，查询才返回新颜色。
-  registerOscColorQueryHandlers();
-  scheduleFit();
-}
-
-/** 外观设置局部更新（设置页控件）：归一化 → 持久化 → 即时应用。 */
-function updateTerminalAppearance(patch: Partial<TerminalAppearanceSettings>) {
-  terminalAppearance.value = {
-    ...terminalAppearance.value,
-    settings: sanitizeAppearanceSettings({ ...terminalAppearance.value.settings, ...patch }),
-  };
-  persistTerminalAppearance(terminalAppearance.value);
-  applyTerminalAppearance();
-}
-
-/** 套用主题快照：设置 + 字体一起落地（字体走既有 terminalFont 键与链路）。 */
-function applyTerminalAppearanceTheme(theme: TerminalAppearanceProfile) {
-  terminalAppearance.value = { ...terminalAppearance.value, settings: sanitizeAppearanceSettings(theme.settings) };
-  persistTerminalAppearance(terminalAppearance.value);
-  // 主题里的字体为 null 表示「跟随宿主」：把字号键一起清掉（null），否则
-  // 快照与实际态不一致、主题永远无法高亮。
-  setTerminalFont(theme.font.family, theme.font.size);
-  applyTerminalAppearance();
-  showNotice(t("terminalAppearance.themeApplied", { name: t(theme.name) }));
-}
-
-/** 保存当前配置为「我的主题」（字体取缩放链路当前的覆盖态）。 */
-function saveTerminalAppearanceTheme(name: string) {
-  const theme: TerminalAppearanceProfile = {
-    id: uniqueSchemeId(schemeIdFromName(name), terminalAppearance.value.customThemes.map((item) => item.id)),
-    name,
-    builtin: false,
-    settings: sanitizeAppearanceSettings(terminalAppearance.value.settings),
-    font: { family: terminalFontOverride.value.fontFamily, size: terminalFontOverride.value.fontSize },
-  };
-  const customThemes = [...terminalAppearance.value.customThemes, theme].slice(-CUSTOM_THEME_LIMIT);
-  terminalAppearance.value = { ...terminalAppearance.value, customThemes };
-  persistTerminalAppearance(terminalAppearance.value);
-  showNotice(t("terminalAppearance.themeSaved", { name }));
-}
-
-function deleteTerminalAppearanceTheme(id: string) {
-  terminalAppearance.value = {
-    ...terminalAppearance.value,
-    customThemes: terminalAppearance.value.customThemes.filter((theme) => theme.id !== id),
-  };
-  persistTerminalAppearance(terminalAppearance.value);
-}
-
-/**
- * 导入外部配色方案（Tabby/iTerm2/Windows Terminal/Xresources）：
- * 分配唯一 id、落盘；单个方案或首个方案按自身亮暗挂到对应槽位并切到
- * 「使用配色方案」——导入的意图通常就是立刻用上，否则用户还要再点一次。
- */
-function addImportedSchemes(schemes: Array<Omit<TerminalColorScheme, "id" | "source">>) {
-  const existing = terminalAppearance.value.customSchemes;
-  const taken = existing.map((scheme) => scheme.id);
-  const added: TerminalColorScheme[] = [];
-  for (const item of schemes) {
-    if (existing.length + added.length >= CUSTOM_SCHEME_LIMIT) break;
-    const id = uniqueSchemeId(schemeIdFromName(item.name), taken);
-    taken.push(id);
-    added.push({ ...item, id, source: "custom" });
-  }
-  if (!added.length) {
-    showNotice(t("terminalAppearance.importEmpty"));
-    return;
-  }
-  const first = added[0];
-  const slot = schemeTone(first) === "light" ? "lightSchemeId" : "darkSchemeId";
-  terminalAppearance.value = {
-    ...terminalAppearance.value,
-    customSchemes: [...existing, ...added],
-    settings: sanitizeAppearanceSettings({ ...terminalAppearance.value.settings, schemeSource: "custom", [slot]: first.id }),
-  };
-  persistTerminalAppearance(terminalAppearance.value);
-  applyTerminalAppearance();
-  showNotice(t("terminalAppearance.importImported", { count: added.length }));
-}
-
-/** 删除自定义方案：同时清掉引用它的槽位，避免持久化悬空 id。 */
-function removeImportedScheme(id: string) {
-  const scheme = terminalAppearance.value.customSchemes.find((item) => item.id === id);
-  const settings = terminalAppearance.value.settings;
-  terminalAppearance.value = {
-    ...terminalAppearance.value,
-    customSchemes: terminalAppearance.value.customSchemes.filter((item) => item.id !== id),
-    settings: sanitizeAppearanceSettings({
-      ...settings,
-      darkSchemeId: settings.darkSchemeId === id ? null : settings.darkSchemeId,
-      lightSchemeId: settings.lightSchemeId === id ? null : settings.lightSchemeId,
-    }),
-  };
-  persistTerminalAppearance(terminalAppearance.value);
-  applyTerminalAppearance();
-  if (scheme) showNotice(t("terminalAppearance.schemeRemoved", { name: scheme.name }));
-}
-
-// 颜色变量 → 宿主令牌名探测/回退循环收敛到 shared 单点（X-P4，kafka 策略为
-// 准）；此处只保留 ssh 特有的终端底色/字体处理。
-function applyAppearance(next: DbxPluginAppearanceInput) {
-  // 宿主可能缺字段（1.0 或部分下发、1.1 theme 通道只带颜色令牌），按 DBX 规范色板补齐。
-  const resolved = resolveAppearance(next);
-  appearance.value = resolved;
-  const root = document.documentElement;
-  root.dataset.theme = resolved.colorScheme;
-  root.style.colorScheme = resolved.colorScheme;
-  applyAppearanceColorVars(root, resolved.colors);
-  root.style.setProperty("--popover", DBX_POPOVER[resolved.colorScheme]);
-  // 终端底色：启用配色方案且背景来源为「方案」时取方案底色，否则宿主面板色。
-  root.style.setProperty("--ssh-terminal-background", terminalTheme().background);
-  followHostFonts(resolved);
-  applyTerminalAppearance();
-  if (terminal) {
-    // 宿主下发的字体大小即缩放基准；外观切换后回到基准值，
-    // 但用户单独调过的字号（issue #31 持久化覆盖）优先于宿主基准。
-    terminalFontSize.value = terminalFontOverride.value.fontSize ?? resolved.terminal.fontSize;
-    terminal.options.fontSize = terminalFontSize.value;
-    scheduleFit();
-  }
-}
-
-// vim/tmux/neovim 等启动时用 OSC 10/11 查询终端前景/背景色定调色板；xterm 内核
-// 不应答，这里按当前主题补答（对标 electerm）。颜色"设置"分支交回内核处理。
-function registerOscColorQueryHandlers() {
-  for (const disposable of oscColorQueryDisposables) {
-    if (disposable.dispose) disposable.dispose();
-  }
-  oscColorQueryDisposables = [];
-  registerModeQueryHandlers();
-  if (!terminal) return;
-  const term = terminal;
-  // 应答当前「生效」主题的前景/背景（宿主基底已被配色方案覆盖时返回方案色），
-  // 否则 vim/tmux 会按宿主色板渲染，与屏幕实际底色不一致。
-  const theme = terminalTheme();
-  oscColorQueryDisposables.push(
-    term.parser.registerOscHandler(10, (data) =>
-      handleTerminalColorQuery(term, 10, theme.foreground, OSC_COLOR_FALLBACK.foreground, data),
-    ),
-    term.parser.registerOscHandler(11, (data) =>
-      handleTerminalColorQuery(term, 11, theme.background, OSC_COLOR_FALLBACK.background, data),
-    ),
-  );
-}
-
-// CSI 能力查询应答只在终端创建时挂一次：应答与主题无关，无需随外观重挂。
-// DECSET 2026 拦截驱动合帧通道的 hold/release；DECRQM 2026 按实时同步态回
-// set/reset（其余私有模式维持 reset，不回 0 打扰探测其它模式的 TUI）。
-function registerModeQueryHandlers() {
-  for (const disposable of modeQueryDisposables) disposable.dispose();
-  modeQueryDisposables = [];
-  if (!terminal) return;
-  const dispose = registerTerminalModeQueryHandlers(terminal, {
-    syncOutput: terminalSyncOutput,
-    decRqmState: (mode) => (mode === 2026 ? (terminalWriteThrottle.held ? 1 : 2) : 2),
-  });
-  modeQueryDisposables.push({ dispose });
-}
-
-// 字体始终跟随宿主：不写内联字体变量——内联样式会压过 themeSync 桥样式表里的
-// var(--font-sans)/var(--font-mono) 引用（这正是宿主全局字体此前不生效的根因），
-// 撤出内联后桥引用直接命中宿主令牌，宿主改字体经 SDK 令牌推送自动跟随。
-function followHostFonts(resolved: ReturnType<typeof resolveAppearance>) {
-  const root = document.documentElement;
-  root.style.removeProperty("--ui-font-family");
-  root.style.removeProperty("--terminal-font-family");
-  if (terminal) {
-    // 用户单独设置过字体族时保持用户值（issue #31），否则跟随宿主。
-    terminal.options.fontFamily = terminalFontOverride.value.fontFamily ?? hostTerminalFontFamily(resolved);
-    scheduleFit();
-  }
-}
-
-// xterm 需要具体字体串（不认 CSS 变量）：取 --terminal-font-family 的计算值
-// （桥已把宿主令牌/回退解析好），计算值为空时回退 appearance 解析值。
-function hostTerminalFontFamily(resolved: ReturnType<typeof resolveAppearance>): string {
-  const computed = getComputedStyle(document.documentElement).getPropertyValue("--terminal-font-family").trim();
-  return computed || resolved.terminal.fontFamily;
-}
-
-// 宿主字体令牌经 SDK applyTheme 写 :root 内联样式推送（无事件通道）：观察
-// style 属性变化，终端字体随之更新；插件自身写颜色令牌也会触发，
-// 计算值未变时为空操作。
-const hostFontObserver = new MutationObserver(() => {
-  if (!terminal) return;
-  // 用户单独设置过字体族时不跟随宿主字体变化（issue #31）。
-  if (terminalFontOverride.value.fontFamily) return;
-  const family = hostTerminalFontFamily(appearance.value);
-  if (family !== terminal.options.fontFamily) {
-    terminal.options.fontFamily = family;
-    scheduleFit();
-  }
+// 终端外观/主题/字体跟随：收口在 composables/useTerminalAppearance。
+const {
+  terminalTheme,
+  hostTerminalTheme,
+  applyTerminalPaddingVars,
+  applyTerminalAppearance,
+  updateTerminalAppearance,
+  applyTerminalAppearanceTheme,
+  saveTerminalAppearanceTheme,
+  deleteTerminalAppearanceTheme,
+  addImportedSchemes,
+  removeImportedScheme,
+  applyAppearance,
+  registerOscColorQueryHandlers,
+  hostTerminalFontFamily,
+  hostFontObserver,
+} = useTerminalAppearance({
+  t, showNotice, appearance, terminalAppearance, terminalFontOverride, terminalFontSize,
+  terminalWriteThrottle, terminalSyncOutput,
+  terminal: () => terminal,
+  scheduleFit,
+  setTerminalFont: (family, size) => setTerminalFont(family, size),
 });
 
 function createTerminal() {
@@ -2377,58 +2113,11 @@ function handleTerminalKey(event: KeyboardEvent) {
   }
 }
 
-/**
- * 终端响铃（对标 Tabby「Terminal → Sound」）：xterm 6.x 只抛 onBell、
- * 不再有 bellStyle，「视觉 / 听觉」两态在这里按设置自行实现。
- */
-function handleTerminalBell() {
-  if (terminalBehavior.value.bell === "visual") flashTerminalBell();
-  else if (terminalBehavior.value.bell === "audible") playTerminalBell();
-}
-
-/**
- * 视觉响铃：给终端区域加一个短暂高亮类。先摘掉类、下一帧再加回，否则连续
- * 响铃时浏览器认为动画已在播放，不会重新触发。
- */
-function flashTerminalBell() {
-  window.clearTimeout(terminalBellFlashTimer);
-  terminalBellFlash.value = false;
-  terminalBellFlashTimer = window.setTimeout(() => {
-    terminalBellFlash.value = true;
-    terminalBellFlashTimer = window.setTimeout(() => {
-      terminalBellFlash.value = false;
-    }, TERMINAL_BELL_FLASH_MS);
-  }, TERMINAL_BELL_RETRIGGER_MS);
-}
-
-/**
- * 听觉响铃：不引入音频资源（仓库规则禁止新增运行时依赖，二进制资源也无必要），
- * 用 WebAudio 现场合成一声短促正弦提示音。AudioContext 懒建并复用。沙箱可能
- * 直接拒绝构造，或自动播放策略让声音静默挂起；两种情况下都退化为视觉闪动，
- * 保证响铃至少有可见反馈，不抛错打断终端。
- */
-function playTerminalBell() {
-  try {
-    bellAudioContext ??= new AudioContext();
-    const context = bellAudioContext;
-    void context.resume();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.value = TERMINAL_BELL_FREQUENCY_HZ;
-    const startedAt = context.currentTime;
-    // 用指数包络避免方波式的爆音；起止值不能为 0（指数斜坡不接受 0）。
-    gain.gain.setValueAtTime(0.0001, startedAt);
-    gain.gain.exponentialRampToValueAtTime(TERMINAL_BELL_GAIN, startedAt + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, startedAt + TERMINAL_BELL_DURATION_S);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start(startedAt);
-    oscillator.stop(startedAt + TERMINAL_BELL_DURATION_S);
-  } catch {
-    flashTerminalBell();
-  }
-}
+// 终端响铃：视觉/听觉两态收口在 composables/useTerminalBell。
+const {
+  terminalBellFlash,
+  handleTerminalBell,
+} = useTerminalBell({ terminalBehavior });
 
 /**
  * 链接点击（对标 Tabby「Mouse → Require a key to click links」）：链接修饰键未按下
@@ -2438,109 +2127,39 @@ function playTerminalBell() {
  * 只是多了上面这道修饰键闸门：清 opener 是防「反向标签劫持」的关键，不能省。
  * 沙箱 iframe 未开 allow-popups 时 window.open 会返回 null，此时静默放弃。
  */
-function openTerminalLink(event: MouseEvent, uri: string) {
-  if (!isLinkModifierSatisfied(terminalBehavior.value, event)) return;
-  const opened = window.open();
-  if (!opened) return;
-  try {
-    opened.opener = null;
-  } catch {
-    // Electron 等环境写入 opener 会抛错；与内置处理器同样忽略。
-  }
-  opened.location.href = uri;
-}
+// 终端鼠标交互：链接/中键粘贴/缩放滚轮/点击定位光标收口在 composables/useTerminalMouse。
+const {
+  openTerminalLink,
+  handleTerminalMiddleClick,
+  handleTerminalWheel,
+  handleTerminalMouseDown,
+  handleTerminalMouseUp,
+} = useTerminalMouse({
+  terminalBehavior, terminalMenuOpen,
+  closeFileMenu: () => { fileMenu.value = undefined; },
+  pasteTerminal,
+  adjustTerminalZoom: (delta) => adjustTerminalZoom(delta),
+  terminal: () => terminal,
+  getTerminalHost: () => terminalHost.value,
+  session,
+  sendTerminalBytes,
+  zmodemBusy: () => zmodemBusy.value,
+  trzszBusy: () => trzszBusy.value,
+});
 
-/**
- * 中键粘贴（对标 Tabby「Mouse → Paste on middle-click」，默认关闭）。
- * 仅当设置开启时消费事件：默认放行，保持浏览器既有行为不变。
- */
-function handleTerminalMiddleClick(event: MouseEvent) {
-  if (!terminalBehavior.value.pasteOnMiddleClick) return;
-  event.preventDefault();
-  terminalMenuOpen.value = false;
-  fileMenu.value = undefined;
-  void pasteTerminal();
-}
-
-
-function handleTerminalWheel(event: WheelEvent) {
-  if (!(event.ctrlKey || event.metaKey)) return;
-  event.preventDefault();
-  adjustTerminalZoom(event.deltaY < 0 ? 1 : -1);
-}
-
-// 点击定位光标（iTerm2/kitty 风格）：readline 只认按键，所以在光标所在逻辑行内
-// 的“原地点击”（无拖拽成选区）换算成 N 次左右方向键发给远端；行外点击不动作，
-// 避免方向键把 shell 翻进历史命令。鼠标上报（vim/htop）与备用屏（TUI 全屏应用）
-// 时点击属于应用自身语义，一律不代发。
-function handleTerminalMouseDown(event: MouseEvent) {
-  terminalMouseDownAt = event.button === 0 ? { clientX: event.clientX, clientY: event.clientY } : undefined;
-}
-
-function handleTerminalMouseUp(event: MouseEvent) {
-  const down = terminalMouseDownAt;
-  terminalMouseDownAt = undefined;
-  if (!down || !terminal || !terminalHost.value || !session.value) return;
-  if (terminal.hasSelection()) return;
-  if (Math.abs(event.clientX - down.clientX) > 2 || Math.abs(event.clientY - down.clientY) > 2) return;
-  if (terminal.modes.mouseTrackingMode !== "none") return;
-  const buffer = terminal.buffer.active;
-  if (buffer.type !== "normal") return;
-  const click = cellFromMouseEvent(terminalHost.value, { cols: terminal.cols, rows: terminal.rows }, event.clientX, event.clientY);
-  if (!click) return;
-  const move = resolveClickCursorMove({ buffer, cols: terminal.cols, click });
-  if (!move) return;
-  const route = resolveTerminalInputRoute({ zmodemBusy: zmodemBusy.value, trzszBusy: trzszBusy.value });
-  if (route !== "pty") return;
-  sendTerminalBytes(new TextEncoder().encode(clickCursorArrows(move)));
-}
-
-function adjustTerminalZoom(delta: number) {
-  const current = terminalFontSize.value;
-  const next = clampFontSize(current, delta);
-  if (next === current) return;
-  applyTerminalFontSize(next);
-}
-
-function resetTerminalZoom() {
-  // 主题可能自带字号（外观快照的 font.size）：复位回到「主题基准」，没有主题
-  // 或主题未指定字号时才回宿主基准（= 既有行为）。
-  const base = terminalAppearance.value.font.size ?? appearance.value.terminal.fontSize;
-  if (terminalFontSize.value === base) return;
-  applyTerminalFontSize(base);
-}
-
-/**
- * 字体落地唯一入口：内存覆盖态 + terminalFont 两个键 + xterm 生效值。
- * `size` 允许为 null（跟随宿主字号）——主题快照的「未指定」语义靠它表达，
- * 若在此处把 null 折成宿主具体值，快照与实况就会永远不相等、主题无法高亮。
- */
-function setTerminalFont(family: string | null, size: number | null) {
-  terminalFontOverride.value = { fontFamily: family, fontSize: size };
-  persistTerminalFontFamily(family);
-  persistTerminalFontSize(size);
-  const effectiveSize = size ?? appearance.value.terminal.fontSize;
-  terminalFontSize.value = effectiveSize;
-  if (terminal) {
-    terminal.options.fontFamily = family ?? hostTerminalFontFamily(appearance.value);
-    terminal.options.fontSize = effectiveSize;
-    scheduleFit();
-  }
-}
-
-// 缩放只动字号：同步内存覆盖态并经 lib 持久化（键与解析逻辑集中在 terminalFont.ts）。
-function applyTerminalFontSize(size: number) {
-  setTerminalFont(terminalFontOverride.value.fontFamily, size);
-  window.clearTimeout(zoomNoticeTimer);
-  zoomNoticeTimer = window.setTimeout(() => showNotice(t("terminalZoom.fontSize", { size })), 500);
-}
-
-// 应用用户字体设置并持久化：family null = 恢复跟随宿主。立即生效并 toast 反馈。
-function applyTerminalFontSettings(family: string | null, size: number) {
-  const followHost = family == null;
-  setTerminalFont(family, size);
-  showNotice(followHost ? t("terminalFont.resetDone") : t("terminalFont.applied", { size }));
-}
+// 终端缩放与字体设置落地：收口在 composables/useTerminalFontZoom。
+const {
+  adjustTerminalZoom,
+  resetTerminalZoom,
+  setTerminalFont,
+  applyTerminalFontSize,
+  applyTerminalFontSettings,
+} = useTerminalFontZoom({
+  t, showNotice, appearance, terminalAppearance, terminalFontOverride, terminalFontSize,
+  terminal: () => terminal,
+  scheduleFit,
+  hostTerminalFontFamily,
+});
 
 function openTerminalSearch() {
   if (!terminal) return;
@@ -8792,7 +8411,6 @@ onBeforeUnmount(() => {
   window.clearTimeout(resizeTimer);
   window.clearTimeout(reconnectTimer);
   window.clearInterval(reconnectCountdownTimer);
-  window.clearTimeout(zoomNoticeTimer);
   stopCommandMarkerTick();
   stopAgentPromptTimer();
   resolvePasteConfirm(false);
@@ -8812,10 +8430,6 @@ onBeforeUnmount(() => {
   unsubscribeBinary?.();
   unsubscribeEnvironment?.();
   resizeObserver?.disconnect();
-  for (const disposable of oscColorQueryDisposables) disposable.dispose();
-  oscColorQueryDisposables = [];
-  for (const disposable of modeQueryDisposables) disposable.dispose();
-  modeQueryDisposables = [];
   osc52Disposable?.dispose();
   osc52Disposable = undefined;
   for (const disposable of oscFeedDisposables) disposable.dispose();
@@ -8826,8 +8440,6 @@ onBeforeUnmount(() => {
   disposeSelectionCopy?.dispose();
   disposeTerminalBell?.dispose();
   disposeTerminalBell = undefined;
-  window.clearTimeout(terminalBellFlashTimer);
-  terminalBellFlash.value = false;
   terminalWriteThrottle.dispose();
   // 终端重建/会话关闭：在途写入回调整体作废，保护态复位，避免旧积压误判。
   outputInFlightBytes = 0;
