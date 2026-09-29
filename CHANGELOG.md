@@ -4,6 +4,9 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+- **修复 Windows 本地终端启动残影的真正成因：ConPTY 握手应答用了错误的值**。ConPTY 以 `PSEUDOCONSOLE_INHERIT_CURSOR` 创建，开场 `CSI 6n` 问的是「终端光标在哪」并把子进程放到该位置；此前 sidecar 用**视口尺寸**应答，等于宣称光标在最后一行——conhost 于是把首字符留在顶部（cmd 的 `M`、WSL 的 `d`）并从底部整屏重画横幅（PowerShell 提示符画两遍）。前三轮修复（spawn 尺寸稳定、同尺寸 resize 去重、启动窗口 resize 门控）都作用于另一条 resize 通路，所以毫无改观。现在工作台在启动时上报终端真实光标（`cursorRow`/`cursorCol`），sidecar 归一化后如实应答——shell 就从用户看到的光标处开始输出。
+  **The real cause of the Windows local-terminal startup artifact: the ConPTY handshake was answered with the wrong value.** ConPTY is created with `PSEUDOCONSOLE_INHERIT_CURSOR`, so its opening `CSI 6n` asks where the terminal's cursor is and starts the child there; the sidecar answered with the **viewport size**, i.e. "your cursor is on the last row" — conhost left the first glyph at the top (cmd's `M`, WSL's `d`) and re-drew the whole banner from the inherited bottom row (PowerShell's prompt twice). The three earlier fixes all worked on the other resize path, which is why nothing changed. The workbench now reports the terminal's real cursor at spawn (`cursorRow`/`cursorCol`) and the sidecar answers truthfully, so the shell starts where the user sees the cursor.
+
 ## [0.7.1-beta.10] — 2026-09-29
 
 - **修复 Windows 本地终端启动顶部孤字/双提示符在宿主改面板几何时仍复现**：此前两轮修复（spawn 前等插件面板布局稳定、同尺寸 resize 去重）只挡住了插件自己引起的重绘；DBX 宿主在 spawn 之后仍会继续整理 dock/tab 面板几何，这类真实跨几何 resize 落在 shell 开场横幅/首个提示符的输出窗口内，ConPTY 整屏重序列化与输出交错，仍会渲染出顶部孤字（cmd 的 "M"、WSL 的 "d"）或重复提示符（PowerShell 两行 `PS …>`）。现在仅 Windows：spawn 起 3 秒启动窗口内，横幅正在写（距上次输出不足 500ms）时的 resize 请求被扣留并合并，输出安静满 500ms（或窗口到期）后一次性应用最终几何——静止屏幕上的 ConPTY 重绘是幂等重排，不再产生副本；首个输出之前与窗口之外的 resize 立即应用，Unix 平台不受影响。
