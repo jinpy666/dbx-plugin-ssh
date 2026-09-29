@@ -123,7 +123,6 @@ import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "
 import { computeWindow } from "./lib/virtualWindow";
 import { isCountdownActive } from "./lib/recordingCountdown";
 import { expandSelection, filterSftpEntries, type SftpTypeFilter } from "./lib/sftpFileFilters";
-import { pushPathHistory, sanitizePathHistories } from "./lib/sftpPathHistory";
 import {
   defaultBookmarkLabel,
   deleteBookmark,
@@ -153,7 +152,7 @@ import { figCompletionSource } from "./lib/completion/fig/figCompletionSource";
 import { createEngineRunner } from "./lib/completion/worker/engineRunner";
 import { withShellBuiltinsSource, detectShellKind } from "./lib/completion/shell/shellBuiltins";
 import { GeneratorScheduler } from "./lib/completion/fig/generatorScheduler";
-import { displayPathToWire, hasLossyChars, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
+import { displayPathToWire, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "./lib/transferQueue";
 import { filterQuickCommands, QUICK_COMMANDS_LIMIT } from "./lib/quickCommands";
 import { registerWatch } from "./lib/watchEdits";
@@ -208,6 +207,8 @@ import { transferPausable } from "./lib/transferResume";
 import { isLiveTransferStatus, sortTransferTasks } from "./lib/transferOrder";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useSftpPathHistory } from "./composables/useSftpPathHistory";
+import { useSymlink } from "./composables/useSymlink";
 import { useZmodem } from "./composables/useZmodem";
 import { useCommandDialog } from "./composables/useCommandDialog";
 import { useExternalEdits } from "./composables/useExternalEdits";
@@ -539,8 +540,6 @@ const WEB_DOWNLOAD_WARNING_BYTES = 512 * MIB;
 // 粘贴防护：内容含换行或达到该字符数时先确认（对齐 tiny-rdm TerminalPane 阈值）。
 const PASTE_CONFIRM_CHAR_THRESHOLD = 200;
 // SFTP 路径历史：每连接最多保留 10 条，存 pluginStore（宿主 host.storage；对齐 tiny-rdm pathHistory）。
-const SFTP_PATH_HISTORY_KEY = "sftp-path-history";
-const SFTP_PATH_HISTORY_LIMIT = 10;
 // Upper bound for out-of-order terminal frames held while waiting for the
 // missing sequence; the replay path re-delivers anything dropped beyond it.
 const TERMINAL_PENDING_FRAME_LIMIT = 1024;
@@ -725,13 +724,6 @@ const archiveBusy = ref(false);
 const operationDialog = ref<"mkdir" | null>(null);
 const operationDraft = ref("");
 
-// —— 符号链接（P2-6）：新建/改指向小对话框 + 列表 tooltip 的 → target 缓存。
-// create 用 draft(链接名)+targetDraft(指向)；edit 复用 draft 承载指向。
-const symlinkDialog = ref<{ mode: "create" | "edit"; linkPath: string; name: string } | null>(null);
-const symlinkDraft = ref("");
-const symlinkTargetDraft = ref("");
-const symlinkSubmitting = ref(false);
-const linkTargets = ref<Record<string, string>>({});
 const deleteTarget = ref<SftpEntry>();
 const deleteSubmitting = ref(false);
 const renamingPath = ref("");
@@ -1175,8 +1167,6 @@ const selectedUriSet = computed(() => new Set(selectedUris.value));
 const lastClickedUri = ref("");
 const sftpClipboard = ref<SftpClipboard>();
 const pasteBusy = ref(false);
-const pathHistoryOpen = ref(false);
-const pathHistories = reactive<Record<string, string[]>>(loadPathHistories());
 // SFTP 路径书签（全局清单，sftp-bookmarks.json）：路径栏星标收藏 + 路径弹层内跳转/删除。
 const sftpBookmarks = ref<SftpBookmark[]>([]);
 const bookmarkSaveOpen = ref(false);
@@ -1839,7 +1829,6 @@ function clearSftpSearch() {
   sftpSearch.value = "";
 }
 const selectedEntries = computed(() => entries.value.filter((entry) => selectedUriSet.value.has(entry.uri)));
-const currentPathHistory = computed(() => pathHistories[connectionId.value] || []);
 const previewDirty = computed(() => previewEditable.value && previewDraft.value !== previewBaseline.value);
 // 编辑保存走 sftp/write 整文件覆写：只有完整加载（未截断）且不超直写上限的
 // 文本才允许进入编辑，否则保存会把未加载部分丢掉。
@@ -7328,31 +7317,14 @@ async function confirmDelete() {
 // SFTP 面板：搜索/多选/批量/新建文件/属性/路径历史/复制粘贴
 // ---------------------------------------------------------------------------
 
-function loadPathHistories(): Record<string, string[]> {
-  try {
-    const raw = pluginStore.getItem(SFTP_PATH_HISTORY_KEY);
-    const parsed = raw ? JSON.parse(raw) : null;
-    return sanitizePathHistories(parsed, SFTP_PATH_HISTORY_LIMIT);
-  } catch {
-    return {};
-  }
-}
-
-function persistPathHistories() {
-  try {
-    pluginStore.setItem(SFTP_PATH_HISTORY_KEY, JSON.stringify(pathHistories));
-  } catch {
-    // localStorage 不可用时路径历史仅保留在内存中。
-  }
-}
-
-function rememberPathHistory(path: string) {
-  const key = connectionId.value;
-  if (!key || !path) return;
-  const next = pushPathHistory(pathHistories, key, path, SFTP_PATH_HISTORY_LIMIT);
-  for (const connection of Object.keys(next)) pathHistories[connection] = next[connection];
-  persistPathHistories();
-}
+// 路径历史：存储/记录/弹层开关收口在 composables/useSftpPathHistory。
+const {
+  pathHistoryOpen,
+  pathHistories,
+  currentPathHistory,
+  rememberPathHistory,
+  togglePathHistoryMenu,
+} = useSftpPathHistory({ connectionId, closeToolbarPopovers });
 
 // ---------------------------------------------------------------------------
 // SFTP 路径书签（全局清单）：星标收藏 + 路径弹层跳转/删除（sftp/bookmarks/*）
@@ -8008,83 +7980,19 @@ async function openInExternalEditor(entry: SftpEntry) {
   }
 }
 
-// —— 符号链接（P2-6）——
-function beginSymlinkCreate() {
-  if (!session.value) return;
-  symlinkDraft.value = "";
-  symlinkTargetDraft.value = "";
-  symlinkDialog.value = { mode: "create", linkPath: "", name: "" };
-}
-
-function beginSymlinkEdit(entry: SftpEntry) {
-  if (!session.value) return;
-  symlinkDraft.value = linkTargets.value[entry.uri] || "";
-  symlinkDialog.value = { mode: "edit", linkPath: pathFromUri(entry.uri), name: entry.name };
-}
-
-/** 新建/改指向共用提交：create 走 sftp/symlink-create（target 允许相对路径），
- * edit 先 readlink 比对避免无谓的删建（后端也会 no-op 兜底）。 */
-async function commitSymlink() {
-  const dialog = symlinkDialog.value;
-  const isCreate = dialog?.mode === "create";
-  const name = isCreate ? symlinkDraft.value.trim() : dialog?.name || "";
-  const target = (isCreate ? symlinkTargetDraft.value : symlinkDraft.value).trim();
-  if (!session.value || !dialog || !target || symlinkSubmitting.value) return;
-  if (isCreate && !name) return;
-  symlinkSubmitting.value = true;
-  try {
-    if (isCreate) {
-      await window.dbxPlugin.invoke("sftp/symlink-create", {
-        sessionId: session.value.sessionId,
-        target,
-        linkPath: joinRemote(currentPath.value, name),
-      });
-    } else {
-      await window.dbxPlugin.invoke("sftp/symlink-update", {
-        sessionId: session.value.sessionId,
-        linkPath: dialog.linkPath,
-        target,
-      });
-      linkTargets.value = { ...linkTargets.value, [`sftp:${dialog.linkPath}`]: target };
-    }
-    symlinkDialog.value = null;
-    await loadDirectory();
-  } catch (cause) {
-    showError(cause, "sftp");
-  } finally {
-    symlinkSubmitting.value = false;
-  }
-}
-
-/** symlink 行的 tooltip：`→ target`（target 由列表加载后的只读解析填充）。 */
-function linkTargetTitle(entry: SftpEntry): string | undefined {
-  const target = entry.kind === "symlink" ? linkTargets.value[entry.uri] : undefined;
-  const linkTitle = target ? `→ ${target}` : undefined;
-  // M14-B：lossy 行名（wire 含 U+FFFD）在悬停提示里说明字节不可还原，
-  // 并指向设置 → 传输的文件名编码偏好。
-  if (entry.lossy || hasLossyChars(entry.name)) return [linkTitle, t("sftpName.lossyTitle")].filter(Boolean).join(" · ");
-  return linkTitle;
-}
-
-/** 列表加载后解析 symlink 条目的指向（只读 readlink，并发、失败静默——
- * 悬空链接也照常显示，tooltip 缺失只是没有 target 文案）。 */
-async function hydrateLinkTargets(list: SftpEntry[]) {
-  const sessionId = session.value?.sessionId;
-  if (!sessionId) return;
-  const links = list.filter((entry) => entry.kind === "symlink").slice(0, 50);
-  if (!links.length) return;
-  const next = { ...linkTargets.value };
-  await Promise.allSettled(
-    links.map(async (entry) => {
-      const result = await window.dbxPlugin.invoke<{ target?: string }>("sftp/symlink-read", {
-        sessionId,
-        linkPath: pathFromUri(entry.uri),
-      });
-      if (result?.target) next[entry.uri] = result.target;
-    }),
-  );
-  linkTargets.value = next;
-}
+// 符号链接（P2-6）：对话框/提交/tooltip 缓存收口在 composables/useSymlink。
+const {
+  symlinkDialog,
+  symlinkDraft,
+  symlinkTargetDraft,
+  symlinkSubmitting,
+  linkTargets,
+  beginSymlinkCreate,
+  beginSymlinkEdit,
+  commitSymlink,
+  linkTargetTitle,
+  hydrateLinkTargets,
+} = useSymlink({ t, showError, session, currentPath, pathFromUri, joinRemote, loadDirectory });
 
 // 本机落盘能力探测（sidecar local/capabilities）：宿主缺 fileTransfer API 时，
 // 桌面端 sidecar 可直接把下载写进本机下载目录；web/docker 模式探测失败或
@@ -9099,11 +9007,6 @@ function toggleTransferPanel() {
   transferPanelOpen.value = next;
 }
 
-function togglePathHistoryMenu() {
-  const next = !pathHistoryOpen.value;
-  closeToolbarPopovers();
-  pathHistoryOpen.value = next;
-}
 
 // 认证方式：读取 ssh/sessions/list 当前会话行的 authMethod（只读方法名，
 // 不含任何凭据材料）。失败时面板显示占位符，不影响其他信息。
