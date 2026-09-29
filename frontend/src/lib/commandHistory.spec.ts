@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commandInputAction, pushCommandHistory } from "./commandHistory";
+import { commandInputAction, mergeShellHistory, parseShellHistoryText, pushCommandHistory } from "./commandHistory";
 
 describe("command input keyboard behavior", () => {
   const base = {
@@ -35,5 +35,53 @@ describe("command history", () => {
   it("keeps multiline commands intact for in-session reruns", () => {
     const command = ["llamafactory-cli api \\", "--model_name_or_path ~/.cache/modelscope/hub/models/Qwen/Qwen3/"].join("\n");
     expect(pushCommandHistory([], command)).toEqual([command]);
+  });
+});
+
+describe("parseShellHistoryText", () => {
+  it("keeps plain bash history lines in file order (oldest on top)", () => {
+    expect(parseShellHistoryText("ls -la\nkubectl get pods\n")).toEqual(["ls -la", "kubectl get pods"]);
+  });
+
+  it("strips zsh EXTENDED_HISTORY metadata prefixes", () => {
+    expect(parseShellHistoryText(": 1700000000:0;vim /etc/nginx.conf\n: 1700000005:3;systemctl restart nginx")).toEqual([
+      "vim /etc/nginx.conf",
+      "systemctl restart nginx",
+    ]);
+  });
+
+  it("joins backslash continuation lines into one command", () => {
+    expect(parseShellHistoryText("tail -n 100 /var/log/syslog \\\n  | grep -i error\ndone-cmd")).toEqual([
+      "tail -n 100 /var/log/syslog   | grep -i error",
+      "done-cmd",
+    ]);
+  });
+
+  it("keeps literal double-backslash tails and drops empty lines", () => {
+    expect(parseShellHistoryText('echo "path\\\\" \n\n   \nnext')).toEqual(['echo "path\\\\"', "next"]);
+  });
+});
+
+describe("mergeShellHistory", () => {
+  it("appends unseen remote history after the session ring, newest of the two at the front", () => {
+    const merged = mergeShellHistory(["git status"], ["old-cmd", "newer-cmd"]);
+    expect(merged).toEqual(["git status", "newer-cmd", "old-cmd"]);
+  });
+
+  it("skips commands already in the ring, secrets and over-long lines", () => {
+    const secret = "mysql -u root --password=hunter2";
+    const merged = mergeShellHistory(["git status", "old-cmd"], ["old-cmd", secret, "x".repeat(250), "keep-me"]);
+    // keep-me 是远端补充,插在环尾(更旧端)。
+    expect(merged).toEqual(["git status", "old-cmd", "keep-me"]);
+  });
+
+  it("caps the merged ring at the limit", () => {
+    const current = ["a", "b"];
+    const remote = Array.from({ length: 120 }, (_, i) => `remote-${i}`);
+    const merged = mergeShellHistory(current, remote, 100);
+    expect(merged).toHaveLength(100);
+    expect(merged[0]).toBe("a");
+    // 远端补充按新旧插在环尾:最旧的被截掉(122 条截到 100,丢 r0..r21)。
+    expect(merged[99]).toBe("remote-22");
   });
 });
