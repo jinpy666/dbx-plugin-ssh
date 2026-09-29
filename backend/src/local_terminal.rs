@@ -1590,6 +1590,7 @@ mod tests {
             ("size 30;100 (shipping)", Some(b"\x1b[30;100R".to_vec())),
             ("cursor 1;1 (inherit truth)", Some(b"\x1b[1;1R".to_vec())),
         ];
+        let mut measured: Vec<(&str, Vec<u8>)> = Vec::new();
         for (label, reply) in cases {
             // Watchdog: a wedged ConPTY session must not hang the runner.
             let (tx, rx) = mpsc::channel();
@@ -1598,10 +1599,48 @@ mod tests {
                 let _ = tx.send(session(reply));
             });
             match rx.recv_timeout(Duration::from_secs(60)) {
-                Ok(stream) => eprintln!("[{}] {} bytes: {}", label, stream.len(), escape(&stream)),
+                Ok(stream) => {
+                    eprintln!("[{}] {} bytes: {}", label, stream.len(), escape(&stream));
+                    measured.push((label, stream));
+                }
                 Err(_) => eprintln!("[{}] HUNG: no result within 60s", label),
             }
         }
+        let stream_for = |label: &str| {
+            measured
+                .iter()
+                .find(|(name, _)| *name == label)
+                .map(|(_, stream)| stream)
+                .unwrap_or_else(|| panic!("variant {label} produced no stream"))
+        };
+        // Anchor the measured difference, so a conhost change that invalidates
+        // the reasoning shows up here instead of as a user-visible regression.
+        let size_reply = stream_for("size 30;100 (shipping)");
+        assert!(
+            saw(size_reply, b"\x1b[29;100H"),
+            "the viewport-size reply no longer triggers the bottom-row \
+             re-serialization this fix was built on: {}",
+            escape(size_reply)
+        );
+        let cursor_reply = stream_for("cursor 1;1 (inherit truth)");
+        assert!(
+            !saw(cursor_reply, b"\x1b[29;100H") && !saw(cursor_reply, b"M\r\n\x1b["),
+            "the cursor-position reply still produced a re-serialization: {}",
+            escape(cursor_reply)
+        );
+        // The banner is written once, not echoed back from the inherited
+        // position — the doubled-prompt shape starts with a lone first glyph.
+        let banner = b"Microsoft Windows";
+        let banner_hits = cursor_reply
+            .windows(banner.len())
+            .filter(|window| *window == banner)
+            .count();
+        assert_eq!(
+            banner_hits,
+            1,
+            "banner written {banner_hits} times with the cursor reply: {}",
+            escape(cursor_reply)
+        );
     }
 
     #[test]
