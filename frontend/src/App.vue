@@ -793,9 +793,8 @@ const searchResultIndex = ref(0);
 const searchResultCount = ref(0);
 // Quick Select Mode（WT-1，对标 WezTerm）：注册表动作 quick-select 唤起，
 // Warp 式 history 面板（↑ 唤起，对标 Warp command history）：commandHistory
-// 可视化快速回填（仅回填不执行）。焦点不离开终端：↑↓/Enter/Tab/Esc 由
-// handleTerminalKey 的面板分支统一消费；开启期间继续打字即实时过滤
-// （pendingTerminalInput 即 query），其余按键放行。
+// 可视化快速回填（仅回填不执行）。打开即聚焦面板内搜索框：↑↓/Enter/Tab/Esc
+// 由 App 的面板分支统一消费，字符键进搜索框实时过滤，其余按键放行。
 const historyPanelOpen = ref(false);
 // 面板内搜索框的 query（开启期间焦点在输入框，打字即过滤；关闭随面板清空）。
 const historyPanelQuery = ref("");
@@ -1844,10 +1843,10 @@ function handleTerminalKey(event: KeyboardEvent) {
   if (completionOpen.value && handleCompletionKey(event)) return consume();
   if (suggestionOpen.value && handleSuggestionKey(event)) return consume();
   // Warp 式 history 面板（↑ 唤起）：面板开启时优先消费导航/回填键（↑↓ 移动、
-  // Enter/Tab 回填、Esc 关闭），其余按键原样放行——继续打字即过滤（onData
-  // 链的 updateHistoryPanelFilter）。未开启时裸 ↑ 经 gate 打开（输入行内容即
-  // 过滤 query）；alternate 屏（vim/htop 靠 ↑ 导航）、命令运行中、传输占用、
-  // 既有浮层开启时不抢 ↑，shell 原生 readline 历史在那些场景依旧可达。
+  // Enter/Tab 回填、Esc 关闭），其余按键原样放行——焦点回到终端时打字仍会
+  // 走 onData 链刷新锚点。未开启时裸 ↑ 经 gate 打开全量视图（过滤交给面板内
+  // 搜索框，不读行缓冲）；alternate 屏（vim/htop 靠 ↑ 导航）、命令运行中、
+  // 传输占用、既有浮层开启时不抢 ↑，shell 原生 readline 历史在那些场景依旧可达。
   if (historyPanelOpen.value && handleHistoryPanelKey(event)) return consume();
   if (
     event.type === "keydown" &&
@@ -2029,8 +2028,8 @@ const {
 // Warp 式 history 面板（对标 Warp command history）：↑ 裸键（或注册表
 // command-history 动作）唤起，commandHistory 过滤结果可视化快速回填。
 // 纯逻辑（过滤/导航/门判定）在 lib/historyPanel.ts；这里只做状态接线——
-// 打开时以 pendingTerminalInput 为 query 快照过滤，开启期间 onData 链
-// （refreshSuggestionsAfterInput 早退分支）继续按行缓冲实时过滤；选中走
+// 打开即全量视图 + 聚焦面板内搜索框（过滤只认搜索框 query，不读行缓冲——
+// 行缓冲模型在 Ctrl+U/方向键编辑后会残留残影）；选中走
 // replaceTerminalLineWith 仅回填不执行（自动执行命令路径不新增）。
 // ---------------------------------------------------------------------------
 /** 打开门：任一浮层/alternate 屏/命令运行中/传输占用时不拦截 ↑。 */
@@ -2049,10 +2048,11 @@ function historyPanelGateOpen(): boolean {
 function openHistoryPanel() {
   if (!terminal) return;
   terminalMenuOpen.value = false;
-  // 每次打开都是全量视图:清掉上一次的搜索词,打开瞬间的行内容仍作为初始
-  // 过滤 query(裸 ↑ 唤起时行通常为空;热键唤起时保留行内语义)。
+  // 每次打开都是全量视图:清掉上一次的搜索词,不读行缓冲(pendingTerminalInput
+  // 是简单字符模型,Ctrl+U/方向键/Ctrl+W 等编辑后会残留残影,曾把面板过滤得
+  // 只剩一条)。过滤只走面板内搜索框。
   historyPanelQuery.value = "";
-  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, pendingTerminalInput), commandHistoryTimes.value);
+  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, ""), commandHistoryTimes.value);
   historyPanelEntries.value = next;
   // shell ↑ 语义:初始高亮最底部(最新执行的命令),↑ 一直往上翻更旧的。
   historyPanelActiveIndex.value = clampHistoryPanelIndex(next.length - 1, next.length);
@@ -2076,13 +2076,11 @@ function moveHistoryPanelActive(delta: number) {
   historyPanelActiveIndex.value = moveHistoryPanelIndex(historyPanelActiveIndex.value, delta, historyPanelEntries.value.length);
 }
 
-/** 开启期间的过滤联动:搜索框 query 优先(焦点在输入框),回落行缓冲(旧
- *  打字过滤路径);重算条目后高亮置底(最新/最相关匹配,shell ↑ 语义),
- *  锚点跟随光标。 */
+/** 开启期间的过滤联动:只认搜索框 query(打开即聚焦,打字即过滤);重算
+ *  条目后高亮置底(最新/最相关匹配,shell ↑ 语义),锚点跟随光标。 */
 function updateHistoryPanelFilter() {
   if (!historyPanelOpen.value) return;
-  const query = historyPanelQuery.value || pendingTerminalInput;
-  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, query), commandHistoryTimes.value);
+  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, historyPanelQuery.value), commandHistoryTimes.value);
   historyPanelEntries.value = next;
   historyPanelActiveIndex.value = clampHistoryPanelIndex(next.length - 1, next.length);
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
