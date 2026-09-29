@@ -1,5 +1,5 @@
 import { ref, type Ref } from "vue";
-import { browseCommandHistory, commandInputAction, pushCommandHistory } from "../lib/commandHistory";
+import { browseCommandHistory, commandInputAction } from "../lib/commandHistory";
 import { randomUUID } from "../lib/uuid";
 
 /** 远端命令执行弹窗（ssh/exec，非交互通道）：草稿/ sudo 开关/执行与取消、
@@ -13,8 +13,12 @@ export function useCommandDialog(options: {
   commandHistoryIndex: Ref<number>;
   commandHistoryBackup: Ref<string>;
   persistCommandHistory: () => void;
+  /** 统一采集口（Warp 式 history 面板）：命令环 + 执行时间映射一并推进。 */
+  commandHistoryTimes: Ref<Record<string, number>>;
+  pushTerminalCommandHistory: (command: string) => void;
+  persistCommandHistoryTimes: () => void;
 }) {
-  const { showError, session, commandRunning, commandHistory, commandHistoryIndex, commandHistoryBackup, persistCommandHistory } = options;
+  const { showError, session, commandRunning, commandHistory, commandHistoryIndex, commandHistoryBackup, persistCommandHistory, commandHistoryTimes, pushTerminalCommandHistory, persistCommandHistoryTimes } = options;
 
 // 执行结果的最小结构（App.vue 的 ExecResult 为局部接口）。
 type CommandExecResult = { output: string; exitCode: number };
@@ -82,8 +86,10 @@ function rerunHistoryCommand(command: string) {
 
 function clearCommandHistory() {
   commandHistory.value = [];
+  commandHistoryTimes.value = {};
   commandHistoryIndex.value = -1;
   persistCommandHistory();
+  persistCommandHistoryTimes();
 }
 
 async function runCommand() {
@@ -103,8 +109,7 @@ async function runCommand() {
       sudo: commandUseSudo.value,
     }, { timeoutMs: 120_000 });
     // 执行成功提交即入历史（不论退出码），与输入框 ↑↓、一键重发共用同一份。
-    commandHistory.value = pushCommandHistory(commandHistory.value, command);
-    persistCommandHistory();
+    pushTerminalCommandHistory(command);
     commandHistoryIndex.value = -1;
     commandHistoryBackup.value = "";
   } catch (cause) {

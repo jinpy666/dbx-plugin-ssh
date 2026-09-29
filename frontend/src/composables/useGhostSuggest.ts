@@ -21,12 +21,14 @@ export function useGhostSuggest(options: {
   quickCommands: Ref<QuickCommand[]>;
   suggestionOpen: Ref<boolean>;
   completionOpen: Ref<boolean>;
+  /** Warp 式 history 面板开启期间不出 ghost（面板打字即过滤，同屏不叠两层）。 */
+  historyPanelOpen: Ref<boolean>;
   completionController: { lineChanged(): void };
   suggestionMinCharsState: Ref<number>;
   suggestionMaxCharsState: Ref<number>;
   readTerminalCellFrame: () => { originLeft: number; originTop: number; cursorX: number; visibleRow: number; cellWidth: number; cellHeight: number } | null;
 }) {
-  const { terminal: terminalGet, sendTerminalBytes, getPendingTerminalInput, appendToPendingTerminalInput, commandRunning, terminalTransferBusy, commandHistory, quickCommands, suggestionOpen, completionOpen, completionController, suggestionMinCharsState, suggestionMaxCharsState, readTerminalCellFrame } = options;
+  const { terminal: terminalGet, sendTerminalBytes, getPendingTerminalInput, appendToPendingTerminalInput, commandRunning, terminalTransferBusy, commandHistory, quickCommands, suggestionOpen, completionOpen, historyPanelOpen, completionController, suggestionMinCharsState, suggestionMaxCharsState, readTerminalCellFrame } = options;
 
 // —— 终端行内 ghost 自动建议（对标 Warp/fish autosuggest）——状态机纯逻辑在
 // lib/terminalGhostSuggest.ts；数据源即上方 commandHistory/quickCommands refs
@@ -110,7 +112,8 @@ function refreshGhostAfterInput(data: string) {
 function updateGhostSuggestion() {
   // 浮层建议/结构化补全菜单开着时不出 ghost：菜单占用 →/Enter/Esc，与
   // 「→ 仅在无菜单态下接受」一致，同屏叠两层建议也无法阅读。
-  if (ghostMenuSuppressed(suggestionOpen.value, completionOpen.value)) {
+  // history 面板同理：面板开启期间继续打字是过滤输入，不出 ghost。
+  if (ghostMenuSuppressed(suggestionOpen.value, completionOpen.value) || historyPanelOpen.value) {
     ghostMatch.value = null;
     return;
   }

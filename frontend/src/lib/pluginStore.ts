@@ -25,6 +25,9 @@ import { createPluginKvStore } from "../../../shared/frontend/pluginStorage";
 export const PLUGIN_STORE_KEYS: readonly string[] = [
   "sftp-path-history",
   "ssh-command-history",
+  // 命令 → 最近执行时刻（Warp 式 history 面板右侧相对时间），与命令环同一
+  // 采集口推进；wire 形态 [{c,t}]，命令环清空/淘汰时同步修剪。
+  "ssh-command-history-times",
   "ssh-sftp-pane-open",
   "ssh-follow-directory",
   "ssh-sftp-side-tab",

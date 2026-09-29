@@ -40,8 +40,15 @@ export function useCommandSuggestions(options: {
   getSessionId: () => string;
   getLocalSessionId: () => string | undefined;
   persistCommandHistory: () => void;
+  /** Warp 式 history 面板开启时，锚点同步帧连带刷新面板锚点。 */
+  isHistoryPanelOpen: () => boolean;
+  syncHistoryPanelAnchor: () => void;
+  /** 面板开启期间的键入分流：按最新行缓冲重算过滤结果（App.vue 状态接线）。 */
+  updateHistoryPanelFilter: () => void;
+  /** 统一采集口：命令环 + 执行时间映射一并推进（回填后回车执行路径）。 */
+  pushTerminalCommandHistory: (command: string) => void;
 }) {
-  const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, persistCommandHistory } = options;
+  const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, persistCommandHistory, isHistoryPanelOpen, syncHistoryPanelAnchor, updateHistoryPanelFilter, pushTerminalCommandHistory } = options;
 
 // 命令输入建议浮层（P1-1）运行时状态：条目/选中项/光标锚点与抑制门锁存。
 // 开关与长度上下限的权威值在上方 suggestions*State（sidecar 偏好）。
@@ -245,6 +252,7 @@ function syncSuggestionAnchorsOnSettle() {
     suggestionAnchorSyncScheduled = false;
     if (suggestionOpen.value) suggestionAnchor.value = readTerminalSuggestionAnchor();
     if (completionOpen.value) completionAnchor.value = readTerminalSuggestionAnchor();
+    if (isHistoryPanelOpen()) syncHistoryPanelAnchor();
   });
 }
 
@@ -290,6 +298,13 @@ function suggestionTypingChar(data: string): string | null {
  * 与 guard 抑制面一律关门。
  */
 function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
+  // Warp 式 history 面板开启期间：建议/补全/ghost 浮层全部让位（同屏不叠
+  // 两层浮层），面板按最新行缓冲实时过滤；面板关闭后的下一次键入恢复常规
+  // 调度（guard 锁存暂停推进——面板期间 ↑↓/Enter 均被吞键，不会产生命令）。
+  if (isHistoryPanelOpen()) {
+    updateHistoryPanelFilter();
+    return;
+  }
   const alternateActive = terminalGet()?.buffer.active.type === "alternate";
   const typingChar = suggestionTypingChar(data);
 
@@ -505,8 +520,7 @@ function replaceTerminalLineWith(nextLine: string, pressEnter: boolean) {
   setPendingTerminalInput(pressEnter ? "" : nextLine);
   if (pressEnter) {
     lastTerminalCommand.value = nextLine;
-    commandHistory.value = pushCommandHistory(commandHistory.value, nextLine);
-    persistCommandHistory();
+    pushTerminalCommandHistory(nextLine);
   }
   sendTerminalBytes(new TextEncoder().encode(payload));
   // 整行替换也是行缓冲变更点（FIG wave-1 锚点）：作废在途结果并防抖刷新；

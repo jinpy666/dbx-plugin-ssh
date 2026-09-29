@@ -1,7 +1,7 @@
 import { onBeforeUnmount, ref, watch, type ComputedRef, type Ref } from "vue";
 import { pluginStore } from "../lib/pluginStore";
 import { randomUUID } from "../lib/uuid";
-import { browseCommandHistory, pushCommandHistory } from "../lib/commandHistory";
+import { browseCommandHistory } from "../lib/commandHistory";
 import {
   batchTargetLabel,
   deriveBatchCommandName,
@@ -31,10 +31,12 @@ export function useBatchSend(options: {
   sftpPaneOpen: Ref<boolean>;
   transferPanelOpen: Ref<boolean>;
   persistCommandHistory: () => void;
+  /** 统一采集口（Warp 式 history 面板）：命令环 + 执行时间映射一并推进。 */
+  pushTerminalCommandHistory: (command: string) => void;
   confirmRiskyPaste: (text: string) => Promise<boolean>;
   terminalInputQueue: { enqueue: (sessionId: string, data: Uint8Array) => void };
 }) {
-  const { showError, connected, session, localSession, quickCommands, commandHistory, panelSurface, sftpPaneOpen, transferPanelOpen, persistCommandHistory, confirmRiskyPaste, terminalInputQueue } = options;
+  const { showError, connected, session, localSession, quickCommands, commandHistory, panelSurface, sftpPaneOpen, transferPanelOpen, persistCommandHistory, pushTerminalCommandHistory, confirmRiskyPaste, terminalInputQueue } = options;
 
 // 即发送。目标来自 ssh/sessions/list（跨连接全部活跃会话），命令写入各会话
 // 交互终端（PTY 键盘语义，输出回显在各自终端，对齐 tiny-rdm batch send）。
@@ -245,8 +247,7 @@ async function sendBatchCommand() {
     batchSummary.value = summarizeBatchResults(results);
     if (batchSummary.value.sent) {
       // 发送成功即清空输入与下拉选中（对齐原弹窗语义），命令入历史供 ↑↓ 回选。
-      commandHistory.value = pushCommandHistory(commandHistory.value, command);
-      persistCommandHistory();
+      pushTerminalCommandHistory(command);
       batchDraft.value = "";
       batchQuickPickId.value = "";
       batchHistoryIndex.value = -1;
