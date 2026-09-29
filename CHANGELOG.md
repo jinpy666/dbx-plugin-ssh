@@ -4,6 +4,11 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [未发布 / Unreleased]
+
+- **修复 Windows 本地终端启动顶部孤字/双提示符在宿主改面板几何时仍复现**：此前两轮修复（spawn 前等插件面板布局稳定、同尺寸 resize 去重）只挡住了插件自己引起的重绘；DBX 宿主在 spawn 之后仍会继续整理 dock/tab 面板几何，这类真实跨几何 resize 落在 shell 开场横幅/首个提示符的输出窗口内，ConPTY 整屏重序列化与输出交错，仍会渲染出顶部孤字（cmd 的 "M"、WSL 的 "d"）或重复提示符（PowerShell 两行 `PS …>`）。现在仅 Windows：spawn 起 3 秒启动窗口内，横幅正在写（距上次输出不足 500ms）时的 resize 请求被扣留并合并，输出安静满 500ms（或窗口到期）后一次性应用最终几何——静止屏幕上的 ConPTY 重绘是幂等重排，不再产生副本；首个输出之前与窗口之外的 resize 立即应用，Unix 平台不受影响。
+  **Fix Windows startup orphan-glyph / duplicated prompt resurfacing when the host reshapes the panel after spawn:** the two earlier fixes (pre-spawn layout settling, same-size resize dedup) only removed repaints the plugin itself caused; the host keeps settling dock/tab geometry after spawn, and those real cross-geometry resizes still landed inside the shell's opening output window, where ConPTY's whole-screen re-serialization interleaved with the banner into an orphan glyph (cmd's "M", WSL's "d") or a duplicated prompt (two `PS …>` lines in PowerShell). Windows-only now: within a 3s startup window, resizes arriving while output is in flight (less than 500ms since the last PTY output) are held and merged; the final geometry applies once output stays quiet for 500ms (or the window expires) — the repaint over a static screen is an idempotent re-layout. Resizes before the first output and past the window still apply immediately; Unix is unaffected.
+
 ## [0.7.1-beta.9] — 2026-09-27
 
 - **修复 Windows 本地终端提示符渲染两遍（PowerShell 等无 banner shell）**：本地 shell 现在等终端面板布局稳定后再 spawn——dock「+」新开 tab 时 webview 可能尚未布局完成（宿主 0 尺寸回落 80×24、web 字体换装改变单元格度量），shell 按临时尺寸启动后，布局到位的真实 fit 是一次跨几何 resize，ConPTY 整屏重绘＝提示符/横幅画两遍；现在逐帧采样至连续两次 fit 一致（限时 1.5s 兜底）才以最终尺寸启动。

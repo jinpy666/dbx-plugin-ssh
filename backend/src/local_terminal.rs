@@ -398,6 +398,14 @@ fn spawn_pump(
         let mut exit_code: Option<Option<u32>> = None;
         let mut handshake_pending = current_platform() == Platform::Windows;
         let mut handshake_scan: Vec<u8> = Vec::new();
+        // Startup-window resize gate (Windows): host-driven geometry changes
+        // racing the shell's opening output are merged here and flushed once
+        // output stays quiet — see [`StartupResizeGate`]. The flush timer is
+        // pinned far-future while nothing is pending and re-armed from
+        // `next_wake` at the top of every loop turn.
+        let mut resize_gate = StartupResizeGate::new(current_platform());
+        let session_started_at = tokio::time::Instant::now();
+        let mut resize_flush_timer = Box::pin(tokio::time::sleep_until(idle_flush_deadline()));
         loop {
             if closing {
                 // Graceful-first teardown: with the master dropped the slave
@@ -420,9 +428,15 @@ fn spawn_pump(
                 }
                 break;
             }
+            resize_flush_timer.as_mut().reset(
+                resize_gate
+                    .next_wake()
+                    .map_or_else(idle_flush_deadline, |elapsed| session_started_at + elapsed),
+            );
             tokio::select! {
                 chunk = out_rx.recv() => match chunk {
                     Some(data) => {
+                        resize_gate.on_output(session_started_at.elapsed());
                         if handshake_pending && detect_conpty_handshake(&mut handshake_scan, &data) {
                             handshake_pending = false;
                             let reply = conpty_cpr_reply(pty_rows, pty_cols);
@@ -451,20 +465,28 @@ fn spawn_pump(
                     }
                     Some(LocalTerminalCommand::Resize { cols, rows }) => {
                         if let Some(size) = requested_pty_size(pty_rows, pty_cols, rows, cols) {
-                            if let Some(master) = master.as_ref() {
-                                // Track the size only after a successful resize:
-                                // a failed call would poison the same-size dedup
-                                // and the ConPTY CPR reply, which must answer
-                                // with the live viewport.
-                                if master.resize(size).is_ok() {
-                                    pty_rows = size.rows;
-                                    pty_cols = size.cols;
-                                } else {
-                                    eprintln!(
-                                        "[ssh-sftp-plugin] local terminal resize to {}x{} failed",
-                                        size.cols, size.rows
-                                    );
+                            match resize_gate.resize(size, session_started_at.elapsed()) {
+                                StartupResizeDecision::Apply => {
+                                    // Track the size only after a successful resize:
+                                    // a failed call would poison the same-size dedup
+                                    // and the ConPTY CPR reply, which must answer
+                                    // with the live viewport.
+                                    match apply_pty_resize(master.as_deref(), size) {
+                                        Some((rows, cols)) => {
+                                            pty_rows = rows;
+                                            pty_cols = cols;
+                                        }
+                                        None => eprintln!(
+                                            "[ssh-sftp-plugin] local terminal resize to {}x{} failed",
+                                            size.cols, size.rows
+                                        ),
+                                    }
                                 }
+                                // Deferred: the gate keeps the merged geometry
+                                // and the flush timer (re-armed from next_wake at
+                                // the loop top) applies it once the startup
+                                // output has been quiet.
+                                StartupResizeDecision::Defer => {}
                             }
                         }
                     }
@@ -477,6 +499,14 @@ fn spawn_pump(
                         // Late/blocked input senders must fail fast instead of
                         // piling up behind the close grace window.
                         cmd_rx.close();
+                    }
+                },
+                _ = &mut resize_flush_timer => {
+                    if let Some(size) = resize_gate.poll(session_started_at.elapsed()) {
+                        if let Some((rows, cols)) = apply_pty_resize(master.as_deref(), size) {
+                            pty_rows = rows;
+                            pty_cols = cols;
+                        }
                     }
                 },
                 code = exit_rx.recv() => {
@@ -554,6 +584,20 @@ fn conpty_cpr_reply(rows: u16, cols: u16) -> Vec<u8> {
     format!("\x1b[{rows};{cols}R").into_bytes()
 }
 
+/// Deadline for the resize-flush timer while nothing is pending. tokio's
+/// `Instant::far_future` is crate-private in the version we pin, so park the
+/// timer an hour out instead; every reset is anchored to `now`, so the timer
+/// simply never fires while the gate has nothing to flush.
+fn idle_flush_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_secs(3600)
+}
+
+/// Applies a resize to the PTY when the master is still alive; returns the
+/// new tracked geometry so callers update their size cache only on success.
+fn apply_pty_resize(master: Option<&(dyn MasterPty + Send)>, size: PtySize) -> Option<(u16, u16)> {
+    master?.resize(size).ok().map(|_| (size.rows, size.cols))
+}
+
 /// Gates client resize requests before they reach the PTY. ConPTY
 /// re-serializes its whole screen buffer on every ResizePseudoConsole call —
 /// same-size included — and right after spawn that redraw races the shell
@@ -577,6 +621,112 @@ fn requested_pty_size(
         pixel_width: 0,
         pixel_height: 0,
     })
+}
+
+/// How long after the last startup output a deferred resize waits before the
+/// screen is considered settled (banner and first prompt fully rendered).
+const STARTUP_RESIZE_QUIET: Duration = Duration::from_millis(500);
+/// Hard cap on deferring: a chatty banner must not hold a real user resize
+/// hostage for more than the typical shell cold start (PowerShell 1-3s).
+const STARTUP_RESIZE_WINDOW: Duration = Duration::from_secs(3);
+
+/// What [`StartupResizeGate::resize`] wants the caller to do with a resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupResizeDecision {
+    /// Safe to call `MasterPty::resize` now — no ConPTY repaint race.
+    Apply,
+    /// Hold the resize; the gate merges it into its pending slot and the
+    /// flush timer applies it once output goes quiet.
+    Defer,
+}
+
+/// Merges startup-window resizes on Windows so ConPTY's whole-screen repaint
+/// never interleaves with the shell's opening output.
+///
+/// ConPTY re-serializes its entire screen buffer on every
+/// `ResizePseudoConsole`. When that lands mid-banner the terminal renders the
+/// snapshot and the live stream as two copies (an orphan glyph on the first
+/// row, a full banner/prompt duplicate below) — the classic "M"/"d" artifact.
+/// Spawn-time sizing and same-size dedup only remove the resizes the plugin
+/// itself causes; the host keeps reshaping the panel after spawn (dock/tab
+/// layout settling, window resize), and those real geometry changes still
+/// race PowerShell's slow first prompt. The gate holds such resizes while
+/// output is in flight and applies the merged geometry once the shell has
+/// been quiet — a repaint over a static screen is an idempotent re-layout,
+/// exactly what a user-initiated resize looks like later in the session.
+///
+/// All timestamps are elapsed-since-spawn `Duration`s so tests drive time
+/// directly. Non-Windows platforms always get [`StartupResizeDecision::Apply`]:
+/// Unix PTYs do not repaint on resize.
+struct StartupResizeGate {
+    platform: Platform,
+    /// Elapsed-since-spawn of the last PTY output; `None` before the first
+    /// byte (an empty screen repaints harmlessly, so no gating then).
+    last_output_at: Option<Duration>,
+    /// Latest deferred geometry; each new resize overwrites the previous one.
+    pending: Option<PtySize>,
+}
+
+impl StartupResizeGate {
+    fn new(platform: Platform) -> Self {
+        Self {
+            platform,
+            last_output_at: None,
+            pending: None,
+        }
+    }
+
+    fn on_output(&mut self, elapsed: Duration) {
+        self.last_output_at = Some(elapsed);
+    }
+
+    fn resize(&mut self, size: PtySize, elapsed: Duration) -> StartupResizeDecision {
+        if self.platform != Platform::Windows || elapsed >= STARTUP_RESIZE_WINDOW {
+            self.pending = None;
+            return StartupResizeDecision::Apply;
+        }
+        let output_in_flight = self
+            .last_output_at
+            .is_some_and(|at| elapsed.saturating_sub(at) < STARTUP_RESIZE_QUIET);
+        if output_in_flight {
+            self.pending = Some(size);
+            StartupResizeDecision::Defer
+        } else {
+            // No output yet, or it already went quiet: a repaint now is safe.
+            self.pending = None;
+            StartupResizeDecision::Apply
+        }
+    }
+
+    /// The elapsed-since-spawn instant when a pending resize can flush:
+    /// last output + QUIET, capped at the startup window. `None` when nothing
+    /// is pending (drives a never-firing timer on non-Windows).
+    fn next_wake(&self) -> Option<Duration> {
+        let _pending = self.pending.as_ref()?;
+        let quiet_at = self.last_output_at? + STARTUP_RESIZE_QUIET;
+        Some(quiet_at.min(STARTUP_RESIZE_WINDOW))
+    }
+
+    /// Releases the pending resize once quiet (or the window) has been
+    /// reached; consumes it so it applies exactly once.
+    fn poll(&mut self, elapsed: Duration) -> Option<PtySize> {
+        let size = self.pending?;
+        let flush_at = self.last_output_at.map_or(STARTUP_RESIZE_WINDOW, |at| {
+            (at + STARTUP_RESIZE_QUIET).min(STARTUP_RESIZE_WINDOW)
+        });
+        if elapsed >= flush_at {
+            self.pending = None;
+            Some(size)
+        } else {
+            None
+        }
+    }
+
+    /// Test-only view of the deferred geometry.
+    #[cfg(test)]
+    fn pending(&self) -> Option<PtySize> {
+        self.pending
+    }
 }
 
 fn unix_now_secs() -> u64 {
@@ -1175,6 +1325,119 @@ mod tests {
         assert_eq!((size.rows, size.cols), (2, u16::MAX));
         // Clamped onto the current size: nothing reaches the PTY.
         assert_eq!(requested_pty_size(2, u16::MAX, 0, 500_000), None);
+    }
+
+    fn gate_size(rows: u16, cols: u16) -> PtySize {
+        PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    #[test]
+    fn startup_resize_gate_passes_through_on_unix() {
+        // Unix PTYs do not repaint on resize (shells reflow themselves on
+        // SIGWINCH), so the gate must never engage there.
+        let mut gate = StartupResizeGate::new(Platform::MacOS);
+        gate.on_output(Duration::from_millis(100));
+        assert_eq!(
+            gate.resize(gate_size(30, 100), Duration::from_millis(150)),
+            StartupResizeDecision::Apply
+        );
+        assert_eq!(gate.next_wake(), None);
+    }
+
+    #[test]
+    fn startup_resize_gate_applies_before_first_output() {
+        // A resize racing ahead of the banner lands on an empty screen —
+        // ConPTY's repaint is trivially safe, so apply immediately.
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        assert_eq!(
+            gate.resize(gate_size(30, 100), Duration::from_millis(100)),
+            StartupResizeDecision::Apply
+        );
+        assert_eq!(gate.pending(), None);
+    }
+
+    #[test]
+    fn startup_resize_gate_defers_while_banner_in_flight() {
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        gate.on_output(Duration::from_millis(200));
+        assert_eq!(
+            gate.resize(gate_size(30, 100), Duration::from_millis(400)),
+            StartupResizeDecision::Defer
+        );
+        // A second geometry wins: only the latest viewport is worth applying.
+        assert_eq!(
+            gate.resize(gate_size(32, 120), Duration::from_millis(450)),
+            StartupResizeDecision::Defer
+        );
+        assert_eq!(gate.pending(), Some(gate_size(32, 120)));
+    }
+
+    #[test]
+    fn startup_resize_gate_next_wake_tracks_last_output() {
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        assert_eq!(gate.next_wake(), None);
+        gate.on_output(Duration::from_millis(200));
+        gate.resize(gate_size(30, 100), Duration::from_millis(400));
+        // Fresh output while deferred pushes the quiet point out with it.
+        gate.on_output(Duration::from_millis(600));
+        assert_eq!(
+            gate.next_wake(),
+            Some(Duration::from_millis(600) + STARTUP_RESIZE_QUIET)
+        );
+        // ...and the startup window caps how long the flush can wait.
+        gate.on_output(Duration::from_millis(2_900));
+        assert_eq!(gate.next_wake(), Some(STARTUP_RESIZE_WINDOW));
+    }
+
+    #[test]
+    fn startup_resize_gate_flushes_after_quiet() {
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        gate.on_output(Duration::from_millis(200));
+        gate.resize(gate_size(30, 100), Duration::from_millis(400));
+        gate.resize(gate_size(32, 120), Duration::from_millis(450));
+        // One tick before the quiet point: still held.
+        let quiet = Duration::from_millis(200) + STARTUP_RESIZE_QUIET;
+        assert_eq!(gate.poll(quiet - Duration::from_millis(1)), None);
+        // Quiet reached: the merged geometry applies exactly once.
+        assert_eq!(gate.poll(quiet), Some(gate_size(32, 120)));
+        assert_eq!(gate.poll(quiet + Duration::from_millis(1)), None);
+        assert_eq!(gate.pending(), None);
+    }
+
+    #[test]
+    fn startup_resize_gate_force_flushes_at_window_expiry() {
+        // Output still trickling at the cap: flush anyway rather than hold a
+        // real resize hostage to a chatty banner.
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        gate.on_output(Duration::from_millis(2_900));
+        gate.resize(gate_size(30, 100), Duration::from_millis(2_950));
+        assert_eq!(
+            gate.poll(STARTUP_RESIZE_WINDOW - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(gate.poll(STARTUP_RESIZE_WINDOW), Some(gate_size(30, 100)));
+    }
+
+    #[test]
+    fn startup_resize_gate_inert_after_window() {
+        // Past the window the gate is gone: every resize applies at once.
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        gate.on_output(Duration::from_millis(2_900));
+        gate.resize(gate_size(30, 100), Duration::from_millis(2_950));
+        assert_eq!(
+            gate.resize(
+                gate_size(40, 140),
+                STARTUP_RESIZE_WINDOW + Duration::from_millis(50)
+            ),
+            StartupResizeDecision::Apply
+        );
+        assert_eq!(gate.pending(), None);
+        assert_eq!(gate.next_wake(), None);
     }
 
     #[test]
