@@ -880,9 +880,10 @@ describe("issue #93 download fallback policy", () => {
     const body = appScript.slice(start, appScript.indexOf("\n  } catch (cause)", start));
     expect(body).toContain("?? undefined");
     expect(body).toContain("transferStatus.cancelled");
-    // trzsz 批量路径同样不得忽略 null 句柄。
-    const trzszStart = appScript.indexOf("async function saveTrzszDownloadedFiles(");
-    const trzszBody = appScript.slice(trzszStart, appScript.indexOf("\n  for (const file of saving) {\n    const target = await fileTransfer.beginSave", trzszStart));
+    // trzsz 批量路径同样不得忽略 null 句柄（函数可能随模块化迁入 composables/）。
+    const trzszHaystack = appScript.includes("async function saveTrzszDownloadedFiles(") ? appScript : `${appScript}\n${composablesScript}`;
+    const trzszStart = trzszHaystack.indexOf("async function saveTrzszDownloadedFiles(");
+    const trzszBody = trzszHaystack.slice(trzszStart, trzszHaystack.indexOf("\n  for (const file of saving) {\n    const target = await fileTransfer.beginSave", trzszStart));
     expect(trzszBody).toContain("if (!target)");
   });
 });
