@@ -2168,6 +2168,20 @@ async function settledTerminalDimensions(maxWaitMs = 1500): Promise<{ cols: numb
   return last ?? fitTerminalDimensions();
 }
 
+/** The terminal's on-screen cursor (1-based) at spawn time. ConPTY's opening
+ * CSI 6n asks where the cursor is and starts the shell there
+ * (PSEUDOCONSOLE_INHERIT_CURSOR), so the sidecar must answer with this — and
+ * the answer decides where the banner/prompt is drawn: the viewport size (what
+ * the sidecar used to send) inherits the last row and re-serializes the screen
+ * mid-banner, which is the stray first glyph users see. cursorY is
+ * viewport-relative (0 = the row at baseY) and cursorX is the column, so both
+ * need the +1 to become the 1-based position conhost expects. */
+function terminalCursorPosition(): { cursorRow: number; cursorCol: number } {
+  const buffer = terminal?.buffer.active;
+  if (!buffer) return { cursorRow: 1, cursorCol: 1 };
+  return { cursorRow: buffer.cursorY + 1, cursorCol: buffer.cursorX + 1 };
+}
+
 function stopCommandMarkerTick() {
   if (commandMarkerTimer) {
     window.clearInterval(commandMarkerTimer);
@@ -2852,6 +2866,11 @@ async function startLocalTerminal(shellOverride?: string) {
       // dock「+」新 tab 此时可能还没布局完，fit 回落 80×24，稍后的真实 fit 是
       // 一次跨几何 resize，ConPTY 整屏重绘＝提示符/横幅渲染两遍）。
       ...(await settledTerminalDimensions()),
+      // ConPTY 以 PSEUDOCONSOLE_INHERIT_CURSOR 创建，开场 CSI 6n 问的是
+      // 「终端光标在哪」，子进程从该位置开始输出——必须回真实光标位置；
+      // 回视口尺寸等于宣称光标在最后一行，横幅会被从底部重画（顶部孤字/
+      // 双提示符的来源）。
+      ...terminalCursorPosition(),
       // Shell precedence: explicit dock choice > user preference > auto-detection.
       ...(shellOverride?.trim() ? { shell: shellOverride.trim() } : localShellPref.value ? { shell: localShellPref.value } : {}),
       ...(localShellIntegrationPref.value ? {} : { shellIntegration: false }),
@@ -4273,7 +4292,7 @@ const {
   getPendingTerminalInput: () => pendingTerminalInput,
   persistState, refreshDiskUsage, persistDirectoryFollowPref,
   resetLinkTargets: () => { linkTargets.value = {}; },
-  hydrateLinkTargets: (list) => hydrateLinkTargets(list),
+  hydrateLinkTargets: (list, isCurrent) => hydrateLinkTargets(list, isCurrent),
   rememberPathHistory: (path) => rememberPathHistory(path),
   closePathHistoryMenu: () => { pathHistoryOpen.value = false; },
 });

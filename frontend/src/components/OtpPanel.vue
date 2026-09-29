@@ -205,6 +205,8 @@ function openCreate() {
   editor.draft = emptyOtpDraft();
   editor.showSecret = false;
   editor.touched = false;
+  // 上一次保存失败的文案不能跨对话框残留到新表单。
+  draftBackendError.value = "";
   editor.open = true;
 }
 
@@ -212,6 +214,7 @@ function openEdit(entry: OtpEntryView) {
   editor.draft = entryToDraft(entry);
   editor.showSecret = false;
   editor.touched = false;
+  draftBackendError.value = "";
   editor.open = true;
 }
 

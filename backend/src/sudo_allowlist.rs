@@ -55,6 +55,28 @@ pub fn is_allowed(entries: &[Vec<String>], command: &str) -> bool {
     !tokens.is_empty() && entries.iter().any(|entry| entry_matches(entry, &tokens))
 }
 
+/// Shell-safe rebuild of an allowed command: the exact tokens `is_allowed`
+/// matched are re-quoted one by one, so leading `K=V` assignments are
+/// physically stripped and shell metacharacters inside any token — including
+/// the tail swallowed by a trailing `*` — cannot regain shell semantics when
+/// the result is handed to `sh -c`. Matching is text, execution must be
+/// tokens: without this rebuild, `LD_PRELOAD=… systemctl restart nginx` or
+/// `docker restart x; <arbitrary>` both match a legitimate entry and then
+/// run with full shell semantics as root. Returns `None` when not allowed.
+pub fn allowed_rebuilt_command(entries: &[Vec<String>], command: &str) -> Option<String> {
+    let tokens = command_tokens(command);
+    if tokens.is_empty() || !entries.iter().any(|entry| entry_matches(entry, &tokens)) {
+        return None;
+    }
+    Some(
+        tokens
+            .iter()
+            .map(|token| crate::exec::shell_quote(token))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 /// Command tokens for matching: leading `K=V` assignments dropped, one
 /// leading `sudo` verb dropped, sudo *flags* kept (they make the command
 /// unmatchable on purpose — run-as is not modeled).
@@ -150,6 +172,31 @@ mod tests {
             "sudo -u root systemctl restart nginx"
         ));
         assert!(!is_allowed(&entries, "sudo -n docker restart api"));
+    }
+
+    #[test]
+    fn rebuilt_command_strips_assignments_and_quarantines_metacharacters() {
+        let entries = entries();
+        // The assignment prefix passes the match (stripped tokens) but is
+        // gone from the rebuild: the root shell never applies it.
+        let rebuilt =
+            allowed_rebuilt_command(&entries, "LD_PRELOAD=/tmp/evil.so systemctl restart nginx")
+                .unwrap();
+        assert_eq!(rebuilt, "'systemctl' 'restart' 'nginx'");
+        // Tokens swallowed by a trailing `*` lose their shell semantics.
+        let rebuilt =
+            allowed_rebuilt_command(&entries, "docker restart x; cp /bin/sh /tmp/s").unwrap();
+        assert_eq!(rebuilt, "'docker' 'restart' 'x;' 'cp' '/bin/sh' '/tmp/s'");
+        // Exact entries rebuild verbatim; refusals stay refusals.
+        assert_eq!(
+            allowed_rebuilt_command(&entries, "sudo systemctl restart nginx").unwrap(),
+            "'systemctl' 'restart' 'nginx'"
+        );
+        assert_eq!(
+            allowed_rebuilt_command(&entries, "systemctl restart mysql"),
+            None
+        );
+        assert_eq!(allowed_rebuilt_command(&entries, "docker restart"), None);
     }
 
     #[test]

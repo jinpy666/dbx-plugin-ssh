@@ -332,7 +332,9 @@ def live_round_trip(proc: subprocess.Popen, args, id_base: int) -> None:
     task = call_tool(proc, next_id, "ssh_run_bg", {
         **connection, "command": "echo bg-probe-start && sleep 2 && echo bg-probe-done",
     })
-    assert task["logPath"].startswith("/tmp/.dbx-ssh-tasks/"), task
+    # SEC-4: the log lives under the remote user's $HOME/.dbx-ssh-tasks
+    # (0700, out of co-tenant reach), named by taskId — never /tmp.
+    assert task["logPath"].endswith(f"/.dbx-ssh-tasks/{task['taskId']}.log"), task
     assert task["pollWith"] == "ssh_task_status", task
     status = {}
     for _ in range(20):

@@ -70,6 +70,14 @@ pub struct LocalTerminalStartRequest {
     /// tracked cwd, VS Code new-terminal-in-workspace style). Must be an
     /// existing directory; invalid values fall back to the home directory.
     pub cwd: Option<String>,
+    /// The terminal's cursor position (1-based, on-screen) as the workbench
+    /// sees it at spawn time. ConPTY is created with
+    /// `PSEUDOCONSOLE_INHERIT_CURSOR`, so its opening `CSI 6n` asks the
+    /// terminal where the cursor is and starts the shell there; the reply must
+    /// carry this value, never the viewport size. Defaults to the top-left for
+    /// older workbenches that do not send it.
+    pub cursor_row: Option<u16>,
+    pub cursor_col: Option<u16>,
 }
 
 enum LocalTerminalCommand {
@@ -119,6 +127,11 @@ impl LocalTerminalRuntime {
             current_platform(),
         );
         let integration = prepare_integration(spec.kind, request.shell_integration.unwrap_or(true));
+        // The handshake reply is a cursor position, so it must land inside the
+        // viewport: an out-of-range value would inherit a position ConPTY
+        // cannot honour, and the shell's first output would be re-serialized
+        // mid-banner (the orphan-glyph artifact this reply exists to prevent).
+        let cursor = inherit_cursor(request.cursor_row, request.cursor_col, rows, cols);
         // cwd：显式参数须为现存目录，非法值静默回落家目录（前端传的是上次
         // 会话跟踪到的 cwd，目录可能已被删除）。
         let cwd = request
@@ -192,6 +205,7 @@ impl LocalTerminalRuntime {
             request.workbench_id,
             rows,
             cols,
+            cursor,
             pair.master,
             reader,
             writer,
@@ -351,6 +365,9 @@ fn spawn_pump(
     workbench_id: String,
     pty_rows: u16,
     pty_cols: u16,
+    // The terminal's cursor at spawn time — the value ConPTY's inherit-cursor
+    // handshake must be answered with (see [`LocalTerminalStartRequest`]).
+    cursor: (u16, u16),
     master: Box<dyn MasterPty + Send>,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
@@ -396,8 +413,16 @@ fn spawn_pump(
         let mut pty_cols = pty_cols;
         let mut closing = false;
         let mut exit_code: Option<Option<u32>> = None;
-        let mut handshake_pending = current_platform() == Platform::Windows;
-        let mut handshake_scan: Vec<u8> = Vec::new();
+        let mut handshake_filter =
+            ConptyHandshakeFilter::new(current_platform() == Platform::Windows);
+        // Startup-window resize gate (Windows): host-driven geometry changes
+        // racing the shell's opening output are merged here and flushed once
+        // output stays quiet — see [`StartupResizeGate`]. The flush timer is
+        // pinned far-future while nothing is pending and re-armed from
+        // `next_wake` at the top of every loop turn.
+        let mut resize_gate = StartupResizeGate::new(current_platform());
+        let session_started_at = tokio::time::Instant::now();
+        let mut resize_flush_timer = Box::pin(tokio::time::sleep_until(idle_flush_deadline()));
         loop {
             if closing {
                 // Graceful-first teardown: with the master dropped the slave
@@ -420,16 +445,24 @@ fn spawn_pump(
                 }
                 break;
             }
+            resize_flush_timer.as_mut().reset(
+                resize_gate
+                    .next_wake()
+                    .map_or_else(idle_flush_deadline, |elapsed| session_started_at + elapsed),
+            );
             tokio::select! {
                 chunk = out_rx.recv() => match chunk {
                     Some(data) => {
-                        if handshake_pending && detect_conpty_handshake(&mut handshake_scan, &data) {
-                            handshake_pending = false;
-                            let reply = conpty_cpr_reply(pty_rows, pty_cols);
+                        resize_gate.on_output(session_started_at.elapsed());
+                        let (forward, handshake) = handshake_filter.filter(&data);
+                        if handshake {
+                            let reply = conpty_cpr_reply(cursor.0, cursor.1);
                             let mut writer = writer.lock().unwrap_or_else(|poison| poison.into_inner());
                             let _ = writer.write_all(&reply).and_then(|_| writer.flush());
                         }
-                        publish_local_terminal(&session_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                        if !forward.is_empty() {
+                            publish_local_terminal(&session_id, TerminalStream::Stdout, forward, &replay, &emitter).await;
+                        }
                     }
                     None => closing = true,
                 },
@@ -451,20 +484,28 @@ fn spawn_pump(
                     }
                     Some(LocalTerminalCommand::Resize { cols, rows }) => {
                         if let Some(size) = requested_pty_size(pty_rows, pty_cols, rows, cols) {
-                            if let Some(master) = master.as_ref() {
-                                // Track the size only after a successful resize:
-                                // a failed call would poison the same-size dedup
-                                // and the ConPTY CPR reply, which must answer
-                                // with the live viewport.
-                                if master.resize(size).is_ok() {
-                                    pty_rows = size.rows;
-                                    pty_cols = size.cols;
-                                } else {
-                                    eprintln!(
-                                        "[ssh-sftp-plugin] local terminal resize to {}x{} failed",
-                                        size.cols, size.rows
-                                    );
+                            match resize_gate.resize(size, session_started_at.elapsed()) {
+                                StartupResizeDecision::Apply => {
+                                    // Track the size only after a successful resize:
+                                    // a failed call would poison the same-size dedup
+                                    // and the ConPTY CPR reply, which must answer
+                                    // with the live viewport.
+                                    match apply_pty_resize(master.as_deref(), size) {
+                                        Some((rows, cols)) => {
+                                            pty_rows = rows;
+                                            pty_cols = cols;
+                                        }
+                                        None => eprintln!(
+                                            "[ssh-sftp-plugin] local terminal resize to {}x{} failed",
+                                            size.cols, size.rows
+                                        ),
+                                    }
                                 }
+                                // Deferred: the gate keeps the merged geometry
+                                // and the flush timer (re-armed from next_wake at
+                                // the loop top) applies it once the startup
+                                // output has been quiet.
+                                StartupResizeDecision::Defer => {}
                             }
                         }
                     }
@@ -477,6 +518,14 @@ fn spawn_pump(
                         // Late/blocked input senders must fail fast instead of
                         // piling up behind the close grace window.
                         cmd_rx.close();
+                    }
+                },
+                _ = &mut resize_flush_timer => {
+                    if let Some(size) = resize_gate.poll(session_started_at.elapsed()) {
+                        if let Some((rows, cols)) = apply_pty_resize(master.as_deref(), size) {
+                            pty_rows = rows;
+                            pty_cols = cols;
+                        }
                     }
                 },
                 code = exit_rx.recv() => {
@@ -497,6 +546,19 @@ fn spawn_pump(
         while let Ok(Some(data)) = tokio::time::timeout(LOCAL_EXIT_DRAIN, out_rx.recv()).await {
             publish_local_terminal(&session_id, TerminalStream::Stdout, data, &replay, &emitter)
                 .await;
+        }
+        // A handshake prefix held back at the very end of the stream is the
+        // terminal's last visible bytes — never drop them.
+        let residue = handshake_filter.flush();
+        if !residue.is_empty() {
+            publish_local_terminal(
+                &session_id,
+                TerminalStream::Stdout,
+                residue,
+                &replay,
+                &emitter,
+            )
+            .await;
         }
         publish_local_terminal(
             &session_id,
@@ -519,39 +581,124 @@ fn spawn_pump(
     });
 }
 
-/// ConPTY's startup cursor-position query, which conhost withholds all
-/// output behind until a CPR reply arrives.
+/// ConPTY's startup cursor-position query. conhost withholds all output behind
+/// it, and the answer is a **cursor position**, not a viewport size: the
+/// pseudo console is created with `PSEUDOCONSOLE_INHERIT_CURSOR`, whose
+/// documented job is to "inherit cursor position from the parent terminal".
 const CONPTY_CPR_QUERY: &[u8] = b"\x1b[6n";
 
 /// Windows ConPTY opens every session with a handshake: conhost sends the
-/// terminal `CSI 6n` and withholds ALL output until a CPR reply comes back,
-/// which it reads as the terminal's viewport size. The reply normally travels
-/// terminal → PTY input — i.e. through the same workbench binary bridge as
-/// keystrokes — and when that path drops it, every local shell sits alive but
-/// permanently silent: no banner, no prompt, no echo (the terminal looks
-/// dead while the child process runs). So the sidecar answers the FIRST
-/// query itself with the PTY size — exactly the value conhost wants. A real
-/// terminal's own reply is then a duplicate, which conhost tolerates; later
-/// `CSI 6n` queries from applications (PSReadLine, vim) still pass through
-/// untouched for the terminal to answer truthfully.
-fn detect_conpty_handshake(scan: &mut Vec<u8>, chunk: &[u8]) -> bool {
-    scan.extend_from_slice(chunk);
-    if scan
-        .windows(CONPTY_CPR_QUERY.len())
-        .any(|window| window == CONPTY_CPR_QUERY)
-    {
-        return true;
-    }
-    // Retain a short tail so a query split across chunk boundaries still
-    // matches on the next chunk.
-    let keep_from = scan.len().saturating_sub(CONPTY_CPR_QUERY.len() - 1);
-    scan.drain(..keep_from);
-    false
+/// terminal `CSI 6n` and withholds ALL output until a CPR reply arrives.
+/// Because the pseudo console carries `PSEUDOCONSOLE_INHERIT_CURSOR`, the
+/// reply is read as **where the terminal's cursor is**, and the child's first
+/// output starts there.
+///
+/// That makes the reply's *value* load-bearing, and answering it with the
+/// viewport size — the value this sidecar used to send — is wrong: `rows;cols`
+/// tells conhost the cursor sits on the bottom row, so it emits the first text
+/// batch where its own buffer origin was (the orphan glyph: cmd's `M`, WSL's
+/// `d`) and then re-serializes the whole banner from the inherited bottom-row
+/// position (PowerShell's doubled prompt). The workbench knows the real cursor
+/// and passes it in [`LocalTerminalStartRequest::cursor_row`], so the sidecar
+/// answers with the truth and the shell starts where the user sees the cursor.
+///
+/// The reply normally also travels terminal → PTY input, through the same
+/// workbench binary bridge as keystrokes; when that path drops it every local
+/// shell sits alive but permanently silent (no banner, no prompt, no echo —
+/// the terminal looks dead while the child runs). The sidecar therefore
+/// answers the first query itself, which also means the query must not reach
+/// the terminal as well: a second answer would be ignored (measured), but the
+/// query has no reader on the far side worth the round trip. So it is
+/// swallowed here, before it is forwarded, and stripped at the source so it
+/// cannot sit in the replay buffer either. `CSI ?6n` (DECDSR) and every later
+/// `CSI 6n` from applications (PSReadLine, vim) pass through untouched for the
+/// terminal to answer truthfully.
+struct ConptyHandshakeFilter {
+    /// Handshake already answered (or not needed on this platform): from here
+    /// on every byte passes through verbatim.
+    done: bool,
+    /// Trailing bytes that may begin the query; held until the next chunk can
+    /// complete — or rule out — the match.
+    held: Vec<u8>,
 }
 
-/// The CPR reply ConPTY expects: `CSI rows;cols R` (1-based viewport size).
-fn conpty_cpr_reply(rows: u16, cols: u16) -> Vec<u8> {
-    format!("\x1b[{rows};{cols}R").into_bytes()
+impl ConptyHandshakeFilter {
+    fn new(needed: bool) -> Self {
+        Self {
+            done: !needed,
+            held: Vec::new(),
+        }
+    }
+
+    /// Filters one PTY chunk. Returns the bytes to forward to the terminal and
+    /// whether this chunk carries the handshake query — which the caller must
+    /// answer through the PTY input instead of the terminal.
+    fn filter(&mut self, chunk: &[u8]) -> (Vec<u8>, bool) {
+        if self.done {
+            return (chunk.to_vec(), false);
+        }
+        let mut scan = std::mem::take(&mut self.held);
+        scan.extend_from_slice(chunk);
+        if let Some(at) = scan
+            .windows(CONPTY_CPR_QUERY.len())
+            .position(|window| window == CONPTY_CPR_QUERY)
+        {
+            self.done = true;
+            let mut forward = Vec::with_capacity(scan.len() - CONPTY_CPR_QUERY.len());
+            forward.extend_from_slice(&scan[..at]);
+            forward.extend_from_slice(&scan[at + CONPTY_CPR_QUERY.len()..]);
+            return (forward, true);
+        }
+        // No query yet: hold back a trailing proper prefix of it so a query
+        // split across chunks is still caught, and forward everything else.
+        let keep = (1..CONPTY_CPR_QUERY.len())
+            .rev()
+            .find(|length| scan.ends_with(&CONPTY_CPR_QUERY[..*length]))
+            .unwrap_or(0);
+        let split = scan.len() - keep;
+        let forward = scan[..split].to_vec();
+        self.held = scan[split..].to_vec();
+        (forward, false)
+    }
+
+    /// Releases bytes still held when the stream ends.
+    fn flush(&mut self) -> Vec<u8> {
+        self.done = true;
+        std::mem::take(&mut self.held)
+    }
+}
+
+/// The CPR reply ConPTY's inherit-cursor handshake expects: `CSI row;col R` —
+/// the terminal's 1-based cursor position, which is where the shell will start
+/// drawing. Sending the viewport size instead inherits a bottom-row cursor and
+/// produces the orphan-glyph/doubled-prompt artifact (see
+/// [`ConptyHandshakeFilter`]).
+fn conpty_cpr_reply(row: u16, col: u16) -> Vec<u8> {
+    format!("\x1b[{row};{col}R").into_bytes()
+}
+
+/// Normalizes the workbench-reported cursor into the viewport: absent (older
+/// workbenches) means the top-left, and anything out of range is clamped so
+/// conhost never inherits a position outside the screen it just sized.
+fn inherit_cursor(row: Option<u16>, col: Option<u16>, rows: u16, cols: u16) -> (u16, u16) {
+    (
+        row.unwrap_or(1).clamp(1, rows.max(1)),
+        col.unwrap_or(1).clamp(1, cols.max(1)),
+    )
+}
+
+/// Deadline for the resize-flush timer while nothing is pending. tokio's
+/// `Instant::far_future` is crate-private in the version we pin, so park the
+/// timer an hour out instead; every reset is anchored to `now`, so the timer
+/// simply never fires while the gate has nothing to flush.
+fn idle_flush_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_secs(3600)
+}
+
+/// Applies a resize to the PTY when the master is still alive; returns the
+/// new tracked geometry so callers update their size cache only on success.
+fn apply_pty_resize(master: Option<&(dyn MasterPty + Send)>, size: PtySize) -> Option<(u16, u16)> {
+    master?.resize(size).ok().map(|_| (size.rows, size.cols))
 }
 
 /// Gates client resize requests before they reach the PTY. ConPTY
@@ -577,6 +724,112 @@ fn requested_pty_size(
         pixel_width: 0,
         pixel_height: 0,
     })
+}
+
+/// How long after the last startup output a deferred resize waits before the
+/// screen is considered settled (banner and first prompt fully rendered).
+const STARTUP_RESIZE_QUIET: Duration = Duration::from_millis(500);
+/// Hard cap on deferring: a chatty banner must not hold a real user resize
+/// hostage for more than the typical shell cold start (PowerShell 1-3s).
+const STARTUP_RESIZE_WINDOW: Duration = Duration::from_secs(3);
+
+/// What [`StartupResizeGate::resize`] wants the caller to do with a resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupResizeDecision {
+    /// Safe to call `MasterPty::resize` now — no ConPTY repaint race.
+    Apply,
+    /// Hold the resize; the gate merges it into its pending slot and the
+    /// flush timer applies it once output goes quiet.
+    Defer,
+}
+
+/// Merges startup-window resizes on Windows so ConPTY's whole-screen repaint
+/// never interleaves with the shell's opening output.
+///
+/// ConPTY re-serializes its entire screen buffer on every
+/// `ResizePseudoConsole`. When that lands mid-banner the terminal renders the
+/// snapshot and the live stream as two copies (an orphan glyph on the first
+/// row, a full banner/prompt duplicate below) — the classic "M"/"d" artifact.
+/// Spawn-time sizing and same-size dedup only remove the resizes the plugin
+/// itself causes; the host keeps reshaping the panel after spawn (dock/tab
+/// layout settling, window resize), and those real geometry changes still
+/// race PowerShell's slow first prompt. The gate holds such resizes while
+/// output is in flight and applies the merged geometry once the shell has
+/// been quiet — a repaint over a static screen is an idempotent re-layout,
+/// exactly what a user-initiated resize looks like later in the session.
+///
+/// All timestamps are elapsed-since-spawn `Duration`s so tests drive time
+/// directly. Non-Windows platforms always get [`StartupResizeDecision::Apply`]:
+/// Unix PTYs do not repaint on resize.
+struct StartupResizeGate {
+    platform: Platform,
+    /// Elapsed-since-spawn of the last PTY output; `None` before the first
+    /// byte (an empty screen repaints harmlessly, so no gating then).
+    last_output_at: Option<Duration>,
+    /// Latest deferred geometry; each new resize overwrites the previous one.
+    pending: Option<PtySize>,
+}
+
+impl StartupResizeGate {
+    fn new(platform: Platform) -> Self {
+        Self {
+            platform,
+            last_output_at: None,
+            pending: None,
+        }
+    }
+
+    fn on_output(&mut self, elapsed: Duration) {
+        self.last_output_at = Some(elapsed);
+    }
+
+    fn resize(&mut self, size: PtySize, elapsed: Duration) -> StartupResizeDecision {
+        if self.platform != Platform::Windows || elapsed >= STARTUP_RESIZE_WINDOW {
+            self.pending = None;
+            return StartupResizeDecision::Apply;
+        }
+        let output_in_flight = self
+            .last_output_at
+            .is_some_and(|at| elapsed.saturating_sub(at) < STARTUP_RESIZE_QUIET);
+        if output_in_flight {
+            self.pending = Some(size);
+            StartupResizeDecision::Defer
+        } else {
+            // No output yet, or it already went quiet: a repaint now is safe.
+            self.pending = None;
+            StartupResizeDecision::Apply
+        }
+    }
+
+    /// The elapsed-since-spawn instant when a pending resize can flush:
+    /// last output + QUIET, capped at the startup window. `None` when nothing
+    /// is pending (drives a never-firing timer on non-Windows).
+    fn next_wake(&self) -> Option<Duration> {
+        let _pending = self.pending.as_ref()?;
+        let quiet_at = self.last_output_at? + STARTUP_RESIZE_QUIET;
+        Some(quiet_at.min(STARTUP_RESIZE_WINDOW))
+    }
+
+    /// Releases the pending resize once quiet (or the window) has been
+    /// reached; consumes it so it applies exactly once.
+    fn poll(&mut self, elapsed: Duration) -> Option<PtySize> {
+        let size = self.pending?;
+        let flush_at = self.last_output_at.map_or(STARTUP_RESIZE_WINDOW, |at| {
+            (at + STARTUP_RESIZE_QUIET).min(STARTUP_RESIZE_WINDOW)
+        });
+        if elapsed >= flush_at {
+            self.pending = None;
+            Some(size)
+        } else {
+            None
+        }
+    }
+
+    /// Test-only view of the deferred geometry.
+    #[cfg(test)]
+    fn pending(&self) -> Option<PtySize> {
+        self.pending
+    }
 }
 
 fn unix_now_secs() -> u64 {
@@ -1127,31 +1380,267 @@ mod tests {
     use crate::model::TerminalFrame;
 
     #[test]
-    fn conpty_handshake_detected_in_first_chunk() {
-        let mut scan = Vec::new();
-        assert!(detect_conpty_handshake(&mut scan, b"noise\x1b[6n"));
+    fn handshake_filter_swallows_the_query_and_reports_it() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, handshake) = filter.filter(b"noise\x1b[6n");
+        assert!(handshake);
+        assert_eq!(forward, b"noise");
+        // Once answered, everything passes through — terminal-visible bytes
+        // never lose their tail and the terminal never sees the query.
+        let (forward, handshake) = filter.filter(b"banner");
+        assert!(!handshake);
+        assert_eq!(forward, b"banner");
     }
 
     #[test]
-    fn conpty_handshake_detected_when_split_across_chunks() {
-        let mut scan = Vec::new();
-        assert!(!detect_conpty_handshake(&mut scan, b"banner\x1b[6"));
-        assert!(detect_conpty_handshake(&mut scan, b"n rest"));
+    fn handshake_filter_catches_a_query_split_across_chunks() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, handshake) = filter.filter(b"banner\x1b[6");
+        // The partial query is held, not forwarded, and not yet answered.
+        assert!(!handshake);
+        assert_eq!(forward, b"banner");
+        let (forward, handshake) = filter.filter(b"n rest");
+        assert!(handshake);
+        assert_eq!(forward, b" rest");
     }
 
     #[test]
-    fn conpty_detection_ignores_private_dsr_and_later_queries() {
-        let mut scan = Vec::new();
-        assert!(!detect_conpty_handshake(&mut scan, b"\x1b[?6n\x1b[?25h"));
-        // After a hit the caller stops scanning; the detector itself must not
-        // confuse DECDSR (`CSI ?6n`) with the plain query.
-        assert!(!detect_conpty_handshake(&mut scan, b"\x1b[?6n"));
+    fn handshake_filter_flushes_held_bytes_that_never_complete() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, handshake) = filter.filter(b"prompt\x1b[");
+        assert!(!handshake);
+        assert_eq!(forward, b"prompt");
+        // Not a query after all: the held prefix reaches the terminal.
+        let (forward, handshake) = filter.filter(b"?6n");
+        assert!(!handshake);
+        assert_eq!(forward, b"\x1b[?6n");
     }
 
     #[test]
-    fn conpty_cpr_reply_carries_viewport_size() {
-        assert_eq!(conpty_cpr_reply(24, 80), b"\x1b[24;80R".to_vec());
+    fn handshake_filter_ignores_private_dsr_and_leaves_stream_intact() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, handshake) = filter.filter(b"\x1b[?6n\x1b[?25h");
+        assert!(!handshake);
+        assert_eq!(forward, b"\x1b[?6n\x1b[?25h");
+        // DECDSR is not the handshake, so the real query is still answered —
+        // and swallows only itself.
+        let (forward, handshake) = filter.filter(b"\x1b[?6n\x1b[6n\x1b[?25h");
+        assert!(handshake);
+        assert_eq!(forward, b"\x1b[?6n\x1b[?25h");
+    }
+
+    #[test]
+    fn handshake_filter_passes_everything_when_not_needed() {
+        // Unix openpty has no handshake: not a byte is held back or dropped.
+        let mut filter = ConptyHandshakeFilter::new(false);
+        let (forward, handshake) = filter.filter(b"\x1b[6n");
+        assert!(!handshake);
+        assert_eq!(forward, b"\x1b[6n");
+    }
+
+    #[test]
+    fn handshake_filter_flush_releases_a_trailing_prefix() {
+        let mut filter = ConptyHandshakeFilter::new(true);
+        let (forward, _) = filter.filter(b"bye\x1b[6");
+        assert_eq!(forward, b"bye");
+        assert_eq!(filter.flush(), b"\x1b[6");
+        assert!(filter.flush().is_empty());
+    }
+
+    #[test]
+    fn conpty_cpr_reply_carries_cursor_position() {
+        assert_eq!(conpty_cpr_reply(3, 7), b"\x1b[3;7R".to_vec());
         assert_eq!(conpty_cpr_reply(1, 1), b"\x1b[1;1R".to_vec());
+    }
+
+    #[test]
+    fn inherited_cursor_defaults_to_top_left_without_a_report() {
+        // An older workbench sends nothing: the top-left is the only truthful
+        // guess for a terminal that was just laid out for a new session.
+        assert_eq!(inherit_cursor(None, None, 30, 100), (1, 1));
+        assert_eq!(inherit_cursor(Some(5), None, 30, 100), (5, 1));
+    }
+
+    #[test]
+    fn inherited_cursor_is_clamped_into_the_viewport() {
+        // conhost reads the reply as a real position; a row past the last one
+        // would be an inherit it cannot honour.
+        assert_eq!(inherit_cursor(Some(0), Some(0), 30, 100), (1, 1));
+        assert_eq!(inherit_cursor(Some(999), Some(999), 30, 100), (30, 100));
+        assert_eq!(inherit_cursor(Some(12), Some(7), 30, 100), (12, 7));
+    }
+
+    /// Windows-only probe of conhost's startup handshake, measured on the
+    /// windows-2022 runner (inbox conhost 20348). Facts established here, each
+    /// one refuting a theory that had been shipping:
+    ///
+    ///   * conhost issues `CSI 6n` **exactly once**, and only after the child
+    ///     exists — nothing arrives while the PTY has no client (0 bytes).
+    ///   * a **duplicate** CPR reply is ignored outright (0 bytes followed it),
+    ///     so neither the terminal's leaked answer nor the sidecar's own reply
+    ///     can resize anything. The "duplicate reply" family of theories is dead.
+    ///   * the orphan first glyph is **conhost's own doing**, and where it lands
+    ///     follows the reply's numbers: replying `30;100` produced
+    ///     `... \e[?25h M\r\n \e[29;100H Microsoft Windows [Version ...` — the
+    ///     banner's first character printed at the top, an absolute jump to the
+    ///     viewport's bottom row, then the banner re-drawn there. That is
+    ///     precisely the "M" users report.
+    ///
+    /// So the remaining variable is the reply's *value*. This runs one cmd.exe
+    /// session per variant and prints the raw bytes (`--nocapture`): the sidecar's
+    /// viewport-size answer, a truthful cursor position (what xterm would say), a
+    /// mismatched size to tell "read as a position" from "read as a size", and no
+    /// reply at all as the output-withholding control.
+    // Deliberately NOT `#[cfg(windows)]`: the body drives a real ConPTY, but
+    // gating the whole item would hide it from `cargo test` on macOS/Linux —
+    // where a type error in it (a moved closure, say) only surfaces after a
+    // Windows CI round trip. It compiles everywhere and returns early where
+    // there is no ConPTY to drive.
+    #[test]
+    fn conpty_handshake_reply_variants() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        if !cfg!(windows) {
+            return;
+        }
+
+        const ROWS: u16 = 30;
+        const COLS: u16 = 100;
+
+        let escape = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| match byte {
+                    b'\x1b' => "\\e".to_string(),
+                    b'\r' => "\\r".to_string(),
+                    b'\n' => "\\n".to_string(),
+                    0x20..=0x7e => (*byte as char).to_string(),
+                    other => format!("\\x{other:02x}"),
+                })
+                .collect::<String>()
+        };
+        let saw = |haystack: &[u8], needle: &[u8]| {
+            haystack
+                .windows(needle.len())
+                .any(|window| window == needle)
+        };
+        // One cmd.exe session under a 30x100 ConPTY, handshake answered with
+        // `reply` (or left unanswered), returning everything the PTY emitted.
+        let run_session = move |reply: Option<Vec<u8>>| -> Vec<u8> {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: ROWS,
+                    cols: COLS,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .expect("open ConPTY");
+            let mut child = pair
+                .slave
+                .spawn_command(CommandBuilder::new("cmd.exe"))
+                .expect("spawn cmd.exe");
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().expect("pty reader");
+            let mut writer = pair.master.take_writer().expect("pty writer");
+            let (tx, rx) = mpsc::channel::<Vec<u8>>();
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 4096];
+                while let Ok(read) = reader.read(&mut buffer) {
+                    if read == 0 || tx.send(buffer[..read].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut stream = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut answered = false;
+            while Instant::now() < deadline {
+                match rx.recv_timeout(Duration::from_millis(400)) {
+                    Ok(chunk) => {
+                        stream.extend_from_slice(&chunk);
+                        if !answered && saw(&stream, CONPTY_CPR_QUERY) {
+                            if let Some(reply) = reply.as_ref() {
+                                writer.write_all(reply).expect("write reply");
+                                writer.flush().expect("flush reply");
+                            }
+                            answered = true;
+                            // Let the first frame settle before finishing.
+                            std::thread::sleep(Duration::from_millis(700));
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if answered {
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(
+                saw(&stream, CONPTY_CPR_QUERY),
+                "cmd.exe never issued the ConPTY handshake"
+            );
+            stream
+        };
+
+        let cases: [(&str, Option<Vec<u8>>); 2] = [
+            ("size 30;100 (shipping)", Some(b"\x1b[30;100R".to_vec())),
+            ("cursor 1;1 (inherit truth)", Some(b"\x1b[1;1R".to_vec())),
+        ];
+        let mut measured: Vec<(&str, Vec<u8>)> = Vec::new();
+        for (label, reply) in cases {
+            // Watchdog: a wedged ConPTY session must not hang the runner.
+            let (tx, rx) = mpsc::channel();
+            let session = run_session;
+            std::thread::spawn(move || {
+                let _ = tx.send(session(reply));
+            });
+            match rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(stream) => {
+                    eprintln!("[{}] {} bytes: {}", label, stream.len(), escape(&stream));
+                    measured.push((label, stream));
+                }
+                Err(_) => eprintln!("[{}] HUNG: no result within 60s", label),
+            }
+        }
+        let stream_for = |label: &str| {
+            measured
+                .iter()
+                .find(|(name, _)| *name == label)
+                .map(|(_, stream)| stream)
+                .unwrap_or_else(|| panic!("variant {label} produced no stream"))
+        };
+        // Anchor the measured difference, so a conhost change that invalidates
+        // the reasoning shows up here instead of as a user-visible regression.
+        let size_reply = stream_for("size 30;100 (shipping)");
+        assert!(
+            saw(size_reply, b"\x1b[29;100H"),
+            "the viewport-size reply no longer triggers the bottom-row \
+             re-serialization this fix was built on: {}",
+            escape(size_reply)
+        );
+        let cursor_reply = stream_for("cursor 1;1 (inherit truth)");
+        assert!(
+            !saw(cursor_reply, b"\x1b[29;100H") && !saw(cursor_reply, b"M\r\n\x1b["),
+            "the cursor-position reply still produced a re-serialization: {}",
+            escape(cursor_reply)
+        );
+        // The banner is written once, not echoed back from the inherited
+        // position — the doubled-prompt shape starts with a lone first glyph.
+        let banner = b"Microsoft Windows";
+        let banner_hits = cursor_reply
+            .windows(banner.len())
+            .filter(|window| *window == banner)
+            .count();
+        assert_eq!(
+            banner_hits,
+            1,
+            "banner written {banner_hits} times with the cursor reply: {}",
+            escape(cursor_reply)
+        );
     }
 
     #[test]
@@ -1175,6 +1664,119 @@ mod tests {
         assert_eq!((size.rows, size.cols), (2, u16::MAX));
         // Clamped onto the current size: nothing reaches the PTY.
         assert_eq!(requested_pty_size(2, u16::MAX, 0, 500_000), None);
+    }
+
+    fn gate_size(rows: u16, cols: u16) -> PtySize {
+        PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    #[test]
+    fn startup_resize_gate_passes_through_on_unix() {
+        // Unix PTYs do not repaint on resize (shells reflow themselves on
+        // SIGWINCH), so the gate must never engage there.
+        let mut gate = StartupResizeGate::new(Platform::MacOS);
+        gate.on_output(Duration::from_millis(100));
+        assert_eq!(
+            gate.resize(gate_size(30, 100), Duration::from_millis(150)),
+            StartupResizeDecision::Apply
+        );
+        assert_eq!(gate.next_wake(), None);
+    }
+
+    #[test]
+    fn startup_resize_gate_applies_before_first_output() {
+        // A resize racing ahead of the banner lands on an empty screen —
+        // ConPTY's repaint is trivially safe, so apply immediately.
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        assert_eq!(
+            gate.resize(gate_size(30, 100), Duration::from_millis(100)),
+            StartupResizeDecision::Apply
+        );
+        assert_eq!(gate.pending(), None);
+    }
+
+    #[test]
+    fn startup_resize_gate_defers_while_banner_in_flight() {
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        gate.on_output(Duration::from_millis(200));
+        assert_eq!(
+            gate.resize(gate_size(30, 100), Duration::from_millis(400)),
+            StartupResizeDecision::Defer
+        );
+        // A second geometry wins: only the latest viewport is worth applying.
+        assert_eq!(
+            gate.resize(gate_size(32, 120), Duration::from_millis(450)),
+            StartupResizeDecision::Defer
+        );
+        assert_eq!(gate.pending(), Some(gate_size(32, 120)));
+    }
+
+    #[test]
+    fn startup_resize_gate_next_wake_tracks_last_output() {
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        assert_eq!(gate.next_wake(), None);
+        gate.on_output(Duration::from_millis(200));
+        gate.resize(gate_size(30, 100), Duration::from_millis(400));
+        // Fresh output while deferred pushes the quiet point out with it.
+        gate.on_output(Duration::from_millis(600));
+        assert_eq!(
+            gate.next_wake(),
+            Some(Duration::from_millis(600) + STARTUP_RESIZE_QUIET)
+        );
+        // ...and the startup window caps how long the flush can wait.
+        gate.on_output(Duration::from_millis(2_900));
+        assert_eq!(gate.next_wake(), Some(STARTUP_RESIZE_WINDOW));
+    }
+
+    #[test]
+    fn startup_resize_gate_flushes_after_quiet() {
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        gate.on_output(Duration::from_millis(200));
+        gate.resize(gate_size(30, 100), Duration::from_millis(400));
+        gate.resize(gate_size(32, 120), Duration::from_millis(450));
+        // One tick before the quiet point: still held.
+        let quiet = Duration::from_millis(200) + STARTUP_RESIZE_QUIET;
+        assert_eq!(gate.poll(quiet - Duration::from_millis(1)), None);
+        // Quiet reached: the merged geometry applies exactly once.
+        assert_eq!(gate.poll(quiet), Some(gate_size(32, 120)));
+        assert_eq!(gate.poll(quiet + Duration::from_millis(1)), None);
+        assert_eq!(gate.pending(), None);
+    }
+
+    #[test]
+    fn startup_resize_gate_force_flushes_at_window_expiry() {
+        // Output still trickling at the cap: flush anyway rather than hold a
+        // real resize hostage to a chatty banner.
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        gate.on_output(Duration::from_millis(2_900));
+        gate.resize(gate_size(30, 100), Duration::from_millis(2_950));
+        assert_eq!(
+            gate.poll(STARTUP_RESIZE_WINDOW - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(gate.poll(STARTUP_RESIZE_WINDOW), Some(gate_size(30, 100)));
+    }
+
+    #[test]
+    fn startup_resize_gate_inert_after_window() {
+        // Past the window the gate is gone: every resize applies at once.
+        let mut gate = StartupResizeGate::new(Platform::Windows);
+        gate.on_output(Duration::from_millis(2_900));
+        gate.resize(gate_size(30, 100), Duration::from_millis(2_950));
+        assert_eq!(
+            gate.resize(
+                gate_size(40, 140),
+                STARTUP_RESIZE_WINDOW + Duration::from_millis(50)
+            ),
+            StartupResizeDecision::Apply
+        );
+        assert_eq!(gate.pending(), None);
+        assert_eq!(gate.next_wake(), None);
     }
 
     #[test]

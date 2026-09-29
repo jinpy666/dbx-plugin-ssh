@@ -40,7 +40,7 @@ export function useSftpNavigation(options: {
   refreshDiskUsage: () => Promise<void> | void;
   persistDirectoryFollowPref: (value: boolean) => void;
   resetLinkTargets: () => void;
-  hydrateLinkTargets: (list: { uri: string; name: string; kind: SftpEntryKind }[]) => void;
+  hydrateLinkTargets: (list: { uri: string; name: string; kind: SftpEntryKind }[], isCurrent: () => boolean) => void;
   rememberPathHistory: (path: string) => void;
   closePathHistoryMenu: () => void;
 }) {
@@ -84,7 +84,7 @@ async function loadDirectory(path = currentPath.value, fromTerminal = false) {
     // 缺 kind 的行降级为 file），单行坏数据不再让列表僵死或抛 pageerror。
     entries.value = sanitizeSftpEntries(result.entries);
     resetLinkTargets();
-    void hydrateLinkTargets(entries.value);
+    void hydrateLinkTargets(entries.value, () => listEpoch.isCurrent(epochId));
     currentPath.value = normalized;
     selectedPath.value = "";
     clearRowSelection();

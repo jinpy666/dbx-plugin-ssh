@@ -85,8 +85,10 @@ function linkTargetTitle(entry: SideSftpEntry): string | undefined {
 }
 
 /** 列表加载后解析 symlink 条目的指向（只读 readlink，并发、失败静默——
- * 悬空链接也照常显示，tooltip 缺失只是没有 target 文案）。 */
-async function hydrateLinkTargets(list: SideSftpEntry[]) {
+ * 悬空链接也照常显示，tooltip 缺失只是没有 target 文案）。回写前按调用方
+ * 的列表 epoch 复核：快速连续导航时旧目录的 readlink 批次晚到，不得把
+ * 新目录的 linkTargets 整体覆盖回旧值。 */
+async function hydrateLinkTargets(list: SideSftpEntry[], isCurrent: () => boolean) {
   const sessionId = session.value?.sessionId;
   if (!sessionId) return;
   const links = list.filter((entry) => entry.kind === "symlink").slice(0, 50);
@@ -101,6 +103,7 @@ async function hydrateLinkTargets(list: SideSftpEntry[]) {
       if (result?.target) next[entry.uri] = result.target;
     }),
   );
+  if (!isCurrent()) return;
   linkTargets.value = next;
 }
 

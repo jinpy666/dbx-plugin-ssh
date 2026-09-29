@@ -646,6 +646,8 @@ onBeforeUnmount(() => {
   cancelAnimationFrame(replayRaf);
   replayTerminal?.dispose();
   replayTerminal = null;
+  window.clearInterval(recordCountdownTimer);
+  window.clearInterval(recordingElapsedTimer);
 });
 
 
