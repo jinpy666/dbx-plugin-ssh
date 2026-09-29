@@ -376,6 +376,11 @@ const props = defineProps<{
     /** Issue #66：下载限速（KiB/s，0=不限速）。 */
     loadDownloadLimit(): number;
     persistDownloadLimit(value: number): void;
+    /** M33：压缩传输策略（auto/on/off）与生效阈值（MiB，0=不限下限）。 */
+    loadCompressMode(): string;
+    loadCompressThreshold(): number;
+    persistCompressMode(value: string): void;
+    persistCompressThreshold(value: number): void;
   };
   /** 命令输入建议（开关 + 查询长度上下限）的读写适配器，权威态同在 App。 */
   suggestionPrefs: {
@@ -496,6 +501,10 @@ const transferMaxActiveDraft = ref(String(props.transferPrefs.loadMaxActive()));
 const transferDownloadLimitDraft = ref(String(props.transferPrefs.loadDownloadLimit()));
 const sftpCompatModeDraft = ref(props.transferPrefs.loadCompatMode());
 const sftpNameEncodingDraft = ref<SftpNameEncoding>(props.transferPrefs.loadNameEncoding());
+// M33：压缩传输策略与阈值草稿（阈值 0=不限下限，上限 65536 MiB）。
+const TRANSFER_COMPRESS_MODES = ["auto", "on", "off"] as const;
+const transferCompressModeDraft = ref(props.transferPrefs.loadCompressMode());
+const transferCompressThresholdDraft = ref(String(props.transferPrefs.loadCompressThreshold()));
 const suggestionsEnabledDraft = ref(props.suggestionPrefs.loadEnabled());
 const suggestionMinCharsDraft = ref(String(props.suggestionPrefs.loadMinChars()));
 const suggestionMaxCharsDraft = ref(String(props.suggestionPrefs.loadMaxChars()));
@@ -883,6 +892,8 @@ async function reloadSettings() {
   transferDownloadLimitDraft.value = String(props.transferPrefs.loadDownloadLimit());
   sftpCompatModeDraft.value = props.transferPrefs.loadCompatMode();
   sftpNameEncodingDraft.value = props.transferPrefs.loadNameEncoding();
+  transferCompressModeDraft.value = props.transferPrefs.loadCompressMode();
+  transferCompressThresholdDraft.value = String(props.transferPrefs.loadCompressThreshold());
   suggestionsEnabledDraft.value = props.suggestionPrefs.loadEnabled();
   suggestionMinCharsDraft.value = String(props.suggestionPrefs.loadMinChars());
   suggestionMaxCharsDraft.value = String(props.suggestionPrefs.loadMaxChars());
@@ -1205,6 +1216,8 @@ async function saveSettings() {
     props.transferPrefs.persistDownloadLimit(Math.max(0, Number.parseInt(transferDownloadLimitDraft.value, 10) || 0));
     props.transferPrefs.persistCompatMode(sftpCompatModeDraft.value);
     props.transferPrefs.persistNameEncoding(sftpNameEncodingDraft.value);
+    props.transferPrefs.persistCompressMode(transferCompressModeDraft.value);
+    props.transferPrefs.persistCompressThreshold(Math.min(65536, Math.max(0, Number.parseInt(transferCompressThresholdDraft.value, 10) || 0)));
     props.suggestionPrefs.persistEnabled(suggestionsEnabledDraft.value);
     props.suggestionPrefs.persistMinChars(Number.parseInt(suggestionMinCharsDraft.value, 10) || 2);
     props.suggestionPrefs.persistMaxChars(Number.parseInt(suggestionMaxCharsDraft.value, 10) || 64);
@@ -1779,6 +1792,22 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               </Select>
             </label>
             <p class="muted settings-note">{{ t("transferCfg.nameEncodingHint") }}</p>
+            <h3 class="settings-section-title">{{ t("transferCfg.compressTitle") }}</h3>
+            <label class="settings-field">
+              <span>{{ t("transferCfg.compressMode") }}</span>
+              <Select :model-value="transferCompressModeDraft" @update:model-value="(v) => (transferCompressModeDraft = String(v))">
+                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="mode in TRANSFER_COMPRESS_MODES" :key="mode" :value="mode">{{ t(`transferCfg.compressMode.${mode}`) }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <p class="muted settings-note">{{ t("transferCfg.compressModeHint") }}</p>
+            <label class="settings-field">
+              <span>{{ t("transferCfg.compressThreshold") }}</span>
+              <input v-model="transferCompressThresholdDraft" type="number" min="0" max="65536" step="16" :disabled="transferCompressModeDraft === 'off'" @change="transferCompressThresholdDraft = String(Math.min(65536, Math.max(0, Number.parseInt(transferCompressThresholdDraft, 10) || 0)))" />
+            </label>
+            <p class="muted settings-note">{{ t("transferCfg.compressThresholdHint") }}</p>
             </div>
 
             <!-- 终端（对标 Tabby「Terminal」页）：渲染 / 键盘 / 鼠标 / 剪贴板 / 声音五组。

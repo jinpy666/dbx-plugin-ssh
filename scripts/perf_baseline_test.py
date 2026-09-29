@@ -143,12 +143,14 @@ def case_terminal_buffer(client: SidecarClient, session_id: str, mb: int) -> dic
             "replayed_bytes": replayed_bytes, "frames": len(frames)}
 
 
-def case_upload(client: SidecarClient, session_id: str, path: str, data: bytes, digest: str) -> tuple[float, float]:
+def case_upload(client: SidecarClient, session_id: str, path: str, data: bytes, digest: str, expect_compression: str | None = None) -> tuple[float, float]:
     """Returns (spool_seconds, network_seconds). Chunks spool to a local
     temp file; the actual SFTP network transfer happens in upload/finish."""
     step(f"sftp upload throughput: {len(data) / (1024 * 1024):.0f} MiB in {CHUNK // 1024} KiB chunks")
     upload = client.request("sftp/upload/start",
                             {"sessionId": session_id, "remotePath": path, "size": len(data)})
+    if expect_compression is not None and upload.get("compression") != expect_compression:
+        raise AssertionError(f"upload compression={upload.get('compression')!r}, want {expect_compression!r}")
     task_id = upload["taskId"]
     if upload.get("chunkSize") and upload["chunkSize"] != CHUNK:
         raise AssertionError(f"negotiated chunk size {upload.get('chunkSize')} != {CHUNK}")
@@ -204,9 +206,23 @@ def case_upload(client: SidecarClient, session_id: str, path: str, data: bytes, 
     return spool, network
 
 
-def case_download(client: SidecarClient, session_id: str, path: str, size: int, digest: str) -> float:
+def case_download(client: SidecarClient, session_id: str, path: str, size: int, digest: str, expect_compression: str | None = None) -> float:
     step(f"sftp download throughput: {size / (1024 * 1024):.0f} MiB in {CHUNK // 1024} KiB chunks")
     download = client.request("sftp/download/start", {"sessionId": session_id, "remotePath": path}, timeout=60)
+    if expect_compression == "gzip":
+        # 压缩下载等 prep（远端 gzip → 拉取 → 解压）ready 后再开始分块泵。
+        deadline = time.monotonic() + 600
+        while True:
+            status = client.request("sftp/transfer/status", {"taskId": download["taskId"]}, timeout=30)
+            if status.get("ready"):
+                break
+            if status.get("status") in ("failed", "cancelled"):
+                raise AssertionError(f"compressed prep died: {json.dumps(status)[:160]}")
+            if time.monotonic() > deadline:
+                raise AssertionError("compressed prep not ready in 600s")
+            time.sleep(0.5)
+        if download.get("compression") != "gzip":
+            raise AssertionError(f"download compression={download.get('compression')!r}, want gzip")
     task_id = download["taskId"]
     if download.get("size") != size:
         raise AssertionError(f"download size {download.get('size')} != {size}")
@@ -303,17 +319,63 @@ def main() -> None:
                 raise
             skips.append(f"sftp throughput ({missing} not registered)")
 
+        # -- case 4: 压缩通道对照（M33）--------------------------------------
+        # 高冗余数据 + 阈值 0：上传/下载走 gzip 压缩通道，与上方随机数据
+        # 的普通通道对照。容器缺 gzip/tar 时响应回落 none，按 SKIP 记。
+        compress_path = f"{home}/.dbx-perf-compress-{secrets.token_hex(4)}.log"
+        step(f"preparing {args.mb} MiB of repetitive payload (compressible)")
+        compress_data = (b"2026-09-29 perf baseline repetitive log line for the compressed channel\n"
+                         * (args.mb * 1024 * 1024 // 74))
+        compress_data += b"x" * (args.mb * 1024 * 1024 - len(compress_data))
+        compress_digest = hashlib.sha256(compress_data).hexdigest()
+        prefs_dirty = False
+        try:
+            # on 策略豁免弱 CPU 门槛（perf 机核数不可假定），阈值 0 全量启用。
+            client.request("local/preferences/set",
+                           {"transfer_compress_mode": "on", "transfer_compress_threshold_mib": 0})
+            prefs_dirty = True
+            probe = client.request("ssh/exec", {"sessionId": session_id,
+                                                "command": "command -v gzip >/dev/null 2>&1 && command -v gunzip >/dev/null 2>&1 && echo OK"},
+                                   timeout=30)
+            if "OK" not in (probe.get("output") or ""):
+                skips.append("compressed channel (remote lacks gzip)")
+            else:
+                cspool_s, cnetwork_s = case_upload(client, session_id, compress_path,
+                                                   compress_data, compress_digest,
+                                                   expect_compression="gzip")
+                results["uploadCompressed"] = {"bytes": len(compress_data),
+                                               "spool_seconds": round(cspool_s, 2),
+                                               "network_seconds": round(cnetwork_s, 2),
+                                               "mb_s": round(mb_s(len(compress_data), cnetwork_s), 1)}
+                cdownload_s = case_download(client, session_id, compress_path,
+                                            len(compress_data), compress_digest,
+                                            expect_compression="gzip")
+                results["downloadCompressed"] = {"bytes": len(compress_data),
+                                                 "seconds": round(cdownload_s, 2),
+                                                 "mb_s": round(mb_s(len(compress_data), cdownload_s), 1)}
+        except SidecarError as error:
+            missing = missing_method(error)
+            if missing is None:
+                raise
+            skips.append(f"compressed channel ({missing} not registered)")
+        finally:
+            if prefs_dirty:
+                client.request("local/preferences/set",
+                               {"transfer_compress_mode": "auto",
+                                "transfer_compress_threshold_mib": 64})
+
     except SidecarError as error:
         print(f"FAIL: {error}")
         sys.exit(1)
     finally:
         step("cleanup")
         if client is not None and session_id:
-            if remote_path:
-                try:
-                    client.request("sftp/delete", {"sessionId": session_id, "path": remote_path}, timeout=30)
-                except Exception:
-                    pass
+            for cleanup_path in (remote_path, locals().get("compress_path")):
+                if cleanup_path:
+                    try:
+                        client.request("sftp/delete", {"sessionId": session_id, "path": cleanup_path}, timeout=30)
+                    except Exception:
+                        pass
             try:
                 client.request("ssh/session/close", {"sessionId": session_id}, timeout=30)
             except Exception:
@@ -339,6 +401,20 @@ def main() -> None:
     if "download" in results:
         row = results["download"]
         print(f"{'sftp download':<28}{row['bytes'] / (1024 * 1024):>8.0f} MiB{row['seconds']:>8}s{row['mb_s']:>12} MB/s")
+    if "uploadCompressed" in results:
+        row = results["uploadCompressed"]
+        print(f"{'sftp upload gz (network)':<28}{row['bytes'] / (1024 * 1024):>8.0f} MiB{row['network_seconds']:>8}s{row['mb_s']:>12} MB/s")
+    if "downloadCompressed" in results:
+        row = results["downloadCompressed"]
+        print(f"{'sftp download gz':<28}{row['bytes'] / (1024 * 1024):>8.0f} MiB{row['seconds']:>8}s{row['mb_s']:>12} MB/s")
+    if "uploadCompressed" in results and "upload" in results:
+        plain = results["upload"]["network_seconds"] or 0.001
+        compressed = results["uploadCompressed"]["network_seconds"] or 0.001
+        print(f"{'  upload network speedup':<28}{plain / compressed:>7.2f}x  (plain {results['upload']['network_seconds']}s vs gz {compressed}s)")
+        # 口径说明：gz 网络段含本地压缩 CPU；loopback 上"网络"是内存速度，
+        # CPU 开销必然占优——收益要在真实 WAN/低带宽链路上观察。下载 gz 的
+        # 计时段是本地 staging 分块供给，压缩流拉取腿在 prep（未计时）。
+        print("  (gz rows: loopback numbers include compress CPU; gains show on real WAN links)")
     for skip in skips:
         print(f"  SKIP: {skip}")
     if not results:

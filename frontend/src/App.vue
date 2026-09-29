@@ -509,6 +509,11 @@ const DOWNLOAD_CONFLICT_KEY = "ssh-download-conflict-policy";
 // 上传并发（P1-5，1..10，默认 3）与重复目标策略（rename 默认）：sidecar
 const SFTP_COMPAT_MODE_KEY = "ssh-sftp-compat-mode";
 const SFTP_NAME_ENCODING_KEY = "ssh-sftp-name-encoding";
+// 压缩传输（M33，gzip 混合方案）：策略三态（auto=智能综合判断含弱 CPU
+// 门槛，默认 / on=始终尝试 / off=关闭）+ 生效阈值 MiB（默认 64，0=不限
+// 下限）；sidecar preferences 同步，键名与后端白名单一致。
+const TRANSFER_COMPRESS_MODE_KEY = "ssh-transfer-compress-mode";
+const TRANSFER_COMPRESS_THRESHOLD_KEY = "ssh-transfer-compress-threshold-mib";
 // 命令输入建议（P1-1）：开关 + 查询长度上下限；同一偏好链路持久化。
 const SUGGESTIONS_ENABLED_KEY = "ssh-history-suggestions-enabled";
 const SUGGESTIONS_MIN_CHARS_KEY = "ssh-history-suggestion-min-chars";
@@ -524,12 +529,28 @@ const downloadConflictState = ref<DownloadConflictPolicy>("rename");
 // 下载限速权威态（KiB/s，0=不限速）；sidecar preferences 同步。
 const sftpCompatModeState = ref(false);
 const sftpNameEncodingState = ref<SftpNameEncoding>("auto");
+// 压缩传输（M33）：策略默认 auto、阈值默认 64 MiB（0=不限下限，上限 65536）。
+type SftpCompressMode = "auto" | "on" | "off";
+const transferCompressModeState = ref<SftpCompressMode>("auto");
+const transferCompressThresholdState = ref(64);
 const suggestionsEnabledState = ref(true);
 const suggestionMinCharsState = ref(2);
 const suggestionMaxCharsState = ref(64);
 
 function sanitizeConflictPolicy(value: unknown): DownloadConflictPolicy {
   return value === "ask" || value === "overwrite" ? value : "rename";
+}
+
+/** 压缩阈值 MiB 钳制（M33）：0..=65536，非法回落默认 64（与后端白名单同向）。 */
+function sanitizeTransferCompressThresholdMib(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 64;
+  return Math.min(65536, Math.max(0, Math.floor(parsed)));
+}
+
+/** 压缩策略三态白名单（M33）：非法回落 auto（与后端 CompressPolicy 同向）。 */
+function sanitizeTransferCompressMode(value: unknown): SftpCompressMode {
+  return value === "on" || value === "off" ? value : "auto";
 }
 // Apple 平台判定（Cmd 为主修饰键）：既有的全选语义与新增的快捷键默认键位都要用，
 // 因此在此单点声明，供后面的偏好初始值与终端选项复用。
@@ -849,6 +870,10 @@ const transferPrefsAdapter = {
   persistCompatMode: persistSftpCompatMode,
   loadNameEncoding: loadSftpNameEncoding,
   persistNameEncoding: persistSftpNameEncoding,
+  loadCompressMode: loadTransferCompressMode,
+  persistCompressMode: persistTransferCompressMode,
+  loadCompressThreshold: loadTransferCompressThreshold,
+  persistCompressThreshold: persistTransferCompressThreshold,
 };
 const suggestionPrefsAdapter = {
   loadEnabled: loadSuggestionsEnabled,
@@ -4603,6 +4628,25 @@ function persistSftpNameEncoding(value: SftpNameEncoding) {
   void syncPrefs();
 }
 
+// 压缩传输（M33）：设置弹窗经适配器读写，权威态在此。
+function loadTransferCompressMode(): SftpCompressMode {
+  return transferCompressModeState.value;
+}
+
+function persistTransferCompressMode(value: SftpCompressMode) {
+  transferCompressModeState.value = sanitizeTransferCompressMode(value);
+  void syncPrefs();
+}
+
+function loadTransferCompressThreshold(): number {
+  return transferCompressThresholdState.value;
+}
+
+function persistTransferCompressThreshold(value: number) {
+  transferCompressThresholdState.value = sanitizeTransferCompressThresholdMib(value);
+  void syncPrefs();
+}
+
 // 命令输入建议（P1-1）：设置弹窗经适配器读写，权威态在此。
 function loadSuggestionsEnabled(): boolean {
   return suggestionsEnabledState.value;
@@ -4650,6 +4694,11 @@ function cachePrefs() {
     else window.localStorage.removeItem(SFTP_COMPAT_MODE_KEY);
     if (sftpNameEncodingState.value !== "auto") window.localStorage.setItem(SFTP_NAME_ENCODING_KEY, sftpNameEncodingState.value);
     else window.localStorage.removeItem(SFTP_NAME_ENCODING_KEY);
+    // 压缩传输（M33）：默认 auto/默认 64 时不落键，老用户不被钉死。
+    if (transferCompressModeState.value !== "auto") window.localStorage.setItem(TRANSFER_COMPRESS_MODE_KEY, transferCompressModeState.value);
+    else window.localStorage.removeItem(TRANSFER_COMPRESS_MODE_KEY);
+    if (transferCompressThresholdState.value !== 64) window.localStorage.setItem(TRANSFER_COMPRESS_THRESHOLD_KEY, String(transferCompressThresholdState.value));
+    else window.localStorage.removeItem(TRANSFER_COMPRESS_THRESHOLD_KEY);
     if (transferDuplicateState.value !== "rename") window.localStorage.setItem(TRANSFER_DUPLICATE_KEY, transferDuplicateState.value);
     else window.localStorage.removeItem(TRANSFER_DUPLICATE_KEY);
     if (!suggestionsEnabledState.value) window.localStorage.setItem(SUGGESTIONS_ENABLED_KEY, "0");
@@ -4676,6 +4725,8 @@ async function syncPrefs() {
       transfer_download_limit_kib: transferDownloadLimitState.value,
       sftp_compat_mode: sftpCompatModeState.value,
       sftp_name_encoding: sftpNameEncodingState.value,
+      transfer_compress_mode: transferCompressModeState.value,
+      transfer_compress_threshold_mib: transferCompressThresholdState.value,
       history_suggestions_enabled: suggestionsEnabledState.value,
       history_suggestion_min_chars: suggestionMinCharsState.value,
       history_suggestion_max_chars: suggestionMaxCharsState.value,
@@ -4703,6 +4754,8 @@ async function hydratePrefsOnce() {
     transferDownloadLimitState.value = clampTransferDownloadLimit(window.localStorage.getItem(TRANSFER_DOWNLOAD_LIMIT_KEY) ?? undefined);
     sftpCompatModeState.value = window.localStorage.getItem(SFTP_COMPAT_MODE_KEY) === "1";
     sftpNameEncodingState.value = sanitizeNameEncoding(window.localStorage.getItem(SFTP_NAME_ENCODING_KEY));
+    transferCompressModeState.value = sanitizeTransferCompressMode(window.localStorage.getItem(TRANSFER_COMPRESS_MODE_KEY));
+    transferCompressThresholdState.value = sanitizeTransferCompressThresholdMib(window.localStorage.getItem(TRANSFER_COMPRESS_THRESHOLD_KEY) ?? undefined);
     suggestionsEnabledState.value = window.localStorage.getItem(SUGGESTIONS_ENABLED_KEY) !== "0";
     suggestionMinCharsState.value = clampSuggestionMinChars(window.localStorage.getItem(SUGGESTIONS_MIN_CHARS_KEY));
     suggestionMaxCharsState.value = clampSuggestionMaxChars(window.localStorage.getItem(SUGGESTIONS_MAX_CHARS_KEY));
@@ -4727,6 +4780,8 @@ async function hydratePrefsOnce() {
       transfer_download_limit_kib?: unknown;
       sftp_compat_mode?: unknown;
       sftp_name_encoding?: unknown;
+      transfer_compress_mode?: unknown;
+      transfer_compress_threshold_mib?: unknown;
       history_suggestions_enabled?: unknown;
       history_suggestion_min_chars?: unknown;
       history_suggestion_max_chars?: unknown;
@@ -4758,6 +4813,8 @@ async function hydratePrefsOnce() {
     if (prefs.transfer_max_active !== undefined) transferMaxActiveState.value = clampTransferMaxActive(prefs.transfer_max_active);
     if (prefs.transfer_download_limit_kib !== undefined) transferDownloadLimitState.value = clampTransferDownloadLimit(prefs.transfer_download_limit_kib);
     if (prefs.sftp_compat_mode !== undefined) sftpCompatModeState.value = prefs.sftp_compat_mode === true;
+    if (prefs.transfer_compress_mode !== undefined) transferCompressModeState.value = sanitizeTransferCompressMode(prefs.transfer_compress_mode);
+    if (prefs.transfer_compress_threshold_mib !== undefined) transferCompressThresholdState.value = sanitizeTransferCompressThresholdMib(prefs.transfer_compress_threshold_mib);
     if (prefs.sftp_name_encoding !== undefined) sftpNameEncodingState.value = sanitizeNameEncoding(prefs.sftp_name_encoding);
     if (prefs.history_suggestions_enabled !== undefined) suggestionsEnabledState.value = prefs.history_suggestions_enabled === true;
     if (prefs.history_suggestion_min_chars !== undefined) suggestionMinCharsState.value = clampSuggestionMinChars(prefs.history_suggestion_min_chars);
@@ -6894,7 +6951,7 @@ onBeforeUnmount(() => {
               <p v-if="folderUploadProgress.currentFile" class="transfer-path mono" :title="folderUploadProgress.currentFile">{{ folderUploadProgress.currentFile }}</p>
             </article>
             <article v-for="task in transferList" :key="task.taskId" class="transfer-card">
-              <div class="transfer-title"><FileUp v-if="task.direction === 'upload'" /><Download v-else /><span>{{ task.fileName || task.taskId }}</span><strong v-if="task.phase !== 'staging'">{{ transferPercent(task) }}%</strong></div>
+              <div class="transfer-title"><FileUp v-if="task.direction === 'upload'" /><Download v-else /><span>{{ task.fileName || task.taskId }}</span><span v-if="task.compression === 'gzip'" class="transfer-badge" :title="t('transferCompress.badgeHint')">{{ t("transferCompress.badge") }}</span><strong v-if="task.phase !== 'staging'">{{ transferPercent(task) }}%</strong></div>
               <progress :value="transferBarValue(task)" max="100" />
               <div class="transfer-meta"><span>{{ t(`transferStatus.${task.status}`) }}</span><span :title="transferBytesTitle(task)">{{ formatBytes(transferShownBytes(task)) }} / {{ formatBytes(task.size) }}</span><span v-if="transferSpeeds[task.taskId]">{{ formatBytes(transferSpeeds[task.taskId]) }}/s</span></div>
               <!-- 目录下载：在传文件相对路径，让长传输有可感知的推进。 -->

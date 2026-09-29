@@ -183,6 +183,35 @@ pub fn transfer_max_active(data_dir: &Path) -> u64 {
         .unwrap_or(TRANSFER_MAX_ACTIVE_DEFAULT)
 }
 
+/// 压缩传输策略（gzip 混合方案）：`auto`（默认，智能综合判断，含弱 CPU
+/// 门槛）/`on`（始终尝试，豁免 CPU 门槛）/`off`（关闭）。任务 start 时现读
+/// 现决——改动对下一个任务生效，进行中任务按原定通道完成。
+pub fn transfer_compress_mode(data_dir: &Path) -> crate::transfer_compress::CompressPolicy {
+    load_preferences(data_dir)
+        .get("transfer_compress_mode")
+        .and_then(Value::as_str)
+        .and_then(crate::transfer_compress::CompressPolicy::parse)
+        .unwrap_or(crate::transfer_compress::CompressPolicy::Auto)
+}
+
+/// 压缩传输生效阈值（MiB）：0 = 不设下限（冒烟/显式全量场景），
+/// 1..=65536；非法回落默认 64。
+pub fn sanitize_transfer_compress_threshold_mib(value: &Value) -> u64 {
+    sanitize_u64_clamped(
+        value,
+        0,
+        crate::transfer_compress::THRESHOLD_MIB_MAX,
+        crate::transfer_compress::THRESHOLD_MIB_DEFAULT,
+    )
+}
+
+pub fn transfer_compress_threshold_mib(data_dir: &Path) -> u64 {
+    load_preferences(data_dir)
+        .get("transfer_compress_threshold_mib")
+        .map(sanitize_transfer_compress_threshold_mib)
+        .unwrap_or(crate::transfer_compress::THRESHOLD_MIB_DEFAULT)
+}
+
 /// 老旧服务器兼容模式（M14-B）：缺省关。开启后 SFTP 会话不做流水线并发、
 /// 传输深度强制 1，并避开非标准扩展请求。
 pub fn sftp_compat_mode(data_dir: &Path) -> bool {
@@ -374,6 +403,25 @@ pub fn load_preferences(data_dir: &Path) -> Value {
             "transfer_download_limit_kib".to_string(),
             Value::from(sanitize_transfer_download_limit_kib(
                 &map["transfer_download_limit_kib"],
+            )),
+        );
+    }
+    // 压缩传输（gzip 混合方案）：策略三态（auto/on/off）+ 阈值 MiB（0=不限下限）。
+    if let Some(mode) = map
+        .get("transfer_compress_mode")
+        .and_then(Value::as_str)
+        .and_then(crate::transfer_compress::CompressPolicy::parse)
+    {
+        prefs.insert(
+            "transfer_compress_mode".to_string(),
+            Value::String(mode.as_str().to_string()),
+        );
+    }
+    if map.contains_key("transfer_compress_threshold_mib") {
+        prefs.insert(
+            "transfer_compress_threshold_mib".to_string(),
+            Value::from(sanitize_transfer_compress_threshold_mib(
+                &map["transfer_compress_threshold_mib"],
             )),
         );
     }
@@ -597,6 +645,28 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
             "transfer_download_limit_kib".to_string(),
             Value::from(sanitize_transfer_download_limit_kib(
                 &params["transfer_download_limit_kib"],
+            )),
+        );
+    }
+    // 压缩传输（gzip 混合方案）：策略走白名单（非法报错，同 sftp_name_encoding
+    // 的严格向），阈值数值钳制到 0..=65536 MiB（0=不限下限），非法回落默认。
+    if let Some(value) = params.get("transfer_compress_mode") {
+        let mode = crate::transfer_compress::CompressPolicy::parse(
+            value
+                .as_str()
+                .ok_or_else(|| "transfer_compress_mode must be auto, on or off".to_string())?,
+        )
+        .ok_or_else(|| "transfer_compress_mode must be auto, on or off".to_string())?;
+        map.insert(
+            "transfer_compress_mode".to_string(),
+            Value::String(mode.as_str().to_string()),
+        );
+    }
+    if params.get("transfer_compress_threshold_mib").is_some() {
+        map.insert(
+            "transfer_compress_threshold_mib".to_string(),
+            Value::from(sanitize_transfer_compress_threshold_mib(
+                &params["transfer_compress_threshold_mib"],
             )),
         );
     }
@@ -1147,6 +1217,56 @@ mod tests {
             sanitize_transfer_download_limit_kib(&json!(TRANSFER_DOWNLOAD_LIMIT_KIB_MAX + 1)),
             TRANSFER_DOWNLOAD_LIMIT_KIB_MAX
         );
+    }
+
+    #[test]
+    fn transfer_compress_prefs_default_auto_with_clamped_threshold() {
+        use crate::transfer_compress::CompressPolicy;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // 缺省：策略 auto、阈值 64 MiB。
+        assert_eq!(
+            transfer_compress_mode(data_dir.path()),
+            CompressPolicy::Auto
+        );
+        assert_eq!(
+            transfer_compress_threshold_mib(data_dir.path()),
+            crate::transfer_compress::THRESHOLD_MIB_DEFAULT
+        );
+        // 写入读回：off + 阈值 0（=不限下限）；on 亦合法。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "transfer_compress_mode": "off", "transfer_compress_threshold_mib": 0 }),
+        )
+        .expect("save compress prefs");
+        assert_eq!(transfer_compress_mode(data_dir.path()), CompressPolicy::Off);
+        assert_eq!(transfer_compress_threshold_mib(data_dir.path()), 0);
+        save_preferences(data_dir.path(), &json!({ "transfer_compress_mode": "on" }))
+            .expect("save on");
+        assert_eq!(transfer_compress_mode(data_dir.path()), CompressPolicy::On);
+        // 超界钳制到上限；策略非法值整键报错（同 sftp_name_encoding 严格向）。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "transfer_compress_threshold_mib": 999_999 }),
+        )
+        .expect("save oversized threshold");
+        assert_eq!(
+            transfer_compress_threshold_mib(data_dir.path()),
+            crate::transfer_compress::THRESHOLD_MIB_MAX
+        );
+        assert!(
+            save_preferences(data_dir.path(), &json!({ "transfer_compress_mode": "yes" }),)
+                .is_err()
+        );
+        // 纯函数直测：非法形状（非数值/负数）回落默认值，0 是合法下限。
+        assert_eq!(
+            sanitize_transfer_compress_threshold_mib(&json!("abc")),
+            crate::transfer_compress::THRESHOLD_MIB_DEFAULT
+        );
+        assert_eq!(
+            sanitize_transfer_compress_threshold_mib(&json!(-1)),
+            crate::transfer_compress::THRESHOLD_MIB_DEFAULT
+        );
+        assert_eq!(sanitize_transfer_compress_threshold_mib(&json!(0)), 0);
     }
 
     #[test]
