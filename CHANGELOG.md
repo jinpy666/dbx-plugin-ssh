@@ -4,6 +4,15 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.1-beta.12] — 2026-09-29
+
+- **新增 Warp 式 history 面板（↑ 唤起命令历史可视化）**。终端里按裸 ↑ 即在输入行上方展开全宽面板：fzf 式子序列检索 + 子串回落、输入即过滤（行缓冲即 query）、每条命令右侧显示相对执行时间；↑↓ 导航、Enter/Tab 仅回填输入行不自动执行（不新增自动执行命令路径），Esc 关闭。alternate 屏（vim/htop）、命令运行中、传输占用、既有浮层开启时不抢 ↑（shell 原生 readline 历史保留），⌘⇧H / Ctrl+Shift+H 为可配置补充入口；会话切换 / 命令开始执行 / 清屏兜底关闭。数据沿用全局命令历史并新增执行时间映射（统一采集口 `pushTerminalCommandHistory`，四个采集点共用；旧历史无时间则不显示时间列）。
+  **New: Warp-style history panel (raise with ↑).** Pressing bare ↑ in the terminal opens a full-width panel above the input line: fzf-style subsequence matching with substring fallback, filter-as-you-type (the line buffer is the query) and a relative execution time per entry; ↑↓ navigates, Enter/Tab only refills the input line without executing (no new auto-execute path) and Esc closes. Bare ↑ is not grabbed when an alternate screen (vim/htop) is active, a command is running, a transfer is in flight or another overlay is open (shell readline history stays reachable); ⌘⇧H / Ctrl+Shift+H is the configurable secondary entry. The panel closes on session switch, command start and clear-screen. Data reuses the global command history plus a new execution-time map (one unified collector `pushTerminalCommandHistory` shared by all four collection points; older entries without timestamps simply show no time column).
+- **Docker 面板浮层化：不再挤占终端布局**。面板从 `.docker-pane` 停靠分栏（divider 拖宽、终端/SFTP 让宽）改为 metrics 同款右上浮层（`.docker-float`，挂终端面板内右上角，自右缘向左覆盖终端一角），不占分栏宽度、永不遮挡 SFTP 面板，X/Esc 随时可关；workbenchState 停写 `dockerPaneWidth`（旧值残留无害）。
+  **Docker panel is now a floating overlay.** The panel moved from the docked `.docker-pane` split (divider drag, terminal/SFTP giving way) to a metrics-style top-right float (`.docker-float`, anchored inside the terminal pane, overlapping the terminal's right edge) — it no longer takes split width, never covers the SFTP panel, and closes with X/Esc anytime; workbenchState no longer persists `dockerPaneWidth` (stale values are harmless).
+- **工程：工作台前端完成结构性拆分**。App.vue 从 14,281 行拆至 ~8,700 行，40 个功能域收口为 composables（传输/导航/会话/事件分派等），纯代码层次拆分、零行为变化；ConPTY 启动探针扩展覆盖 cmd/PowerShell/WSL 三种 shell。
+  **Engineering: the workbench front end finished a structural split.** App.vue went from 14,281 to ~8,700 lines with 40 domain composables (transfers, navigation, sessions, event dispatch, …) — pure code restructuring with zero behavior change; the ConPTY startup probe now covers cmd/PowerShell/WSL shells.
+
 ## [0.7.1-beta.11] — 2026-09-29
 
 - **修复 Windows 本地终端启动残影的真正成因：ConPTY 握手应答用了错误的值**。ConPTY 以 `PSEUDOCONSOLE_INHERIT_CURSOR` 创建，开场 `CSI 6n` 问的是「终端光标在哪」并把子进程放到该位置；此前 sidecar 用**视口尺寸**应答，等于宣称光标在最后一行——conhost 于是把首字符留在顶部（cmd 的 `M`、WSL 的 `d`）并从底部整屏重画横幅（PowerShell 提示符画两遍）。前三轮修复（spawn 尺寸稳定、同尺寸 resize 去重、启动窗口 resize 门控）都作用于另一条 resize 通路，所以毫无改观。现在工作台在启动时上报终端真实光标（`cursorRow`/`cursorCol`），sidecar 归一化后如实应答——shell 就从用户看到的光标处开始输出。
