@@ -91,13 +91,10 @@ import {
   isApplePlatform,
   TERMINAL_SEARCH_OPTIONS_KEY,
   terminalSearchSeedFromSelection,
-  canAcceptTerminalDrop,
-  canAcceptFileDrop,
   normalizeDropTargetDir,
   resolveDropTargetDir,
   type TerminalSearchOptions,
 } from "./lib/terminalInteraction";
-import { planHostFileDrop } from "./lib/hostFileDrop";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
 import { createOutputGate } from "./lib/terminalBackpressure";
 import { createTerminalInputQueue, terminalInputChannel } from "./lib/terminalInputQueue";
@@ -115,7 +112,6 @@ import { createConnectLog } from "./lib/connectLog";
 import { pickModalFocusTarget } from "./lib/modalFocus";
 import { buildPasteConfirmation, type PasteConfirmation } from "./lib/dangerousCommands";
 import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib/clipboardBridge";
-import { filesFromClipboard } from "./lib/clipboardFiles";
 import { friendlySftpError } from "./lib/sftpErrors";
 import { clampDockerPaneWidth, DOCKER_PANE_MIN_WIDTH, terminalFlexBasis } from "./lib/paneLayout";
 import { isCountdownActive } from "./lib/recordingCountdown";
@@ -138,7 +134,7 @@ import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // CompletionController）；legacy 补全目录已退役，无命中即
 // pass-through（菜单关、Tab 交 shell），不造假候选。
 import type { CompletionItem } from "./lib/completion/core/types";
-import { displayPathToWire, sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
+import { sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy, type TransferTask,
 } from "./lib/transferQueue";
 import { filterQuickCommands, QUICK_COMMANDS_LIMIT } from "./lib/quickCommands";
@@ -190,6 +186,7 @@ import {
 import { transferPausable } from "./lib/transferResume";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useUploadChain } from "./composables/useUploadChain";
 import { useFilePreview } from "./composables/useFilePreview";
 import { useSftpDownload } from "./composables/useSftpDownload";
 import { useSftpDelete } from "./composables/useSftpDelete";
@@ -241,13 +238,7 @@ import {
 } from "./lib/sftpEntries";
 import { resolveRemotePath, splitRemotePathSegments } from "./lib/remotePathInput";
 import {
-  advanceFolderUploadDirectories,
-  buildFolderUploadPlan,
-  createFolderUploadProgress,
-  folderUploadOutcome,
   folderUploadPercent,
-  settleFolderUploadFile,
-  type FolderUploadProgress,
 } from "./lib/folderUpload";
 import { decideFileRowAction } from "./lib/fileRowKeydown";
 import { attachWebglRenderer, loadWebglEnabled, persistWebglEnabled, syncWebglRenderer, type WebglRecoveryOptions, type WebglRendererLike } from "./lib/terminalWebgl";
@@ -539,12 +530,6 @@ type TerminalSearchMatchState = "idle" | "match" | "no-match";
 const terminalHost = ref<HTMLElement>();
 const sftpPane = ref<HTMLElement>();
 const paneContainer = ref<HTMLElement>();
-const uploadInput = ref<HTMLInputElement>();
-// 文件夹上传（issue #78）：webkitdirectory 选择器 + 能力探测（缺失时入口隐藏）。
-const folderUploadInput = ref<HTMLInputElement>();
-const folderUploadSupported = ref(false);
-// 文件夹批量上传的聚合进度（复用传输面板展示；目录 X/Y · 文件 N/M）。
-const folderUploadProgress = ref<FolderUploadProgress>();
 const zmodemInput = ref<HTMLInputElement>();
 const hostContext = ref<Record<string, unknown>>({});
 let transportReuseState = createSessionTransportReuseState({});
@@ -672,7 +657,8 @@ const {
   t: (key, values) => t(key, values),
   showError,
   session, currentPath, panelSurface,
-  resolveUploadDuplicateName, joinRemote, writeU64, syncPrefs,
+  resolveUploadDuplicateName: (name, targetDir) => resolveUploadDuplicateName(name, targetDir),
+  joinRemote, writeU64, syncPrefs,
   refreshTransferHistory: () => refreshTransferHistory(),
   refreshResumableUploads: () => refreshResumableUploads(),
 });
@@ -806,32 +792,6 @@ const pasteConfirm = ref<PasteConfirmation>();
 // 终端拖入文件的落点询问：null 表示取消；"cwd" 用解析后的 shell/SFTP 当前
 // 目录（resolveDropTargetDir：终端 cwd 跟随 → SFTP home → 面板当前目录），
 // 弹窗展示解析结果；{ dir } 是用户输入的目标目录（文件原名落其下）。
-const dropUploadPrompt = ref<{ files: Array<{ name: string }> }>();
-const dropUploadTarget = ref<"cwd" | "custom">("cwd");
-// 拖拽落点解析：终端 cwd（OSC 7/633）优先，其次远端主目录，最后兜底面板目
-// 录——终端拖拽只在面板关闭时接收，面板目录此刻不可见，仅作旧 sidecar 兜底。
-// 弹窗展示的就是这里的解析结果。
-const dropCwdTarget = computed(() => resolveDropTargetDir({ terminalCwd: terminalCwd.value || undefined, sftpHome: sftpHomePath.value || undefined, fallback: currentPath.value }));
-// M17 增量②：上传落点的 wire 形式（弹窗仍展示 dropCwdTarget 的显示形式）。
-// shell cwd 回读与 sftp home 探测结果是显示文本，latin-1 下经 displayPathToWire
-// 转成 wire 形式（% 自转义、U+0080..FF → %XX、>U+00FF 按 UTF-8 兜底），与本地
-// 文件名 join 后整条符合 sidecar write_path_bytes 的「wire 目录前缀 + 用户新
-// 输入的显示末段」分工；fallback（面板当前目录）本身来自列表链的 wire 形式，
-// 原样透传。已知边界：shell cwd 回读中非 UTF-8 的服务器字节在终端解码层已
-// 丢失（U+FFFD），无法还原为 latin-1 字节（登记，不做恢复）。
-const dropCwdTargetWire = computed(() => resolveDropTargetDir({
-  terminalCwd: wireDropDir(terminalCwd.value),
-  sftpHome: wireDropDir(sftpHomePath.value),
-  fallback: currentPath.value,
-}));
-
-/** latin-1 显示文本 → wire 形式（拖入上传的手输/shell cwd 目录）；auto 原样。 */
-function wireDropDir(dir: string | undefined): string | undefined {
-  if (!dir) return dir;
-  return sftpNameEncodingState.value === "latin-1" ? displayPathToWire(dir) : dir;
-}
-const dropUploadPathInput = ref("");
-const dropUploadPathInputEl = ref<HTMLInputElement>();
 const terminalFontSize = ref(appearance.value.terminal.fontSize);
 // 终端字体单独设置（issue #31）：字体族/字号的用户覆盖，null 字段 = 跟随宿主。
 // setup 期读取安全：loadTerminalFontOverride 经 pluginStore（内部全 guarded，
@@ -992,7 +952,6 @@ let terminalWheelHandler: ((event: WheelEvent) => void) | undefined;
 let terminalMouseDownHandler: ((event: MouseEvent) => void) | undefined;
 let terminalMouseUpHandler: ((event: MouseEvent) => void) | undefined;
 let pasteConfirmResolver: ((accepted: boolean) => void) | undefined;
-let dropUploadResolver: ((choice: "cancel" | "cwd" | { dir: string }) => void) | undefined;
 // 通用应用内确认弹窗（SSH-H1）：原语在 lib/confirmDialog（SettingsDialog/
 // QuickCommandsSection 等子组件共用），此处只挂宿主渲染；模板/关框/Esc/
 // teardown 统一经 resolvePendingConfirmDialog 结算。
@@ -5758,118 +5717,6 @@ function onFileRowKeydown(event: KeyboardEvent, entry: SftpEntry) {
   else deleteTarget.value = entry;
 }
 
-async function chooseUpload() {
-  if (!connected.value || !canWrite.value) return;
-  openTransferPanel();
-  if (!window.dbxPlugin.fileTransfer) {
-    uploadInput.value?.click();
-    return;
-  }
-  try {
-    const selection = await window.dbxPlugin.fileTransfer.pick({ multiple: true });
-    await uploadHandleFiles(selection.files);
-    await loadDirectory();
-    if (selection.files.length) showNotice(t("uploaded", { count: selection.files.length }));
-  } catch (cause) {
-    // 宿主文件桥失败（pick 或读盘，如 unknown plugin file handle，issue #83/#79）
-    // 时不再直接终止：回退到 webview 原生文件选择（File API），上传仍可继续。
-    if (isHostBridgeReadFailure(cause)) {
-      fallbackToNativeUploadPicker();
-      return;
-    }
-    showError(cause);
-  }
-}
-
-async function uploadHandleFiles(files: Array<{ handleId: string; name: string; size: number }>, targetDir?: string) {
-  if (!window.dbxPlugin.fileTransfer || !files.length) return;
-  uploadDuplicateBatchDecision = undefined;
-  await runTransfers(files, loadTransferConcurrency(), {
-    id: (file) => file.handleId,
-    run: async (file) => {
-      try {
-        await uploadSource(file.name, file.size, async (offset, length) => {
-          const result = await window.dbxPlugin.fileTransfer!.read(file.handleId, offset, length);
-          return window.dbxPlugin.decodeBase64(result.dataBase64);
-        }, undefined, targetDir);
-      } catch (cause) {
-        // 桥接读盘错误转成可理解的提示；uploadSource 已补 upload-read-failed 代码，
-        // 终端拖入路径（同函数）的 showError 也会显示这条友好文案。
-        if (isHostBridgeReadFailure(cause)) {
-          const code = (cause as Error & { code?: unknown }).code;
-          throw Object.assign(new Error(t("uploadBridgeReadFailed", { name: file.name })), { code, cause });
-        }
-        throw cause;
-      } finally {
-        await window.dbxPlugin.fileTransfer!.cancel(file.handleId).catch(() => undefined);
-      }
-    },
-  });
-}
-
-function isHostBridgeReadFailure(cause: unknown): boolean {
-  if (!(cause instanceof Error)) return false;
-  const code = (cause as Error & { code?: unknown }).code;
-  return code === "upload-read-failed" || /file handle/i.test(cause.message);
-}
-
-// 桥接不可用时的兜底（对标 dbx-plugin-files PR #47）：提示后自动打开 webview
-// 原生文件选择器（File API，不依赖宿主句柄），上传仍可完成。
-function fallbackToNativeUploadPicker() {
-  showNotice(t("uploadBridgeFallback"));
-  uploadInput.value?.click();
-}
-
-// 宿主 fileTransfer 桥的拖入链路（桌面端）：OS 级拖放由宿主 webview 捕获并路由
-// 到本工作台。与其他两条链路共用同一道门禁：只读连接/断连时拒绝并提示，不能
-// 成为绕过 readOnly 的旁路。落点按面板状态分流（planHostFileDrop）：SFTP 面板
-// 打开 → 当前目录；终端独占 → 走落点询问；否则忽略。桥故障时与工具栏上传一致
-// 回退原生选择器重挑，而不是只报错走死。
-async function handleHostFileDrop(files: Array<{ handleId: string; name: string; size: number; contentType: string }>) {
-  dragActive.value = false;
-  if (!canAcceptFileDrop({ connected: connected.value, canWrite: canWrite.value })) {
-    showNotice(t("dropRefused"));
-    return;
-  }
-  const plan = planHostFileDrop({
-    files: files.length,
-    connected: connected.value,
-    canWrite: canWrite.value,
-    sftpPaneOpen: sftpPaneOpen.value,
-    terminalTransferBusy: terminalTransferBusy.value,
-  });
-  if (plan.kind === "ignore") return;
-  openTransferPanel();
-  try {
-    if (plan.kind === "terminal") {
-      const choice = await askDropUploadTarget(files);
-      terminal?.focus();
-      if (choice === "cancel") return;
-      // 落点转 wire 形式（M17 增量②，与终端拖拽同款分工）。
-      await uploadHandleFiles(files, choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir));
-    } else {
-      await uploadHandleFiles(files);
-      await loadDirectory();
-    }
-    if (files.length) showNotice(t("uploaded", { count: files.length }));
-  } catch (cause) {
-    if (isHostBridgeReadFailure(cause)) fallbackToNativeUploadPicker();
-    else showError(cause);
-  }
-}
-
-async function uploadLocalFiles(files: readonly File[], targetDir?: string) {
-  openTransferPanel();
-  uploadDuplicateBatchDecision = undefined;
-  // File 对象没有稳定 id：包一层带序号的 key 再交给调度器。
-  const entries = files.map((file, index) => ({ file, key: `local-${index}` }));
-  await runTransfers(entries, loadTransferConcurrency(), {
-    id: (entry) => entry.key,
-    run: (entry) => uploadSource(entry.file.name, entry.file.size, async (offset, length) => new Uint8Array(await entry.file.slice(offset, offset + length).arrayBuffer()), undefined, targetDir),
-  });
-  await loadDirectory();
-  if (files.length) showNotice(t("uploaded", { count: files.length }));
-}
 
 
 // 外部编辑回传：watch 确认状态机/上传串行链收口在 composables/useExternalEdits。
@@ -6021,170 +5868,8 @@ const {
 // 决定重命名 / 覆盖 / 询问。询问弹窗支持「应用到全部」（批次内生效）。——
 
 /** 批次级「应用到全部」决策：undefined = 尚未决定（逐个询问）。 */
-let uploadDuplicateBatchDecision: "overwrite" | "rename" | undefined;
 
-interface UploadDuplicatePrompt {
-  fileName: string;
-  path: string;
-  resolve: (choice: "overwrite" | "rename" | undefined) => void;
-}
-const uploadDuplicatePrompt = ref<UploadDuplicatePrompt | null>(null);
-const uploadDuplicateApplyAll = ref(false);
 
-function resolveUploadDuplicate(choice: "overwrite" | "rename" | undefined) {
-  if (choice !== undefined && uploadDuplicateApplyAll.value) uploadDuplicateBatchDecision = choice;
-  uploadDuplicatePrompt.value?.resolve(choice);
-  uploadDuplicatePrompt.value = null;
-  uploadDuplicateApplyAll.value = false;
-}
-
-function askUploadDuplicate(fileName: string, path: string): Promise<"overwrite" | "rename" | undefined> {
-  return new Promise((resolve) => {
-    uploadDuplicatePrompt.value = { fileName, path, resolve };
-  });
-}
-
-/**
- * 解析上传的最终远端文件名：目标已存在时按策略返回 proceed=false（放弃）或
- * 调整后的名字（rename 经后端 sftp/rename-unique 探测 name(1)..name(999)）。
- * 预检/重命名失败不阻断上传，回落现有覆盖语义。
- */
-async function resolveUploadDuplicateName(name: string, targetDir: string): Promise<{ name: string; proceed: boolean }> {
-  const sessionId = session.value?.sessionId;
-  if (!sessionId) return { name, proceed: true };
-  const targetPath = joinRemote(targetDir, name);
-  let exists = false;
-  try {
-    const probe = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", { sessionId, path: targetPath });
-    exists = probe.exists === true;
-  } catch {
-    // 预检不可用时保持原语义直接下发。
-    return { name, proceed: true };
-  }
-  if (!exists) return { name, proceed: true };
-  const policy = transferDuplicateState.value;
-  if (policy === "overwrite") return { name, proceed: true };
-  if (policy === "ask" && uploadDuplicateBatchDecision === undefined) {
-    const choice = await askUploadDuplicate(name, targetPath);
-    if (!choice) return { name, proceed: false };
-    uploadDuplicateBatchDecision = choice;
-  }
-  if (policy === "ask" && uploadDuplicateBatchDecision === "overwrite") return { name, proceed: true };
-  // rename（或 ask 选了重命名）：后端探测不冲突新名；旧 sidecar 无该方法时回落原名覆盖。
-  try {
-    const result = await window.dbxPlugin.invoke<{ name: string }>("sftp/rename-unique", { sessionId, dir: targetDir, name });
-    return { name: result.name || name, proceed: true };
-  } catch {
-    return { name, proceed: true };
-  }
-}
-
-function onUploadInput(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const files = Array.from(input.files || []);
-  input.value = "";
-  if (files.length) void uploadLocalFiles(files).catch(showError);
-}
-
-// —— 文件夹上传（issue #78）：纯前端编排，复用既有 sftp/upload 管线 ——
-// 选目录 → buildFolderUploadPlan 生成远端目录集 + 文件清单 → 逐目录
-// sftp/createDirectory（逐个 ensure，父先于子）→ 逐文件 uploadSource
-// （冲突策略：rename/overwrite 交给既有 resolveUploadDuplicateName；ask 在
-// 批量下降级为「已存在即跳过」+ 完成提示计数，避免上百次弹窗交互）。
-// 能力探测：浏览器无 webkitdirectory 支持时入口隐藏（onMounted 一次性探测）。
-
-function chooseFolderUpload() {
-  if (!connected.value || !canWrite.value || !folderUploadSupported.value) return;
-  openTransferPanel();
-  folderUploadInput.value?.click();
-}
-
-function onFolderUploadInput(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const files = Array.from(input.files || []);
-  input.value = "";
-  if (!files.length) return;
-  void uploadFolderFiles(files.map((file) => ({
-    name: file.name,
-    relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || "",
-    size: file.size,
-    readChunk: (offset: number, length: number) => file.slice(offset, offset + length).arrayBuffer().then((buffer) => new Uint8Array(buffer)),
-  }))).catch(showError);
-}
-
-interface FolderUploadEntry {
-  name: string;
-  relativePath: string;
-  size: number;
-  readChunk: (offset: number, length: number) => Promise<Uint8Array>;
-}
-
-async function uploadFolderFiles(entries: readonly FolderUploadEntry[]) {
-  if (!session.value || !canWrite.value) return;
-  const plan = buildFolderUploadPlan(entries);
-  if (!plan.files.length) {
-    showNotice(t("folderUpload.empty"));
-    return;
-  }
-  openTransferPanel();
-  let progress = createFolderUploadProgress(plan);
-  const publish = (currentFile = "") => {
-    folderUploadProgress.value = { ...progress, currentFile };
-  };
-  publish();
-  // 逐目录 ensure：集合已去重且父先于子；单目录失败不阻断（文件上传会
-  // 因目录缺失自然失败并计入 failed），创建失败只降级提示。
-  for (const relative of plan.directories) {
-    const remotePath = joinRemote(currentPath.value, relative);
-    try {
-      await window.dbxPlugin.invoke("sftp/createDirectory", { sessionId: session.value.sessionId, path: remotePath });
-    } catch {
-      // 已存在/权限不足等：由后续文件上传结果兜底，这里不中止整批。
-    }
-    progress = advanceFolderUploadDirectories(progress);
-    publish();
-  }
-  let skipped = 0;
-  let failed = 0;
-  for (const [index, file] of plan.files.entries()) {
-    const entry = entries[index];
-    progress.currentFile = file.relativePath;
-    publish(file.relativePath);
-    const segments = file.relativePath.split("/");
-    const dirSegments = segments.slice(0, -1);
-    const fileName = segments[segments.length - 1];
-    const targetDir = dirSegments.length ? joinRemote(currentPath.value, dirSegments.join("/")) : currentPath.value;
-    // ask 模式批量降级：已存在则跳过（rename/overwrite 走既有解析，不预检）。
-    if (loadTransferDuplicatePolicy() === "ask") {
-      const probe = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", { sessionId: session.value.sessionId, path: joinRemote(targetDir, fileName) }).catch(() => ({ exists: false }));
-      if (probe.exists === true) {
-        skipped += 1;
-        progress = settleFolderUploadFile(progress, { file, ok: false });
-        publish(file.relativePath);
-        continue;
-      }
-    }
-    try {
-      await uploadSource(fileName, file.size, entry.readChunk, undefined, targetDir);
-      progress = settleFolderUploadFile(progress, { file, ok: true });
-    } catch {
-      failed += 1;
-      progress = settleFolderUploadFile(progress, { file, ok: false });
-    }
-    publish();
-  }
-  const outcome = folderUploadOutcome(progress, skipped, failed);
-  folderUploadProgress.value = undefined;
-  await loadDirectory();
-  let message: string;
-  if (outcome.failed) {
-    message = t("folderUpload.completedWithFailures", { count: outcome.failed, total: outcome.fileCount });
-  } else {
-    message = t("folderUpload.completed", { count: outcome.uploaded });
-  }
-  if (outcome.skipped) message += t("folderUpload.skippedNote", { count: outcome.skipped });
-  showNotice(message);
-}
 
 /**
  * Focus the SFTP workbench itself when the user clicks its blank area. This
@@ -6197,106 +5882,43 @@ function focusSftpPaneOnPointerDown(event: PointerEvent) {
   sftpPane.value?.focus({ preventScroll: true });
 }
 
-/**
- * Native file paste is the browser-compatible bridge for Finder/Explorer
- * clipboard files. Text paste is deliberately left untouched so path/search
- * inputs and the remote SFTP clipboard keep their existing behavior.
- */
-function onSftpClipboardPaste(event: ClipboardEvent) {
-  if (!connected.value || !canWrite.value) return;
-  const files = filesFromClipboard(event.clipboardData);
-  if (!files.length) return;
-  event.preventDefault();
-  event.stopPropagation();
-  void uploadLocalFiles(files).catch(showError);
-}
-
-function onDrop(event: DragEvent) {
-  dragActive.value = false;
-  // 与终端侧共用同一道门禁；拒绝时给提示而不是无声吞掉拖入。
-  if (!canAcceptFileDrop({ connected: connected.value, canWrite: canWrite.value })) {
-    showNotice(t("dropRefused"));
-    return;
-  }
-  const files = Array.from(event.dataTransfer?.files || []);
-  if (files.length) void uploadLocalFiles(files).catch(showError);
-}
-
-function onSftpDragEnter(event: DragEvent) {
-  // 只对文件拖拽点亮高亮：拖文本/元素路过不应给出可放置暗示（终端侧同款预检）。
-  if (!event.dataTransfer?.types.includes("Files")) return;
-  dragActive.value = true;
-}
-
-function onTerminalDragEnter(event: DragEvent) {
-  if (!event.dataTransfer?.types.includes("Files")) return;
-  if (!canAcceptTerminalDrop({ connected: connected.value, canWrite: canWrite.value, transferBusy: terminalTransferBusy.value, sftpPaneOpen: sftpPaneOpen.value })) return;
-  terminalDragActive.value = true;
-}
-
-function onTerminalDrop(event: DragEvent) {
-  terminalDragActive.value = false;
-  if (!canAcceptTerminalDrop({ connected: connected.value, canWrite: canWrite.value, transferBusy: terminalTransferBusy.value, sftpPaneOpen: sftpPaneOpen.value })) {
-    // 拒绝不再静默：面板打开时指引拖到面板（那里目录可见），其余（断连/
-    // 只读/传输占用）给同一条提示。
-    showNotice(t(sftpPaneOpen.value ? "terminalDropToPanel" : "dropRefused"));
-    return;
-  }
-  // Files dropped on the terminal ask for a landing directory first: the
-  // shell's cwd (SFTP directory tracking) or any absolute directory typed in
-  // the prompt — silence would make a wrong-guess overwrite too easy.
-  const files = Array.from(event.dataTransfer?.files || []);
-  if (!files.length) return;
-  void runTerminalDropUpload(files);
-}
-
-async function runTerminalDropUpload(files: File[]) {
-  const choice = await askDropUploadTarget(files);
-  terminal?.focus();
-  if (choice === "cancel") return;
-  try {
-    // 落点转 wire 形式（M17 增量②）：cwd 选项取 wire 化的解析结果，自定义
-    // 目录是手输显示文本，latin-1 下经 wireDropDir 转换（auto 原样）。
-    await uploadLocalFiles(files, choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir));
-  } catch (cause) {
-    showError(cause);
-  }
-}
-
-function askDropUploadTarget(files: Array<{ name: string }>): Promise<"cancel" | "cwd" | { dir: string }> {
-  dropUploadTarget.value = "cwd";
-  dropUploadPathInput.value = "";
-  return new Promise((resolve) => {
-    dropUploadResolver = resolve;
-    dropUploadPrompt.value = { files };
-  });
-}
-
-// 选中“指定目录”即聚焦路径输入框（禁用态拿不到焦点，所以不在打开时聚焦）：
-// 键盘流为拖入 → Tab/方向键切到自定义 → 直接输入 → Enter 提交。
-watch(dropUploadTarget, async (target) => {
-  if (target !== "custom") return;
-  await nextTick();
-  dropUploadPathInputEl.value?.focus();
+// 上传链：五路上传入口/重复策略/拖拽落点收口在 composables/useUploadChain。
+const {
+  uploadInput,
+  folderUploadInput,
+  folderUploadSupported,
+  folderUploadProgress,
+  dropUploadPrompt,
+  dropUploadTarget,
+  dropCwdTarget,
+  dropCwdTargetWire,
+  dropUploadPathInput,
+  dropUploadPathInputEl,
+  uploadDuplicatePrompt,
+  uploadDuplicateApplyAll,
+  resolveUploadDuplicateName,
+  resolveUploadDuplicate,
+  onUploadInput,
+  chooseFolderUpload,
+  onFolderUploadInput,
+  onSftpClipboardPaste,
+  handleHostFileDrop,
+  onDrop,
+  onSftpDragEnter,
+  onTerminalDragEnter,
+  onTerminalDrop,
+  chooseUpload,
+  confirmDropUpload,
+  resolveDropUpload,
+} = useUploadChain({
+  t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath,
+  terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy,
+  uploadSource, loadTransferConcurrency, loadTransferDuplicatePolicy, transferDuplicateState,
+  terminal: () => terminal,
+  loadDirectory,
+  openTransferPanel,
+  joinRemote,
 });
-
-function confirmDropUpload() {
-  if (!dropUploadPrompt.value) return;
-  if (dropUploadTarget.value === "custom") {
-    const dir = normalizeDropTargetDir(dropUploadPathInput.value);
-    if (!dir) return;
-    resolveDropUpload({ dir });
-    return;
-  }
-  resolveDropUpload("cwd");
-}
-
-function resolveDropUpload(choice: "cancel" | "cwd" | { dir: string }) {
-  dropUploadPrompt.value = undefined;
-  const resolve = dropUploadResolver;
-  dropUploadResolver = undefined;
-  resolve?.(choice);
-}
 
 // 沙箱 iframe 的剪贴板依赖注入：宿主桥是 optional 且现网宿主未提供，
 // 缺失/拒绝时由 clipboardBridge 逐级降级（见 lib/clipboardBridge.ts）。
