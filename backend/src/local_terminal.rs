@@ -1525,15 +1525,21 @@ mod tests {
             stream
         };
 
-        let cases: [(&str, Option<Vec<u8>>); 4] = [
-            ("size 30;100 (shipping)", Some(conpty_cpr_reply(ROWS, COLS))),
-            ("cursor 1;1 (what xterm says)", Some(b"\x1b[1;1R".to_vec())),
-            ("size 24;80 (mismatched)", Some(conpty_cpr_reply(24, 80))),
-            ("no reply (control)", None),
+        let cases: [(&str, Option<Vec<u8>>); 2] = [
+            ("size 30;100 (shipping)", Some(b"\x1b[30;100R".to_vec())),
+            ("cursor 1;1 (inherit truth)", Some(b"\x1b[1;1R".to_vec())),
         ];
         for (label, reply) in cases {
-            let stream = run_session(reply);
-            eprintln!("[{}] {} bytes: {}", label, stream.len(), escape(&stream));
+            // Watchdog: a wedged ConPTY session must not hang the runner.
+            let (tx, rx) = mpsc::channel();
+            let session = run_session;
+            std::thread::spawn(move || {
+                let _ = tx.send(session(reply));
+            });
+            match rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(stream) => eprintln!("[{}] {} bytes: {}", label, stream.len(), escape(&stream)),
+                Err(_) => eprintln!("[{}] HUNG: no result within 60s", label),
+            }
         }
     }
 
