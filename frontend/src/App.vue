@@ -99,7 +99,7 @@ import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/t
 import { createOutputGate } from "./lib/terminalBackpressure";
 import { createTerminalInputQueue, terminalInputChannel } from "./lib/terminalInputQueue";
 import { SERIAL_STREAM_STDIN, isKnownStreamTag, supportsBinaryInput } from "./lib/serialTerminalFrames";
-import { describeReconnectCountdown, describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS, type ReconnectCountdown } from "./lib/terminalReconnect";
+import { describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS } from "./lib/terminalReconnect";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
 import { decideConnectRetry, isDuplicatedTransportUnavailableError } from "./lib/connectRetry";
 import {
@@ -186,6 +186,7 @@ import {
 import { transferPausable } from "./lib/transferResume";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
+import { useSessionReconnect } from "./composables/useSessionReconnect";
 import { useProtocolFrameBuffers } from "./composables/useProtocolFrameBuffers";
 import { useUploadChain } from "./composables/useUploadChain";
 import { useFilePreview } from "./composables/useFilePreview";
@@ -866,17 +867,6 @@ function webglRecoveryOptions(): WebglRecoveryOptions<WebglRendererLike> {
 }
 // True while attachSession sits inside its bounded backoff loop; turns the
 // status pill and overlay into the dedicated "reconnecting" phase.
-const reconnectPending = ref(false);
-// Pure-display reconnect countdown for the status pill: seconds until the
-// next retry plus the progress through the current backoff delay.
-const reconnectCountdown = ref<ReconnectCountdown | null>(null);
-let reconnectNextAt = 0;
-let reconnectDelayMs = 0;
-let reconnectCountdownTimer = 0;
-// Set the moment a backoff loop starts; consumed by afterSessionConnected to
-// show the "connection restored" notice (with cwd context) only after a real
-// reconnect, not on the initial connect.
-let reconnectWasPending = false;
 const commandMarker = reactive({
   installed: false,
   active: false,
@@ -973,8 +963,6 @@ let unsubscribeFileDrop: (() => void) | undefined;
 let unsubscribeEnvironment: (() => void) | undefined;
 let persistTimer = 0;
 let resizeTimer = 0;
-let reconnectTimer = 0;
-let reconnectAttempt = 0;
 let disposed = false;
 const OPEN_RETRY_MAX = 3;
 let openRetryAttempt = 0;
@@ -1321,28 +1309,6 @@ const terminalErrorFriendly = computed(() => {
 });
 // Reconnect countdown lifecycle: while the backoff loop is pending a 250ms
 // tick recomputes the pure countdown; any exit from "reconnecting" stops it.
-watch(reconnectPending, (pending) => {
-  if (pending) reconnectWasPending = true;
-  if (reconnectCountdownTimer) {
-    window.clearInterval(reconnectCountdownTimer);
-    reconnectCountdownTimer = 0;
-  }
-  if (!pending) {
-    reconnectCountdown.value = null;
-    return;
-  }
-  const update = () => {
-    reconnectCountdown.value = describeReconnectCountdown({
-      pending: true,
-      attempt: reconnectAttempt,
-      nextAt: reconnectNextAt,
-      now: Date.now(),
-      delayMs: reconnectDelayMs,
-    });
-  };
-  update();
-  reconnectCountdownTimer = window.setInterval(update, 250);
-});
 const commandOutputText = computed(() => (commandResult.value ? sanitizeCommandOutput(commandResult.value.output) : ""));
 // Hover tooltip for the terminal command marker strip: full command, exit
 // code, duration and working directory (localized, multi-line).
@@ -2597,25 +2563,24 @@ function drainTerminalFrames() {
 
 // 传输断开/会话被杀的统一入口：有界退避自动重连，梯子耗尽才落到
 // disconnected 终态等待手动重连。
-function scheduleSessionReconnect() {
-  if (!disposed && reconnectAttempt < TERMINAL_RECONNECT_DELAYS.length) {
-    const delay = terminalReconnectDelay(reconnectAttempt++);
-    terminalState.value = "connecting";
-    reconnectPending.value = true;
-    reconnectTimer = window.setTimeout(() => {
-      if (disposed) return;
-      // 梯子第一级重试前先请宿主按最新配置重开连接（与手动 reconnect 同路径）：
-      // 侧边栏编辑连接（改密码等）会让 sidecar 凭据过期，缺这步自动重连必撞
-      // 旧凭据、落到红色错误态等手动自救——凭据已是新的时这是一次假错误。
-      if (reconnectAttempt === 1) void requestHostReopenConnection().finally(() => { if (!disposed) void openSession(); });
-      else void openSession();
-    }, delay);
-    return;
-  }
-  terminalState.value = "disconnected";
-  reconnectPending.value = false;
-  terminalError.value = t("transportDisconnected");
-}
+// 重连梯子：收口在 composables/useSessionReconnect。
+const {
+  reconnectPending,
+  reconnectCountdown,
+  reconnectWasPending,
+  reconnectTimer,
+  reconnectAttempt,
+  reconnectCountdownTimer,
+  reconnectNextAt,
+  reconnectDelayMs,
+  scheduleSessionReconnect,
+} = useSessionReconnect({
+  t,
+  terminalState, terminalError,
+  isDisposed: () => disposed,
+  openSession,
+  requestHostReopenConnection,
+});
 
 function handleEvent(event: DbxPluginEvent) {
   // env（locale/theme）由 shared/frontend/hostThemeRuntime 的订阅分发；
@@ -2919,8 +2884,8 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     if (!(await startRdpFromConnection())) rdpDialogOpen.value = true;
     return;
   }
-  window.clearTimeout(reconnectTimer);
-  reconnectAttempt = 0;
+  window.clearTimeout(reconnectTimer.value);
+  reconnectAttempt.value = 0;
   // Boot-time tab restore can race the host's plugin activation and fail the
   // very first ssh/session/open; a bounded retry self-heals the restored
   // terminal instead of parking it on a manual reconnect button.
@@ -3051,7 +3016,7 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
       inactiveWaiting.value = inactive && !bootRestore;
       terminalState.value = "connecting";
       connectLog.push("warn", t("connectCard.log.retry", { seconds: decision.delayMs / 1000 }));
-      reconnectTimer = window.setTimeout(() => {
+      reconnectTimer.value = window.setTimeout(() => {
         if (!disposed) void openSession(false, bootRestore, true);
       }, decision.delayMs);
       return;
@@ -3088,7 +3053,7 @@ async function attachSession(sessionId: string, retryReference: string = initial
       terminalError.value = t("sessionUnrecoverable");
       return;
     }
-    reconnectAttempt = 0;
+    reconnectAttempt.value = 0;
     await afterSessionConnected();
   } catch (cause) {
     if (!shouldReattachTerminal({ disposed, state: terminalState.value, expectedSessionId: sessionId, currentSessionId: retryReference })) {
@@ -3098,21 +3063,21 @@ async function attachSession(sessionId: string, retryReference: string = initial
       showError(cause, "terminal");
       return;
     }
-    const delay = terminalReconnectDelay(reconnectAttempt++);
+    const delay = terminalReconnectDelay(reconnectAttempt.value++);
     // Once the backoff ladder is exhausted, the stored session is gone for
     // good (e.g. the app was killed while the tab was open): re-attaching a
     // dead session id can never succeed, so fall back to a fresh open.
-    if (reconnectAttempt > TERMINAL_RECONNECT_DELAYS.length) {
-      reconnectAttempt = 0;
+    if (reconnectAttempt.value > TERMINAL_RECONNECT_DELAYS.length) {
+      reconnectAttempt.value = 0;
       reconnectPending.value = false;
-      reconnectTimer = window.setTimeout(() => void openSession(true), delay);
+      reconnectTimer.value = window.setTimeout(() => void openSession(true), delay);
       terminalError.value = t("reattachingTerminal");
       return;
     }
-    reconnectNextAt = Date.now() + delay;
-    reconnectDelayMs = delay;
+    reconnectNextAt.value = Date.now() + delay;
+    reconnectDelayMs.value = delay;
     reconnectPending.value = true;
-    reconnectTimer = window.setTimeout(() => void attachSession(sessionId), delay);
+    reconnectTimer.value = window.setTimeout(() => void attachSession(sessionId), delay);
     terminalError.value = t("reattachingTerminal");
   }
 }
@@ -3132,8 +3097,8 @@ async function afterSessionConnected() {
   ensureSideTreeRoot();
   // After an auto-reconnect succeeds, tell the user the session is back and
   // which working directory context it resumed with (pure-function chosen).
-  if (reconnectWasPending) {
-    reconnectWasPending = false;
+  if (reconnectWasPending.value) {
+    reconnectWasPending.value = false;
     const restored = describeReconnectRestoredNotice({ wasReconnecting: true, path: currentPath.value });
     // Dock panel surface：目录提示属 SFTP/目录跟随域，面板里不弹。
     if (restored && !panelSurface.value) showNotice(t(restored.key, restored.values));
@@ -3855,7 +3820,7 @@ async function reconnect() {
  * 分支负责回收孤儿会话 / 跳过重试与错误呈现。
  */
 function cancelConnect() {
-  window.clearTimeout(reconnectTimer);
+  window.clearTimeout(reconnectTimer.value);
   connectCancelled.value = true;
   connectLog.push("warn", t("connectCard.log.cancelled"));
 }
@@ -3880,9 +3845,9 @@ async function reconnectNow() {
     await reconnect();
     return;
   }
-  window.clearTimeout(reconnectTimer);
+  window.clearTimeout(reconnectTimer.value);
   reconnectPending.value = false;
-  reconnectAttempt = 0;
+  reconnectAttempt.value = 0;
   await openSession();
 }
 
@@ -6946,8 +6911,8 @@ onBeforeUnmount(() => {
   window.clearTimeout(persistTimer);
   void writeWorkbenchState();
   window.clearTimeout(resizeTimer);
-  window.clearTimeout(reconnectTimer);
-  window.clearInterval(reconnectCountdownTimer);
+  window.clearTimeout(reconnectTimer.value);
+  window.clearInterval(reconnectCountdownTimer.value);
   stopCommandMarkerTick();
   stopAgentPromptTimer();
   resolvePasteConfirm(false);
