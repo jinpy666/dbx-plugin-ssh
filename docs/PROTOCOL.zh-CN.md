@@ -958,6 +958,10 @@ offset 读（不再远端 seek），事件带 `compression: "gzip"`、分母回�
 `compression`。各阶段事件 `transferred/size` 自描述（fetching 分母=压缩流体积，decompressing/
 transferring 分母=原始体积），普通下载事件无 phase（线上兼容）。前端归并按阶段切计数器，
 本地 CPU 阶段（staging/compressing/decompressing）不计速度。
+**上传事件恒带 `compression`（2026-09-29 补齐，与下载同语义）**：普通管线为 `"none"`；
+决策 gzip 的任务从建卡（start 响应）起各阶段事件带 `"gzip"`，预压不划算/压缩推送或远端
+gunzip 失败回退后，后续（uploading/终态）事件降回 `"none"`——前端据此清徽标；
+`sftp/transfer/list` 的上传行与 `sftp/transfer/status` 的上传分支同字段。
 
 **清理与磁盘**：两侧临时件（本地 `.part.gz`/`.tgz`、远端 `.dbx-*-<taskId>.gz/.tgz`）在完成/
 失败/取消三态 best-effort 清理（重复删除无害；取消与 prep 建件的竞窗由取消路径的远端删除 +

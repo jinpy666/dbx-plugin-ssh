@@ -326,11 +326,13 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
     if (!resolved.proceed) return;
     uploadName = resolved.name;
   }
-  const info = await window.dbxPlugin.invoke<{ taskId: string; chunkSize: number; resumeOffset?: number }>("sftp/upload/start", resume
+  const info = await window.dbxPlugin.invoke<{ taskId: string; chunkSize: number; resumeOffset?: number; compression?: string }>("sftp/upload/start", resume
     ? { sessionId: session.value.sessionId, remotePath: resume.remotePath, size, resumeTaskId: resume.taskId }
     : { sessionId: session.value.sessionId, remotePath: joinRemote(dir, uploadName), size });
   const startOffset = info.resumeOffset ?? 0;
-  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "upload", fileName: uploadName, size, transferred: startOffset, status: startOffset > 0 ? "running" : "queued", joinedAt: Date.now() };
+  // 压缩通道标记（M33）：start 响应即带决策结果，任务卡建卡时就点徽标；
+  // 后续 progress 事件（恒带 compression）接手维护，回退时以 none 清除。
+  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "upload", fileName: uploadName, size, transferred: startOffset, compression: info.compression === "gzip" ? "gzip" : undefined, status: startOffset > 0 ? "running" : "queued", joinedAt: Date.now() };
   try {
     let offset = startOffset;
     while (offset < size) {
