@@ -38,6 +38,8 @@ const t = (key: string, values: Record<string, string | number> = {}) => workben
 const forwards = ref<PortForward[]>([]);
 const forwardsLoading = ref(false);
 const forwardsBusyId = ref<string | null>(null);
+/** start 在途守卫：连点/回车重放不会重复发起 ssh/forward/start。 */
+const forwardsStarting = ref(false);
 const forwardForm = reactive<ForwardFormDraft>({
   kind: "local",
   listenHost: "127.0.0.1",
@@ -103,7 +105,8 @@ async function submitForward() {
     });
     return;
   }
-  if (!props.sessionId) return;
+  if (!props.sessionId || forwardsStarting.value) return;
+  forwardsStarting.value = true;
   try {
     const payload = await window.dbxPlugin.invoke(
       "ssh/forward/start",
@@ -117,6 +120,8 @@ async function submitForward() {
   } catch (cause) {
     forwardFormMessage.value = "";
     emit("error", cause);
+  } finally {
+    forwardsStarting.value = false;
   }
 }
 
@@ -229,7 +234,7 @@ watch(
           <p v-if="forwardForm.kind === 'remote'" class="forward-form-hint">{{ t("forwards.remoteListenTip") }}</p>
           <p v-if="forwardFormMessage" class="forward-form-error">{{ forwardFormMessage }}</p>
           <footer>
-            <button type="submit" class="primary-button" :disabled="!props.sessionId"><Plus />{{ t("forwards.add") }}</button>
+            <button type="submit" class="primary-button" :disabled="forwardsStarting || !props.sessionId"><Plus />{{ t("forwards.add") }}</button>
           </footer>
         </form>
       </div>

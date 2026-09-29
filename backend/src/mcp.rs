@@ -1808,6 +1808,28 @@ impl McpState {
             }
             _ => {}
         }
+        // Sudo allowlist rebuild for the hidden exec channel (mirrors the
+        // early gate): when the connection declares a whitelist and this is a
+        // sudo run, the command that actually executes is the token-quoted
+        // rebuild — assignments stripped, metacharacters quarantined — so a
+        // passed match can never regain shell semantics under the root
+        // `sh -c`. Visible-terminal routes above keep the raw text: the real
+        // sudo binary's env_reset and the shell's own command separators
+        // bound the elevation there.
+        let allowlist = self.sudo_allowlist_for(arguments).await?;
+        let command: String = if !allowlist.is_empty()
+            && (name == "ssh_exec_sudo" || mcp_safety::runs_under_sudo(command))
+        {
+            sudo_allowlist::allowed_rebuilt_command(&allowlist, command).ok_or_else(|| {
+                format!(
+                    "sudo command is not allowed by this connection's whitelist. \
+                         Allowed patterns: {}",
+                    sudo_allowlist::render_entries(&allowlist)
+                )
+            })?
+        } else {
+            command.to_string()
+        };
         // Saved DBX connections declare their Quick Sudo source (form field
         // sudo_source); the hidden exec channel honors it exactly like the
         // workbench instead of requiring inline credentials on every call.
@@ -1837,7 +1859,7 @@ impl McpState {
             exec::exec_with_sudo(
                 &connection,
                 &auth,
-                command,
+                &command,
                 timeout_secs.unwrap_or(exec::SUDO_EXEC_TIMEOUT),
                 false,
                 &set_env,
@@ -1848,7 +1870,7 @@ impl McpState {
             let connection = self.connection(arguments).await?;
             exec::exec_plain(
                 &connection,
-                command,
+                &command,
                 timeout_secs.unwrap_or(exec::PLAIN_EXEC_TIMEOUT),
                 &set_env,
             )
@@ -1858,7 +1880,7 @@ impl McpState {
     }
 
     /// `ssh_run_bg`: stages a long-running command detached on the remote
-    /// host (nohup, output appended to `/tmp/.dbx-ssh-tasks/<taskId>.log`)
+    /// host (nohup, output appended to `~/.dbx-ssh-tasks/<taskId>.log`)
     /// and returns immediately. The server-side log file is the task's
     /// durable record: status polling reattaches over a fresh connection, so
     /// flapping networks, disconnects, and MCP-host wait caps never lose
@@ -1872,8 +1894,11 @@ impl McpState {
         let task_id = format!("bg-{stamp}-{}", std::process::id() % 100_000);
         // Single-quote escape for embedding inside the remote `sh -c '...'`.
         let escaped = command.replace('\'', "'\\''");
+        // The task dir lives under $HOME (never a shared /tmp path another
+        // local user could pre-create or symlink-bait) and is created 0700 so
+        // task logs/pids stay private to the remote account.
         let remote = format!(
-            "d=/tmp/.dbx-ssh-tasks; mkdir -p \"$d\" || exit 3; f=\"$d/{task_id}.log\"; : > \"$f\"; \
+            "d=\"$HOME/.dbx-ssh-tasks\"; mkdir -p -m 700 \"$d\" || exit 3; f=\"$d/{task_id}.log\"; : > \"$f\"; \
              nohup sh -c '{escaped}; s=$?; echo EXIT_$s' >> \"$f\" 2>&1 & p=$!; \
              echo \"$p\" > \"$f.pid\"; echo \"PID=$p\"; echo \"LOG=$f\""
         );
@@ -1887,7 +1912,7 @@ impl McpState {
                 outcome.exit_code, outcome.output
             ));
         }
-        let default_log = format!("/tmp/.dbx-ssh-tasks/{task_id}.log");
+        let default_log = format!("~/.dbx-ssh-tasks/{task_id}.log");
         let (pid, log_path) = parse_bg_start_output(&outcome.output, default_log);
         Ok(json!({
             "taskId": task_id,
@@ -4892,7 +4917,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "ssh_run_bg",
-            "description": "Start a long-running command detached on the remote host (nohup; output appended to /tmp/.dbx-ssh-tasks/<taskId>.log) and return immediately with taskId/pid/logPath. Survives disconnects, MCP-host wait caps, and session restarts because the output lives on the server. Poll progress with ssh_task_status(logPath). Same safety gates as ssh_exec: destructive patterns need confirmDestructive: true, read-only connections refuse it.",
+            "description": "Start a long-running command detached on the remote host (nohup; output appended to ~/.dbx-ssh-tasks/<taskId>.log) and return immediately with taskId/pid/logPath. Survives disconnects, MCP-host wait caps, and session restarts because the output lives on the server. Poll progress with ssh_task_status(logPath). Same safety gates as ssh_exec: destructive patterns need confirmDestructive: true, read-only connections refuse it.",
             "inputSchema": {
                 "type": "object",
                 "properties": connection_properties(&[
@@ -7379,7 +7404,7 @@ mod tests {
 
     /// Reliability round 5 (churn): the `ssh_run_bg` / `ssh_task_status`
     /// offline surface is the two output parsers (the task table itself
-    /// lives on the remote host under /tmp/.dbx-ssh-tasks — there is no
+    /// lives on the remote host under ~/.dbx-ssh-tasks — there is no
     /// in-process registry to leak). 300 start→running→done→missing cycles
     /// must parse identically every time.
     #[test]
