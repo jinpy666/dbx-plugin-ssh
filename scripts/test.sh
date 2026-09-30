@@ -15,7 +15,11 @@ SKIP_HOST=0
 [ "${1:-}" = "--skip-host" ] && SKIP_HOST=1
 
 if ! command -v node >/dev/null 2>&1 || ! command -v pnpm >/dev/null 2>&1; then
-  NODE_BIN="$(ls -d "$HOME"/.nvm/versions/node/v22*/bin 2>/dev/null | sort -V | tail -1 || true)"
+  # Node 版本单一真源是仓库根 .nvmrc（CI setup-node node-version-file 同源）；
+  # 精确版本缺失时回退 nvm 里最新的 v22。
+  NODE_VER="$(head -n1 .nvmrc 2>/dev/null | tr -d 'vV\n ')"
+  NODE_BIN="$(ls -d "$HOME/.nvm/versions/node/v${NODE_VER:-22.21.0}"/bin 2>/dev/null \
+    || ls -d "$HOME"/.nvm/versions/node/v22*/bin 2>/dev/null | sort -V | tail -1 || true)"
   export PATH="$HOME/Library/pnpm:${NODE_BIN:+$NODE_BIN:}$PATH"
 fi
 export PATH="$HOME/.cargo/bin:$PATH"

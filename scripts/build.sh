@@ -7,7 +7,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if ! command -v pnpm >/dev/null; then
-  export PATH="$HOME/Library/pnpm:$HOME/.nvm/versions/node/v22.21.0/bin:$PATH"
+  # Node 版本单一真源是仓库根 .nvmrc（CI setup-node node-version-file 同源）；
+  # 精确版本缺失时回退 nvm 里最新的 v22。
+  NODE_VER="$(head -n1 .nvmrc 2>/dev/null | tr -d 'vV\n ')"
+  NODE_BIN="$(ls -d "$HOME/.nvm/versions/node/v${NODE_VER:-22.21.0}"/bin 2>/dev/null \
+    || ls -d "$HOME"/.nvm/versions/node/v22*/bin 2>/dev/null | sort -V | tail -1 || true)"
+  export PATH="$HOME/Library/pnpm:${NODE_BIN:+$NODE_BIN:}$PATH"
 fi
 # Prepend only when cargo is not already resolvable: the release CI installs a
 # cargo→cargo-zigbuild wrapper ahead of the rustup shim (Linux sidecars must

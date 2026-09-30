@@ -4443,3 +4443,36 @@ headless conhost 各烧满 1 核近 10 小时——sidecar 死亡（崩溃/更�
 - `lib/hostTheme.ts` 仍四插件各一份（ldap≡kafka 同源，ssh/files 有差异），
   列为下一轮收敛候选；shared/frontend `hostBridge.d.ts` 类型单点（X-M7）
   同前排期。
+
+## CI 提速与过期依赖升级：预构建 UI 分发 + sccache + actions 对齐（2026-10-01）
+
+改动（本仓 `.github/workflows/`、`scripts/build.sh`、`scripts/test.sh`、新增 `.nvmrc`）：
+
+- **前端三件套去重**：candidate 矩阵原每平台重复 `pnpm install + build`（×5）。
+  现在 frontend job 构建一次并上传 `frontend-ui-ssh` artifact（`ui/**` glob
+  锚定根），candidate 下载到 `ui/` 后直接打包——与主仓
+  build-candidates.yml 的 DBX_PREBUILT_UI 模式同款。
+- **sccache 层接入**（照 files/ci.yml 模式）：workflow 级
+  `RUSTC_WRAPPER=sccache` + local-dir 经 actions/cache 持久化，覆盖
+  backend / windows-regression / ssh-smoke / candidate / release build。
+  专治 `dbx-plugin package` staging 副本全量重建（files 实测 ~374 编译单元
+  每次全跑），rust-cache 对该步无效。
+- **过期 actions 升级**（对齐 ldap/files/kafka 仓内已验证版本）：
+  checkout v4→v7、setup-node v4→v7、setup-python v5→v7、upload-artifact
+  v4→v7、download-artifact v4→v8、pnpm/action-setup v4→v6；同文件内
+  upload/download 配套一致（artifact API 不能混版）。
+- **concurrency / timeout 补齐**：ci 加 concurrency（仅 PR 取消、main
+  保留，同 files/kafka）；全部 job 补 timeout（原默认 360 分钟）。
+  release 按 tag 分组不取消；publish 补 timeout 10。
+- **Node 版本单一真源**：新增 `.nvmrc`（22.21.0），CI `setup-node` 改
+  `node-version-file`；build.sh/test.sh 原硬编码 `v22.21.0`/`v22*` glob 改读
+  `.nvmrc`（精确命中，缺失回退最新 v22；`tr` 写法 BSD/GNU 通用）。
+- **release.yml** 加 frontend job：install+build 一次并分发（原 ×5），
+  发布门禁语义不变。
+
+验证：actionlint 结构校验全绿（6 条 shellcheck 提示为存量问题，与 HEAD
+基线一致）；`bash -n` 全过；本地 `DBX_PREBUILT_UI=1 bash scripts/build.sh`
+抽查通过（kafka + files 两个代表插件，前端跳过且打包/校验完整）。
+剩余风险：GitHub runner 真实行为需推送后首跑观察；candidate 的
+cargo 垫片（musl 同步回 `release/`）逻辑未动，artifact 根目录 `ui/` 已由
+glob 锚定，风险低。

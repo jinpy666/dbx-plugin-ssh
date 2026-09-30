@@ -7,6 +7,11 @@ on:
 permissions:
   contents: write
 
+# Same tag cannot run twice concurrently; different tags are independent.
+concurrency:
+  group: release-ssh-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
 env:
   PLUGIN_CLI_VERSION: "0.1.3"
   # aws-lc-sys falls back to its bundled prebuilt NASM objects when the
@@ -15,14 +20,20 @@ env:
   # Windows runners default python stdout to cp1252; UTF-8 mode is a no-op
   # on the other platforms.
   PYTHONUTF8: "1"
+  # sccache caches rustc invocations — `dbx-plugin package`'s staging build
+  # has its own target dir that rust-cache cannot help (see ci.yml).
+  RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: ${{ github.workspace }}/.sccache-cache
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   validate:
     if: startsWith(github.event.release.tag_name, 'ssh-v')
     name: Validate SSH release identity
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate manifest and release tag
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -41,10 +52,39 @@ jobs:
               raise SystemExit(f"release tag {sys.argv[1]!r} does not match {expected!r}")
           PY
 
+  # Build the target-independent UI once; every platform job below unpacks it
+  # as ui/ and packages it as-is instead of rebuilding the frontend 5x.
+  frontend:
+    if: startsWith(github.event.release.tag_name, 'ssh-v')
+    name: Build release frontend
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm --dir frontend install --frozen-lockfile
+      - run: pnpm --dir frontend build
+      - name: Upload prebuilt UI
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-ui-ssh
+          path: ui/**
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     if: startsWith(github.event.release.tag_name, 'ssh-v')
     name: Build ${{ matrix.target }}
-    needs: validate
+    needs: [validate, frontend]
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +114,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native dependencies
         if: matrix.os == 'linux'
         # musl-tools 提供 musl-gcc：aws-lc-sys（russh 依赖）在 musl target 下
@@ -82,25 +122,33 @@ jobs:
         # 在 Linux 被 cfg 门控掉（走 keyfile 层），nasm 只服务 aws-lc-sys 的
         # MSVC 预置对象路径。
         run: sudo apt-get update && sudo apt-get install -y pkg-config musl-tools
-      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v7
         with:
-          version: 11.24.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-      # 发布自带前端构建：ui/index.html 由 frontend/ 源码现生成后再打包，
-      # 不再依赖仓里提交的副本（该副本已脱库，见 .gitignore /ui/）。
-      - run: pnpm --dir frontend install --frozen-lockfile
-      - run: pnpm --dir frontend build
+          node-version-file: .nvmrc
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.sccache-cache
+          # Primary key carries matrix.target so the five parallel saves
+          # never collide.
+          key: sccache-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-
+            sccache-${{ runner.os }}-${{ github.job }}-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
           cache-on-failure: true
+      # ui/index.html 由 frontend job 一次构建后经 artifact 下发，打包直接用
+      # （已脱库，见 .gitignore /ui/）。
+      - name: Download prebuilt UI
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-ui-ssh
+          path: ui
       # CARGO_BUILD_TARGET 经环境变量传导（cargo 原生支持）：同时约束这里的
       # 预构建与 package 步骤里 CLI 内部的 cargo build（CLI 不传 --target）。
       # 非 linux 条目 RUST_TARGET 为空，保持默认主机 target。
@@ -158,7 +206,7 @@ jobs:
             echo "FAIL: packaged linux binary is dynamically linked; expected a static musl build" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dbx-plugin-${{ matrix.target }}
           if-no-files-found: error
@@ -172,9 +220,10 @@ jobs:
     name: Publish plugin release assets
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: dbx-plugin-*
           path: dist

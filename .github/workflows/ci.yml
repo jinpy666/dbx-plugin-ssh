@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One run per branch/PR: superseded pushes cancel instead of queueing (same
+# policy as files/kafka; main-branch in-flight runs are kept).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -18,19 +24,31 @@ env:
   # Unicode (→, ✓) and would die on UnicodeEncodeError. UTF-8 mode is a no-op
   # on the other platforms.
   PYTHONUTF8: "1"
+  # sccache caches rustc invocations. It matters because `dbx-plugin package`
+  # rebuilds the sidecar from a staging copy with its own target dir, so
+  # rust-cache's target-dir reuse cannot help that step — sccache's
+  # content-keyed compilation cache can (same setup as files/ci.yml, which
+  # measured a full ~374-unit rebuild on every packaging run). Storage is a
+  # local dir persisted via actions/cache: a restore miss degrades to a cold
+  # build instead of a failure. Incremental must stay off for sccache Rust
+  # hits.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_DIR: ${{ github.workspace }}/.sccache-cache
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   validate:
     name: Validate repository contracts
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
       - run: python3 scripts/validate_repo.py
       - run: node scripts/connection-forms/verify.mjs
       # 方法注册四路比对：backend 分派臂 ↔ mock 桩 ↔ 前端 invoke ↔ 文档。
@@ -41,21 +59,34 @@ jobs:
   frontend:
     name: Frontend checks
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.24.0
       # setup-node 的 pnpm 缓存需要 pnpm 已在 PATH 中，故置于 pnpm/action-setup 之后
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm --dir frontend install --frozen-lockfile
       - run: pnpm --dir frontend typecheck
       - run: pnpm --dir frontend test
       - run: pnpm --dir frontend build
+      # Upload the target-independent UI once; the candidate matrix jobs unpack
+      # it as ui/ and package it as-is (DBX_PREBUILT_UI semantics) instead of
+      # rebuilding the frontend 5x.
+      - name: Upload prebuilt UI
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-ui-ssh
+          # Glob (not a bare directory) pins the artifact root at ui/, so the
+          # packaging jobs can unpack it straight as ui/index.html.
+          path: ui/**
+          if-no-files-found: error
+          retention-days: 3
       # UI e2e 门禁：架构 WATCH —— 环境损坏不得与测试通过共享静默绿路径。
       # playwright-core 按脚本约定装在仓库外的 runner 路径（/tmp/dbx-ui-mock，
       # 与本地 SKIP 语义同一定位），项目 package.json 保持依赖冻结；版本由
@@ -80,8 +111,9 @@ jobs:
   backend:
     name: Rust sidecar checks
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native dependencies
         # libdbus-1-dev / nasm 已移除：secret-service（dbus）在 Linux 被 cfg
         # 门控掉（走 keyfile 层），nasm 只服务 aws-lc-sys 的 MSVC 预置对象路径。
@@ -90,6 +122,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.sccache-cache
+          # sccache is content-keyed, so an unchanged lock hash keeps the key
+          # stable and new code just adds entries. The primary key carries the
+          # job so parallel saves never collide; the restore prefix lets
+          # sibling jobs on the same OS share compilations.
+          key: sccache-${{ runner.os }}-${{ github.job }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ github.job }}-
+            sccache-${{ runner.os }}-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
@@ -113,20 +157,29 @@ jobs:
     name: Windows connection-config regression
     runs-on: windows-2022
     needs: [validate]
+    timeout-minutes: 25
     defaults:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
-      - uses: actions/setup-python@v5
+          node-version-file: .nvmrc
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.sccache-cache
+          key: sccache-${{ runner.os }}-${{ github.job }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ github.job }}-
+            sccache-${{ runner.os }}-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
@@ -146,11 +199,20 @@ jobs:
     name: SSH container smoke
     runs-on: ubuntu-24.04
     needs: [validate]
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.sccache-cache
+          key: sccache-${{ runner.os }}-${{ github.job }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ github.job }}-
+            sccache-${{ runner.os }}-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
@@ -205,6 +267,7 @@ jobs:
   candidate:
     name: Package candidate (${{ matrix.target }})
     needs: [validate, frontend, backend]
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -240,32 +303,43 @@ jobs:
     env:
       SIDECAR_BINARY: backend/target/release/dbx-plugin-ssh${{ matrix.os == 'windows' && '.exe' || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install native dependencies
         if: matrix.os == 'linux'
         # musl-tools 提供 musl-gcc（aws-lc-sys 在 musl target 下仍要编 C）。
         # libdbus-1-dev / nasm 已移除：Linux 不走 secret-service，nasm 仅服务
         # aws-lc-sys 的 MSVC 预置对象路径。
         run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev musl-tools
-      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v7
         with:
-          version: 11.24.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          node-version-file: .nvmrc
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.sccache-cache
+          # Primary key carries matrix.target so the five parallel saves
+          # never collide.
+          key: sccache-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-
+            sccache-${{ runner.os }}-
       # rust-cache 的 key 自动包含 job 名与 matrix 值，五个 target 各自缓存；
-      # 打包步骤的 CARGO_TARGET_DIR 也指向 backend/target，可一并复用。
+      # 直接构建这一步靠它复用。`dbx-plugin package` 的 staging 副本构建
+      # 不复用 target，改由 sccache 按编译单元提速。
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
           cache-on-failure: true
-      - run: pnpm --dir frontend install --frozen-lockfile
-      - run: pnpm --dir frontend build
+      # UI 构建一次（frontend job 产物），矩阵 job 直接取 ui/ 打包，
+      # 不再每个平台重复 pnpm build。
+      - name: Download prebuilt UI
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-ui-ssh
+          path: ui
       # CARGO_BUILD_TARGET 经环境变量传导给本步与 package 步内 CLI 的
       # cargo build（CLI 不传 --target）；非 linux 条目 RUST_TARGET 为空。
       - name: Build sidecar
@@ -341,7 +415,7 @@ jobs:
             docker run --rm -v "$bin:/sidecar:ro" "$image" sh -c '/sidecar --mcp </dev/null'
             echo "$image: sidecar executed and exited 0"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dbx-plugin-ssh-${{ matrix.target }}
           if-no-files-found: error
@@ -353,9 +427,10 @@ jobs:
     name: Cross-target candidate checks
     needs: [candidate]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: dbx-plugin-ssh-*
           path: dist
