@@ -62,11 +62,11 @@ pub fn browse_local_dir(path: Option<&str>, data_dir: &Path) -> Result<Value, St
             continue;
         };
         entries.push((name, entry.path().to_string_lossy().into_owned()));
-        if entries.len() >= MAX_ENTRIES {
-            break;
-        }
     }
+    // 先排序再截断：截断在排序前会按 readdir 顺序（ext4 为 hash 序，不确定）
+    // 任取 500 条，字母序靠后的目录在用户眼里"消失"。
     entries.sort_by_key(|entry| entry.0.to_lowercase());
+    entries.truncate(MAX_ENTRIES);
     Ok(json!({
         "path": dir.to_string_lossy(),
         "parent": dir.parent().map(|parent| parent.to_string_lossy()),
@@ -262,6 +262,23 @@ mod tests {
         assert_eq!(miss["exists"].as_bool(), Some(false));
         assert!(target_exists("relative", "a.txt").is_err());
         assert!(target_exists("", "a.txt").is_err());
+    }
+
+    #[test]
+    fn browse_truncates_after_sorting_not_before() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let root = tempfile::tempdir().expect("root");
+        // >MAX_ENTRIES 个子目录：截断必须发生在排序后，返回的应是字母序前
+        // 500 个确定子集（而不是 readdir 序的任意 500 个再排序）。
+        for index in 0..(MAX_ENTRIES + 50) {
+            std::fs::create_dir_all(root.path().join(format!("dir-{index:04}"))).unwrap();
+        }
+        let result =
+            browse_local_dir(Some(root.path().to_str().unwrap()), data_dir.path()).expect("browse");
+        let names = result["entries"].as_array().unwrap();
+        assert_eq!(names.len(), MAX_ENTRIES);
+        assert_eq!(names[0]["name"].as_str().unwrap(), "dir-0000");
+        assert_eq!(names[MAX_ENTRIES - 1]["name"].as_str().unwrap(), &format!("dir-{:04}", MAX_ENTRIES - 1));
     }
 
     #[test]

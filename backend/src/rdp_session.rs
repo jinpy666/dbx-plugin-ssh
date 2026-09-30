@@ -3550,7 +3550,7 @@ mod tests {
 
     #[test]
     fn client_build_encodes_the_package_version() {
-        assert_eq!(client_build(), 700); // 0.7.0
+        assert_eq!(client_build(), 701); // 0.7.1
     }
 
     #[test]

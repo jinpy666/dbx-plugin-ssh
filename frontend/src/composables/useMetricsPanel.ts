@@ -106,7 +106,10 @@ async function refreshMetrics() {
     metricsError.value = "";
     recordMetricSamples();
   } catch (cause) {
-    metricsError.value = cause instanceof Error ? cause.message : String(cause);
+    // 错误卡直渲染 metricsError 原文：裸 sidecar 错误串不进 UI（showError
+    // 约定同源），细节留给 console 排查。
+    console.warn("[metrics] refresh failed", cause);
+    metricsError.value = t("metricsRefreshFailed");
   } finally {
     metricsLoading.value = false;
   }

@@ -785,10 +785,11 @@ pub fn find_local_cli(cli: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// One local `docker` invocation: direct exec (argv, no shell), stdout and
-/// stderr merged in order-of-arrival (docker writes diagnostics to stderr
-/// and data to stdout — merged keeps `logs` 2>&1 semantics), bounded by
-/// `timeout`. Exit code -1 covers signal deaths like the remote parse path.
+/// One local `docker` invocation: direct exec (argv, no shell). Output is
+/// `wait_with_output`'s stdout followed by stderr — NOT interleaved in
+/// order-of-arrival (docker writes diagnostics to stderr and data to stdout,
+/// so appending keeps `logs` 2>&1 semantics at the cost of ordering); bounded
+/// by `timeout`. Exit code -1 covers signal deaths like the remote parse path.
 /// A configured endpoint rides the engine's own env var (`DOCKER_HOST` /
 /// `CONTAINER_HOST`) on the spawned process — never argv, never a shell.
 async fn run_local(

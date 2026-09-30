@@ -84,6 +84,17 @@ describe("nextRunnable (per-direction balanced scheduling)", () => {
     expect(nextRunnable(items, 0, 2)?.id).toBe("u2");
   });
 
+  it("breaks equal-slot ties by queue order across directions", () => {
+    // 两侧各占 1 槽（d-running、u-running），槽位 1:1 打平时取队列序在前者。
+    const items = queue([
+      ["r-down", "download", "running"],
+      ["r-up", "upload", "running"],
+      ["d1", "download", "queued"],
+      ["u1", "upload", "queued"],
+    ]);
+    expect(nextRunnable(items, 2, 4)?.id).toBe("d1");
+  });
+
   it("clamps a degenerate limit to at least one", () => {
     const items = queue([["a", "upload", "queued"]]);
     expect(nextRunnable(items, 0, 0)?.id).toBe("a");
@@ -161,6 +172,56 @@ describe("runTransfers (orchestration over the pure scheduler)", () => {
       },
     });
     expect(started).toEqual(["u1", "d1"]);
+  });
+
+  it("keeps per-direction FIFO and global slots on concurrent mixed batches (incremental scheduler)", async () => {
+    // 增量账本实现与 nextRunnable 同契约的性质钉：同方向保持入队顺序、
+    // 全局并发不越限、混合批次全部完成。
+    let inFlight = 0;
+    let peak = 0;
+    const startedUp: string[] = [];
+    const startedDown: string[] = [];
+    const items = [
+      { id: "u0", direction: "upload" as const },
+      { id: "d0", direction: "download" as const },
+      { id: "u1", direction: "upload" as const },
+      { id: "u2", direction: "upload" as const },
+      { id: "d1", direction: "download" as const },
+      { id: "u3", direction: "upload" as const },
+      { id: "d2", direction: "download" as const },
+    ];
+    await runTransfers(items, 2, {
+      id: (item) => item.id,
+      run: async (item) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        (item.direction === "upload" ? startedUp : startedDown).push(item.id);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        inFlight -= 1;
+      },
+    });
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(startedUp).toEqual(["u0", "u1", "u2", "u3"]);
+    expect(startedDown).toEqual(["d0", "d1", "d2"]);
+  });
+
+  it("dispatches in queue order on serial mixed batches (limit 1)", async () => {
+    // limit=1 时每步两方向槽位都是 0（tie → 队列序），顺序必须与入队一致。
+    const started: string[] = [];
+    const items = [
+      { id: "d0", direction: "download" as const },
+      { id: "u0", direction: "upload" as const },
+      { id: "d1", direction: "download" as const },
+      { id: "u1", direction: "upload" as const },
+    ];
+    await runTransfers(items, 1, {
+      id: (item) => item.id,
+      run: async (item) => {
+        started.push(item.id);
+        await Promise.resolve();
+      },
+    });
+    expect(started).toEqual(["d0", "u0", "d1", "u1"]);
   });
 
   it("propagates worker failures and stops scheduling new items", async () => {

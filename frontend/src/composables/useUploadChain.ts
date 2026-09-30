@@ -36,7 +36,7 @@ export function useUploadChain(options: {
   terminalDragActive: Ref<boolean>;
   sftpPaneOpen: Ref<boolean>;
   terminalTransferBusy: Ref<boolean>;
-  uploadSource: (name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean }) => Promise<void>;
+  uploadSource: (name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean }) => Promise<boolean>;
   loadTransferConcurrency: () => number;
   loadTransferMaxActive: () => number;
   loadTransferDuplicatePolicy: () => "rename" | "ask" | "overwrite";
@@ -102,9 +102,10 @@ async function chooseUpload() {
   }
   try {
     const selection = await window.dbxPlugin.fileTransfer.pick({ multiple: true });
-    await uploadHandleFiles(selection.files);
+    const uploaded = await uploadHandleFiles(selection.files);
     await loadDirectory();
-    if (selection.files.length) showNotice(t("uploaded", { count: selection.files.length }));
+    // 计数只含真实上传：重复弹窗里放弃跳过的文件不计入 uploaded N。
+    if (uploaded) showNotice(t("uploaded", { count: uploaded }));
   } catch (cause) {
     // 宿主文件桥失败（pick 或读盘，如 unknown plugin file handle，issue #83/#79）
     // 时不再直接终止：回退到 webview 原生文件选择（File API），上传仍可继续。
@@ -116,17 +117,20 @@ async function chooseUpload() {
   }
 }
 
-async function uploadHandleFiles(files: Array<{ handleId: string; name: string; size: number }>, targetDir?: string) {
-  if (!window.dbxPlugin.fileTransfer || !files.length) return;
+/** 宿主桥句柄批量上传；返回真实上传数（重复弹窗放弃跳过的不计）。 */
+async function uploadHandleFiles(files: Array<{ handleId: string; name: string; size: number }>, targetDir?: string): Promise<number> {
+  if (!window.dbxPlugin.fileTransfer || !files.length) return 0;
   uploadDuplicateBatchDecision = undefined;
+  let uploaded = 0;
   await runTransfers(files, batchTransferLimit(), {
     id: (file) => file.handleId,
     run: async (file) => {
       try {
-        await uploadSource(file.name, file.size, async (offset, length) => {
+        const done = await uploadSource(file.name, file.size, async (offset, length) => {
           const result = await window.dbxPlugin.fileTransfer!.read(file.handleId, offset, length);
           return window.dbxPlugin.decodeBase64(result.dataBase64);
         }, undefined, targetDir);
+        if (done) uploaded += 1;
       } catch (cause) {
         // 桥接读盘错误转成可理解的提示；uploadSource 已补 upload-read-failed 代码，
         // 终端拖入路径（同函数）的 showError 也会显示这条友好文案。
@@ -140,6 +144,7 @@ async function uploadHandleFiles(files: Array<{ handleId: string; name: string; 
       }
     },
   });
+  return uploaded;
 }
 
 function isHostBridgeReadFailure(cause: unknown): boolean {
@@ -178,6 +183,7 @@ async function handleHostFileDrop(files: HostFileDropFile[]) {
   // 带相对路径的条目（宿主遍历目录后的增量契约）走文件夹管线，其余照旧。
   const folderFiles = files.filter((file) => typeof file.relativePath === "string" && file.relativePath);
   const plainFiles = files.filter((file) => !file.relativePath);
+  let plainUploaded = 0;
   try {
     if (plan.kind === "terminal") {
       const choice = await askDropUploadTarget(files);
@@ -186,13 +192,13 @@ async function handleHostFileDrop(files: HostFileDropFile[]) {
       // 落点转 wire 形式（M17 增量②，与终端拖拽同款分工）。
       const targetDir = choice === "cwd" ? dropCwdTargetWire.value : wireDropDir(choice.dir);
       if (folderFiles.length) await uploadHostFolderEntries(folderFiles, targetDir);
-      if (plainFiles.length) await uploadHandleFiles(plainFiles, targetDir);
+      if (plainFiles.length) plainUploaded = await uploadHandleFiles(plainFiles, targetDir);
     } else {
       if (folderFiles.length) await uploadHostFolderEntries(folderFiles);
-      if (plainFiles.length) await uploadHandleFiles(plainFiles);
+      if (plainFiles.length) plainUploaded = await uploadHandleFiles(plainFiles);
       await loadDirectory();
     }
-    if (plainFiles.length) showNotice(t("uploaded", { count: plainFiles.length }));
+    if (plainUploaded) showNotice(t("uploaded", { count: plainUploaded }));
   } catch (cause) {
     if (isHostBridgeReadFailure(cause)) fallbackToNativeUploadPicker();
     else showError(cause);
@@ -224,12 +230,16 @@ async function uploadLocalFiles(files: readonly File[], targetDir?: string) {
   uploadDuplicateBatchDecision = undefined;
   // File 对象没有稳定 id：包一层带序号的 key 再交给调度器。
   const entries = files.map((file, index) => ({ file, key: `local-${index}` }));
+  let uploaded = 0;
   await runTransfers(entries, batchTransferLimit(), {
     id: (entry) => entry.key,
-    run: (entry) => uploadSource(entry.file.name, entry.file.size, async (offset, length) => new Uint8Array(await entry.file.slice(offset, offset + length).arrayBuffer()), undefined, targetDir),
+    run: async (entry) => {
+      const done = await uploadSource(entry.file.name, entry.file.size, async (offset, length) => new Uint8Array(await entry.file.slice(offset, offset + length).arrayBuffer()), undefined, targetDir);
+      if (done) uploaded += 1;
+    },
   });
   await loadDirectory();
-  if (files.length) showNotice(t("uploaded", { count: files.length }));
+  if (uploaded) showNotice(t("uploaded", { count: uploaded }));
 }
 
 let uploadDuplicateBatchDecision: "overwrite" | "rename" | undefined;
@@ -249,10 +259,21 @@ function resolveUploadDuplicate(choice: "overwrite" | "rename" | undefined) {
   uploadDuplicateApplyAll.value = false;
 }
 
+// 单槽弹窗互斥（promise 链）：runTransfers 以批次上限并发跑上传，两个并发
+// 任务同时撞名时，后问直接覆盖 uploadDuplicatePrompt 会把先问的 resolve 顶掉
+// ——该 worker 永久 await、批次挂死、并发槽泄漏。串成链后，后到者的询问在
+// 先到者结算完成后再占槽；弹窗 UI 保持一次只问一个。
+let uploadDuplicateAskChain: Promise<unknown> = Promise.resolve();
+
 function askUploadDuplicate(fileName: string, path: string): Promise<"overwrite" | "rename" | undefined> {
-  return new Promise((resolve) => {
-    uploadDuplicatePrompt.value = { fileName, path, resolve };
-  });
+  const asked = uploadDuplicateAskChain.then(
+    () =>
+      new Promise<"overwrite" | "rename" | undefined>((resolve) => {
+        uploadDuplicatePrompt.value = { fileName, path, resolve };
+      }),
+  );
+  uploadDuplicateAskChain = asked.catch(() => undefined);
+  return asked;
 }
 
 /**
@@ -338,6 +359,10 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?
   // 并发 run 闭包里不能用 session.value（TS 无法跨异步闭包收窄）：守卫后
   // 捕获一次。
   const sessionId = session.value.sessionId;
+  // 批量决策是「每批次开头清 undefined」的契约：文件夹入口同样要清，否则
+  // 上一批的「应用到全部=覆盖」残留会让本批归档撞名时静默放行（解包恒覆盖，
+  // 属破坏性结果）。
+  uploadDuplicateBatchDecision = undefined;
   // baseDir：终端/宿主桥拖入的自定义落点；缺省仍是 SFTP 当前目录。
   const base = baseDir ?? currentPath.value;
   const plan = buildFolderUploadPlan(entries);
@@ -350,10 +375,12 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?
   // 远端 sftp/extract 解包。latin-1 不走该车道：tar 头名字节与解包命令串都是
   // UTF-8 边界（登记边界）。整包超传输上限时回退逐文件。
   if (sftpNameEncodingState.value !== "latin-1" && shouldFolderArchive(plan.files.length)) {
-    const archiveEntries = plan.files.map((file, index) => ({
+    const archiveEntries = plan.files.map((file) => ({
       relativePath: file.relativePath,
       size: file.size,
-      readChunk: entries[index].readChunk,
+      // readChunk 经计划保留的 source 回取：plan.files 是 entries 的过滤子集，
+      // 按下标配对会在首条被跳过后整体错位（A 的字节传到 B 的名字下）。
+      readChunk: file.source.readChunk,
     }));
     const source = createTarChunkSource(archiveEntries);
     if (source) {
@@ -392,7 +419,7 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?
       // sudo 车道建目录换 sudo/mkdir（参数族同用 path），父目录不可写时
       // SFTP createDirectory 必失败。
       const mkdirMethod = sudoUpload() ? "sudo/mkdir" : "sftp/createDirectory";
-      await window.dbxPlugin.invoke(mkdirMethod, { sessionId: session.value.sessionId, path: remotePath });
+      await window.dbxPlugin.invoke(mkdirMethod, { sessionId, path: remotePath });
     } catch {
       // 已存在/权限不足等：由后续文件上传结果兜底，这里不中止整批。
     }
@@ -406,7 +433,7 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?
   // 循环内 read-modify-write 无交错）。单文件失败计 failed 不中止整批——
   // catch 吞掉不外抛，runTransfers 的失败中止语义不触发；用户取消同理
   // （计 failed，批次继续，与既有串行语义一致）。
-  await runTransfers(plan.files.map((file, index) => ({ file, entry: entries[index], index })), batchTransferLimit(), {
+  await runTransfers(plan.files.map((file, index) => ({ file, entry: file.source, index })), batchTransferLimit(), {
     id: (item) => `folder-${item.index}`,
     run: async (item) => {
       const { file, entry } = item;
@@ -561,13 +588,22 @@ async function runTerminalDropUpload(files: File[], roots: DropRootEntry[] | nul
   }
 }
 
+// 与 askUploadDuplicate 同款互斥：两个拖入批次先后落点询问时，后问覆盖
+// dropUploadResolver 会把先问的 promise 顶成永久挂起（拖入静默卡死）。
+let dropUploadAskChain: Promise<unknown> = Promise.resolve();
+
 function askDropUploadTarget(files: Array<{ name: string }>): Promise<"cancel" | "cwd" | { dir: string }> {
-  dropUploadTarget.value = "cwd";
-  dropUploadPathInput.value = "";
-  return new Promise((resolve) => {
-    dropUploadResolver = resolve;
-    dropUploadPrompt.value = { files };
-  });
+  const asked = dropUploadAskChain.then(
+    () =>
+      new Promise<"cancel" | "cwd" | { dir: string }>((resolve) => {
+        dropUploadTarget.value = "cwd";
+        dropUploadPathInput.value = "";
+        dropUploadResolver = resolve;
+        dropUploadPrompt.value = { files };
+      }),
+  );
+  dropUploadAskChain = asked.catch(() => undefined);
+  return asked;
 }
 
 // 选中“指定目录”即聚焦路径输入框（禁用态拿不到焦点，所以不在打开时聚焦）：

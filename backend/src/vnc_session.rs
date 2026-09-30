@@ -429,7 +429,7 @@ pub struct VncSessionRuntime {
 enum GenerationEnd {
     Closed,
     Superseded,
-    Failed { error: String, retryable: bool },
+    Failed { error: String, retryable: bool, was_active: bool },
 }
 
 impl GenerationEnd {
@@ -439,6 +439,7 @@ impl GenerationEnd {
         GenerationEnd::Failed {
             error: message,
             retryable,
+            was_active: false,
         }
     }
 }
@@ -755,7 +756,7 @@ fn spawn_worker(
                     }
                     return;
                 }
-                GenerationEnd::Failed { error, retryable } => {
+                GenerationEnd::Failed { error, retryable, was_active } => {
                     let _ = emit_state("error", Some(error));
                     if !retryable
                         || attempt >= entry.reconnect_attempts
@@ -765,6 +766,15 @@ fn spawn_worker(
                         let _ = emit_state("closed", None);
                         sessions.write().await.remove(&session_id);
                         return;
+                    }
+                    // 活跃代际（完成过握手、进入过泵循环）的失败是"服务过一
+                    // 段时间再断"：退避梯子复位重新计步——attempt 贯穿 worker
+                    // 生命周期不复位的话，长会话经历几次偶发断线后就会因
+                    // 梯子耗尽被永久关闭。总预算由 reconnect_attempts 每次
+                    // 重新给满（与 rdp ReconnectBudget.on_active_generation
+                    // 的语义一致：attempt 复位、预算另计）。
+                    if was_active {
+                        attempt = 0;
                     }
                     attempt += 1;
                     tokio::time::sleep(reconnect_delay(attempt)).await;
@@ -791,6 +801,7 @@ async fn run_generation(
         return GenerationEnd::Failed {
             error,
             retryable: false,
+            was_active: false,
         };
     }
     let password = entry.password.clone().unwrap_or_default();
@@ -808,6 +819,7 @@ async fn run_generation(
                     entry.runtime_host, entry.runtime_port
                 ),
                 retryable: true,
+                was_active: false,
             };
         }
         Err(_) => {
@@ -819,6 +831,7 @@ async fn run_generation(
                     CONNECT_TIMEOUT.as_secs()
                 ),
                 retryable: true,
+                was_active: false,
             };
         }
     };
@@ -860,6 +873,7 @@ async fn run_generation(
                     HANDSHAKE_TIMEOUT.as_secs()
                 ),
                 retryable: true,
+                was_active: false,
             };
         }
     };
@@ -1030,6 +1044,7 @@ async fn handle_vnc_event(
                     return Some(GenerationEnd::Failed {
                         error,
                         retryable: false,
+                        was_active: true,
                     });
                 }
             };
@@ -1053,6 +1068,7 @@ async fn handle_vnc_event(
                     return Some(GenerationEnd::Failed {
                         error: "VNC rectangle bounds overflow".to_string(),
                         retryable: false,
+                        was_active: true,
                     });
                 };
                 match VncFramebuffer::new(width, height) {
@@ -1061,6 +1077,7 @@ async fn handle_vnc_event(
                         return Some(GenerationEnd::Failed {
                             error,
                             retryable: false,
+                            was_active: true,
                         });
                     }
                 }
@@ -1070,6 +1087,7 @@ async fn handle_vnc_event(
                 return Some(GenerationEnd::Failed {
                     error,
                     retryable: false,
+                    was_active: true,
                 });
             }
             let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
@@ -1079,6 +1097,7 @@ async fn handle_vnc_event(
                     return Some(GenerationEnd::Failed {
                         error,
                         retryable: false,
+                        was_active: true,
                     });
                 }
             }
@@ -1097,14 +1116,17 @@ async fn handle_vnc_event(
         VncEvent::JpegImage(_, _) => Some(GenerationEnd::Failed {
             error: TIGHT_UNSUPPORTED.to_string(),
             retryable: false,
+            was_active: true,
         }),
         VncEvent::Copy(_, _) | VncEvent::SetCursor(_, _) => Some(GenerationEnd::Failed {
             error: "The VNC server sent an encoding this client never requested".to_string(),
             retryable: false,
+            was_active: true,
         }),
         VncEvent::Error(message) => Some(GenerationEnd::Failed {
             error: message,
             retryable: false,
+            was_active: true,
         }),
         // SetPixelFormat (we pin the format), Bell, DesktopUpdate (layout
         // bookkeeping) and future variants carry no pixels.

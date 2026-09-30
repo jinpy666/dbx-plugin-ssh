@@ -75,6 +75,12 @@ const qrBusy = ref(false);
 let tickTimer = 0;
 /** 在途生成中的条目 id（reactive Set：驱动按钮 spinner / 禁用态）。 */
 const generating = reactive(new Set<string>());
+// 生成失败后的自动重试退避：连续失败按 5s→10s→30s 封顶阶梯推迟 tick 的
+// 自动拉码（手动点击不受退避约束，成功即清零）。没有退避时 sidecar 不可达
+// 的条目会每秒重发一次 invoke 并反复刷新错误条。
+const RETRY_BACKOFF_STEPS_MS = [5000, 10000, 30000];
+const retryBackoffAt: Record<string, number> = {};
+const retryBackoffStep: Record<string, number> = {};
 
 const connectionName = computed(() => {
   const names = new Map<string, string>();
@@ -106,12 +112,17 @@ async function generateFor(entry: OtpEntryView) {
   generating.add(entry.id);
   try {
     const payload = await window.dbxPlugin.invoke("otp/generate", { entryId: entry.id });
+    delete retryBackoffAt[entry.id];
+    delete retryBackoffStep[entry.id];
     const state = parseGenerateResponse(payload);
     if (!state) return;
     // reused：本窗口已取过码（code 为 null）——保留旧码置灰展示，倒计时走完
     // 新窗口开启后由 tick 自动重新生成。
     codes[entry.id] = state.reused ? { ...state, code: codes[entry.id]?.code ?? "" } : state;
   } catch (cause) {
+    const step = Math.min(retryBackoffStep[entry.id] ?? 0, RETRY_BACKOFF_STEPS_MS.length - 1);
+    retryBackoffAt[entry.id] = Date.now() + RETRY_BACKOFF_STEPS_MS[step];
+    retryBackoffStep[entry.id] = Math.min((retryBackoffStep[entry.id] ?? 0) + 1, RETRY_BACKOFF_STEPS_MS.length - 1);
     showActionError(cause);
   } finally {
     generating.delete(entry.id);
@@ -124,8 +135,10 @@ async function generateAllTotp() {
   }
 }
 
-/** 每秒 tick：TOTP 剩余秒递减，归零即拉新码（新窗口）。 */
+/** 每秒 tick：TOTP 剩余秒递减，归零即拉新码（新窗口）；失败退避期内跳过
+ * 自动拉码，等下一次窗口再试。 */
 function tick() {
+  const now = Date.now();
   for (const entry of entries.value) {
     const state = codes[entry.id];
     if (!state || entry.otpType !== "totp") continue;
@@ -133,6 +146,7 @@ function tick() {
       state.remaining = tickCountdown(state.remaining);
       continue;
     }
+    if ((retryBackoffAt[entry.id] ?? 0) > now) continue;
     void generateFor(entry);
   }
 }

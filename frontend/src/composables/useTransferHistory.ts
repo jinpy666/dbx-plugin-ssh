@@ -9,7 +9,9 @@ export function useTransferHistory(options: {
   t: (key: string, values?: Record<string, string | number>) => string;
   showNotice: (message: string) => void;
   showError: (cause: unknown, target?: "terminal" | "sftp") => void;
-  uploadSource: (name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string) => Promise<void>;
+  // 返回值沿用 uploadSource 的 boolean 契约（true=已交付、false=用户放弃）；
+  // 本处续传只 await 完成与否，false 同样视为结束。
+  uploadSource: (name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string) => Promise<boolean>;
   loadDirectory: (path?: string) => Promise<void>;
 }) {
   const { t, showNotice, showError, uploadSource, loadDirectory } = options;

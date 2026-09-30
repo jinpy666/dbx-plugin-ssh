@@ -171,7 +171,7 @@ pub async fn exists(
 /// counts as absent, every other LSTAT failure surfaces as an error
 /// (M23/R1, same contract as `mcp.rs::raw_sftp_exists` — a permission error
 /// must never masquerade as `exists: false`).
-fn raw_exists_decision(result: Result<RawAttrs, String>) -> Result<bool, String> {
+pub(crate) fn raw_exists_decision(result: Result<RawAttrs, String>) -> Result<bool, String> {
     match result {
         Ok(_) => Ok(true),
         Err(error) => match sftp_raw::error_status(&error) {
@@ -247,7 +247,10 @@ pub async fn rename_unique(
                     .into_iter()
                     .enumerate()
                 {
-                    if client.lstat(&raw).await.is_err() {
+                    // NO_SUCH_FILE-only 契约（同 raw_exists_decision）：把任何
+                    // lstat 错误当"目标不存在"会在链路抖动下让原名直接撞上
+                    // 既有文件、上传走 CREAT|TRUNC 静默覆盖。
+                    if raw_exists_decision(client.lstat(&raw).await)? {
                         return Ok(json!({ "name": candidate, "conflict": index > 0 }));
                     }
                 }
@@ -269,7 +272,11 @@ pub async fn rename_unique(
         session.symlink_metadata(full)
     };
     for (index, candidate) in unique_name_candidates(&clean).into_iter().enumerate() {
-        if probe(&candidate).await.is_err() {
+        let absent = match probe(&candidate).await {
+            Ok(_) => false,
+            Err(error) => high_level_exists_decision(&error)?,
+        };
+        if absent {
             return Ok(json!({ "name": candidate, "conflict": index > 0 }));
         }
     }
@@ -445,7 +452,10 @@ pub async fn archive(
         .iter()
         .map(|source| relative_to_parent(source, &parent))
         .collect::<Vec<_>>();
-    let temporary = format!("{target}.tmp");
+    // 暂存名掺 uuid：确定性 `{target}.tmp` 在两个并发归档到同一目标时共享
+    // 同一文件——两个 tar 互相截断产出损坏归档，且一方的失败清理会删掉
+    // 另一方正在写的 tmp。uuid 隔离后清理只可能删到自己的那份。
+    let temporary = format!("{}.{}.tmp", target, Uuid::new_v4());
     let command = build_archive_command(&temporary, &parent, &relatives);
     let outcome = runtime
         .exec(
@@ -516,6 +526,12 @@ pub async fn extract(
         if listing.trim().is_empty() {
             return Err("Archive is empty or could not be listed".to_string());
         }
+        if contains_unsafe_members(&listing) {
+            return Err(
+                "Archive contains absolute or '..' members that would escape the destination"
+                    .to_string(),
+            );
+        }
         crate::sudo_fs::sudo_exec(
             runtime,
             session_id,
@@ -540,6 +556,12 @@ pub async fn extract(
         .get("output")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if contains_unsafe_members(members) {
+        return Err(
+            "Archive contains absolute or '..' members that would escape the destination"
+                .to_string(),
+        );
+    }
     let top_entries = unique_top_level_entries(members);
     if top_entries.is_empty() {
         return Err("Archive is empty or could not be listed".to_string());
@@ -1117,7 +1139,10 @@ fn relative_to_parent(path: &str, parent: &str) -> String {
     }
 }
 
-/// `tar -czf <tmp> -C <parent> <rel...>` with every argument shell-quoted.
+/// `tar -czf <tmp> -C <parent> -- <rel...>` with every argument shell-quoted.
+/// The `--` terminates option parsing: GNU tar still reads operands as
+/// options, so a remote file named `--checkpoint-action=exec=…` would
+/// otherwise execute on the server during archiving.
 fn build_archive_command(temporary: &str, parent: &str, relatives: &[String]) -> String {
     let members = relatives
         .iter()
@@ -1125,7 +1150,7 @@ fn build_archive_command(temporary: &str, parent: &str, relatives: &[String]) ->
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "tar -czf {} -C {} {}",
+        "tar -czf {} -C {} -- {}",
         shell_quote(temporary),
         shell_quote(parent),
         members
@@ -1138,11 +1163,12 @@ fn build_tar_list_command(archive: &str, compressed: bool) -> String {
     format!("tar -t{z_flag}f {}", shell_quote(archive))
 }
 
-/// `mkdir -p <dest> && tar -x[z]f <archive> -C <dest>`.
+/// `mkdir -p <dest> && tar -x[z]f <archive> -C <dest> --`. The trailing `--`
+/// keeps archive-internal member names from being parsed as tar options.
 fn build_extract_command(archive: &str, destination: &str, compressed: bool) -> String {
     let z_flag = if compressed { "z" } else { "" };
     format!(
-        "mkdir -p {} && tar -x{z_flag}f {} -C {}",
+        "mkdir -p {} && tar -x{z_flag}f {} -C {} --",
         shell_quote(destination),
         shell_quote(archive),
         shell_quote(destination)
@@ -1186,6 +1212,18 @@ fn unique_top_level_entries(listing: &str) -> Vec<String> {
         }
     }
     entries
+}
+
+/// Whether any `tar -t` member would escape the extraction destination: an
+/// absolute path or a `..` segment. GNU tar strips leading `/` on extraction
+/// but does not neutralize `..`, so an archive containing either must be
+/// refused instead of unpacked (catastrophic under the sudo lane, where the
+/// extraction runs as root).
+fn contains_unsafe_members(listing: &str) -> bool {
+    listing.lines().any(|line| {
+        let trimmed = line.trim().trim_start_matches("./");
+        trimmed.starts_with('/') || trimmed.split('/').any(|segment| segment == "..")
+    })
 }
 
 /// Turns an exec outcome (`{success, output, exitCode}`) into an error when
@@ -1456,7 +1494,7 @@ mod tests {
         );
         assert_eq!(
             command,
-            "tar -czf '/tmp/arc.tar.gz.tmp' -C '/var/log' 'my app.log' 'it'\\''s'"
+            "tar -czf '/tmp/arc.tar.gz.tmp' -C '/var/log' -- 'my app.log' 'it'\\''s'"
         );
     }
 
@@ -1471,6 +1509,19 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_tar_members_are_detected_before_extraction() {
+        // `..` 段（GNU tar 解包不中和）与绝对路径成员都必须拒绝——sudo 车道
+        // 下解包以 root 运行，逃出目标目录即任意路径写。
+        assert!(contains_unsafe_members("../evil"));
+        assert!(contains_unsafe_members("dir/../../evil"));
+        assert!(contains_unsafe_members("/abs/path"));
+        assert!(contains_unsafe_members("./dir/../evil"));
+        // 正常成员、嵌套路径、空行放行。
+        assert!(!contains_unsafe_members("good.txt\ndir/nested.txt\n"));
+        assert!(!contains_unsafe_members("./root/sub/file.log"));
+    }
+
+    #[test]
     fn tar_commands_carry_the_z_flag_and_destination() {
         assert_eq!(
             build_tar_list_command("/tmp/a.tgz", true),
@@ -1478,11 +1529,11 @@ mod tests {
         );
         assert_eq!(
             build_extract_command("/tmp/a.tar", "/opt/app", false),
-            "mkdir -p '/opt/app' && tar -xf '/tmp/a.tar' -C '/opt/app'"
+            "mkdir -p '/opt/app' && tar -xf '/tmp/a.tar' -C '/opt/app' --"
         );
         assert_eq!(
             build_extract_command("/tmp/a.tgz", "/opt/app", true),
-            "mkdir -p '/opt/app' && tar -xzf '/tmp/a.tgz' -C '/opt/app'"
+            "mkdir -p '/opt/app' && tar -xzf '/tmp/a.tgz' -C '/opt/app' --"
         );
     }
 
@@ -1504,7 +1555,7 @@ mod tests {
         );
         assert_eq!(
             build_extract_command("/tmp/my archive.tar.gz", "/opt/my app", true),
-            "mkdir -p '/opt/my app' && tar -xzf '/tmp/my archive.tar.gz' -C '/opt/my app'"
+            "mkdir -p '/opt/my app' && tar -xzf '/tmp/my archive.tar.gz' -C '/opt/my app' --"
         );
         // 恶意注入段不得逃出引号位。
         let hostile = build_extract_command("/tmp/evil'; rm -rf / #.tar.gz", "/opt/app", true);

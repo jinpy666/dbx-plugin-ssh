@@ -33,6 +33,10 @@ jobs:
           node-version: "22"
       - run: python3 scripts/validate_repo.py
       - run: node scripts/connection-forms/verify.mjs
+      # 方法注册四路比对：backend 分派臂 ↔ mock 桩 ↔ 前端 invoke ↔ 文档。
+      # 前端调用后端不存在的方法会在运行时静默落 "Method not found"，
+      # 这里是唯一的机器看护点。
+      - run: node scripts/mock_host_registry_check.mjs
 
   frontend:
     name: Frontend checks

@@ -83,10 +83,6 @@ export function transferSlotsInUse(queue: readonly TransferQueueItem[]): number 
   return queue.reduce((count, item) => count + (occupiesSlot(item.status) ? 1 : 0), 0);
 }
 
-function slotsByDirection(queue: readonly TransferQueueItem[], direction: TransferDirection): number {
-  return queue.reduce((count, item) => count + (occupiesSlot(item.status) && item.direction === direction ? 1 : 0), 0);
-}
-
 /** 传输并发上限钳制：1..10，非法值回落 3。 */
 export function clampTransferConcurrency(value: unknown, fallback = 3): number {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -126,11 +122,21 @@ export function nextRunnable<T extends TransferQueueItem>(queue: readonly T[], r
   const boundedLimit = Math.max(1, Math.floor(limit));
   const active = Math.max(0, Math.floor(runningCount));
   if (active >= boundedLimit) return null;
+  // 两个方向的占槽数先一遍数清，再一遍选件——旧实现对每个 queued 项都重扫
+  // 全队列数槽（O(n²)），大批量派发时是主线程卡顿源。取件语义不变：低槽
+  // 方向赢，槽位相同时队列顺序优先（严格小于）。
+  let uploadSlots = 0;
+  let downloadSlots = 0;
+  for (const item of queue) {
+    if (!occupiesSlot(item.status)) continue;
+    if (item.direction === "upload") uploadSlots += 1;
+    else downloadSlots += 1;
+  }
   let best: T | null = null;
   let bestDirectionSlots = Number.POSITIVE_INFINITY;
   for (const item of queue) {
     if (item.status !== "queued") continue;
-    const directionSlots = slotsByDirection(queue, item.direction);
+    const directionSlots = item.direction === "upload" ? uploadSlots : downloadSlots;
     if (directionSlots < bestDirectionSlots) {
       best = item;
       bestDirectionSlots = directionSlots;
@@ -153,25 +159,62 @@ export async function runTransfers<T>(items: readonly T[], limit: number, option
     status: "queued",
   }));
   if (!tracked.length) return;
-  const byId = new Map(tracked.map((item) => [item.id, item]));
   const originals = new Map(tracked.map((item, index) => [item.id, items[index]]));
   let failed = false;
+  // 增量调度账本：批次内状态单向（queued → running → done/cancelled），占槽
+  // 计数与每方向取件指针随迁移同步维护，取件摊还 O(1)——旧实现每次派发都
+  // 全队列重扫（每批 O(n²)，数千文件的文件夹上传会冻结主线程）。取件契约与
+  // nextRunnable 相同：有槽且存在 queued 项才派发；低槽方向赢，槽位相同时
+  // 队列顺序（index 小者）优先。
+  let activeTotal = 0;
+  const activeByDirection: Record<TransferDirection, number> = { upload: 0, download: 0 };
+  const cursorByDirection: Record<TransferDirection, number> = { upload: 0, download: 0 };
+
+  const firstQueued = (direction: TransferDirection): { item: TransferQueueItem; index: number } | null => {
+    for (let index = cursorByDirection[direction]; index < tracked.length; index += 1) {
+      const item = tracked[index];
+      if (item.direction !== direction) continue;
+      if (item.status === "queued") return { item, index };
+      // 终态项永不再回 queued，指针推过即可。
+      cursorByDirection[direction] = index + 1;
+    }
+    return null;
+  };
+
+  const pickNext = (): TransferQueueItem | null => {
+    if (activeTotal >= Math.max(1, Math.floor(limit))) return null;
+    const upload = firstQueued("upload");
+    const download = firstQueued("download");
+    if (!upload && !download) return null;
+    if (!upload) return download!.item;
+    if (!download) return upload.item;
+    const upSlots = activeByDirection.upload;
+    const downSlots = activeByDirection.download;
+    if (downSlots < upSlots) return download.item;
+    if (upSlots < downSlots) return upload.item;
+    return upload.index < download.index ? upload.item : download.item;
+  };
 
   const worker = async (): Promise<void> => {
     for (;;) {
       if (failed) return;
-      const next = nextRunnable(tracked, transferSlotsInUse(tracked), limit);
+      const next = pickNext();
       if (!next) return;
       next.status = "running";
+      activeTotal += 1;
+      activeByDirection[next.direction] += 1;
       try {
         await options.run(originals.get(next.id)!);
-        byId.get(next.id)!.status = "done";
+        next.status = "done";
       } catch (cause) {
-        byId.get(next.id)!.status = "cancelled";
+        next.status = "cancelled";
         if (!isTransferCancelledCause(cause)) {
           failed = true;
           throw cause;
         }
+      } finally {
+        activeTotal -= 1;
+        activeByDirection[next.direction] -= 1;
       }
     }
   };

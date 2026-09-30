@@ -46,13 +46,25 @@ describe("buildFolderUploadPlan", () => {
   });
 
   it("skips files whose last segment does not match the file name (malformed input)", () => {
+    const good = { name: "good.txt", relativePath: "root/good.txt", size: 5 };
     const plan = buildFolderUploadPlan([
-      { name: "good.txt", relativePath: "root/good.txt", size: 5 },
+      good,
       { name: "bad.txt", relativePath: "root/other.txt", size: 9 },
       { name: "", relativePath: "", size: 7 },
     ]);
-    expect(plan.files).toEqual([{ name: "good.txt", relativePath: "root/good.txt", size: 5 }]);
+    expect(plan.files).toEqual([{ name: "good.txt", relativePath: "root/good.txt", size: 5, source: good }]);
     expect(plan.totalBytes).toBe(5);
+  });
+
+  it("keeps the source entry on each planned file so consumers never pair by index", () => {
+    // plan.files 是 entries 的过滤子集：首条畸形被跳过后，按下标配对会把
+    // A 的 readChunk 传到 B 的名字下（数据错位）。source 引用是唯一正确配对。
+    const first = { name: "skip.txt", relativePath: "", size: 1, readChunk: async () => new Uint8Array() };
+    const second = { name: "keep.txt", relativePath: "keep.txt", size: 2, readChunk: async () => new Uint8Array([1]) };
+    const plan = buildFolderUploadPlan([first, second]);
+    expect(plan.files).toHaveLength(1);
+    expect(plan.files[0].source).toBe(second);
+    expect(plan.files[0].source.readChunk).toBe(second.readChunk);
   });
 
   it("accepts a flat selection with no intermediate directories", () => {

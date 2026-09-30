@@ -408,8 +408,20 @@ async fn execute_with(
         let mut probed = false;
         if let Some((client, form)) = raw.as_mut() {
             for (index, target) in targets.iter().enumerate() {
-                if client.lstat(&form.decode(target)).await.is_ok() {
-                    blocked[index] = true;
+                match crate::sftp_ext::raw_exists_decision(
+                    client.lstat(&form.decode(target)).await,
+                ) {
+                    Ok(true) => blocked[index] = true,
+                    Ok(false) => {}
+                    Err(error) => {
+                        // 无法判定占用时按占用拦下：放行会让后续 cp -a
+                        // 静默覆盖既有目标——overwrite 保护优先于可用性。
+                        eprintln!(
+                            "[ssh] sftp {} existence probe errored for {target}: {error}; blocking the item",
+                            op.label()
+                        );
+                        blocked[index] = true;
+                    }
                 }
             }
             probed = true;
@@ -420,18 +432,43 @@ async fn execute_with(
                     blocked = existing_targets(&outcome.output, targets.len());
                 }
                 Ok(outcome) => {
-                    eprintln!(
-                        "[ssh] sftp {} existence probe failed (exit {}): {}; continuing with per-item attempts",
-                        op.label(),
+                    // fail-closed：overwrite=false 的整批占用预检失败后继续
+                    // 逐项执行，后续 cp -a 会静默覆盖既有目标——整批拒绝，
+                    // 让调用方在可确认的状态下重试。
+                    let reason = format!(
+                        "existence probe failed (exit {}): {}; refusing to continue with overwrite protection unverified",
                         outcome.exit_code,
                         outcome.output.trim()
                     );
+                    eprintln!("[ssh] sftp {} {reason}", op.label());
+                    return CopyMoveOutcome {
+                        success: false,
+                        results: request
+                            .from
+                            .iter()
+                            .zip(targets.iter())
+                            .map(|(source, target)| {
+                                ItemOutcome::failed(source, target, reason.clone())
+                            })
+                            .collect(),
+                    };
                 }
                 Err(error) => {
-                    eprintln!(
-                        "[ssh] sftp {} existence probe failed: {error}; continuing with per-item attempts",
-                        op.label()
+                    let reason = format!(
+                        "existence probe failed: {error}; refusing to continue with overwrite protection unverified"
                     );
+                    eprintln!("[ssh] sftp {} {reason}", op.label());
+                    return CopyMoveOutcome {
+                        success: false,
+                        results: request
+                            .from
+                            .iter()
+                            .zip(targets.iter())
+                            .map(|(source, target)| {
+                                ItemOutcome::failed(source, target, reason.clone())
+                            })
+                            .collect(),
+                    };
                 }
             }
         }

@@ -12,12 +12,40 @@ use russh::client::Handle;
 use russh::ChannelMsg;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
+use tokio::sync::watch;
 
 use crate::ssh::SshClient;
 
 pub const SUDO_EXEC_TIMEOUT: Duration = Duration::from_secs(90);
 pub const PLAIN_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_AUTH_ROUNDS: u32 = 3;
+
+/// Cancellation outcome for the `*_cancellable` exec variants. Reaching the
+/// caller as a regular `Err` is deliberate: every exec error path already
+/// funnels through [`abort_exec_channel`], so a cancelled run closes the
+/// channel (and lets sshd reap the remote process) instead of leaking it.
+pub const EXEC_CANCELLED_MESSAGE: &str = "Remote command was cancelled";
+
+/// A never-firing cancel receiver for call sites that have no cancellation
+/// surface (metrics collectors, docker listings, the keepalive probe): they
+/// keep the plain signatures while the internals stay cancellation-aware.
+pub fn never_cancels() -> watch::Receiver<bool> {
+    watch::channel(false).1
+}
+
+/// Resolves once a cancellation is requested. A dropped sender (the exec
+/// registry entry was removed because the task already finished) counts as
+/// "never" so the select arms fall through to normal completion.
+async fn wait_cancelled(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
 
 const PASSWORD_PROMPT_PATTERS: &[&str] = &[
     "password:",
@@ -896,16 +924,47 @@ pub async fn exec_plain(
     timeout: Duration,
     set_env: &[(String, String)],
 ) -> Result<ExecOutcome, String> {
-    let mut channel = handle
-        .channel_open_session()
-        .await
-        .map_err(|error| format!("Failed to open exec channel: {error}"))?;
-    apply_connection_env(&mut channel, set_env).await?;
-    channel
-        .exec(true, command.as_bytes())
-        .await
-        .map_err(|error| format!("Failed to start command: {error}"))?;
-    match run_to_completion(&mut channel, timeout, None).await {
+    exec_plain_cancellable(handle, command, timeout, set_env, &mut never_cancels()).await
+}
+
+/// [`exec_plain`] with a cancellation surface: the signal is honored at the
+/// next await point (channel open, env/exec start, output collection), and a
+/// cancelled run always closes the channel through the regular error path —
+/// dropping a russh `Channel` never sends SSH_MSG_CHANNEL_CLOSE, so the
+/// remote process would survive the task (a mid-authentication `sudo` keeps
+/// the timestamp lock and deadlocks every later sudo on the connection).
+pub async fn exec_plain_cancellable(
+    handle: &Handle<SshClient>,
+    command: &str,
+    timeout: Duration,
+    set_env: &[(String, String)],
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<ExecOutcome, String> {
+    // Dial: no exec issued yet, so a plain error return leaks nothing.
+    let mut channel = tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => return Err(EXEC_CANCELLED_MESSAGE.to_string()),
+        opened = handle.channel_open_session() =>
+            opened.map_err(|error| format!("Failed to open exec channel: {error}"))?,
+    };
+    // env/exec start: the command may have been accepted by the time the
+    // cancel lands, so this arm closes the channel before returning.
+    tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => {
+            return Err(
+                abort_exec_channel(&mut channel, EXEC_CANCELLED_MESSAGE.to_string()).await
+            );
+        }
+        started = async {
+            apply_connection_env(&mut channel, set_env).await?;
+            channel
+                .exec(true, command.as_bytes())
+                .await
+                .map_err(|error| format!("Failed to start command: {error}"))
+        } => started?,
+    }
+    match run_to_completion(&mut channel, timeout, None, cancel).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => Err(abort_exec_channel(&mut channel, error).await),
     }
@@ -923,21 +982,59 @@ pub async fn exec_with_sudo(
     use_pty: bool,
     set_env: &[(String, String)],
 ) -> Result<ExecOutcome, String> {
+    exec_with_sudo_cancellable(
+        handle,
+        auth,
+        command,
+        timeout,
+        use_pty,
+        set_env,
+        &mut never_cancels(),
+    )
+    .await
+}
+
+/// [`exec_with_sudo`] with a cancellation surface (same semantics as
+/// [`exec_plain_cancellable`]: cancel lands at the next await point and the
+/// channel is always closed, so an interrupted `sudo -S` releases the
+/// timestamp lock).
+pub async fn exec_with_sudo_cancellable(
+    handle: &Handle<SshClient>,
+    auth: &SudoAuth,
+    command: &str,
+    timeout: Duration,
+    use_pty: bool,
+    set_env: &[(String, String)],
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<ExecOutcome, String> {
     if auth.password.is_empty() {
         let command_line = format!("sudo -n {}", sanitize_sudo_command(command));
-        let mut channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|error| format!("Failed to open sudo channel: {error}"))?;
-        apply_connection_env(&mut channel, set_env).await?;
-        channel
-            .exec(true, command_line.as_bytes())
-            .await
-            .map_err(|error| format!("Failed to start sudo command: {error}"))?;
-        let outcome = match run_to_completion(&mut channel, timeout, None).await {
-            Ok(outcome) => outcome,
-            Err(error) => return Err(abort_exec_channel(&mut channel, error).await),
+        let mut channel = tokio::select! {
+            biased;
+            _ = wait_cancelled(cancel) => return Err(EXEC_CANCELLED_MESSAGE.to_string()),
+            opened = handle.channel_open_session() =>
+                opened.map_err(|error| format!("Failed to open sudo channel: {error}"))?,
         };
+        tokio::select! {
+            biased;
+            _ = wait_cancelled(cancel) => {
+                return Err(
+                    abort_exec_channel(&mut channel, EXEC_CANCELLED_MESSAGE.to_string()).await
+                );
+            }
+            started = async {
+                apply_connection_env(&mut channel, set_env).await?;
+                channel
+                    .exec(true, command_line.as_bytes())
+                    .await
+                    .map_err(|error| format!("Failed to start sudo command: {error}"))
+            } => started?,
+        }
+        let outcome =
+            match run_to_completion(&mut channel, timeout, None, cancel).await {
+                Ok(outcome) => outcome,
+                Err(error) => return Err(abort_exec_channel(&mut channel, error).await),
+            };
         if outcome.exit_code != 0 {
             return Err(format!(
                 "sudo exited {}: {} (no password configured - run sudo in the terminal first or configure Quick Sudo)",
@@ -948,10 +1045,12 @@ pub async fn exec_with_sudo(
     }
 
     let command_line = format!("sudo -S -p '' {}", sanitize_sudo_command(command));
-    let mut channel = handle
-        .channel_open_session()
-        .await
-        .map_err(|error| format!("Failed to open sudo channel: {error}"))?;
+    let mut channel = tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => return Err(EXEC_CANCELLED_MESSAGE.to_string()),
+        opened = handle.channel_open_session() =>
+            opened.map_err(|error| format!("Failed to open sudo channel: {error}"))?,
+    };
     if use_pty {
         // Some PAM stacks only prompt correctly with a TTY. With a PTY the
         // prompt arrives on the merged stdout stream instead of stderr.
@@ -964,11 +1063,21 @@ pub async fn exec_with_sudo(
     // user value taking precedence, so the two env sources cannot fight
     // over the same key via server-side ordering of duplicate requests.
     let env = merge_channel_env(&[("SUDO_ASKPASS", "")], set_env);
-    apply_channel_env(&mut channel, &env).await?;
-    channel
-        .exec(true, command_line.as_bytes())
-        .await
-        .map_err(|error| format!("Failed to start sudo command: {error}"))?;
+    tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => {
+            return Err(
+                abort_exec_channel(&mut channel, EXEC_CANCELLED_MESSAGE.to_string()).await
+            );
+        }
+        started = async {
+            apply_channel_env(&mut channel, &env).await?;
+            channel
+                .exec(true, command_line.as_bytes())
+                .await
+                .map_err(|error| format!("Failed to start sudo command: {error}"))
+        } => started?,
+    }
 
     // Phase 1: hand sudo the password, with the OTP code (when configured)
     // queued right behind it - `sudo -S` and its PAM stack read the factors
@@ -998,7 +1107,9 @@ pub async fn exec_with_sudo(
     // were piped, so the watcher only answers hosts that re-prompt and
     // reports sudo's authentication failures.
     let outcome =
-        match run_to_completion(&mut channel, timeout, Some((auth, use_pty, otp_piped))).await {
+        match run_to_completion(&mut channel, timeout, Some((auth, use_pty, otp_piped)), cancel)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => return Err(abort_exec_channel(&mut channel, error).await),
         };
@@ -1072,6 +1183,7 @@ async fn run_to_completion(
     channel: &mut russh::Channel<russh::client::Msg>,
     timeout: Duration,
     prompt_context: Option<PromptContext<'_>>,
+    cancel: &mut watch::Receiver<bool>,
 ) -> Result<ExecOutcome, String> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut stdout = Vec::new();
@@ -1086,9 +1198,15 @@ async fn run_to_completion(
         .unwrap_or(false);
 
     while !closed {
-        let message = tokio::time::timeout_at(deadline, channel.wait())
-            .await
-            .map_err(|_| SUDO_WAIT_TIMEOUT_MESSAGE.to_string())?;
+        let message = tokio::select! {
+            biased;
+            // Cancel lands here even mid-collection: returning Err routes
+            // through the caller's abort_exec_channel, which closes the
+            // channel so sshd reaps the remote process.
+            _ = wait_cancelled(cancel) => return Err(EXEC_CANCELLED_MESSAGE.to_string()),
+            waited = tokio::time::timeout_at(deadline, channel.wait()) =>
+                waited.map_err(|_| SUDO_WAIT_TIMEOUT_MESSAGE.to_string())?,
+        };
         let message = match message {
             Some(message) => message,
             None => break,
@@ -1133,7 +1251,12 @@ async fn run_to_completion(
             ChannelMsg::ExitStatus { exit_status } => {
                 exit_code = Some(exit_status as i32);
             }
-            ChannelMsg::Eof | ChannelMsg::Close => {
+            // EOF only means the peer closed its output stream; servers send
+            // exit-status after it and Close last (RFC 4254). Treating EOF as
+            // terminal dropped the exit code and turned failures into
+            // `unwrap_or(0)` successes. The outer deadline still bounds a
+            // server that never closes.
+            ChannelMsg::Close => {
                 closed = true;
             }
             _ => {}
@@ -1222,7 +1345,7 @@ pub async fn validate_sudo_timestamp(handle: &Handle<SshClient>) -> Result<(), S
         .exec(true, b"sudo -nv")
         .await
         .map_err(|error| format!("Failed to start sudo keepalive: {error}"))?;
-    let outcome = run_to_completion(&mut channel, Duration::from_secs(15), None).await?;
+    let outcome = run_to_completion(&mut channel, Duration::from_secs(15), None, &mut never_cancels()).await?;
     if outcome.exit_code == 0 {
         Ok(())
     } else {
@@ -2995,5 +3118,32 @@ mod rotation_tests {
         assert!(merge_channel_env(&[], &[]).is_empty());
         let user = vec![("A".to_string(), "1".to_string())];
         assert_eq!(merge_channel_env(&[], &user).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_cancelled_resolves_on_signal_but_stays_pending_without_one() {
+        // 信号路径：send(true) 后立即解除。
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tx.send(true).expect("send");
+        tokio::time::timeout(Duration::from_millis(100), wait_cancelled(&mut rx))
+            .await
+            .expect("signal resolves the wait");
+        // 无信号：保持挂起（超时即证明未误触发）。
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tokio::time::timeout(Duration::from_millis(20), wait_cancelled(&mut rx))
+            .await
+            .expect_err("stays pending without a signal");
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn wait_cancelled_treats_dropped_sender_as_never() {
+        // sender 被丢弃（任务已从注册表移除）= 永不取消：立即解除，select
+        // 的另一分支（正常完成）得以继续。
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        drop(tx);
+        tokio::time::timeout(Duration::from_millis(100), wait_cancelled(&mut rx))
+            .await
+            .expect("dropped sender resolves as never-cancel");
     }
 }
