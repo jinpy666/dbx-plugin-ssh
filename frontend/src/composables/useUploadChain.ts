@@ -2,6 +2,7 @@ import { computed, nextTick, onMounted, ref, watch, type Ref } from "vue";
 import { filesFromClipboard } from "../lib/clipboardFiles";
 import { collectDropRootEntries, scanDroppedEntries, type DropRootEntry } from "../lib/dropEntries";
 import { advanceFolderUploadDirectories, buildFolderUploadPlan, createFolderUploadProgress, folderUploadOutcome, settleFolderUploadFile, type FolderUploadProgress } from "../lib/folderUpload";
+import { createTarChunkSource, shouldFolderArchive } from "../lib/folderArchive";
 import { planHostFileDrop } from "../lib/hostFileDrop";
 import { displayPathToWire } from "../lib/sftpName";
 import { canAcceptTerminalDrop, canAcceptFileDrop, normalizeDropTargetDir, resolveDropTargetDir } from "../lib/terminalInteraction";
@@ -343,6 +344,39 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?
   if (!plan.files.length) {
     showNotice(t("folderUpload.empty"));
     return;
+  }
+  // 文件夹整包车道（folderArchive）：超过阈值的目录打成单个流式 tar 走既有
+  // 上传管线（网络腿 gzip 由 M33 决策、sudo 车道由 UploadSudo 接管），落盘后
+  // 远端 sftp/extract 解包。latin-1 不走该车道：tar 头名字节与解包命令串都是
+  // UTF-8 边界（登记边界）。整包超传输上限时回退逐文件。
+  if (sftpNameEncodingState.value !== "latin-1" && shouldFolderArchive(plan.files.length)) {
+    const archiveEntries = plan.files.map((file, index) => ({
+      relativePath: file.relativePath,
+      size: file.size,
+      readChunk: entries[index].readChunk,
+    }));
+    const source = createTarChunkSource(archiveEntries);
+    if (source) {
+      openTransferPanel();
+      try {
+        // 冲突策略作用于归档名本身（复用既有预检：ask/rename/覆盖）；解包
+        // 恒 overwrite——整包语义就是解包覆盖，逐文件策略不适用。
+        const resolved = await resolveUploadDuplicateName(source.name, base);
+        if (!resolved.proceed) return;
+        const archivePath = joinRemote(base, resolved.name);
+        await uploadSource(resolved.name, source.size, source.readChunk, undefined, base, { duplicatePreCheckedAbsent: true });
+        await window.dbxPlugin.invoke("sftp/extract", { sessionId, archivePath, destinationPath: base, overwrite: true, sudo: sudoUpload() }, { timeoutMs: 10 * 60 * 1000 });
+        // 归档是传输载体：解包成功即清理（sudo 车道 sudo/remove），失败保留
+        // 供手工解包。
+        await window.dbxPlugin.invoke(sudoUpload() ? "sudo/remove" : "sftp/delete", { sessionId, path: archivePath }).catch(() => undefined);
+        await loadDirectory();
+        showNotice(t("folderArchive.completed", { count: archiveEntries.length, name: resolved.name }));
+      } catch (cause) {
+        showError(cause, "sftp");
+      }
+      return;
+    }
+    showNotice(t("folderArchive.tooLarge"));
   }
   openTransferPanel();
   let progress = createFolderUploadProgress(plan);
