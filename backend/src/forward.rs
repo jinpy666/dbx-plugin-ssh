@@ -941,7 +941,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut tcp, _) = listener.accept().await.unwrap();
-            socks5_destination(&mut tcp).await
+            // Windows turns an immediate drop after the rejection write into a
+            // mid-read RST (10054); linger briefly so the reply is delivered.
+            let result = socks5_destination(&mut tcp).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            result
         });
         let mut client = TcpStream::connect(addr).await.unwrap();
         client.write_all(&[5, 1, 2]).await.unwrap();
@@ -954,7 +958,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut tcp, _) = listener.accept().await.unwrap();
-            socks5_destination(&mut tcp).await
+            // Windows turns an immediate drop after the rejection write into a
+            // mid-read RST (10054); linger briefly so the reply is delivered.
+            let result = socks5_destination(&mut tcp).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            result
         });
         let mut client = TcpStream::connect(addr).await.unwrap();
         client.write_all(&[5, 1, 0]).await.unwrap();
