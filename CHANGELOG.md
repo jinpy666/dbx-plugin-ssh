@@ -6,6 +6,9 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [0.7.1] — 2026-10-01
 
+- **修复内部远端采集在真实会话上全部秒失败**。命令取消重构引入的 watch 等待在「发送端已丢弃」分支错误地立即完成——`biased` select 的取消臂因此恒被抢占，`never_cancels()` 直通道上的每个 exec（metrics/processes/docker 面板/completion 执行器）未拨远端就返回 "Remote command was cancelled"（beta.16 起潜伏，冒烟此前未覆盖该车道）。修复为永久挂起（发送端丢弃 = 无人能再取消 = 走正常完成），并把把错误行为钉成契约的单测改判为断言挂起。
+  **Fixed: every internal remote collection failed instantly on live sessions.** The cancellation-rework watch waiter completed immediately on a dropped sender, so the biased select's cancel arm always won — every exec on the `never_cancels()` direct path (metrics, processes, docker panel, completion executor) returned "Remote command was cancelled" without ever dialing the remote (latent since beta.16; the smoke suite had not covered that lane). It now parks forever (dropped sender = nobody can cancel = normal completion), and the unit test that had pinned the buggy behavior now asserts the pending semantics.
+
 - **传输与远端进程安全加固**。远端命令取消改为优雅关闭通道（此前丢弃 russh Channel——远端进程残留、sudo timestamp 锁死）；会话自发断开（网络丢失）现在完整清理上传表项、`.part`/spool 与 metrics；SFTP 客户端缓存新增失效路径（死通道不再让该会话 SFTP 永久报错），树下载遇通道死亡立即中止整批，不再烧完队列逐文件登记失败。
   **Transfer & remote-process hardening.** Cancelling a remote command now closes the channel gracefully (previously it dropped the russh Channel, leaving remote processes behind and the sudo timestamp locked); a spontaneously dropped session (network loss) now cleans upload entries, `.part`/spool files and metrics; the SFTP client cache gained an invalidation path (a dead channel no longer errors that session's SFTP forever), and tree downloads abort the whole batch on channel death instead of failing every remaining file one by one.
 - **数据完整性 fail-closed**。`rename-unique` 与 `copy` 占用预检遇到瞬时 lstat 错误不再当作「目标不存在/未占用」——链路抖动下曾可能静默覆盖既有文件；sudo 写暂存名与归档暂存名掺 uuid，并发同路径不再交错产出损坏文件。

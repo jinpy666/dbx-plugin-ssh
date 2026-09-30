@@ -42,7 +42,13 @@ async fn wait_cancelled(cancel: &mut watch::Receiver<bool>) {
             return;
         }
         if cancel.changed().await.is_err() {
-            return;
+            // Sender dropped = nobody can cancel anymore: the future must
+            // stay PENDING forever. Completing here would make the biased
+            // select arms take the cancel branch and instantly fail the exec
+            // — `never_cancels()` drops its sender immediately, so every
+            // plain/internal exec (metrics, processes, docker, completion)
+            // would return "cancelled" without ever dialing the remote.
+            std::future::pending::<()>().await;
         }
     }
 }
@@ -3138,12 +3144,14 @@ mod rotation_tests {
 
     #[tokio::test]
     async fn wait_cancelled_treats_dropped_sender_as_never() {
-        // sender 被丢弃（任务已从注册表移除）= 永不取消：立即解除，select
-        // 的另一分支（正常完成）得以继续。
+        // sender 被丢弃（任务已从注册表移除 / never_cancels 立即弃 sender）
+        // = 永不取消：future 必须永久挂起。此前这里错误地断言「立即解除」
+        // ——biased select 的取消臂因此抢占工作臂，never_cancels 系 exec
+        // （metrics/processes/docker/completion）在真实会话上秒报 cancelled。
         let (tx, mut rx) = tokio::sync::watch::channel(false);
         drop(tx);
         tokio::time::timeout(Duration::from_millis(100), wait_cancelled(&mut rx))
             .await
-            .expect("dropped sender resolves as never-cancel");
+            .expect_err("dropped sender must park the future, never resolve as cancelled");
     }
 }
