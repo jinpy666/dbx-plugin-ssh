@@ -191,9 +191,19 @@ jobs:
       - name: Run native Windows backend regression tests
         run: cargo test --locked --manifest-path backend/Cargo.toml
       - name: Build and smoke the Windows sidecar
+        shell: pwsh
         run: |
           cargo build --locked --release --manifest-path backend/Cargo.toml
-          python scripts/smoke_mcp.py --binary backend/target/release/dbx-plugin-ssh.exe
+          # windows-2022 runner 的 docker daemon 偶发 15s 探测超时（main 近
+          # 5 次 CI 两次闪红均为此因，构建与 MCP 校验本体全过）；重试一次。
+          $ok = $false
+          foreach ($i in 1..2) {
+            python scripts/smoke_mcp.py --binary backend/target/release/dbx-plugin-ssh.exe
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "::warning::smoke_mcp.py attempt $i failed (docker daemon probe timeout?); retrying..."
+            Start-Sleep -Seconds 15
+          }
+          if (-not $ok) { exit 1 }
 
   ssh-smoke:
     name: SSH container smoke
