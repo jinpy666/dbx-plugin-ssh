@@ -1270,7 +1270,8 @@ const runtimeEndpoint = computed<RuntimeEndpoint>(() => {
 });
 const connection = computed<ConnectionSummary>(() => {
   const value = hostContext.value.connection;
-  if (!value || typeof value === "object" || Array.isArray(value)) return {} as ConnectionSummary;
+  // 宿主下发的 connection 是配置对象（mockDbxHost 同契约）；对象之外一律视为缺失。
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {} as ConnectionSummary;
   const raw = value as Record<string, unknown>;
   // serial/rdp 连接配置（M32-B）：manifest select 存的是字符串值，逐项
   // 白名单归一，非法/缺失回落各 startXXXSession 的默认值。
@@ -6719,7 +6720,9 @@ onBeforeUnmount(() => {
       <div class="identity-side">
         <div class="identity">
           <span v-if="connection.color" class="connection-color" :style="{ backgroundColor: connection.color }" />
-          <strong>{{ connectionIdentity }}</strong>
+          <!-- 主标题跟随 ConnectingCard 的口径：连接名优先，未命名回退 user@host:port；
+               hover 仍可看到技术标识（UUID 只在名称与 host 全缺失时兜底出现）。 -->
+          <strong :title="connectionIdentity">{{ connection.name || connectionIdentity }}</strong>
           <span v-if="connection.readOnly || connectionReadOnly" class="read-only-badge">{{ t("readOnly") }}</span>
           <span class="session-pill" :class="`session-${sessionStatus}`"><span class="session-dot" aria-hidden="true" />{{ sessionPillText }}<span v-if="sessionStatus === 'reconnecting' && reconnectCountdown" class="session-pill-countdown mono">{{ t("sessionStatus.reconnectCountdown", { seconds: reconnectCountdown.seconds, attempt: reconnectCountdown.attempt }) }}</span></span>
         </div>
