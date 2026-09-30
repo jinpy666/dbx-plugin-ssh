@@ -4,6 +4,11 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.2] — 2026-10-01
+
+- **修复 0.7.1 安装失败**。manifest 的连接右键「端口映射」项携带了宿主尚未发布的 `dynamic` 字段，宿主 manifest 解析器（`deny_unknown_fields`）会拒绝整个 manifest 并报 "unknown field `dynamic`"，现行全部 DBX 版本（含 0.6.29）都无法安装 0.7.1。现改为宿主已支持的声明式 `open-workbench` action：右键「端口映射」直接打开该连接的端口映射管理界面；依赖宿主动态菜单能力的逐条/批量二级菜单暂缓启用（sidecar 侧 `contextMenu/resolve/manage-tunnels` 实现保留，宿主能力在 0.6.29 之后的版本发布后，加回 `dynamic: true` 即恢复）。
+  **Fixed: 0.7.1 failed to install.** The connection context-menu "Port forwards" entry carried a `dynamic` field the host has not shipped yet; the host manifest parser (`deny_unknown_fields`) rejects the whole manifest with "unknown field `dynamic`", so no current DBX version (including 0.6.29) could install 0.7.1. The entry now uses the host-supported declarative `open-workbench` action: right-clicking a connection opens that connection's port-forward manager directly. The per-profile start/stop submenu that depends on the unreleased host dynamic-menu capability is disabled for now (the sidecar's `contextMenu/resolve/manage-tunnels` implementation is kept; re-adding `dynamic: true` once the host capability ships, in a version after 0.6.29, restores it).
+
 ## [0.7.1] — 2026-10-01
 
 - **修复内部远端采集在真实会话上全部秒失败**。命令取消重构引入的 watch 等待在「发送端已丢弃」分支错误地立即完成——`biased` select 的取消臂因此恒被抢占，`never_cancels()` 直通道上的每个 exec（metrics/processes/docker 面板/completion 执行器）未拨远端就返回 "Remote command was cancelled"（beta.16 起潜伏，冒烟此前未覆盖该车道）。修复为永久挂起（发送端丢弃 = 无人能再取消 = 走正常完成），并把把错误行为钉成契约的单测改判为断言挂起。

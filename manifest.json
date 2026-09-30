@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.dbx.ssh",
   "name": "Terminal",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "publisher": "jinpy",
   "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
   "source": "https://github.com/jinpy666/dbx-plugin-ssh",
@@ -1191,7 +1191,10 @@
       "id": "manage-tunnels",
       "label": "Port forwards",
       "menu": "connection",
-      "dynamic": true
+      "action": {
+        "type": "open-workbench",
+        "workbench": "io.dbx.ssh.tunnels"
+      }
     },
     {
       "type": "filesystem-provider",
