@@ -974,8 +974,9 @@ prep 退出兜底双保险）。**会话关闭是第四条等价清理路径（2
 plain/`.gz`/远端临时件，取消与会话关闭都穿过它（此前会话关闭只删 `.part`，树半成品与压缩
 资产按 16GiB 级残留）；上传侧同路径补删 `<spool>.gz` 与孤儿 meta。**sidecar 启动清扫**
 （2026-09-30，评审 L-2）：`transfers/downloads/` 整目录清空（下载临时件不可续传），上传侧
-只清「meta 在而 spool 不在」的孤儿 meta 与永远可再生的 `.part.gz`，健康续传态
-（`.part`+`.json`）原样保留。磁盘放大：上传本地 spool 2×（原始 + .gz）、远端 .gz+plain 2×、下载
+只清「meta 在而 spool 不在」的孤儿 meta、永远可再生的 `.part.gz` 与超过 7 天龄期
+（`UPLOAD_SPOOL_RETENTION`）的超龄 spool（连同 meta——断点续传不跨「7 天前」的窗口），
+健康续传态（`.part`+`.json`）原样保留。磁盘放大：上传本地 spool 2×（原始 + .gz）、远端 .gz+plain 2×、下载
 本地 .gz+.plain 2×、树远端 .tgz+源树 2×；`MAX_TRANSFER_SIZE`（16 GiB）仍按原始大小语义。
 
 ### 递归目录下载（sftp/download/tree/start）
