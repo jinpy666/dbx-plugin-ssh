@@ -103,7 +103,10 @@ pub async fn collect_metrics(handle: &Handle<SshClient>) -> Result<serde_json::V
     if outcome.exit_code != 0 && outcome.output.is_empty() {
         // output 被条件保证为空，格式化它只会产出 "failed: " 空因；退出码
         // 是这里唯一可用的线索。
-        return Err(format!("metrics collection failed (exit {})", outcome.exit_code));
+        return Err(format!(
+            "metrics collection failed (exit {})",
+            outcome.exit_code
+        ));
     }
     let mut metrics = parse_metrics_output(&outcome.output);
     merge_accelerator_sections(handle, &mut metrics).await;

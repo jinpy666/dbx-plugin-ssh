@@ -14767,7 +14767,8 @@ matrix-ed25519";
                 spawn_mock_koko(Shape::PasswordThenMfa, "请输入6位数字。", "[MFA认证]：").await;
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
-            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts =
+                PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({}),
@@ -14809,7 +14810,8 @@ matrix-ed25519";
                 spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let gateway = Arc::new(ManualOtpGateway::submitting("should-not-be-used"));
             let mut runtime = test_runtime();
-            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts =
+                PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({ "totp_secret": MFA_CODE }),
@@ -14836,7 +14838,8 @@ matrix-ed25519";
                 spawn_mock_koko(Shape::PasswordThenMfa, "请输入6位数字。", "[MFA认证]：").await;
             let gateway = Arc::new(ManualOtpGateway::cancelling());
             let mut runtime = test_runtime();
-            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts =
+                PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({}),
@@ -14870,7 +14873,8 @@ matrix-ed25519";
             .await;
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
-            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts =
+                PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({}),
@@ -14949,7 +14953,8 @@ matrix-ed25519";
             .await;
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
-            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts =
+                PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({}),
@@ -15065,7 +15070,8 @@ matrix-ed25519";
         async fn copied_session_without_a_live_transport_does_not_reprompt_for_mfa() {
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
-            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts =
+                PromptBroker::with_gateway(gateway.clone());
             runtime
                 .store_connection(koko_connection(
                     1,

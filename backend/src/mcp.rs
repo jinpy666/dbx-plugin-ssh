@@ -1211,7 +1211,11 @@ impl McpState {
             // "执行这条改写后的文本"，不是"豁免安全闸"——改写可以把无害
             // 命令换成破坏性命令、把白名单外的 sudo 塞进来。
             let edited = rewritten
-                .get(if name == "ssh_terminal_input" { "input" } else { "command" })
+                .get(if name == "ssh_terminal_input" {
+                    "input"
+                } else {
+                    "command"
+                })
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if !edited.is_empty() {
@@ -2489,9 +2493,10 @@ impl McpState {
             }
         };
         // sftp_ready 为 None 的分支专用绑定：硬错误分支经它还原原错误文案。
-        let sftp_bind = |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
-            sftp_ready.clone().ok_or_else(|| error.to_string())
-        };
+        let sftp_bind =
+            |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
+                sftp_ready.clone().ok_or_else(|| error.to_string())
+            };
         // 文件名编码判定（M17，连接级）：连接覆盖 > 全局偏好 > 缺省 auto。
         // dispatch 层已把 connectionName/端点选择器归一化为显式 connectionId
         // （见 call_tool_inner），这里只需读 connectionId；内联拨号按未覆盖
@@ -3030,9 +3035,10 @@ impl McpState {
                 Err(error) => (entry.handle.clone(), None, error),
             }
         };
-        let sftp_bind = |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
-            sftp_ready.clone().ok_or_else(|| error.to_string())
-        };
+        let sftp_bind =
+            |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
+                sftp_ready.clone().ok_or_else(|| error.to_string())
+            };
         // latin-1（M19）：显示路径整条按 latin1_encode_display 还原字节后走
         // 裸包直写（选型：沿既有 sftp_upload 直写语义，无工作台上传族的
         // `.dbx-part` 暂存需求；覆盖预检与写入同一字节口径，复用 M18 的
@@ -3167,9 +3173,10 @@ impl McpState {
                 Err(error) => (entry.handle.clone(), None, error),
             }
         };
-        let sftp_bind = |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
-            sftp_ready.clone().ok_or_else(|| error.to_string())
-        };
+        let sftp_bind =
+            |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
+                sftp_ready.clone().ok_or_else(|| error.to_string())
+            };
         // latin-1（M19）：读侧沿 M18 sftp_read_file 同策略——显示路径整条
         // latin1_encode_display 还原字节后 OPEN(READ)+READ，裸包路径任何
         // 失败回退高层重读（读操作安全）。目录探测不单独走裸包 STAT：目录
@@ -3189,12 +3196,14 @@ impl McpState {
                                      mcp/settings/set)"
                                 ));
                             }
-                            tokio::fs::write(local_target, &data).await.map_err(|error| {
-                                format!(
-                                    "Cannot write local file {}: {error}",
-                                    local_target.display()
-                                )
-                            })?;
+                            tokio::fs::write(local_target, &data)
+                                .await
+                                .map_err(|error| {
+                                    format!(
+                                        "Cannot write local file {}: {error}",
+                                        local_target.display()
+                                    )
+                                })?;
                             return Ok(json!({
                                 "remotePath": remote_path,
                                 "localPath": local_path,
@@ -3245,12 +3254,14 @@ impl McpState {
         // Vec + 同步写——阻塞 worker 且 RSS 峰值即文件大小）。`take` 仍是
         // 无 size 文件（或 stat 后变大的文件）的硬上限；stat 快路径照旧。
         let mut reader = file.take(download_limit.saturating_add(1));
-        let mut local = tokio::fs::File::create(local_target).await.map_err(|error| {
-            format!(
-                "Cannot create local file {}: {error}",
-                local_target.display()
-            )
-        })?;
+        let mut local = tokio::fs::File::create(local_target)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Cannot create local file {}: {error}",
+                    local_target.display()
+                )
+            })?;
         let mut transferred: u64 = 0;
         let mut buffer = vec![0_u8; 256 * 1024];
         let copy_result: Result<(), String> = async {
@@ -3263,15 +3274,12 @@ impl McpState {
                     break;
                 }
                 transferred += read as u64;
-                local
-                    .write_all(&buffer[..read])
-                    .await
-                    .map_err(|error| {
-                        format!(
-                            "Cannot write local file {}: {error}",
-                            local_target.display()
-                        )
-                    })?;
+                local.write_all(&buffer[..read]).await.map_err(|error| {
+                    format!(
+                        "Cannot write local file {}: {error}",
+                        local_target.display()
+                    )
+                })?;
             }
             Ok(())
         }
@@ -3288,10 +3296,12 @@ impl McpState {
                  bytes (adjust maxDownloadBytes via mcp/settings/set)"
             ));
         }
-        local
-            .flush()
-            .await
-            .map_err(|error| format!("Cannot flush local file {}: {error}", local_target.display()))?;
+        local.flush().await.map_err(|error| {
+            format!(
+                "Cannot flush local file {}: {error}",
+                local_target.display()
+            )
+        })?;
         Ok(json!({ "remotePath": remote_path, "localPath": local_path, "bytes": transferred }))
     }
 
@@ -5862,7 +5872,10 @@ mod tests {
             .enforce_command_text_gates("ssh_exec", "curl example.test", true, &json!({}))
             .await
             .unwrap_err();
-        assert!(error.contains("not recognized as read-only"), "got: {error}");
+        assert!(
+            error.contains("not recognized as read-only"),
+            "got: {error}"
+        );
         state
             .enforce_command_text_gates("ssh_exec", "ls /tmp", true, &json!({}))
             .await

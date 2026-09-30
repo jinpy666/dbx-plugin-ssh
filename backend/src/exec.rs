@@ -1036,11 +1036,10 @@ pub async fn exec_with_sudo_cancellable(
                     .map_err(|error| format!("Failed to start sudo command: {error}"))
             } => started?,
         }
-        let outcome =
-            match run_to_completion(&mut channel, timeout, None, cancel).await {
-                Ok(outcome) => outcome,
-                Err(error) => return Err(abort_exec_channel(&mut channel, error).await),
-            };
+        let outcome = match run_to_completion(&mut channel, timeout, None, cancel).await {
+            Ok(outcome) => outcome,
+            Err(error) => return Err(abort_exec_channel(&mut channel, error).await),
+        };
         if outcome.exit_code != 0 {
             return Err(format!(
                 "sudo exited {}: {} (no password configured - run sudo in the terminal first or configure Quick Sudo)",
@@ -1112,13 +1111,17 @@ pub async fn exec_with_sudo_cancellable(
     // Phase 2: watch for follow-up prompts and collect output. Both factors
     // were piped, so the watcher only answers hosts that re-prompt and
     // reports sudo's authentication failures.
-    let outcome =
-        match run_to_completion(&mut channel, timeout, Some((auth, use_pty, otp_piped)), cancel)
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => return Err(abort_exec_channel(&mut channel, error).await),
-        };
+    let outcome = match run_to_completion(
+        &mut channel,
+        timeout,
+        Some((auth, use_pty, otp_piped)),
+        cancel,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => return Err(abort_exec_channel(&mut channel, error).await),
+    };
     if outcome.exit_code != 0 {
         return Err(format!(
             "sudo exited {}: {}",
@@ -1351,7 +1354,13 @@ pub async fn validate_sudo_timestamp(handle: &Handle<SshClient>) -> Result<(), S
         .exec(true, b"sudo -nv")
         .await
         .map_err(|error| format!("Failed to start sudo keepalive: {error}"))?;
-    let outcome = run_to_completion(&mut channel, Duration::from_secs(15), None, &mut never_cancels()).await?;
+    let outcome = run_to_completion(
+        &mut channel,
+        Duration::from_secs(15),
+        None,
+        &mut never_cancels(),
+    )
+    .await?;
     if outcome.exit_code == 0 {
         Ok(())
     } else {

@@ -408,9 +408,8 @@ async fn execute_with(
         let mut probed = false;
         if let Some((client, form)) = raw.as_mut() {
             for (index, target) in targets.iter().enumerate() {
-                match crate::sftp_ext::raw_exists_decision(
-                    client.lstat(&form.decode(target)).await,
-                ) {
+                match crate::sftp_ext::raw_exists_decision(client.lstat(&form.decode(target)).await)
+                {
                     Ok(true) => blocked[index] = true,
                     Ok(false) => {}
                     Err(error) => {

@@ -278,7 +278,10 @@ mod tests {
         let names = result["entries"].as_array().unwrap();
         assert_eq!(names.len(), MAX_ENTRIES);
         assert_eq!(names[0]["name"].as_str().unwrap(), "dir-0000");
-        assert_eq!(names[MAX_ENTRIES - 1]["name"].as_str().unwrap(), &format!("dir-{:04}", MAX_ENTRIES - 1));
+        assert_eq!(
+            names[MAX_ENTRIES - 1]["name"].as_str().unwrap(),
+            &format!("dir-{:04}", MAX_ENTRIES - 1)
+        );
     }
 
     #[test]

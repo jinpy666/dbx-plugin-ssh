@@ -429,7 +429,11 @@ pub struct VncSessionRuntime {
 enum GenerationEnd {
     Closed,
     Superseded,
-    Failed { error: String, retryable: bool, was_active: bool },
+    Failed {
+        error: String,
+        retryable: bool,
+        was_active: bool,
+    },
 }
 
 impl GenerationEnd {
@@ -756,7 +760,11 @@ fn spawn_worker(
                     }
                     return;
                 }
-                GenerationEnd::Failed { error, retryable, was_active } => {
+                GenerationEnd::Failed {
+                    error,
+                    retryable,
+                    was_active,
+                } => {
                     let _ = emit_state("error", Some(error));
                     if !retryable
                         || attempt >= entry.reconnect_attempts
