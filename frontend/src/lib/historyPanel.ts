@@ -133,6 +133,36 @@ export function moveHistoryPanelIndex(index: number, delta: number, length: numb
   return (((index + delta) % length) + length) % length;
 }
 
+/** 面板开启期间的键位→动作映射（shell ↑ 语义，纯函数供单测；App 消费动作
+ *  并把选中项实时回填输入行）。move=移动高亮；stay=消费但不动（顶部最旧
+ *  一条再 ↑ 停住，不回绕到最新——readline 到最旧即止）；fill=确认当前高亮
+ *  回填；cancel=取消导航：恢复打开前的原输入行并收起面板（Esc，以及底部
+ *  最新一条再 ↓——越过最新回到原行，等价 shell 历史栈回退）；close=收起
+ *  （空列表的 Enter/Tab 无可回填项）。返回 null 的按键不消费、放行远端。 */
+export type HistoryPanelKeyAction =
+  | { kind: "move"; delta: -1 | 1 }
+  | { kind: "stay" }
+  | { kind: "fill" }
+  | { kind: "cancel" }
+  | { kind: "close" };
+
+export function resolveHistoryPanelKey(key: string, activeIndex: number, length: number): HistoryPanelKeyAction | null {
+  switch (key) {
+    case "Escape":
+      return { kind: "cancel" };
+    case "ArrowDown":
+      if (length > 0 && activeIndex >= length - 1) return { kind: "cancel" };
+      return { kind: "move", delta: 1 };
+    case "ArrowUp":
+      return activeIndex > 0 ? { kind: "move", delta: -1 } : { kind: "stay" };
+    case "Enter":
+    case "Tab":
+      return length > 0 ? { kind: "fill" } : { kind: "close" };
+    default:
+      return null;
+  }
+}
+
 /** 重过滤后收拢高亮项：越界裁到列表尾，空列表归零。 */
 export function clampHistoryPanelIndex(index: number, length: number): number {
   if (length <= 0) return 0;

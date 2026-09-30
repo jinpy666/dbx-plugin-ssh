@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // Warp 式终端 history 面板（↑ 唤起）：把 commandHistory 过滤结果渲染成可
-// 键盘/鼠标快速选择的面板；选中只回填输入行不执行（回车留给用户）。
+// 键盘/鼠标快速选择的面板；选中即实时回填输入行不执行（高亮与行内容一致，
+// 回车留给用户，Esc/底部再 ↓ 由 App 恢复原行）。
 // 面板内搜索框（query 上抛 App 重过滤）：打开即聚焦，↑↓/Enter/Tab/Esc 经
 // panel-key 转发给 App 的面板按键处理（preventDefault 挡输入框默认行为），
 // 其余字符键进 query 实时过滤；Esc 关闭后焦点由 App 的 close 归还终端。

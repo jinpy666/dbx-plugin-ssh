@@ -289,6 +289,7 @@ import {
   moveHistoryPanelIndex,
   pruneHistoryTimes,
   recordHistoryTime,
+  resolveHistoryPanelKey,
   sanitizeHistoryTimes,
   type HistoryPanelEntry,
 } from "./lib/historyPanel";
@@ -814,7 +815,8 @@ const searchResultIndex = ref(0);
 const searchResultCount = ref(0);
 // Quick Select Mode（WT-1，对标 WezTerm）：注册表动作 quick-select 唤起，
 // Warp 式 history 面板（↑ 唤起，对标 Warp command history）：commandHistory
-// 可视化快速回填（仅回填不执行）。打开即聚焦面板内搜索框：↑↓/Enter/Tab/Esc
+// 可视化快速回填（选中即回填不执行，行内容与面板高亮恒一致）。打开即聚焦
+// 面板内搜索框：↑↓/Enter/Tab/Esc
 // 由 App 的面板分支统一消费，字符键进搜索框实时过滤，其余按键放行。
 const historyPanelOpen = ref(false);
 // 面板内搜索框的 query（开启期间焦点在输入框，打字即过滤；关闭随面板清空）。
@@ -822,6 +824,9 @@ const historyPanelQuery = ref("");
 const historyPanelEntries = ref<HistoryPanelEntry[]>([]);
 const historyPanelActiveIndex = ref(0);
 const historyPanelAnchor = ref<SuggestionAnchor | null>(null);
+// 打开前的输入行快照：选中同步会改写行缓冲，取消导航（Esc / 底部再 ↓）时
+// 原样恢复，等价 shell readline 的历史栈回退。
+let historyPanelOriginalLine = "";
 const pasteConfirm = ref<PasteConfirmation>();
 // 终端拖入文件的落点询问：null 表示取消；"cwd" 用解析后的 shell/SFTP 当前
 // 目录（resolveDropTargetDir：终端 cwd 跟随 → SFTP home → 面板当前目录），
@@ -2056,10 +2061,12 @@ const {
 // ---------------------------------------------------------------------------
 // Warp 式 history 面板（对标 Warp command history）：↑ 裸键（或注册表
 // command-history 动作）唤起，commandHistory 过滤结果可视化快速回填。
-// 纯逻辑（过滤/导航/门判定）在 lib/historyPanel.ts；这里只做状态接线——
+// 纯逻辑（过滤/键位映射/门判定）在 lib/historyPanel.ts；这里只做状态接线——
 // 打开即全量视图 + 聚焦面板内搜索框（过滤只认搜索框 query，不读行缓冲——
-// 行缓冲模型在 Ctrl+U/方向键编辑后会残留残影）；选中走
-// replaceTerminalLineWith 仅回填不执行（自动执行命令路径不新增）。
+// 行缓冲模型在 Ctrl+U/方向键编辑后会残留残影）。选中即回填（shell ↑ 语义）：
+// 打开/↑↓/悬停激活/搜索框重过滤都把当前高亮命令实时写进输入行（replace
+// TerminalLineWith 整行擦重打，不回车），行内容与面板高亮恒一致；取消导航
+// （Esc / 底部最新一条再 ↓）恢复打开前的原输入行并收起面板。
 // ---------------------------------------------------------------------------
 /** 打开门：任一浮层/alternate 屏/命令运行中/传输占用时不拦截 ↑。 */
 function historyPanelGateOpen(): boolean {
@@ -2087,8 +2094,11 @@ function openHistoryPanel() {
   if (panelSessionId && !isLocalMode.value) void loadRemoteShellHistory(panelSessionId);
   const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, ""), commandHistoryTimes.value);
   historyPanelEntries.value = next;
-  // shell ↑ 语义:初始高亮最底部(最新执行的命令),↑ 一直往上翻更旧的。
+  // shell ↑ 语义:初始高亮最底部(最新执行的命令),↑ 一直往上翻更旧的;
+  // 打开即回填——按下 ↑ 的瞬间输入行就出现最新一条,与 shell 完全一致。
   historyPanelActiveIndex.value = clampHistoryPanelIndex(next.length - 1, next.length);
+  historyPanelOriginalLine = pendingTerminalInput;
+  syncHistoryPanelLine();
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
   hideGhostSuggestion();
   closeSuggestionsOnly();
@@ -2105,48 +2115,67 @@ function closeHistoryPanel() {
   terminal?.focus();
 }
 
+/** 高亮项实时回填输入行（shell ↑ 语义）：光标处内容与面板高亮一致；行内容
+ *  已相同时跳过（重复激活/重过滤不产生无谓的擦除重打字节）。 */
+function syncHistoryPanelLine() {
+  const entry = historyPanelEntries.value[historyPanelActiveIndex.value];
+  if (!entry || pendingTerminalInput === entry.command) return;
+  replaceTerminalLineWith(entry.command, false);
+}
+
+/** 悬停/按下激活：高亮与输入行同步一体（与键盘导航同一语义）。 */
+function activateHistoryPanelEntry(index: number) {
+  historyPanelActiveIndex.value = index;
+  syncHistoryPanelLine();
+}
+
+/** 取消导航：恢复打开前的原输入行并收起面板。行未被改写过（无候选/未同步/
+ *  用户此后自己在终端打字）时为零字节操作。 */
+function cancelHistoryPanelSelection() {
+  if (pendingTerminalInput !== historyPanelOriginalLine) replaceTerminalLineWith(historyPanelOriginalLine, false);
+  closeHistoryPanel();
+}
+
 function moveHistoryPanelActive(delta: number) {
   historyPanelActiveIndex.value = moveHistoryPanelIndex(historyPanelActiveIndex.value, delta, historyPanelEntries.value.length);
+  syncHistoryPanelLine();
 }
 
 /** 开启期间的过滤联动:只认搜索框 query(打开即聚焦,打字即过滤);重算
- *  条目后高亮置底(最新/最相关匹配,shell ↑ 语义),锚点跟随光标。 */
-function updateHistoryPanelFilter() {
+ *  条目后高亮置底(最新/最相关匹配,shell ↑ 语义),锚点跟随光标。syncLine
+ *  仅搜索框驱动的重过滤置真——高亮变化同步进输入行;终端 onData 的无参
+ *  重算路径不改行(用户正在终端打字,行内容不归面板管)。 */
+function updateHistoryPanelFilter(syncLine = false) {
   if (!historyPanelOpen.value) return;
   const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, historyPanelQuery.value), commandHistoryTimes.value);
   historyPanelEntries.value = next;
   historyPanelActiveIndex.value = clampHistoryPanelIndex(next.length - 1, next.length);
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
+  if (syncLine) syncHistoryPanelLine();
 }
 
-/** 选中回填：抹掉当前行缓冲后写入命令文本，不回车（用户可再编辑/自行执行）。 */
+/** 选中回填：抹掉当前行缓冲后写入命令文本，不回车（用户可再编辑/自行执行）。
+ *  键盘导航路径行内容已同步，这里只做收起；点击路径兜底整行替换。 */
 function selectHistoryEntry(command: string) {
   closeHistoryPanel();
   replaceTerminalLineWith(command, false);
 }
 
-/** 面板开启时的按键消费：↑↓ 移动、Enter/Tab 回填、Esc 关闭，未命中放行。 */
+/** 面板开启时的按键消费（键位→动作映射在 lib/historyPanel.resolveHistory
+ *  PanelKey）：↑↓ 移动并实时同步行、Enter/Tab 确认回填、Esc/底部再 ↓ 取消
+ *  恢复原行，其余按键放行。 */
 function handleHistoryPanelKey(event: KeyboardEvent): boolean {
   if (event.type !== "keydown" || event.isComposing || event.keyCode === 229) return false;
-  if (event.key === "Escape") {
-    closeHistoryPanel();
-    return true;
-  }
-  if (event.key === "ArrowDown") {
-    moveHistoryPanelActive(1);
-    return true;
-  }
-  if (event.key === "ArrowUp") {
-    moveHistoryPanelActive(-1);
-    return true;
-  }
-  if (event.key === "Enter" || event.key === "Tab") {
+  const action = resolveHistoryPanelKey(event.key, historyPanelActiveIndex.value, historyPanelEntries.value.length);
+  if (!action) return false;
+  if (action.kind === "move") moveHistoryPanelActive(action.delta);
+  else if (action.kind === "fill") {
     const entry = historyPanelEntries.value[historyPanelActiveIndex.value];
     if (entry) selectHistoryEntry(entry.command);
     else closeHistoryPanel();
-    return true;
-  }
-  return false;
+  } else if (action.kind === "cancel") cancelHistoryPanelSelection();
+  else closeHistoryPanel();
+  return true;
 }
 
 /** 面板搜索框的键盘转发：焦点在输入框时导航/回填/关闭键由 App 的同一
@@ -7127,10 +7156,11 @@ onBeforeUnmount(() => {
           @copy="copyQuickSelectHit"
           @close="closeQuickSelect"
         />
-        <!-- Warp 式 history 面板（↑ 唤起）：commandHistory 可视化快速回填（仅
-             回填不执行）；面板内搜索框聚焦过滤，↑↓/Enter/Tab/Esc 经 panel-key
-             转发给 handleHistoryPanelKey（焦点留在输入框，回填后回终端），
-             锚点定位与翻转语义同建议浮层。 -->
+        <!-- Warp 式 history 面板（↑ 唤起）：commandHistory 可视化快速回填，
+             选中（打开/↑↓/悬停/搜索过滤）即实时回填输入行（仅回填不执行）；
+             面板内搜索框聚焦过滤，↑↓/Enter/Tab/Esc 经 panel-key 转发给
+             handleHistoryPanelKey（焦点留在输入框，回填后回终端），锚点定位
+             与翻转语义同建议浮层。 -->
         <TerminalHistoryPanel
           v-if="historyPanelOpen"
           :locale="locale"
@@ -7139,8 +7169,8 @@ onBeforeUnmount(() => {
           :anchor="historyPanelAnchor"
           :query="historyPanelQuery"
           :viewport="suggestionViewport"
-          @activate="(index) => (historyPanelActiveIndex = index)"
-          @update:query="(value: string) => { historyPanelQuery = value; updateHistoryPanelFilter(); }"
+          @activate="activateHistoryPanelEntry"
+          @update:query="(value: string) => { historyPanelQuery = value; updateHistoryPanelFilter(true); }"
           @panel-key="handleHistoryPanelPanelKey"
           @select="selectHistoryEntry"
           @close="closeHistoryPanel"

@@ -13,6 +13,7 @@ import {
   pruneHistoryTimes,
   recordHistoryTime,
   relativeHistoryAge,
+  resolveHistoryPanelKey,
   sanitizeHistoryTimes,
 } from "./historyPanel";
 
@@ -73,6 +74,33 @@ describe("moveHistoryPanelIndex / clampHistoryPanelIndex", () => {
   it("clamps after re-filtering shrinks the list", () => {
     expect(clampHistoryPanelIndex(7, 3)).toBe(2);
     expect(clampHistoryPanelIndex(-1, 3)).toBe(0);
+  });
+});
+
+describe("resolveHistoryPanelKey (shell ↑ 语义键位映射)", () => {
+  it("moves within the list and stays at the oldest (top) edge instead of wrapping", () => {
+    expect(resolveHistoryPanelKey("ArrowUp", 2, 3)).toEqual({ kind: "move", delta: -1 });
+    expect(resolveHistoryPanelKey("ArrowDown", 0, 3)).toEqual({ kind: "move", delta: 1 });
+    // 顶部是最旧一条：再 ↑ 停住（消费但不回绕到最新）。
+    expect(resolveHistoryPanelKey("ArrowUp", 0, 3)).toEqual({ kind: "stay" });
+  });
+
+  it("cancels on Esc and on ↓ past the newest (bottom) entry", () => {
+    expect(resolveHistoryPanelKey("Escape", 1, 3)).toEqual({ kind: "cancel" });
+    expect(resolveHistoryPanelKey("ArrowDown", 2, 3)).toEqual({ kind: "cancel" });
+    expect(resolveHistoryPanelKey("ArrowDown", 0, 1)).toEqual({ kind: "cancel" });
+  });
+
+  it("fills the active entry on Enter/Tab and closes when the list is empty", () => {
+    expect(resolveHistoryPanelKey("Enter", 2, 3)).toEqual({ kind: "fill" });
+    expect(resolveHistoryPanelKey("Tab", 0, 1)).toEqual({ kind: "fill" });
+    expect(resolveHistoryPanelKey("Enter", 0, 0)).toEqual({ kind: "close" });
+    expect(resolveHistoryPanelKey("Tab", 0, 0)).toEqual({ kind: "close" });
+  });
+
+  it("lets unrelated keys pass through to the shell", () => {
+    expect(resolveHistoryPanelKey("a", 1, 3)).toBeNull();
+    expect(resolveHistoryPanelKey("Home", 1, 3)).toBeNull();
   });
 });
 
