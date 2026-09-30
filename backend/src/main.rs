@@ -635,6 +635,17 @@ impl Plugin {
                 self.runtime.block_on(self.local.close(session_id))?;
                 Ok(json!({ "success": true }))
             }
+            // 本地终端录制：与 ssh/recording 同形（同一 asciicast 目录与
+            // 回放链），录制器挂在本地 PTY 泵上，shell 退出随会话槽位释放。
+            "local/recording/start" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime
+                    .block_on(self.local.recording_start(session_id, &self.ssh.data_dir()))
+            }
+            "local/recording/stop" => {
+                let session_id = required_string(&params, "sessionId")?;
+                self.runtime.block_on(self.local.recording_stop(session_id))
+            }
             "local/session/list" => Ok(self.runtime.block_on(self.local.list())),
             // 本地终端 shell 发现：工作台选择器用（多平台 shell 设置）。
             "local/shells/list" => Ok(self.local.shells()),

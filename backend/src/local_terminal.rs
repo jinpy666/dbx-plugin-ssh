@@ -34,6 +34,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::model::TerminalStream;
+use crate::session_recording;
 use crate::ssh::ReplayBuffer;
 
 /// Grace for a EOF'd/HUP'd child to exit on its own (zsh/bash flush command
@@ -93,6 +94,13 @@ struct LocalSession {
     created_at_secs: u64,
     terminal_tx: mpsc::Sender<LocalTerminalCommand>,
     replay: Arc<AsyncMutex<ReplayBuffer>>,
+    /// Active asciicast recorder (`local/recording/start`); `None` while not
+    /// recording. Fed from the pump's output path, finished by the stop RPC —
+    /// a shell exit drops the slot, and the buffered writer flushes on drop.
+    recorder: Arc<Mutex<Option<session_recording::SessionRecorder>>>,
+    /// Spawn-time geometry, reused as the recording header's dimensions.
+    cols: u16,
+    rows: u16,
 }
 
 pub struct LocalTerminalRuntime {
@@ -189,6 +197,8 @@ impl LocalTerminalRuntime {
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let replay = Arc::new(AsyncMutex::new(ReplayBuffer::default()));
+        let recorder: Arc<Mutex<Option<session_recording::SessionRecorder>>> =
+            Arc::new(Mutex::new(None));
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         self.sessions.write().await.insert(
             session_id.clone(),
@@ -198,6 +208,9 @@ impl LocalTerminalRuntime {
                 created_at_secs: unix_now_secs(),
                 terminal_tx: cmd_tx,
                 replay: replay.clone(),
+                recorder: recorder.clone(),
+                cols,
+                rows,
             }),
         );
         spawn_pump(
@@ -213,6 +226,7 @@ impl LocalTerminalRuntime {
             child,
             cmd_rx,
             replay,
+            recorder,
             emitter,
             self.sessions.clone(),
         );
@@ -275,6 +289,50 @@ impl LocalTerminalRuntime {
             .ok_or("Local session was not found")?;
         let _ = session.terminal_tx.send(LocalTerminalCommand::Close).await;
         Ok(())
+    }
+
+    /// `local/recording/start`: attaches an asciicast recorder to a live local
+    /// shell. Mirrors `ssh/recording/start` in shape so the workbench's record
+    /// toggle can target either session kind; recordings land in the same
+    /// directory the list/replay family reads, with `host: "local"` metadata.
+    pub async fn recording_start(
+        &self,
+        session_id: &str,
+        data_dir: &Path,
+    ) -> Result<Value, String> {
+        let session = self.session(session_id).await?;
+        let mut slot = session
+            .recorder
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if slot.is_some() {
+            return Err("This session is already being recorded".to_string());
+        }
+        let recording_id = uuid::Uuid::new_v4().to_string();
+        let recorder = session_recording::SessionRecorder::start(
+            data_dir,
+            &recording_id,
+            "local",
+            "local",
+            session_id,
+            u32::from(session.cols),
+            u32::from(session.rows),
+        )?;
+        *slot = Some(recorder);
+        Ok(json!({ "recordingId": recording_id, "recording": true }))
+    }
+
+    /// `local/recording/stop`: finalizes the active recording (if any) and
+    /// returns its summary — the same document `ssh/recording/stop` reports.
+    pub async fn recording_stop(&self, session_id: &str) -> Result<Value, String> {
+        let session = self.session(session_id).await?;
+        let recorder = session
+            .recorder
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+            .ok_or("This session has no active recording")?;
+        recorder.finish()
     }
 
     /// Closing a workbench tears down its local shells; a webview reload does
@@ -355,6 +413,21 @@ async fn publish_local_terminal(
     }
 }
 
+/// Feeds the active recorder (if any) with an output burst about to be
+/// published. Stdout-only by construction — State frames never pass through
+/// here, mirroring the SSH pump. Sync and lock-scoped: never held across an
+/// await.
+fn observe_local_recording(
+    recorder: &Arc<Mutex<Option<session_recording::SessionRecorder>>>,
+    data: &[u8],
+) {
+    if let Ok(mut slot) = recorder.lock() {
+        if let Some(active) = slot.as_mut() {
+            active.observe(data);
+        }
+    }
+}
+
 /// Owns the PTY master for one session and multiplexes PTY output, workbench
 /// commands and the child's exit status. Terminal condition is the child's
 /// exit (or the bounded grace after a kill/EOF); the teardown publishes the
@@ -375,6 +448,7 @@ fn spawn_pump(
     child: Box<dyn Child + Send + Sync>,
     mut cmd_rx: mpsc::Receiver<LocalTerminalCommand>,
     replay: Arc<AsyncMutex<ReplayBuffer>>,
+    recorder: Arc<Mutex<Option<session_recording::SessionRecorder>>>,
     emitter: PluginEmitter,
     sessions: Arc<RwLock<HashMap<String, Arc<LocalSession>>>>,
 ) {
@@ -461,6 +535,7 @@ fn spawn_pump(
                             let _ = writer.write_all(&reply).and_then(|_| writer.flush());
                         }
                         if !forward.is_empty() {
+                            observe_local_recording(&recorder, &forward);
                             publish_local_terminal(&session_id, TerminalStream::Stdout, forward, &replay, &emitter).await;
                         }
                     }
@@ -544,6 +619,7 @@ fn spawn_pump(
         // exited frame — dropping it here would silently lose the tail the
         // user is waiting to read.
         while let Ok(Some(data)) = tokio::time::timeout(LOCAL_EXIT_DRAIN, out_rx.recv()).await {
+            observe_local_recording(&recorder, &data);
             publish_local_terminal(&session_id, TerminalStream::Stdout, data, &replay, &emitter)
                 .await;
         }
@@ -551,6 +627,7 @@ fn spawn_pump(
         // terminal's last visible bytes — never drop them.
         let residue = handshake_filter.flush();
         if !residue.is_empty() {
+            observe_local_recording(&recorder, &residue);
             publish_local_terminal(
                 &session_id,
                 TerminalStream::Stdout,
@@ -1854,6 +1931,43 @@ mod tests {
         );
         assert_eq!(gate.pending(), None);
         assert_eq!(gate.next_wake(), None);
+    }
+
+    #[test]
+    fn observe_local_recording_writes_stdout_events() {
+        let dir = std::env::temp_dir().join(format!("dbx-local-rec-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let recorder = session_recording::SessionRecorder::start(
+            &dir,
+            "unit-local-rec",
+            "local",
+            "local",
+            "unit-session",
+            100,
+            24,
+        )
+        .expect("start recorder");
+        let slot: Arc<Mutex<Option<session_recording::SessionRecorder>>> =
+            Arc::new(Mutex::new(Some(recorder)));
+        observe_local_recording(&slot, b"hello ");
+        observe_local_recording(&slot, b"world");
+        let summary = slot
+            .lock()
+            .unwrap()
+            .take()
+            .expect("active recorder")
+            .finish()
+            .expect("finish recorder");
+        assert_eq!(summary["events"], 2);
+        // The two bursts must land as one `o` event each, in order — replay
+        // re-serializes the terminal from exactly these bytes.
+        let path = session_recording::cast_path(&dir, "unit-local-rec").expect("cast path");
+        let text = std::fs::read_to_string(&path).expect("read cast");
+        let events: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].contains("\"eventdata\":\"hello \""));
+        assert!(events[1].contains("\"eventdata\":\"world\""));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -5917,6 +5917,15 @@ const {
 
 
 
+// 录制目标会话：SSH 连接优先（与既有语义一致）；本地终端（运行中的 shell）
+// 走 local/recording 家族——sidecar 侧与 ssh/recording 同形同目录。
+// SSH 断开 / 本地 shell 退出时目标消失，录制态由 useRecording 内的 watch 复位。
+const recordingTarget = computed<{ kind: "ssh" | "local"; sessionId: string } | undefined>(() => {
+  if (connected.value && session.value) return { kind: "ssh", sessionId: session.value.sessionId };
+  if (localSession.value) return { kind: "local", sessionId: localSession.value.sessionId };
+  return undefined;
+});
+
 // 终端录制 + 回放（asciicast v2）：状态与交互收口在 composables/useRecording。
 const {
   recordingActive,
@@ -5971,7 +5980,7 @@ const {
     formatDuration,
     formatRecordedAt,
 } = useRecording({
-  t, showNotice, showError, session, appearance, terminalTheme, openTransferTarget, revealTransferTarget,
+  t, showNotice, showError, recordingTarget, appearance, terminalTheme, openTransferTarget, revealTransferTarget,
   terminalFontOverride, terminalAppearance,
   hostFontFamily: () => hostTerminalFontFamily(appearance.value),
   loadDownloadDir, loadDownloadUseDefaultDir, askDownloadTarget, applyChosenDirAsDefault, resolveDownloadConflictFor,
@@ -6076,6 +6085,14 @@ onBeforeUnmount(() => window.clearInterval(panelMetricsTimer));
 const panelMetricsVisible = computed(() =>
   panelSurface.value && (connected.value || localTerminalActive.value) && metrics.value != null && !metricsError.value,
 );
+// SSH 面板指标失败不再静默整条隐藏：降级显示占位带，tooltip 携带原因——
+// 「左上角没有 metrics」从无声降级变成可观察状态（exec 通道故障/超时/旧
+// sidecar，hover 即见），下一拍成功自愈回正常数值。本地终端的平台性缺失
+// （Windows 无 sh）仍按既有约定整条隐藏，不制造噪音。
+const panelMetricsFailed = computed(() =>
+  panelSurface.value && connected.value && !localTerminalActive.value && !!metricsError.value,
+);
+const panelMetricsErrorTitle = computed(() => `${t("metrics")}: ${metricsError.value}`);
 const panelCpuPercent = computed<number | null>(() => {
   const value = metrics.value?.cpu?.percent;
   return value == null ? null : Math.round(value);
@@ -7085,9 +7102,9 @@ onBeforeUnmount(() => {
              工具条不再放配置编辑器，渲染扫描（compiledHighlightRules）仍在。 -->
         <span class="toolbar-separator" aria-hidden="true" />
         <button class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
-        <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!connected" @click="toggleRecording"><Disc /></button>
+        <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
         <button class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
-        <button class="icon-button icon-violet" :title="t('settings')" :disabled="!connected" @click="openSettings"><Settings /></button>
+        <button class="icon-button icon-violet" :title="t('settings')" @click="openSettings"><Settings /></button>
         <button class="icon-button icon-amber" :title="t('auditLog.title')" @click="openAuditLog"><FileText /></button>
         <span class="toolbar-separator" aria-hidden="true" />
         <div>
@@ -7118,6 +7135,10 @@ onBeforeUnmount(() => {
           <span>MEM <b>{{ panelMemPercent ?? "–" }}%</b></span>
           <span v-if="panelNetRates">↓ <b>{{ formatRate(panelNetRates.rx) }}</b> ↑ <b>{{ formatRate(panelNetRates.tx) }}</b></span>
         </div>
+        <div v-else-if="panelMetricsFailed" class="panel-metrics panel-metrics-degraded" :title="panelMetricsErrorTitle">
+          <span>CPU <b>–%</b></span>
+          <span>MEM <b>–%</b></span>
+        </div>
       </div>
       <!-- Dock 面板表面（底部栏）的精简工具区：宿主 dock chrome 已带标题与
            关闭/收起/最大化，这里只留终端快捷操作——字号、录屏、传输、配色快切、
@@ -7127,7 +7148,7 @@ onBeforeUnmount(() => {
         <button v-if="!localUiMode" class="icon-button compact" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><ExternalLink /></button>
         <!-- SFTP 文件面板开关：dock 默认不开，手动开合（连接后列表已就绪）。 -->
         <button v-if="!localUiMode" class="icon-button compact" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
-        <button class="icon-button compact" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!connected" @click="toggleRecording"><Disc /></button>
+        <button class="icon-button compact" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
         <button class="icon-button compact" :title="t('transfers')" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
         <button class="icon-button compact" :title="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
         <button class="icon-button compact" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
@@ -7155,7 +7176,7 @@ onBeforeUnmount(() => {
             </footer>
           </PopoverContent>
         </Popover>
-        <button class="icon-button compact" :title="t('settings')" :disabled="!connected" @click="openSettings"><Settings /></button>
+        <button class="icon-button compact" :title="t('settings')" @click="openSettings"><Settings /></button>
         <button class="icon-button compact" :title="t('panel.hideToolbar')" :aria-pressed="panelToolbarHidden" @click="togglePanelToolbar"><ChevronUp /></button>
       </div>
       <!-- 传输弹层单实例（tab/panel 两表面共用）：Popover 挂在 header 层，锚点是

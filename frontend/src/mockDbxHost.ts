@@ -946,6 +946,14 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   else if (method === "ssh/recording/delete") result = { success: true };
   else if (method === "ssh/recording/clear") result = { success: true, deleted: 1 };
   else if (method === "ssh/recording/reveal") result = { success: true };
+  else if (method === "local/recording/start") {
+    // 本地终端录制（dock 本地终端录制按钮）：与 ssh/recording 同形；走查里
+    // 点录制即走这里，回固定 recordingId 供 stop 配对。
+    result = { recordingId: "visual-local-recording-1", recording: true };
+  }
+  else if (method === "local/recording/stop") {
+    result = { ...RECORDING_FIXTURE_SUMMARY, host: "local", recordingId: "visual-local-recording-1" };
+  }
   else if (method === "sftp/transfer/history") {
     // ?err=transferHistory 模拟历史查询失败，供面板 loadFailed+重试态走查。
     if (fixtureParams.get("err") === "transferHistory") throw new Error("sftp: transfer history unavailable");
@@ -1208,6 +1216,9 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     }
   }
   else if (method === "ssh/metrics") {
+    // ?err=metrics 模拟采集失败：dock 面板信息带走降级占位（CPU/MEM –%、
+    // tooltip 携带原因），验证「失败可见」分支而非静默消失。
+    if (fixtureParams.get("err") === "metrics") throw new Error("metrics collection failed: exec channel unavailable");
     const totalBytes = 16_573_006_848;
     const availableBytes = 11_012_874_240;
     // 网络速率随刷新次数变化（正弦扰动），让 sparkline 曲线肉眼可见地滚动；
