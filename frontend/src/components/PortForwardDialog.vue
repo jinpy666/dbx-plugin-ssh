@@ -21,6 +21,7 @@ import {
   type PortForward,
 } from "../lib/portForward";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
+import { deleteTunnelProfile, loadTunnelProfiles, saveTunnelProfile, type TunnelProfile } from "../lib/tunnelProfiles";
 
 interface Props {
   locale: string;
@@ -29,6 +30,10 @@ interface Props {
   connectionId: string;
   /** 新建映射要挂到的会话；未连接（null）时添加表单禁用。 */
   sessionId: string | null;
+  /** Independent manager starts mappings using connectionId and needs no PTY. */
+  independent?: boolean;
+  standalone?: boolean;
+  quickStart?: boolean;
 }
 const props = defineProps<Props>();
 const emit = defineEmits<{ "update:open": [boolean]; error: [unknown] }>();
@@ -36,7 +41,22 @@ const emit = defineEmits<{ "update:open": [boolean]; error: [unknown] }>();
 const t = (key: string, values: Record<string, string | number> = {}) => workbenchMessage(props.locale, key, values);
 
 const forwards = ref<PortForward[]>([]);
+const profiles = ref<TunnelProfile[]>([]);
+const startingSaved = ref(false);
+const savedMessage = ref("");
+let quickStartHandled = false;
+const profileRoute = (profile: TunnelProfile) => formatForwardRoute({ ...profile, listenPort: Number(profile.listenPort), boundPort: 0, targetPort: Number(profile.targetPort) });
+const normalizedHost = (host: string) => host.trim().replace(/^\[(.*)\]$/, "$1").toLowerCase() || "127.0.0.1";
+function runningForward(profile: TunnelProfile): PortForward | undefined {
+  return forwards.value.find((row) => row.state !== "stopped" && row.state !== "error"
+    && row.kind === profile.kind && row.listenHost === normalizedHost(profile.listenHost)
+    && row.listenPort === Number(profile.listenPort)
+    && (profile.kind === "dynamic" || (row.targetHost === normalizedHost(profile.targetHost) && row.targetPort === Number(profile.targetPort))));
+}
+const inactiveProfiles = computed(() => profiles.value.filter((profile) => !runningForward(profile)));
+function refreshProfiles() { profiles.value = loadTunnelProfiles(props.connectionId); }
 const forwardsLoading = ref(false);
+let forwardListRevision = 0;
 const forwardsBusyId = ref<string | null>(null);
 const forwardForm = reactive<ForwardFormDraft>({
   kind: "local",
@@ -56,22 +76,24 @@ const hostOptions = computed(() => listenHostOptions(forwardForm.kind));
 /** 本机网卡探测候选只在本地方向追加（远程方向的监听地址属于服务器，客户机
  * 网卡是误导）；与静态候选按地址去重，探测失败自然退化为纯静态组。 */
 const probedInterfaceOptions = computed(() => {
-  if (forwardForm.kind !== "local") return [];
+  if (forwardForm.kind === "remote") return [];
   const known = new Set(hostOptions.value.map((option) => option.value));
   return interfaces.value.filter((iface) => !known.has(iface.addr));
 });
 
 async function refreshForwards() {
   if (!props.connectionId) return;
+  const revision = ++forwardListRevision;
   forwardsLoading.value = true;
   try {
     const payload = await window.dbxPlugin.invoke("ssh/forward/list", { connectionId: props.connectionId });
-    forwards.value = parseForwards(payload);
+    if (revision === forwardListRevision) forwards.value = parseForwards(payload);
   } catch (cause) {
+    if (revision !== forwardListRevision) return;
     console.warn("[port-forward] list failed", cause);
     emit("error", cause);
   } finally {
-    forwardsLoading.value = false;
+    if (revision === forwardListRevision) forwardsLoading.value = false;
   }
 }
 
@@ -91,6 +113,21 @@ function applyForwardFormError(code: ForwardFormError) {
 
 const submitting = ref(false);
 
+async function startDraft(draft: ForwardFormDraft) {
+  const startParams = forwardStartParams(draft, props.independent ? props.connectionId : props.sessionId!, !!props.independent);
+  let payload: unknown;
+  try {
+    payload = await window.dbxPlugin.invoke("ssh/forward/start", startParams);
+  } catch (cause) {
+    if (!props.independent || !String(cause).includes("Connection is not active")) throw cause;
+    if (window.dbxPlugin.reopenConnection) await window.dbxPlugin.reopenConnection(props.connectionId);
+    else await window.dbxPlugin.request("host.reopenConnection", { connectionId: props.connectionId });
+    payload = await window.dbxPlugin.invoke("ssh/forward/start", startParams);
+  }
+  const started = parseForwards(payload);
+  if (started.length) forwards.value = [...forwards.value.filter((row) => row.id !== started[0].id), ...started];
+}
+
 async function submitForward() {
   const error = validateForwardForm(forwardForm);
   if (error) {
@@ -106,7 +143,7 @@ async function submitForward() {
     return;
   }
   // 无会话时按钮本身已禁用，这里再兜底一次并给出可见提示，避免静默无响应。
-  if (!props.sessionId) {
+  if (!props.independent && !props.sessionId) {
     forwardFormMessage.value = t("forwards.error.noSession");
     return;
   }
@@ -114,14 +151,7 @@ async function submitForward() {
   submitting.value = true;
   forwardFormMessage.value = "";
   try {
-    const payload = await window.dbxPlugin.invoke(
-      "ssh/forward/start",
-      forwardStartParams(forwardForm, props.sessionId),
-    );
-    const started = parseForwards(payload);
-    if (started.length) {
-      forwards.value = [...forwards.value.filter((row) => row.id !== started[0].id), ...started];
-    }
+    await startDraft(forwardForm);
     forwardFormMessage.value = "";
   } catch (cause) {
     // 既在弹窗内显示错误文案，又向父级冒泡，确保任何失败都有可见反馈。
@@ -130,6 +160,43 @@ async function submitForward() {
   } finally {
     submitting.value = false;
   }
+}
+
+function saveCurrentProfile() {
+  const error = validateForwardForm(forwardForm);
+  if (error) { applyForwardFormError(error); return; }
+  try {
+    saveTunnelProfile(props.connectionId, forwardForm);
+    refreshProfiles();
+    savedMessage.value = t("forwards.profileSaved");
+  } catch (cause) { forwardFormMessage.value = String(cause); }
+}
+
+function removeProfile(id: string) {
+  deleteTunnelProfile(id);
+  refreshProfiles();
+}
+
+async function startSaved(profilesToStart = profiles.value) {
+  if (startingSaved.value) return;
+  startingSaved.value = true;
+  savedMessage.value = "";
+  const failures: string[] = [];
+  let started = 0;
+  for (const profile of profilesToStart) {
+    if (runningForward(profile)) continue;
+    if (findForwardConflict(forwards.value, profile)) continue;
+    try { await startDraft(profile); started += 1; }
+    catch (cause) { failures.push(`${profileRoute(profile)}: ${String(cause)}`); }
+  }
+  savedMessage.value = failures.length ? failures.join("\n") : t("forwards.profilesStarted", { count: started });
+  startingSaved.value = false;
+}
+
+async function toggleProfile(profile: TunnelProfile) {
+  const running = runningForward(profile);
+  if (running) await stopForward(running.id);
+  else await startSaved([profile]);
 }
 
 async function stopForward(id: string) {
@@ -151,9 +218,19 @@ async function stopForward(id: string) {
 function handleForwardEvent(event: DbxPluginEvent) {
   if (event.type === "env") return; // 宿主环境推送（locale/theme）不携带 method
   if (event.method !== "ssh/forward/state") return;
+  if (event.params.connectionId !== props.connectionId) return;
+  // An event can arrive while the opening list request is still in flight.
+  // Its snapshot may predate the event, so it must not overwrite the newer state.
+  ++forwardListRevision;
+  forwardsLoading.value = false;
+  const known = forwards.value.some((row) => row.id === event.params.id);
   forwards.value = applyForwardState(forwards.value, event.params);
   if (event.params.state === "stopped") {
     forwards.value = forwards.value.filter((row) => row.id !== event.params.id);
+  } else if (!known) {
+    // The context menu starts tunnels outside this workbench. State events do
+    // not contain a complete row, so fetch it from the sidecar on first sight.
+    void refreshForwards();
   }
 }
 
@@ -170,26 +247,47 @@ watch(
   (open) => {
     if (open) {
       forwardFormMessage.value = "";
-      void refreshForwards();
+      void refreshForwards().then(() => {
+        refreshProfiles();
+        if (props.quickStart && !quickStartHandled) {
+          quickStartHandled = true;
+          void startSaved();
+        }
+      });
       void refreshInterfaces();
     }
   },
+  { immediate: true },
 );
 </script>
 
 <template>
-  <Dialog :open="props.open" @update:open="(open) => emit('update:open', open)">
-    <DialogContent class="modal forwards-modal" @escape-key-down.prevent>
+  <component :is="props.standalone ? 'div' : Dialog" :open="props.open" @update:open="(open: boolean) => emit('update:open', open)">
+    <component :is="props.standalone ? 'section' : DialogContent" class="modal forwards-modal" :class="{ 'forwards-modal--standalone': props.standalone, 'forwards-modal--manager': props.independent }" @escape-key-down.prevent>
       <header>
-        <DialogTitle>{{ t("forwards.title") }}</DialogTitle>
-        <button :title="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
+        <component :is="props.standalone ? 'h1' : DialogTitle">{{ t("forwards.title") }}</component>
+        <button v-if="!props.standalone" :title="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
       </header>
       <div class="forwards-body">
+        <section v-if="props.independent" class="forward-profiles">
+          <header><h2>{{ t("forwards.savedTitle") }}</h2><button v-if="!profiles.length || inactiveProfiles.length" type="button" class="primary-button" :disabled="startingSaved || !inactiveProfiles.length" @click="startSaved()">{{ t("forwards.startAllSaved") }}</button></header>
+          <p v-if="!profiles.length" class="forward-form-hint">{{ t("forwards.noProfiles") }}</p>
+          <ul v-else class="forwards-list">
+            <li v-for="profile in profiles" :key="profile.id" class="forward-row">
+              <span class="forward-kind" :class="`forward-kind--${profile.kind}`">{{ t(`forwards.${profile.kind}`) }}</span>
+              <span class="forward-route">{{ profileRoute(profile) }}</span>
+              <button type="button" class="primary-button" :disabled="startingSaved || !!forwardsBusyId" @click="toggleProfile(profile)">{{ t(runningForward(profile) ? "forwards.stop" : "forwards.startSaved") }}</button>
+              <button type="button" class="forward-stop" :title="t('forwards.deleteSaved')" @click="removeProfile(profile.id)"><X /></button>
+            </li>
+          </ul>
+          <p v-if="savedMessage" class="forward-form-hint" role="status">{{ savedMessage }}</p>
+        </section>
+        <h2 v-if="props.independent" class="forward-section-title">{{ t("forwards.activeTitle") }}</h2>
         <div v-if="forwardsLoading && !forwards.length" class="empty"><Loader2 class="spinning" />{{ t("loading") }}</div>
         <div v-else-if="!forwards.length" class="empty">{{ t("forwards.empty") }}</div>
         <ul v-else class="forwards-list">
           <li v-for="row in forwards" :key="row.id" class="forward-row">
-            <span class="forward-kind" :class="`forward-kind--${row.kind}`">{{ row.kind === "remote" ? t("forwards.remote") : t("forwards.local") }}</span>
+            <span class="forward-kind" :class="`forward-kind--${row.kind}`">{{ t(`forwards.${row.kind}`) }}</span>
             <span class="forward-route">{{ formatForwardRoute(row) }}</span>
             <span class="forward-state" :class="`forward-state--${row.state}`" :title="row.error || ''">{{ t(`forwards.state.${row.state}`) }}</span>
             <span class="forward-stats" :title="t('forwards.statsTitle')">
@@ -202,13 +300,16 @@ watch(
           <!-- fieldset 的 disabled 才是真正禁用内部控件；原 <form disabled> 是无效
                属性，会导致输入框仍可用、只有按钮变灰，造成「填了内容却点不动」的
                静默死按钮。无会话或提交中统一禁用并给出可见提示。 -->
-          <fieldset class="forward-form-fields" :disabled="!props.sessionId || submitting" style="border:0;margin:0;padding:0;min-inline-size:0">
+          <fieldset class="forward-form-fields" :disabled="(!props.independent && !props.sessionId) || submitting" style="border:0;margin:0;padding:0;min-inline-size:0">
             <div class="forward-form-row forward-form-kinds">
               <label class="forward-kind-picker">
                 <input v-model="forwardForm.kind" type="radio" value="local" />{{ t("forwards.local") }}
               </label>
               <label class="forward-kind-picker">
                 <input v-model="forwardForm.kind" type="radio" value="remote" />{{ t("forwards.remote") }}
+              </label>
+              <label class="forward-kind-picker">
+                <input v-model="forwardForm.kind" type="radio" value="dynamic" />{{ t("forwards.dynamic") }}
               </label>
             </div>
             <div class="forward-form-row forward-form-addresses">
@@ -234,7 +335,7 @@ watch(
                   <input v-model="forwardForm.listenPort" inputmode="numeric" :placeholder="t('forwards.portPlaceholder')" />
                 </span>
               </label>
-              <label class="forward-field">
+              <label v-if="forwardForm.kind !== 'dynamic'" class="forward-field">
                 <span>{{ t("forwards.target") }}</span>
                 <span class="forward-field-pair">
                   <input v-model="forwardForm.targetHost" :placeholder="t('forwards.targetHostPlaceholder')" />
@@ -244,15 +345,16 @@ watch(
             </div>
           </fieldset>
           <p v-if="forwardForm.kind === 'remote'" class="forward-form-hint">{{ t("forwards.remoteListenTip") }}</p>
-          <p v-if="!props.sessionId" class="forward-form-hint">{{ t("forwards.error.noSession") }}</p>
+          <p v-if="!props.independent && !props.sessionId" class="forward-form-hint">{{ t("forwards.error.noSession") }}</p>
           <p v-if="forwardFormMessage" class="forward-form-error">{{ forwardFormMessage }}</p>
           <footer>
-            <button type="submit" class="primary-button" :disabled="!props.sessionId || submitting">
+            <button v-if="props.independent" type="button" :disabled="submitting" @click="saveCurrentProfile">{{ t("forwards.saveProfile") }}</button>
+            <button type="submit" class="primary-button" :disabled="(!props.independent && !props.sessionId) || submitting">
               <Loader2 v-if="submitting" class="spinning" /><Plus v-else />{{ t("forwards.add") }}
             </button>
           </footer>
         </form>
       </div>
-    </DialogContent>
-  </Dialog>
+    </component>
+  </component>
 </template>

@@ -1,17 +1,19 @@
 //! User-facing port mapping over a live SSH session (Xshell-style 端口映射,
-//! ssh(1) -L/-R parity; -D dynamic is deliberately deferred — the DBX host
-//! already covers dynamic tunnels internally for database dials).
+//! ssh(1) -L/-R/-D parity).
 //!
-//! Two forward directions:
+//! Three forward directions:
 //! - `local` (-L): we bind `listen_host:listen_port` on the client machine and
 //!   open a `direct-tcpip` channel per accepted connection; the server then
 //!   dials `target_host:target_port` from its side.
 //! - `remote` (-R): we ask the server to bind the port via the `tcpip-forward`
 //!   global request; incoming `forwarded-tcpip` channels are relayed to
 //!   `target_host:target_port` dialed from the *client* machine.
+//! - `dynamic` (-D): a local SOCKS5 CONNECT listener opens direct-tcpip
+//!   channels for destinations chosen by each client request.
 //!
-//! Every mapping lives in the sidecar registry keyed by forward id and dies
-//! with its SSH session (ports bound by a dead session would be lies).
+//! Every mapping lives in the sidecar registry keyed by forward id. Session
+//! mappings die with their terminal; independent mappings own a PTY-free SSH
+//! transport and survive terminal closure until stopped or disconnected.
 //! All protocol-facing fields are camelCase, matching the sibling domains.
 
 use std::collections::HashMap;
@@ -22,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use dbx_plugin_sdk::PluginEmitter;
 use russh::client::Handle;
 use serde_json::{json, Value};
-use tokio::io::copy_bidirectional;
+use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::ssh::{RemoteForwardTable, SshClient};
@@ -43,6 +45,7 @@ pub(crate) struct RelayTarget {
 pub(crate) enum ForwardKind {
     Local,
     Remote,
+    Dynamic,
 }
 
 impl ForwardKind {
@@ -50,17 +53,19 @@ impl ForwardKind {
         match self {
             ForwardKind::Local => "local",
             ForwardKind::Remote => "remote",
+            ForwardKind::Dynamic => "dynamic",
         }
     }
 
-    /// Protocol-facing parse: only "local" | "remote" are accepted so a typo
+    /// Protocol-facing parse: only the three supported kinds are accepted so a typo
     /// fails loudly instead of silently forwarding the wrong direction.
     pub(crate) fn parse(value: &Value) -> Result<Self, String> {
         match value.as_str() {
             Some("local") => Ok(ForwardKind::Local),
             Some("remote") => Ok(ForwardKind::Remote),
+            Some("dynamic") => Ok(ForwardKind::Dynamic),
             other => Err(format!(
-                "Invalid forward kind: {other:?}; expected \"local\" or \"remote\""
+                "Invalid forward kind: {other:?}; expected \"local\", \"remote\" or \"dynamic\""
             )),
         }
     }
@@ -99,6 +104,9 @@ pub(crate) struct ForwardEntry {
     pub listen_port: u16,
     pub target_host: String,
     pub target_port: u16,
+    /// An independent mapping owns an authenticated transport without a PTY.
+    /// Session-backed mappings leave this empty and use their session handle.
+    pub transport: Option<Arc<ForwardTransport>>,
     /// Remote forwards only: the port the server bound (0 until confirmed).
     pub bound_port: AtomicU32,
     pub state: Mutex<ForwardState>,
@@ -118,6 +126,11 @@ pub(crate) struct ForwardEntry {
     /// `None` and the SDK has no public emitter constructor.
     pub emitter: Option<PluginEmitter>,
     pub stopping: AtomicBool,
+}
+
+pub(crate) struct ForwardTransport {
+    pub handle: Arc<Handle<SshClient>>,
+    pub jump_chain: Vec<Arc<Handle<SshClient>>>,
 }
 
 impl ForwardEntry {
@@ -163,11 +176,15 @@ pub(crate) fn describe(
     target_host: &str,
     target_port: u16,
 ) -> String {
+    if kind == ForwardKind::Dynamic {
+        return format!("SOCKS5 {listen_host}:{listen_port}");
+    }
     let arrow = match kind {
         ForwardKind::Local => "->",
         // Remote direction reads right-to-left from the server's view; the
         // arrow keeps the user's mental model (client dials the target).
         ForwardKind::Remote => "<-",
+        ForwardKind::Dynamic => unreachable!(),
     };
     format!("{listen_host}:{listen_port} {arrow} {target_host}:{target_port}")
 }
@@ -190,13 +207,25 @@ pub(crate) fn parse_spec(
             .and_then(Value::as_str)
             .unwrap_or(""),
     )?;
-    if kind == ForwardKind::Local && listen_host == "*" {
+    if kind != ForwardKind::Remote && listen_host == "*" {
         return Err(
             "listenHost \"*\" is a server-side wildcard; local mappings bind a concrete host (use 0.0.0.0 for all interfaces)"
                 .to_string(),
         );
     }
     let listen_port = parse_port(params.get("listenPort"), "listenPort")?;
+    if kind == ForwardKind::Dynamic {
+        if params
+            .get("targetHost")
+            .is_some_and(|host| host.as_str().is_some_and(|host| !host.trim().is_empty()))
+            || params
+                .get("targetPort")
+                .is_some_and(|port| port.as_u64().is_some_and(|port| port != 0))
+        {
+            return Err("Dynamic forwarding selects its destination per SOCKS5 request; targetHost and targetPort must be omitted".to_string());
+        }
+        return Ok((kind, listen_host, listen_port, String::new(), 0));
+    }
     // Unlike the listen host, a missing target has no sensible default —
     // reject before normalize_host silently substitutes the loopback.
     let raw_target = params
@@ -403,7 +432,11 @@ async fn accept_loop(
             Ok((tcp, peer)) => {
                 entry.connections_total.fetch_add(1, Ordering::Relaxed);
                 entry.connections_active.fetch_add(1, Ordering::Relaxed);
-                let relay = tokio::spawn(relay_local(entry.clone(), handle.clone(), tcp, peer));
+                let relay = if entry.kind == ForwardKind::Dynamic {
+                    tokio::spawn(relay_dynamic(entry.clone(), handle.clone(), tcp, peer))
+                } else {
+                    tokio::spawn(relay_local(entry.clone(), handle.clone(), tcp, peer))
+                };
                 retain_live_relays(&entry);
                 entry
                     .relays
@@ -469,6 +502,136 @@ async fn relay_local(
     };
     entry.bytes_up.fetch_add(up, Ordering::Relaxed);
     entry.bytes_down.fetch_add(down, Ordering::Relaxed);
+    note_relay_end(&entry);
+}
+
+const SOCKS5_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Negotiate the SOCKS5 no-auth CONNECT subset. The host string is passed to
+/// direct-tcpip unchanged so domain names are resolved by the SSH server.
+async fn socks5_destination(tcp: &mut TcpStream) -> Result<(String, u16), String> {
+    let mut greeting = [0u8; 2];
+    tcp.read_exact(&mut greeting)
+        .await
+        .map_err(|e| e.to_string())?;
+    if greeting[0] != 5 || greeting[1] == 0 {
+        let _ = tcp.write_all(&[5, 0xff]).await;
+        return Err("Invalid SOCKS5 greeting".to_string());
+    }
+    let mut methods = vec![0u8; usize::from(greeting[1])];
+    tcp.read_exact(&mut methods)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !methods.contains(&0) {
+        let _ = tcp.write_all(&[5, 0xff]).await;
+        return Err("SOCKS5 client did not offer no-authentication".to_string());
+    }
+    tcp.write_all(&[5, 0]).await.map_err(|e| e.to_string())?;
+
+    let mut request = [0u8; 4];
+    tcp.read_exact(&mut request)
+        .await
+        .map_err(|e| e.to_string())?;
+    if request[0] != 5 || request[2] != 0 {
+        socks5_reply(tcp, 1).await;
+        return Err("Invalid SOCKS5 request".to_string());
+    }
+    if request[1] != 1 {
+        socks5_reply(tcp, 7).await;
+        return Err("Only SOCKS5 CONNECT is supported".to_string());
+    }
+    let host = match request[3] {
+        1 => {
+            let mut ip = [0u8; 4];
+            tcp.read_exact(&mut ip).await.map_err(|e| e.to_string())?;
+            std::net::Ipv4Addr::from(ip).to_string()
+        }
+        3 => {
+            let length = tcp.read_u8().await.map_err(|e| e.to_string())?;
+            if length == 0 {
+                socks5_reply(tcp, 8).await;
+                return Err("Empty SOCKS5 domain".to_string());
+            }
+            let mut bytes = vec![0u8; usize::from(length)];
+            tcp.read_exact(&mut bytes)
+                .await
+                .map_err(|e| e.to_string())?;
+            match String::from_utf8(bytes) {
+                Ok(host) if !host.contains('\0') => host,
+                _ => {
+                    socks5_reply(tcp, 8).await;
+                    return Err("Invalid SOCKS5 domain".to_string());
+                }
+            }
+        }
+        4 => {
+            let mut ip = [0u8; 16];
+            tcp.read_exact(&mut ip).await.map_err(|e| e.to_string())?;
+            std::net::Ipv6Addr::from(ip).to_string()
+        }
+        _ => {
+            socks5_reply(tcp, 8).await;
+            return Err("Unsupported SOCKS5 address type".to_string());
+        }
+    };
+    let port = tcp.read_u16().await.map_err(|e| e.to_string())?;
+    if port == 0 {
+        socks5_reply(tcp, 1).await;
+        return Err("SOCKS5 target port must not be zero".to_string());
+    }
+    Ok((host, port))
+}
+
+async fn socks5_reply(tcp: &mut TcpStream, code: u8) {
+    let _ = tcp.write_all(&[5, code, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+}
+
+async fn relay_dynamic(
+    entry: Arc<ForwardEntry>,
+    handle: Arc<Handle<SshClient>>,
+    mut tcp: TcpStream,
+    peer: SocketAddr,
+) {
+    let destination =
+        tokio::time::timeout(SOCKS5_HANDSHAKE_TIMEOUT, socks5_destination(&mut tcp)).await;
+    let (host, port) = match destination {
+        Ok(Ok(destination)) => destination,
+        Ok(Err(error)) => {
+            eprintln!("[ssh-forward] SOCKS5 handshake failed: {error}");
+            note_relay_end(&entry);
+            return;
+        }
+        Err(_) => {
+            eprintln!("[ssh-forward] SOCKS5 handshake timed out");
+            note_relay_end(&entry);
+            return;
+        }
+    };
+    let channel = handle
+        .channel_open_direct_tcpip(
+            host,
+            u32::from(port),
+            peer.ip().to_string(),
+            u32::from(peer.port()),
+        )
+        .await;
+    let mut channel = match channel {
+        Ok(channel) => channel.into_stream(),
+        Err(error) => {
+            socks5_reply(&mut tcp, 5).await;
+            eprintln!("[ssh-forward] SOCKS5 channel open failed: {error}");
+            note_relay_end(&entry);
+            return;
+        }
+    };
+    socks5_reply(&mut tcp, 0).await;
+    match copy_bidirectional(&mut tcp, &mut channel).await {
+        Ok((up, down)) => {
+            entry.bytes_up.fetch_add(up, Ordering::Relaxed);
+            entry.bytes_down.fetch_add(down, Ordering::Relaxed);
+        }
+        Err(error) => eprintln!("[ssh-forward] SOCKS5 relay ended with {error}"),
+    }
     note_relay_end(&entry);
 }
 
@@ -699,7 +862,7 @@ mod tests {
     #[test]
     fn rejects_unknown_kind_and_bad_ports() {
         let error =
-            spec(json!({"kind": "dynamic", "listenPort": 1, "targetHost": "h", "targetPort": 2}))
+            spec(json!({"kind": "unknown", "listenPort": 1, "targetHost": "h", "targetPort": 2}))
                 .unwrap_err();
         assert!(error.contains("expected"), "unexpected: {error}");
         let error =
@@ -714,6 +877,97 @@ mod tests {
             spec(json!({"kind": "local", "listenPort": "x", "targetHost": "h", "targetPort": 2}))
                 .unwrap_err();
         assert!(error.contains("listenPort"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn dynamic_mapping_has_no_fixed_target() {
+        let parsed = spec(json!({"kind": "dynamic", "listenPort": 0})).unwrap();
+        assert_eq!(
+            parsed,
+            (
+                ForwardKind::Dynamic,
+                "127.0.0.1".to_string(),
+                0,
+                String::new(),
+                0
+            )
+        );
+        assert!(spec(
+            json!({"kind": "dynamic", "listenPort": 1080, "targetHost": "web", "targetPort": 80})
+        )
+        .is_err());
+        assert!(spec(json!({"kind": "dynamic", "listenHost": "*", "listenPort": 1080})).is_err());
+    }
+
+    #[tokio::test]
+    async fn socks5_connect_parses_ipv4_domain_and_ipv6() {
+        for (address, expected) in [
+            (vec![1, 10, 0, 0, 5], "10.0.0.5".to_string()),
+            (
+                vec![3, 7, b'i', b'n', b't', b'e', b'r', b'n', b'l'],
+                "internl".to_string(),
+            ),
+            (
+                {
+                    let mut bytes = vec![4];
+                    bytes.extend_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+                    bytes
+                },
+                "::1".to_string(),
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut tcp, _) = listener.accept().await.unwrap();
+                socks5_destination(&mut tcp).await.unwrap()
+            });
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(&[5, 2, 2, 0]).await.unwrap();
+            let mut reply = [0u8; 2];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply, [5, 0]);
+            let mut request = vec![5, 1, 0];
+            request.extend_from_slice(&address);
+            request.extend_from_slice(&8080u16.to_be_bytes());
+            client.write_all(&request).await.unwrap();
+            assert_eq!(server.await.unwrap(), (expected, 8080));
+        }
+    }
+
+    #[tokio::test]
+    async fn socks5_rejects_auth_only_and_udp_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            socks5_destination(&mut tcp).await
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        let mut reply = [0u8; 2];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 0xff]);
+        assert!(server.await.unwrap().is_err());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            socks5_destination(&mut tcp).await
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(&[5, 1, 0]).await.unwrap();
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 0]);
+        client
+            .write_all(&[5, 3, 0, 1, 127, 0, 0, 1, 0, 80])
+            .await
+            .unwrap();
+        let mut response = [0u8; 10];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(response[1], 7);
+        assert!(server.await.unwrap().is_err());
     }
 
     #[test]
@@ -860,6 +1114,7 @@ mod tests {
                 listen_port,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 3000,
+                transport: None,
                 bound_port: AtomicU32::new(listen_port as u32),
                 state: Mutex::new(ForwardState::Active),
                 error: Mutex::new(None),

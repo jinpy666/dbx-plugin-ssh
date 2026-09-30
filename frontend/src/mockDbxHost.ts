@@ -126,6 +126,11 @@ const context = localOnlyContext
   workbenchState: { sftpPath: "/home/demo", splitRatio: 58, paneOrder: "terminal-left", visibleColumns: ["size", "modified", "owner", "group", "permissions"] },
   connection: { name: "Production SSH", host: "192.168.1.64", port: 22, username: "user", color: "#3b82f6", readOnly: !writable, ...(autoAuthActive ? { authentication: "auto" } : {}) },
 };
+// ?tunnels=1 and ?tunnels=quick model a connection right-click workbench.
+if (fixtureParams.has("tunnels")) {
+  delete (context as Record<string, unknown>).connection;
+  Object.assign(context, { id: "visual-connection", dbType: "ssh", name: "Production SSH" });
+}
 
 const appearance: DbxPluginAppearance = {
   colorScheme: light ? "light" : "dark",
@@ -140,8 +145,15 @@ const theme: DbxPluginTheme = {
   appearance: appearance.colorScheme,
   tokens: Object.fromEntries(
     Object.entries(appearance.colors).map(([key, value]) => [`--color-${key.replace(/([A-Z])/g, (c) => `-${c.toLowerCase()}`)}`, value]),
-  ),
+  ) as Record<string, string>,
 };
+theme.tokens["--color-primary"] = light ? "rgb(23 23 23)" : "rgb(59 130 246)";
+theme.tokens["--color-primary-foreground"] = "rgb(255 255 255)";
+// The real host installs these resolved tokens on <html> before loading the
+// iframe. Mirror that precedence so the plugin theme bridge does not read the
+// Tailwind fallback aliases back into themselves in the visual fixture.
+for (const [key, value] of Object.entries(theme.tokens)) document.documentElement.style.setProperty(key, value);
+document.documentElement.dataset.dbxTheme = theme.appearance;
 
 function terminalFrame(sequence: number, text: string) {
   const data = new TextEncoder().encode(text);
@@ -780,9 +792,9 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     const boundPort = listenPort > 0 ? listenPort : 30000 + Math.floor(Math.random() * 20000);
     const forward = {
       id: `mock-forward-${mockForwardSeq++}`,
-      sessionId: String(input.sessionId || "visual-session"),
-      connectionId: context.connectionId,
-      kind: input.kind === "remote" ? "remote" : "local",
+      sessionId: String(input.sessionId || ""),
+      connectionId: String(input.connectionId || context.connectionId),
+      kind: input.kind === "remote" || input.kind === "dynamic" ? input.kind : "local",
       listenHost: String(input.listenHost || "127.0.0.1"),
       listenPort,
       boundPort,
@@ -1784,6 +1796,9 @@ window.dbxPlugin = {
     };
   })(),
 };
+queueMicrotask(() => document.dispatchEvent(new CustomEvent("dbx-plugin-init", {
+  detail: { contributionId: fixtureParams.get("tunnels") === "quick" ? "io.dbx.ssh.tunnels.quick" : fixtureParams.has("tunnels") ? "io.dbx.ssh.tunnels" : "io.dbx.ssh.workbench" },
+})));
 
 // mock 专有调试入口（真实桥无此字段）：切换 locale 并经 onEvent 投递
 // {type:"env", locale}（镜像真桥 updateLocale），供 mock.html 控制台 / 单测

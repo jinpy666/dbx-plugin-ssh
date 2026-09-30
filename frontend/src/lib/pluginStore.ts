@@ -61,6 +61,8 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 值由 dockerEngine.ts 自行拆装；曾用 localStorage 动态键，在工作台
   // opaque origin 沙箱里属性访问即抛 SecurityError，从未发布过无需迁移。
   "ssh-docker-engine",
+  // Per-connection SSH forwarding presets used by the independent tunnel manager.
+  "ssh-tunnel-profiles",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);

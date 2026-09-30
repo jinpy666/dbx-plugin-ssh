@@ -3,14 +3,14 @@
   "manifest_version": 1,
   "id": "io.dbx.ssh",
   "name": "Terminal",
-  "version": "0.7.1-beta.16",
+  "version": "0.7.1-beta.17",
   "publisher": "jinpy",
   "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
   "source": "https://github.com/jinpy666/dbx-plugin-ssh",
   "homepage": "https://github.com/jinpy666/dbx-plugin-ssh",
   "icon": "assets/plugin.svg",
   "engines": {
-    "dbx": ">=0.6.21",
+    "dbx": ">=0.6.28",
     "host_api": ">=1.0.0"
   },
   "permissions": [
@@ -1173,6 +1173,27 @@
       "icon": "assets/plugin.svg"
     },
     {
+      "type": "workbench",
+      "id": "io.dbx.ssh.tunnels",
+      "label": "Port forwards",
+      "description": "Manage SSH port forwards without opening a terminal.",
+      "icon": "assets/plugin.svg"
+    },
+    {
+      "type": "workbench",
+      "id": "io.dbx.ssh.tunnels.quick",
+      "label": "Start saved port forwards",
+      "description": "Start every saved SSH port forward for this connection.",
+      "icon": "assets/plugin.svg"
+    },
+    {
+      "type": "context-menu",
+      "id": "manage-tunnels",
+      "label": "Port forwards",
+      "menu": "connection",
+      "dynamic": true
+    },
+    {
       "type": "filesystem-provider",
       "id": "io.dbx.ssh.files",
       "label": "SFTP files",
@@ -1241,7 +1262,20 @@
           "label": "Terminal",
           "description": "Open a terminal on this machine."
         },
-        "io.dbx.ssh.local-terminal-entrypoints": {}
+        "io.dbx.ssh.local-terminal-entrypoints": {},
+        "io.dbx.ssh.tunnels": {
+          "label": "Port forwards",
+          "description": "Manage SSH port forwards without opening a terminal."
+        },
+        "io.dbx.ssh.manage-tunnels": {
+          "label": "Port forwards"
+        },
+        "io.dbx.ssh.tunnels.quick": {
+          "label": "Start saved port forwards"
+        },
+        "io.dbx.ssh.start-saved-tunnels": {
+          "label": "Start saved port forwards"
+        }
       }
     },
     "es": {
@@ -1512,7 +1546,20 @@
           "label": "Terminal",
           "description": "Abrir una terminal en esta máquina."
         },
-        "io.dbx.ssh.local-terminal-entrypoints": {}
+        "io.dbx.ssh.local-terminal-entrypoints": {},
+        "io.dbx.ssh.tunnels": {
+          "label": "Redirecciones de puertos",
+          "description": "Administra redirecciones SSH sin abrir una terminal."
+        },
+        "io.dbx.ssh.manage-tunnels": {
+          "label": "Redirecciones de puertos"
+        },
+        "io.dbx.ssh.tunnels.quick": {
+          "label": "Iniciar redirecciones guardadas"
+        },
+        "io.dbx.ssh.start-saved-tunnels": {
+          "label": "Iniciar redirecciones guardadas"
+        }
       }
     },
     "it": {
@@ -1783,7 +1830,20 @@
           "label": "Terminale",
           "description": "Apri un terminale su questa macchina."
         },
-        "io.dbx.ssh.local-terminal-entrypoints": {}
+        "io.dbx.ssh.local-terminal-entrypoints": {},
+        "io.dbx.ssh.tunnels": {
+          "label": "Inoltri porta",
+          "description": "Gestisci gli inoltri SSH senza aprire un terminale."
+        },
+        "io.dbx.ssh.manage-tunnels": {
+          "label": "Inoltri porta"
+        },
+        "io.dbx.ssh.tunnels.quick": {
+          "label": "Avvia inoltri salvati"
+        },
+        "io.dbx.ssh.start-saved-tunnels": {
+          "label": "Avvia inoltri salvati"
+        }
       }
     },
     "ja": {
@@ -2054,7 +2114,20 @@
           "label": "ターミナル",
           "description": "このマシンでターミナルを開きます。"
         },
-        "io.dbx.ssh.local-terminal-entrypoints": {}
+        "io.dbx.ssh.local-terminal-entrypoints": {},
+        "io.dbx.ssh.tunnels": {
+          "label": "ポート転送",
+          "description": "ターミナルを開かずに SSH ポート転送を管理します。"
+        },
+        "io.dbx.ssh.manage-tunnels": {
+          "label": "ポート転送"
+        },
+        "io.dbx.ssh.tunnels.quick": {
+          "label": "保存済みポート転送を開始"
+        },
+        "io.dbx.ssh.start-saved-tunnels": {
+          "label": "保存済みポート転送を開始"
+        }
       }
     },
     "pt-BR": {
@@ -2325,7 +2398,20 @@
           "label": "Terminal",
           "description": "Abrir um terminal nesta máquina."
         },
-        "io.dbx.ssh.local-terminal-entrypoints": {}
+        "io.dbx.ssh.local-terminal-entrypoints": {},
+        "io.dbx.ssh.tunnels": {
+          "label": "Encaminhamentos de porta",
+          "description": "Gerencie encaminhamentos SSH sem abrir um terminal."
+        },
+        "io.dbx.ssh.manage-tunnels": {
+          "label": "Encaminhamentos de porta"
+        },
+        "io.dbx.ssh.tunnels.quick": {
+          "label": "Iniciar encaminhamentos salvos"
+        },
+        "io.dbx.ssh.start-saved-tunnels": {
+          "label": "Iniciar encaminhamentos salvos"
+        }
       }
     },
     "zh-CN": {
@@ -2596,7 +2682,20 @@
           "label": "终端",
           "description": "在本机打开一个终端。"
         },
-        "io.dbx.ssh.local-terminal-entrypoints": {}
+        "io.dbx.ssh.local-terminal-entrypoints": {},
+        "io.dbx.ssh.tunnels": {
+          "label": "端口映射",
+          "description": "无需打开终端即可管理 SSH 端口转发。"
+        },
+        "io.dbx.ssh.manage-tunnels": {
+          "label": "端口映射"
+        },
+        "io.dbx.ssh.tunnels.quick": {
+          "label": "启用所有已保存端口映射"
+        },
+        "io.dbx.ssh.start-saved-tunnels": {
+          "label": "启用所有已保存端口映射"
+        }
       }
     },
     "zh-TW": {
@@ -2867,7 +2966,20 @@
           "label": "終端",
           "description": "在本機開啟一個終端。"
         },
-        "io.dbx.ssh.local-terminal-entrypoints": {}
+        "io.dbx.ssh.local-terminal-entrypoints": {},
+        "io.dbx.ssh.tunnels": {
+          "label": "連接埠映射",
+          "description": "無需開啟終端即可管理 SSH 連接埠轉發。"
+        },
+        "io.dbx.ssh.manage-tunnels": {
+          "label": "連接埠映射"
+        },
+        "io.dbx.ssh.tunnels.quick": {
+          "label": "啟用所有已儲存連接埠映射"
+        },
+        "io.dbx.ssh.start-saved-tunnels": {
+          "label": "啟用所有已儲存連接埠映射"
+        }
       }
     }
   }

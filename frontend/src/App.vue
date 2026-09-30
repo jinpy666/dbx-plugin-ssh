@@ -7017,7 +7017,7 @@ onBeforeUnmount(() => {
              管理类按钮，sudoRefresh 保留为会话内即时动作。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :disabled="!session" @click="forwardsOpen = true"><Network /></button>
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
         <!-- Docker 浮层（鲸鱼 logo 独立入口，metrics-float 同款右上浮层）：
              SFTP 面板关闭时也可达；local 模式保留——本机 daemon（Docker
              Desktop/OrbStack）场景照常可用。面板自治，关闭即卸载停轮询。 -->
@@ -8165,13 +8165,14 @@ onBeforeUnmount(() => {
       </DialogContent>
     </Dialog>
 
-    <!-- 端口映射管理（-L/-R）：列表/添加/停止与 ssh/forward/state 订阅都在
-         PortForwardDialog 内；会话断开由 sidecar 清理全部映射。 -->
+    <!-- 端口映射管理（-L/-R/-D）：与连接右键弹框复用预设、列表和操作。
+         以 connectionId 创建独立映射，关闭终端不停止端口转发。 -->
     <PortForwardDialog
       :locale="locale"
       :open="forwardsOpen"
       :connection-id="connectionId"
-      :session-id="session?.sessionId ?? null"
+      :session-id="null"
+      independent
       @update:open="forwardsOpen = $event"
       @error="showError($event, 'terminal')"
     />

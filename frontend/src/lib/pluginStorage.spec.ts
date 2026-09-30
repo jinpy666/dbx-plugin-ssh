@@ -44,6 +44,7 @@ describe("ssh pluginStore wiring", () => {
         "ssh-terminal-ghost-suggest",
         // Docker/Podman 引擎连接设置（单键 JSON 映射，dockerEngine.ts 自治）。
         "ssh-docker-engine",
+        "ssh-tunnel-profiles",
       ].sort(),
     );
     for (const banned of [

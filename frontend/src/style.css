@@ -1118,6 +1118,17 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 /* 端口映射管理弹窗（PortForwardDialog）：映射行 = 类型徽标 + 路由 + 状态 +
    计数 + 停止；下方为添加表单（方向单选 + 监听/目标地址对）。 */
 .forwards-modal { width: min(760px, calc(100vw - 40px)); }
+.forwards-modal--manager { width: min(1040px, calc(100vw - 40px)); max-height: min(82vh, 780px); overflow: auto; }
+.tunnel-manager-root { overflow: auto; padding: 20px clamp(16px, 4vw, 48px); }
+.forwards-modal--standalone { width: min(1040px, 100%); max-height: none; min-height: 480px; margin: 0 auto; box-shadow: none; background: var(--background); }
+.forwards-modal--standalone .forwards-list { max-height: min(55vh, 560px); }
+.forwards-modal--standalone h1 { margin: 0; font-size: 16px; font-weight: 600; }
+.forward-profiles { display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+.forward-profiles header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.forward-profiles h2, .forward-section-title { margin: 0; font-size: 13px; font-weight: 600; }
+.forward-profiles .forwards-list { max-height: 240px; }
+.forward-profiles .forward-form-hint { white-space: pre-wrap; }
+.forward-kind--dynamic { color: var(--success, var(--primary)); border-color: color-mix(in srgb, var(--success, var(--primary)) 45%, var(--border)); }
 .forwards-body { display: flex; flex-direction: column; gap: 14px; min-height: 200px; }
 .forwards-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow: auto; }
 .forward-row { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; }

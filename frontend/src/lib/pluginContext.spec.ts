@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./pluginContext";
+import { isTunnelManagerContext, readPluginMode, readPluginShell, resolveWorkbenchId, tunnelManagerConnectionId } from "./pluginContext";
 
 // Read helpers for the PR-A4 context.plugin namespace. The cases lock two things: type-safe reads of the A4 target shape
 // type-safe reads (including the hard-switch rejection of the legacy { localTerminal: true } passthrough shape) and
 // workbenchId from legacy hosts (Host API 1.0 does not inject it) falls back for compatibility
 // (impl-plan R-legacy-host-compat: the fallback must be kept and covered by a test).
 describe("pluginContext (PR-A4 context.plugin namespace)", () => {
+  it("recognizes the host's connection context-menu envelope", () => {
+    expect(isTunnelManagerContext({ id: "c-1", connectionId: "c-1", dbType: "plugin", name: "server" })).toBe(true);
+    expect(tunnelManagerConnectionId({ id: "c-1", dbType: "plugin", name: "server" })).toBe("c-1");
+    expect(tunnelManagerConnectionId({ id: "c-1" })).toBe("c-1");
+    expect(isTunnelManagerContext({ id: "c-1", dbType: "ssh", name: "server" })).toBe(true);
+    expect(isTunnelManagerContext({ connectionId: "c-1", providerId: "io.dbx.ssh.connection", connection: { id: "c-1" } })).toBe(false);
+    expect(isTunnelManagerContext({ id: "other", connectionId: "c-1", dbType: "plugin", name: "server" })).toBe(false);
+    expect(isTunnelManagerContext({ id: "c-1", connection: { id: "c-1" }, name: "server" })).toBe(false);
+  });
   it("readPluginMode reads context.plugin.mode from the A4 shape", () => {
     expect(readPluginMode({ plugin: { mode: "local-terminal" } })).toBe("local-terminal");
     // Reserved extension slot (later mode names such as the P2 panel surface pass through verbatim for the caller to compare).

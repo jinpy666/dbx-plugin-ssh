@@ -16,6 +16,22 @@ export function readPluginMode(context: Record<string, unknown> | undefined | nu
   return typeof mode === "string" ? mode : "";
 }
 
+/** The connection context-menu action supplies a public connection summary.
+ * Some host versions leave connectionId out and only provide its id field. */
+export function tunnelManagerConnectionId(context: Record<string, unknown> | undefined | null): string {
+  if (!context || context.providerId || context.connection) return "";
+  const id = normalizeConnectionText(context.id);
+  const connectionId = normalizeConnectionText(context.connectionId);
+  if (id && connectionId && id !== connectionId) return "";
+  if (id) return id;
+  const isSummary = typeof context.name === "string" || typeof context.dbType === "string";
+  return isSummary ? connectionId : "";
+}
+
+export function isTunnelManagerContext(context: Record<string, unknown> | undefined | null): boolean {
+  return !!tunnelManagerConnectionId(context);
+}
+
 /**
  * Host-authoritative workbenchId: injected by Host API 1.1+; legacy hosts (1.0, which do not inject the
  * field) fall back to the caller's locally generated id, keeping sessions scoped per workbench instance.
