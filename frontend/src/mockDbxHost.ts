@@ -116,12 +116,13 @@ const context = localOnlyContext
       plugin: { mode: "local-terminal" },
       workbenchId: "visual-workbench",
       restored: restoredFixture,
-      surface: "tab",
+      surface: surfaceFixture,
     }
   : {
   connectionId: "visual-connection",
   workbenchId: "visual-workbench",
   restored: false,
+  surface: surfaceFixture,
   workbenchState: { sftpPath: "/home/demo", splitRatio: 58, paneOrder: "terminal-left", visibleColumns: ["size", "modified", "owner", "group", "permissions"] },
   connection: { name: "Production SSH", host: "192.168.1.64", port: 22, username: "user", color: "#3b82f6", readOnly: !writable, ...(autoAuthActive ? { authentication: "auto" } : {}) },
 };

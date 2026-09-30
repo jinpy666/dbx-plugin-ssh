@@ -32,6 +32,8 @@ describe("ssh pluginStore wiring", () => {
         "ssh-terminal-behavior",
         "ssh-terminal-hotkeys",
         "ssh-terminal-appearance",
+        // dock 面板精简工具条隐藏偏好。
+        "ssh-panel-toolbar-hidden",
         "telnet-connect-last",
         "serial-connect-last",
         "vnc-connect-last",

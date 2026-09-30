@@ -82,12 +82,116 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--primary); o
    hidden 负责长主机名截断，弹层不会被裁）。 */
 .identity-side { display: flex; flex: 0 1 auto; align-items: center; min-width: 0; gap: 4px; }
 
-/* Dock panel surface (surface=panel): hide the entire workbench toolbar — the
-   panel presents only the terminal. The host dock chrome provides its own
-   close/collapse/maximize controls, so no toolbar widgets are needed. */
+/* Dock panel surface (surface=panel): the host dock chrome provides its own
+   close/collapse/maximize controls, so the workbench toolbar collapses to a
+   slim right-aligned quick strip (font zoom, palette, settings) at dock
+   density — 30px row, compact 20px icon buttons. */
 .workbench.panel-surface .toolbar {
-  display: none;
+  height: 30px;
+  min-height: 30px;
+  gap: 4px;
+  padding: 0 6px;
+  /* ghost 化：条子融进终端（去底色/去分隔线），按钮低透明度、hover 才显形。 */
+  background: transparent;
+  border-bottom: 0;
 }
+.workbench.panel-surface .toolbar .icon-button { width: 22px; height: 22px; }
+.workbench.panel-surface .toolbar .icon-button.compact { width: 20px; height: 20px; }
+.workbench.panel-surface .toolbar .icon-button {
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  opacity: .72;
+}
+.workbench.panel-surface .toolbar .icon-button:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: var(--foreground);
+  opacity: 1;
+}
+.workbench.panel-surface .toolbar .icon-button.is-active {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: var(--foreground);
+  opacity: 1;
+}
+.workbench.panel-surface .toolbar .icon-button.is-recording { color: var(--destructive); opacity: 1; }
+
+/* 左组系统信息带：11px 等宽数字、tabular-nums 防抖动，溢出截断不换行。 */
+.panel-toolbar-left { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; overflow: hidden; }
+.panel-metrics {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.panel-metrics b { font-weight: 600; color: var(--foreground); }
+
+/* 工具条隐藏后的还原微钮：贴右上角悬浮于终端上，低透明度、hover 复原。 */
+.panel-toolbar-reveal {
+  position: fixed;
+  top: 4px;
+  right: 6px;
+  z-index: 45;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  opacity: .35;
+  cursor: pointer;
+}
+.panel-toolbar-reveal:hover { background: var(--accent); opacity: 1; }
+.panel-toolbar-reveal svg { width: 13px; height: 13px; }
+
+/* 传输弹层共享隐形锚点：固定定位在工具条右缘下，tab/panel 两个表面的按钮
+   都只是开关（见 App.vue header 层的单实例 Popover）。 */
+.transfer-popover-anchor { position: fixed; top: 34px; right: 8px; width: 0; height: 0; }
+
+/* Dock 面板配色快切弹层：窄体 + 列表内滚，短面板（宿主 dock 可调高度）下
+   也不被视口裁剪；行密度与 shell-surface-item 同档。 */
+.panel-palette-popover { gap: 0; width: 236px; padding: 8px; }
+.panel-palette-popover h3 { margin: 0 2px 6px; font-size: 12px; }
+.panel-palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: min(220px, 46vh);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.panel-palette-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.panel-palette-row:hover { background: var(--accent); }
+.panel-palette-row.selected { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.panel-palette-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel-palette-swatch { flex: 0 0 auto; display: inline-flex; gap: 1px; }
+.panel-palette-swatch i { display: block; width: 6px; height: 11px; border-radius: 1px; }
+.panel-palette-footer { display: flex; justify-content: flex-end; margin-top: 6px; }
+.panel-palette-footer .link-button { gap: 5px; font-size: 11px; }
+.panel-palette-footer .link-button svg { width: 12px; height: 12px; flex: 0 0 12px; }
 
 /* Panel "+" shell menu entries. */
 .shell-surface-item {

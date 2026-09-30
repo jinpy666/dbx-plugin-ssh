@@ -10,6 +10,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import {
   Archive,
   ChevronDown,
+  ChevronUp,
   Disc,
   Eye,
   EyeOff,
@@ -46,6 +47,7 @@ import {
   Lock,
   Network,
   PackageOpen,
+  Palette,
   PanelRightClose,
   Pencil,
   PlugZap,
@@ -204,6 +206,7 @@ import { useSftpNavigation } from "./composables/useSftpNavigation";
 import { useTerminalAppearance } from "./composables/useTerminalAppearance";
 import { useTerminalBell } from "./composables/useTerminalBell";
 import { useTerminalFontZoom } from "./composables/useTerminalFontZoom";
+import { useAppearanceCrossSurfaceSync } from "./composables/useAppearanceCrossSurfaceSync";
 import { useTerminalMouse } from "./composables/useTerminalMouse";
 import { useTransferQueue } from "./composables/useTransferQueue";
 import { useCommandSuggestions } from "./composables/useCommandSuggestions";
@@ -248,6 +251,7 @@ import {
   folderUploadPercent,
 } from "./lib/folderUpload";
 import { decideFileRowAction } from "./lib/fileRowKeydown";
+import { createCrossSurfaceStorageReader, subscribeStorageEvents } from "./lib/appearanceSync";
 import { attachWebglRenderer, loadWebglEnabled, persistWebglEnabled, syncWebglRenderer, type WebglRecoveryOptions, type WebglRendererLike } from "./lib/terminalWebgl";
 import {
   activeProfileId,
@@ -255,6 +259,7 @@ import {
   terminalOptionPatch,
   type TerminalAppearanceState,
 } from "./lib/terminalAppearance";
+import { BUILTIN_TERMINAL_SCHEMES, schemeTone } from "./lib/terminalScheme";
 import {
   loadTerminalBehavior,
   persistTerminalBehavior,
@@ -1115,6 +1120,36 @@ const localShellIntegrationPref = ref(true);
 // 为同弹层内的视图切换（非独立 popover，Esc/外点由 reka 随弹层整体收口）。
 const sessionMenuOpen = ref(false);
 const sessionMenuShellOpen = ref(false);
+// Dock 面板表面的配色快切弹层（底部栏精简工具条）：列出与当前宿主明暗档
+// 同调性的方案，单击即写入对应槽位并启用 custom 来源；「跟随宿主」恢复 host。
+const panelPaletteOpen = ref(false);
+// dock 工具条隐藏偏好（pluginStore 单键，跨会话记忆）：隐藏后由右上角低透明度
+// 微钮还原（ChevronDown），避免「藏了找不回」。
+const panelToolbarHidden = ref(pluginStore.getItem("ssh-panel-toolbar-hidden") === "1");
+function togglePanelToolbar() {
+  panelToolbarHidden.value = !panelToolbarHidden.value;
+  try {
+    if (panelToolbarHidden.value) pluginStore.setItem("ssh-panel-toolbar-hidden", "1");
+    else pluginStore.removeItem("ssh-panel-toolbar-hidden");
+  } catch {
+    // 存储不可用时仅本次会话生效。
+  }
+}
+const panelPaletteSlot = computed<"darkSchemeId" | "lightSchemeId">(() =>
+  appearance.value.colorScheme === "light" ? "lightSchemeId" : "darkSchemeId",
+);
+const panelSchemeChoices = computed(() => {
+  const tone = panelPaletteSlot.value === "lightSchemeId" ? "light" : "dark";
+  return [...BUILTIN_TERMINAL_SCHEMES, ...terminalAppearance.value.customSchemes].filter((scheme) => schemeTone(scheme) === tone);
+});
+const panelActiveSchemeId = computed(() => terminalAppearance.value.settings.schemeSource === "custom" ? terminalAppearance.value.settings[panelPaletteSlot.value] : null);
+/** 配色快切：null = 跟随宿主（关闭 custom 来源）；非空写入当前明暗档槽位。 */
+function pickPanelScheme(id: string | null) {
+  panelPaletteOpen.value = false;
+  updateTerminalAppearance(id == null
+    ? { schemeSource: "host" }
+    : { schemeSource: "custom", [panelPaletteSlot.value]: id });
+}
 const localShells = ref<Array<{ program: string; name: string; isDefault: boolean; isUserShell: boolean; injectable?: boolean }>>([]);
 const localShellsLoading = ref(false);
 // 上次本地会话跟踪到的 cwd：重开时继承（VS Code 新终端继承工作区目录惯例）。
@@ -1442,8 +1477,9 @@ function restoreUiState() {
   currentPath.value = typeof state.sftpPath === "string" ? normalizeRemotePath(state.sftpPath) : "/";
   splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : 58;
   paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : "terminal-left";
-  // Dock panel surface: the SFTP pane stays closed (no auto-list/auto-connect);
-  // users who want SFTP open the workbench tab.
+  // Dock panel surface：SFTP 面板默认不开（不自动列目录/不自动建 SFTP 会话，
+  // dock 保持轻量）；需要文件面板时用 panel-actions 的开关手动打开（连接建立时
+  // loadDirectory 本就会拉列表，打开即有数据）。
   sftpPaneOpen.value = panelSurface.value ? false : resolveSftpPaneOpen(state, sftpPaneDefaultOpen.value);
   // Dock panel surface：目录跟随是 SFTP 域能力，面板一律关闭。
   // 恢复的 tab 用 per-workbench 状态；全新工作台回落全局偏好（pluginStore）。
@@ -2012,6 +2048,28 @@ const {
   scheduleFit,
   hostTerminalFontFamily,
 });
+
+// 跨表面终端外观同步（tab ↔ dock 底部栏）：两个表面是独立 webview，外观三键
+// 写穿宿主 storage 后对端无通知（桥无 storage 变更事件）——host 通道低频轮询
+// 直读桥、localStorage 档（浏览器直连）另有原生 storage 事件即时补拍；隐藏
+// 期间停轮询、复现即补。防「自写未落地被读回旧值回落」的双闸门在 lib 状态机，
+// 外观与字体写入分别经两条深度 watch 进闸。
+const appearanceCrossSurfaceSync = useAppearanceCrossSurfaceSync({
+  reader: createCrossSurfaceStorageReader(),
+  subscribe: subscribeStorageEvents,
+  currentAppearance: () => terminalAppearance.value,
+  currentFont: () => terminalFontOverride.value,
+  adopt: (decision) => {
+    // 只落地非空部分：字体未变时不重写终端字体（避免无谓的持久化回声）。
+    if (decision.appearance) {
+      terminalAppearance.value = decision.appearance;
+      applyTerminalAppearance();
+    }
+    if (decision.font) setTerminalFont(decision.font.fontFamily, decision.font.fontSize);
+  },
+});
+watch(terminalAppearance, () => appearanceCrossSurfaceSync.noteAppearanceWrite(), { deep: true });
+watch(terminalFontOverride, () => appearanceCrossSurfaceSync.noteFontWrite());
 
 function openTerminalSearch() {
   if (!terminal) return;
@@ -5975,6 +6033,46 @@ const {
     killProcessRow,
 } = useMetricsPanel({ t, showNotice, showError, session, transferPanelOpen, recordingsOpen });
 
+// —— dock 面板左上角系统信息（CPU/内存/网速）：复用 ssh/metrics 既有链路 ——
+
+// 连接建立后 5s 环境轮询（与指标卡同一 refreshMetrics/采样环；指标卡打开时
+// 让位其自带轮询，避免双发）。隐藏的 webview 不打扰；断开/失败整体隐藏。
+let panelMetricsTimer = 0;
+watch([connected, panelSurface], ([isConnected, onPanel]) => {
+  window.clearInterval(panelMetricsTimer);
+  if (!onPanel || !isConnected) return;
+  void refreshMetrics();
+  panelMetricsTimer = window.setInterval(() => {
+    if (!metricsOpen.value && !metricsLoading.value && document.visibilityState === "visible") void refreshMetrics();
+  }, 5000);
+}, { immediate: true });
+onBeforeUnmount(() => window.clearInterval(panelMetricsTimer));
+
+// 三项就绪才显示（首拍未回/旧 sidecar 缺 network 字段/请求失败都不渲染占位）。
+const panelMetricsVisible = computed(() =>
+  panelSurface.value && connected.value && !localUiMode.value && metrics.value != null && !metricsError.value,
+);
+const panelCpuPercent = computed<number | null>(() => {
+  const value = metrics.value?.cpu?.percent;
+  return value == null ? null : Math.round(value);
+});
+const panelMemPercent = computed<number | null>(() => {
+  const memory = metrics.value?.memory;
+  if (!memory?.totalBytes) return null;
+  return Math.round(((memory.usedBytes ?? 0) / memory.totalBytes) * 100);
+});
+const panelNetRates = computed<{ rx: number; tx: number } | null>(() => {
+  let rx = 0;
+  let tx = 0;
+  let seen = false;
+  for (const net of metrics.value?.network ?? []) {
+    rx += Math.max(0, net.rxRate || 0);
+    tx += Math.max(0, net.txRate || 0);
+    seen = true;
+  }
+  return seen ? { rx, tx } : null;
+});
+
 async function refreshDiskUsage() {
   if (!session.value) return;
   diskUsage.value = await window.dbxPlugin
@@ -6140,6 +6238,7 @@ function closeToolbarPopovers() {
   sessionMenuOpen.value = false;
   sessionMenuShellOpen.value = false;
   localShellSurfaceOpen.value = false;
+  panelPaletteOpen.value = false;
 }
 
 function closeMenus() {
@@ -6751,9 +6850,12 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="workbench" :class="{ 'panel-surface': panelSurface }">
-    <header class="toolbar" :style="toolbarStyle">
-      <!-- 连接信息入口：Info 图标按钮紧跟标识区（状态徽章右侧），弹层左对齐锚定 -->
-      <div class="identity-side">
+    <!-- dock 工具条隐藏后：右上角低透明度微钮还原（偏好落 pluginStore）。 -->
+    <button v-if="panelSurface && panelToolbarHidden" type="button" class="panel-toolbar-reveal" :title="t('panel.showToolbar')" @click="togglePanelToolbar"><ChevronDown /></button>
+    <header v-if="!panelSurface || !panelToolbarHidden" class="toolbar" :style="toolbarStyle">
+      <!-- 连接信息入口：Info 图标按钮紧跟标识区（状态徽章右侧），弹层左对齐锚定。
+           Dock 面板表面整体换用下方 panel-actions 精简组（宿主 chrome 已有标题/关闭）。 -->
+      <div v-if="!panelSurface" class="identity-side">
         <div class="identity">
           <span v-if="connection.color" class="connection-color" :style="{ backgroundColor: connection.color }" />
           <!-- 主标题跟随 ConnectingCard 的口径：连接名优先，未命名回退 user@host:port；
@@ -6784,7 +6886,7 @@ onBeforeUnmount(() => {
           </PopoverContent>
         </Popover>
       </div>
-      <div class="toolbar-actions">
+      <div v-if="!panelSurface" class="toolbar-actions">
         <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
         <!-- Local terminal UI hides SSH-only actions outright (not disabled): the local
              shell has no SSH session to act on. -->
@@ -6977,11 +7079,68 @@ onBeforeUnmount(() => {
           <!-- 历史卡右键菜单（ContextMenu）打开时忽略弹层的外点关闭请求：
                菜单项 pointerdown 相对弹层是"外部"，不加守卫会在 select 前把宿主弹层
                连同菜单一起卸载，动作丢失。 -->
-          <Popover :open="transferPanelOpen" @update:open="(open) => { if (!open && !transferHistoryMenu) transferPanelOpen = false; }">
-            <PopoverAnchor as-child>
-              <button class="icon-button icon-blue" :title="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
-            </PopoverAnchor>
-            <PopoverContent class="popover transfer-popover" align="end" :side-offset="5">
+          <button class="icon-button icon-blue" :title="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
+
+        </div>
+      </div>
+      <!-- dock 面板左组：系统信息带（CPU/内存/网速，5s 轮询），flex:1 把
+           右侧按钮组推到右缘；数据未就绪/不支持时整条隐藏不占位。 -->
+      <div v-if="panelSurface" class="panel-toolbar-left">
+        <div v-if="panelMetricsVisible" class="panel-metrics" :title="t('metrics')">
+          <span>CPU <b>{{ panelCpuPercent ?? "–" }}%</b></span>
+          <span>MEM <b>{{ panelMemPercent ?? "–" }}%</b></span>
+          <span v-if="panelNetRates">↓ <b>{{ formatRate(panelNetRates.rx) }}</b> ↑ <b>{{ formatRate(panelNetRates.tx) }}</b></span>
+        </div>
+      </div>
+      <!-- Dock 面板表面（底部栏）的精简工具区：宿主 dock chrome 已带标题与
+           关闭/收起/最大化，这里只留终端快捷操作——字号、录屏、传输、配色快切、
+           设置与工具条收起，密度对齐底部栏（紧凑 30px 工具条 + 透明 ghost 按钮）。 -->
+      <div v-if="panelSurface" class="toolbar-actions panel-actions">
+        <!-- 在 tab 打开当前连接（宿主 openWorkbench → 新 tab，panel 自己保持轻量）。 -->
+        <button v-if="!localUiMode" class="icon-button compact" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><ExternalLink /></button>
+        <!-- SFTP 文件面板开关：dock 默认不开，手动开合（连接后列表已就绪）。 -->
+        <button v-if="!localUiMode" class="icon-button compact" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
+        <button class="icon-button compact" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!connected" @click="toggleRecording"><Disc /></button>
+        <button class="icon-button compact" :title="t('transfers')" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
+        <button class="icon-button compact" :title="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
+        <button class="icon-button compact" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
+        <Popover :open="panelPaletteOpen" @update:open="(open) => { if (!open) panelPaletteOpen = false; }">
+          <PopoverAnchor as-child>
+            <button class="icon-button compact icon-violet" :class="{ 'is-active': panelPaletteOpen }" :title="t('terminalAppearance.schemeSection')" :aria-expanded="panelPaletteOpen" @click.stop="panelPaletteOpen = !panelPaletteOpen"><Palette /></button>
+          </PopoverAnchor>
+          <PopoverContent class="popover panel-palette-popover" align="end" :side-offset="4">
+            <h3>{{ t("terminalAppearance.schemeSection") }}</h3>
+            <ul class="panel-palette-list" role="listbox">
+              <li>
+                <button type="button" class="panel-palette-row" :class="{ selected: panelActiveSchemeId === null }" role="option" :aria-selected="panelActiveSchemeId === null" @click="pickPanelScheme(null)">
+                  <span class="panel-palette-name">{{ t("terminalAppearance.modeFollowHost") }}</span>
+                </button>
+              </li>
+              <li v-for="scheme in panelSchemeChoices" :key="scheme.id">
+                <button type="button" class="panel-palette-row" :class="{ selected: panelActiveSchemeId === scheme.id }" role="option" :aria-selected="panelActiveSchemeId === scheme.id" :title="scheme.name" @click="pickPanelScheme(scheme.id)">
+                  <span class="panel-palette-name">{{ scheme.name }}</span>
+                  <span class="panel-palette-swatch" aria-hidden="true"><i v-for="(color, index) in scheme.colors.slice(0, 6)" :key="index" :style="{ background: color }" /></span>
+                </button>
+              </li>
+            </ul>
+            <footer class="panel-palette-footer">
+              <button type="button" class="link-button" @click="panelPaletteOpen = false; openSettings()"><Settings />{{ t("terminalAppearance.moreSettings") }}</button>
+            </footer>
+          </PopoverContent>
+        </Popover>
+        <button class="icon-button compact" :title="t('settings')" :disabled="!connected" @click="openSettings"><Settings /></button>
+        <button class="icon-button compact" :title="t('panel.hideToolbar')" :aria-pressed="panelToolbarHidden" @click="togglePanelToolbar"><ChevronUp /></button>
+      </div>
+      <!-- 传输弹层单实例（tab/panel 两表面共用）：Popover 挂在 header 层，锚点是
+           工具条右缘下的隐形定位点（.transfer-popover-anchor，固定定位不随表面
+           工具条高度变化）；tab 工具条与 dock panel-actions 里的按钮都只是
+           toggleTransferPanel 的普通开关——panel 没有这组 tab 工具条实例，
+           共享锚点让同一个弹层在两个表面都能弹出（内容单拷贝零复制）。 -->
+      <Popover :open="transferPanelOpen" @update:open="(open) => { if (!open && !transferHistoryMenu) transferPanelOpen = false; }">
+        <PopoverAnchor as-child>
+          <span class="transfer-popover-anchor" aria-hidden="true" />
+        </PopoverAnchor>
+        <PopoverContent class="popover transfer-popover" align="end" :side-offset="5">
             <h3>{{ t("transfers") }}</h3>
             <div v-if="!transferList.length && !folderUploadProgress" class="empty compact">{{ t("noTransfers") }}</div>
             <!-- 文件夹批量上传（issue #78）：聚合进度卡——目录 X/Y · 文件 N/M · 字节。
@@ -7049,9 +7208,7 @@ onBeforeUnmount(() => {
               </ContextMenuContent>
             </ContextMenu>
             </PopoverContent>
-          </Popover>
-        </div>
-      </div>
+      </Popover>
     </header>
 
     <div v-if="tooltip" ref="tooltipBubble" class="app-tooltip" :class="{ 'app-tooltip-above': tooltip.above }" :style="{ left: `${tooltip.x}px`, top: `${tooltip.y}px`, '--arrow-offset': `${tooltip.arrowOffset}px` }" role="tooltip">{{ tooltip.text }}</div>

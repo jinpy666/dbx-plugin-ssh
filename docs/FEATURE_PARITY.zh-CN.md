@@ -281,6 +281,8 @@ python3 scripts/gen-terminal-schemes.py   # 重新扫描 Xresources → 覆写 t
 | 可视化预览 | `frontend/src/components/TerminalAppearancePreview.vue` | 纯 DOM 实时预览（不实例化真 xterm）：`ls -la` 配色样例、选区色块、粗体样例、光标样式动画（`prefers-reduced-motion` 降级）、低对比度告警（< 4.5:1） |
 | 方案选择器 | `frontend/src/components/TerminalSchemePicker.vue` | 深浅双槽页签 + 搜索 + 全部/亮/暗过滤 + 「跟随宿主」行 + 每行 16 色色块 + 自定义徽标 + 色调标签 + 空态 |
 | 设置入口 | `frontend/src/components/SettingsDialog.vue` | 新增「外观」分类并置于**首位**、弹窗默认落在该分类；原「终端字体」块移出终端页，留七语指引 |
+| 跨表面外观同步（2026-09-30 补） | `frontend/src/lib/appearanceSync.ts` + `frontend/src/composables/useAppearanceCrossSurfaceSync.ts` | tab 工作台与 dock 底部栏面板是两个独立 webview，外观三键（`ssh-terminal-appearance`/`-font-family`/`-font-size`）写穿宿主 storage 后对端无通知（桥无 storage 变更事件）——host 通道 1.5s 低频轮询直读桥（隐藏期间停拍、复现/聚焦即补），localStorage 档（浏览器直连）另有原生 `storage` 事件即时补拍；双闸门状态机防「本端写穿未落地被读回旧值回落」，外观/字体两键族各自独立判定。桥返回值按 pluginStore 水合同一语义归一（字符串原样/对象 stringify） |
+| dock 面板终端快捷区（2026-09-30 补） | `frontend/src/App.vue`（`panel-actions` 工具条 + `panel-toolbar-left` 信息带）+ `frontend/src/style.css` | dock 底部栏（`surface=panel`）工具条从整体隐藏改为精简快捷区：左组**系统信息带**（CPU/内存/↓↑网速，复用 `ssh/metrics` 的 5s 环境轮询与 `refreshMetrics` 采样环，指标卡打开时让位；数据未就绪/旧 sidecar 缺字段/请求失败整条隐藏）；右组字号 A−/A+、**录屏**（`toggleRecording`，录制中红色高亮）、**SFTP 传输**（`toggleTransferPanel` 弹层 + 活跃计数点）、配色快切弹层（按当前宿主明暗档过滤同调性方案 + 「跟随宿主」+ 「更多设置」入口）、设置齿轮、**工具条收起**（偏好落 `ssh-panel-toolbar-hidden` 单键，隐藏后右上角低透明度微钮还原）；30px 紧凑行 + 透明 ghost 按钮（去条底色/分隔线，hover 才显形），弹层窄体 + 列表内滚适配矮面板。**SFTP 文件面板**可在 dock 手动开合（`toggleSftpPane`，默认仍不开、不自动建 SFTP 会话；连接建立时 `loadDirectory` 已拉列表，打开即有数据）；另有「在 tab 打开当前连接」按钮（`openNewSessionTab` → 宿主 `openWorkbench`，表面落点由宿主按调用者映射：panel 调用按宿主语义可能开新 dock 项，真·指定 tab 需宿主桥扩展） |
 
 光标形状/宽字符/折行等**几何**行为不受影响——`terminalClickCursor.ts` 原地定位逻辑照旧，
 本轮只把 `cursorStyle` 从硬编码 `"bar"` 改为可配置、默认值不变。

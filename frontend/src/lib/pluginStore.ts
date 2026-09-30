@@ -42,6 +42,8 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-terminal-behavior",
   "ssh-terminal-hotkeys",
   "ssh-terminal-appearance",
+  // dock 面板（底部栏）精简工具条的隐藏偏好（"1" = 隐藏）。
+  "ssh-panel-toolbar-hidden",
   // 结构化补全引擎选择（FIG wave-1，契约 §2.3）：SettingsDialog 引擎下拉
   // 自治读写，App 每次调度前直读（fig-safe 默认 / fig / off；fig 与 fig-safe
   // 批次 1 行为相同，差异自 generator 接线起）。
