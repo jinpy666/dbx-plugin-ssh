@@ -5560,10 +5560,18 @@ impl SshRuntime {
             ));
         }
         let remote_path = normalize_remote_path(&remote_path)?;
-        // 压缩通道决策（M33）：偏好/阈值/黑名单 + 远端 gunzip 探测一次，
-        // 决策结果随任务存续，finish 推送前消费。latin-1 车道强制 None。
+        // 压缩通道决策（M33，W6 单入口）：偏好/阈值/黑名单 + 远端 gunzip
+        // 探测一次，决策结果随任务存续，finish 推送前消费。latin-1 车道
+        // 强制 None；只读对上传无意义（ensure_writable 已整体拦截）。
         let compression = self
-            .decide_upload_compression(&session_id, size, &remote_path, encoding)
+            .decide_transfer_compression(
+                &session_id,
+                size,
+                Some(remote_path.rsplit('/').next().unwrap_or("")),
+                false,
+                false,
+                encoding == NameEncoding::Latin1,
+            )
             .await;
         // Resume path: re-register a previously interrupted upload job. The
         // spool file and its sidecar meta (written on the first start) hold
@@ -5684,35 +5692,41 @@ impl SshRuntime {
         )
     }
 
-    /// 压缩通道决策（M33）：`transfer_compress::decide` 收敛全部本地回退
-    /// 条件（只读对上传无意义——`ensure_writable` 已整体拦截），Gzip 判定
-    /// 再做一次远端 `gzip`/`gunzip` 探测。探测失败/超时一律静默回退普通
-    /// 传输，绝不因能力探测失败拒绝传输。
-    async fn decide_upload_compression(
+    /// 压缩通道决策单入口（M33 引入，评审 W6 收敛 2026-09-30）：策略/阈值/
+    /// 扩展名黑名单/只读/latin-1/弱 CPU 全部经 `transfer_compress::decide`
+    /// 收敛，Gzip 判定再做远端 `gzip`/`gunzip`（树加 `tar`）探测（按会话
+    /// 缓存）。上传/单文件下载/树下载三个 start 路径共用，车道差异只在
+    /// 参数：上传的只读由 `ensure_writable` 前置拦截（恒 false）；树的
+    /// 黑名单以 `name=None` 跳过、探测 needs_tar=true。探测失败/超时一律
+    /// 静默回退普通传输，绝不因能力探测失败拒绝传输。
+    async fn decide_transfer_compression(
         &self,
         session_id: &str,
         size: u64,
-        remote_path: &str,
-        encoding: NameEncoding,
+        name: Option<&str>,
+        needs_tar: bool,
+        read_only: bool,
+        latin1: bool,
     ) -> CompressionMode {
-        let latin1 = encoding == NameEncoding::Latin1;
         let policy = crate::preferences::transfer_compress_mode(&self.data_dir);
         let threshold = crate::preferences::transfer_compress_threshold_mib(&self.data_dir);
-        let file_name = remote_path.rsplit('/').next().unwrap_or("");
         let decided = transfer_compress::decide(
             policy,
             size,
             threshold,
-            Some(file_name),
+            name,
             true,
-            false,
+            read_only,
             latin1,
             transfer_compress::local_parallelism(),
         );
         if decided != CompressionMode::Gzip {
             return decided;
         }
-        if self.probe_remote_compress_tools(session_id, false).await {
+        if self
+            .probe_remote_compress_tools(session_id, needs_tar)
+            .await
+        {
             CompressionMode::Gzip
         } else {
             CompressionMode::None
@@ -6695,10 +6709,10 @@ impl SshRuntime {
                 "Resume offset {offset} is beyond the remote file size {size}"
             ));
         }
-        // 压缩通道决策（M33）：offset > 0（续传）与压缩互斥——压缩任务的
-        // 分块读本地解压流，不支持断点拼接，续传一律回落普通管线（前端按
-        // 响应 compression 字段走既有语义）。只读连接与 latin-1 车道强制
-        // None：前者远端 gzip 要写临时件，后者用户路径不进 shell。
+        // 压缩通道决策（M33，W6 单入口）：offset > 0（续传）与压缩互斥——
+        // 压缩任务的分块读本地解压流，不支持断点拼接，续传一律回落普通管
+        // 线（前端按响应 compression 字段走既有语义）。只读连接与 latin-1
+        // 车道强制 None：前者远端 gzip 要写临时件，后者用户路径不进 shell。
         let compression = if offset > 0 {
             CompressionMode::None
         } else {
@@ -6707,26 +6721,16 @@ impl SshRuntime {
                 .await
                 .map(|session| session.read_only)
                 .unwrap_or(true);
-            let policy = crate::preferences::transfer_compress_mode(&self.data_dir);
-            let threshold = crate::preferences::transfer_compress_threshold_mib(&self.data_dir);
             let decided_name = remote_path.rsplit('/').next().unwrap_or("");
-            let decided = transfer_compress::decide(
-                policy,
+            self.decide_transfer_compression(
+                session_id,
                 size,
-                threshold,
                 Some(decided_name),
-                true,
+                false,
                 read_only,
                 latin1,
-                transfer_compress::local_parallelism(),
-            );
-            if decided == CompressionMode::Gzip
-                && self.probe_remote_compress_tools(session_id, false).await
-            {
-                CompressionMode::Gzip
-            } else {
-                CompressionMode::None
-            }
+            )
+            .await
         };
         let file_name = remote_path
             .rsplit('/')
@@ -7429,9 +7433,10 @@ impl SshRuntime {
             &self.data_dir,
         ));
         // 压缩树通道决策（M33）：latin-1 裸包车道强制 None（路径不进
-        // shell）；空树没有传输量可省；远端需要 tar+gzip 双工具。树不做
-        // 比率守卫——归档对混合内容几乎必赚，tar 头开销可忽略。
-        let compression = if encoding == NameEncoding::Latin1 || file_count == 0 {
+        // shell）；空树没有传输量可省。树不做比率守卫——归档对混合内容
+        // 几乎必赚，tar 头开销可忽略。（W6 单入口：latin-1 作为决策参数
+        // 传入，不再在外层重复挡一道。）
+        let compression = if file_count == 0 {
             CompressionMode::None
         } else {
             let read_only = self
@@ -7439,25 +7444,15 @@ impl SshRuntime {
                 .await
                 .map(|session| session.read_only)
                 .unwrap_or(true);
-            let policy = crate::preferences::transfer_compress_mode(&self.data_dir);
-            let threshold = crate::preferences::transfer_compress_threshold_mib(&self.data_dir);
-            let decided = transfer_compress::decide(
-                policy,
+            self.decide_transfer_compression(
+                session_id,
                 total,
-                threshold,
                 None,
                 true,
                 read_only,
-                false,
-                transfer_compress::local_parallelism(),
-            );
-            if decided == CompressionMode::Gzip
-                && self.probe_remote_compress_tools(session_id, true).await
-            {
-                CompressionMode::Gzip
-            } else {
-                CompressionMode::None
-            }
+                encoding == NameEncoding::Latin1,
+            )
+            .await
         };
         // 压缩树的 staging 根建在落点目录内的隐藏目录：与最终落点同卷，
         // 完成时 rename 零拷贝落位；取消/未完成整目录拆除（与普通树的
@@ -10735,12 +10730,19 @@ fn remove_upload_meta(transfer_dir: &Path, task_id: &str) {
     let _ = std::fs::remove_file(transfer_dir.join(format!("upload-{task_id}.json")));
 }
 
+/// 可续传上传 spool 的龄期上限（评审 H-2 后续，2026-09-30）：断点续传按
+/// 设计跨重启保留，但没有龄期约束时 16GiB 级残留可无限累积。7 天覆盖
+/// 「当天断传隔天续」的现实窗口，超龄 spool 连同 meta 在启动清扫中回收。
+const UPLOAD_SPOOL_RETENTION: std::time::Duration =
+    std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
 /// 启动清扫（评审 H-2/L-2，2026-09-30）：sidecar 上个生命周期遗留的孤儿
 /// 临时件。下载侧临时件（`downloads/` 下 .part/.part.gz/.plain/.tgz）全部
 /// 不可续传，进程不在即成孤儿，整目录清空；上传 spool 支持断点续传
-/// （by design 跨重启保留），只清两类无主件——meta 在而 spool 不在的孤儿
-/// meta，以及永远可再生的 `.part.gz` 压缩半成品（有效续传态只由
-/// `.part`+`.json` 构成，finish 推送会重新生成 .gz）。全部 best-effort，
+/// （by design 跨重启保留），只清三类——「meta 在而 spool 不在」的孤儿
+/// meta、永远可再生的 `.part.gz` 压缩半成品（有效续传态只由
+/// `.part`+`.json` 构成，finish 推送会重新生成 .gz）、超过
+/// `UPLOAD_SPOOL_RETENTION` 的超龄 spool（连同 meta）。全部 best-effort，
 /// 清扫失败不阻塞启动。
 fn sweep_stale_transfer_temps(transfer_dir: &Path) {
     let downloads = transfer_dir.join("downloads");
@@ -10769,6 +10771,21 @@ fn sweep_stale_transfer_temps(transfer_dir: &Path) {
                 }
             } else if name.starts_with("upload-") && name.ends_with(".part.gz") {
                 let _ = std::fs::remove_file(entry.path());
+            } else if let Some(id) = name
+                .strip_prefix("upload-")
+                .and_then(|rest| rest.strip_suffix(".part"))
+            {
+                // 超龄 spool（连同 meta）回收：mtime 在未来的钟偏场景
+                // elapsed() 失败按未超龄保留（保守侧）。
+                let stale = std::fs::metadata(entry.path())
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > UPLOAD_SPOOL_RETENTION);
+                if stale {
+                    let _ = std::fs::remove_file(entry.path());
+                    let _ = std::fs::remove_file(transfer_dir.join(format!("upload-{id}.json")));
+                }
             }
         }
     }
@@ -12518,12 +12535,24 @@ matrix-ed25519";
         std::fs::write(downloads.join("download-x.plain"), b"l").unwrap();
         std::fs::write(downloads.join("tree-x.tgz"), b"t").unwrap();
         std::fs::create_dir_all(downloads.join("stale-sub")).unwrap();
-        // 上传侧：健康续传态保留；孤儿 meta 与无主 .gz 清除。
+        // 上传侧：健康续传态保留；孤儿 meta 与无主 .gz 清除；超龄 spool
+        // 连同 meta 回收（7 天 TTL，评审 H-2 后续）。
         std::fs::write(transfer_dir.join("upload-keep.part"), b"data").unwrap();
         std::fs::write(transfer_dir.join("upload-keep.json"), "{}").unwrap();
         std::fs::write(transfer_dir.join("upload-keep.part.gz"), b"gz").unwrap();
         std::fs::write(transfer_dir.join("upload-orphan.json"), "{}").unwrap();
         std::fs::write(transfer_dir.join("upload-orphan.part.gz"), b"gz").unwrap();
+        std::fs::write(transfer_dir.join("upload-aged.part"), b"data").unwrap();
+        std::fs::write(transfer_dir.join("upload-aged.json"), "{}").unwrap();
+        let aged = std::fs::OpenOptions::new()
+            .append(true)
+            .open(transfer_dir.join("upload-aged.part"))
+            .unwrap();
+        aged.set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 60 * 60),
+        )
+        .unwrap();
+        drop(aged);
         sweep_stale_transfer_temps(&transfer_dir);
         assert!(
             std::fs::read_dir(&downloads).unwrap().next().is_none(),
@@ -12534,6 +12563,8 @@ matrix-ed25519";
         assert!(!transfer_dir.join("upload-keep.part.gz").exists());
         assert!(!transfer_dir.join("upload-orphan.json").exists());
         assert!(!transfer_dir.join("upload-orphan.part.gz").exists());
+        assert!(!transfer_dir.join("upload-aged.part").exists());
+        assert!(!transfer_dir.join("upload-aged.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
