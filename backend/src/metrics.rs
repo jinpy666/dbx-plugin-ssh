@@ -108,6 +108,32 @@ pub async fn collect_metrics(handle: &Handle<SshClient>) -> Result<serde_json::V
     Ok(metrics)
 }
 
+/// `local/metrics`: the same collector run through the sidecar host's own
+/// shell. Local terminals have no SSH session, so the dock panel's system
+/// band samples the local machine instead of a remote one. POSIX sh only
+/// (macOS/Linux); Windows has no bundled sh and fails with a structured
+/// error the UI hides the band on. GPU/NPU probes stay SSH-only — the base
+/// document omits both sections and [`project_metrics_sections`] treats
+/// missing keys like any other absent section.
+pub fn collect_local_metrics() -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(METRICS_SCRIPT)
+        .output()
+        .map_err(|error| format!("local metrics unavailable: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    // Same acceptance rule as [`collect_metrics`]: a non-zero exit with no
+    // output is a failure; defensive `|| true` fallbacks normally keep the
+    // script at 0 with parseable output even on partial /proc holes.
+    if !output.status.success() && text.trim().is_empty() {
+        return Err(format!(
+            "local metrics collection failed: {}",
+            output.status
+        ));
+    }
+    Ok(parse_metrics_output(&text))
+}
+
 /// Runs the GPU and NPU probes concurrently and merges the results under the
 /// `gpu` / `npu` top-level keys. Best-effort by design: a failed probe (no
 /// accelerator, restricted driver, exec hiccup) degrades to
@@ -803,6 +829,27 @@ fn truncate_chars(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn local_collector_samples_the_sidecar_host() {
+        // 真跑本机 sh（macOS/Linux 开发机即可，CI Windows 不编译该用例）：
+        // 断言基础三段齐全即可，数值随机器漂移不作断言。
+        let sample = collect_local_metrics().expect("local collector should run on unix hosts");
+        assert!(sample.get("cpu").is_some(), "cpu section missing: {sample}");
+        assert!(
+            sample.get("memory").is_some(),
+            "memory section missing: {sample}"
+        );
+        assert!(
+            sample.get("network").is_some(),
+            "network section missing: {sample}"
+        );
+        assert!(
+            sample.get("gpu").is_none(),
+            "gpu probe must stay ssh-only: {sample}"
+        );
+    }
 
     /// Full collector output in Linux shape: /proc/net/dev twice around the
     /// process table, followed by the base sections.

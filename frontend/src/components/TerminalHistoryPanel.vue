@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // Warp 式终端 history 面板（↑ 唤起）：把 commandHistory 过滤结果渲染成可
-// 键盘/鼠标快速选择的面板；选中即实时回填输入行不执行（高亮与行内容一致，
-// 回车留给用户，Esc/底部再 ↓ 由 App 恢复原行）。
+// 快速选择的面板；选中即实时回填输入行不执行（键盘 ↑↓ 与点击，高亮与行
+// 内容一致，回车留给用户，Esc/底部再 ↓ 由 App 恢复原行）；悬停只浏览——
+// 不抢高亮、不改输入，选中只认点击。
 // 面板内搜索框（query 上抛 App 重过滤）：打开即聚焦，↑↓/Enter/Tab/Esc 经
 // panel-key 转发给 App 的面板按键处理（preventDefault 挡输入框默认行为），
 // 其余字符键进 query 实时过滤；Esc 关闭后焦点由 App 的 close 归还终端。
@@ -31,7 +32,6 @@ interface Props {
 const props = defineProps<Props>();
 
 const emit = defineEmits<{
-  activate: [index: number];
   select: [command: string];
   "update:query": [value: string];
   "panel-key": [event: KeyboardEvent];
@@ -43,13 +43,9 @@ const t = (key: string, values: Record<string, string | number> = {}) => workben
 const rootEl = ref<HTMLElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
 const searchEl = ref<HTMLInputElement | null>(null);
-// 悬停武装（用户反馈同 CompletionMenu）：浮层弹出位置恰在鼠标下时，静止的
-// 指针也会抢走键盘选择；指针在浮层上真实移动过才允许 hover 激活。
-const hoverArmed = ref(false);
 
 watchEffect(() => {
   void props.entries.length;
-  hoverArmed.value = false;
 }, { flush: "post" });
 
 // 打开即聚焦搜索框（Warp 语义：面板 = 搜索/选择界面，打字即过滤）；焦点
@@ -108,20 +104,16 @@ watchEffect(() => {
   item?.scrollIntoView?.({ block: "nearest" });
 }, { flush: "post" });
 
-/** hover 激活只在指针于浮层上移动过之后生效（防弹出位置的静止指针抢选）。 */
-function onRowEnter(index: number) {
-  if (hoverArmed.value) emit("activate", index);
-}
-
-function onRowMousedown(event: MouseEvent, index: number) {
-  // mousedown 不转移焦点（焦点留在终端，Esc/↑↓/Enter 仍走注册表派发路径）。
+/** mousedown 只挡焦点转移（焦点留在原处，↑↓/Enter/Esc 键路不变）；选中
+ *  一律等 click——悬停/按下不抢键盘高亮、不改输入行（用户反馈：移入面板
+ *  不得即刻改写输入，浮层弹出位置恰在鼠标下也不得抢键盘选择）。 */
+function onRowMousedown(event: MouseEvent) {
   event.preventDefault();
-  emit("activate", index);
 }
 </script>
 
 <template>
-  <div ref="rootEl" class="terminal-history-panel" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="dialog" :aria-label="t('terminalHistory.title')" @mousedown.stop.prevent @contextmenu.stop @pointermove="hoverArmed = true">
+  <div ref="rootEl" class="terminal-history-panel" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="dialog" :aria-label="t('terminalHistory.title')" @mousedown.stop.prevent @contextmenu.stop>
     <div class="terminal-history-row">
       <span class="terminal-history-title">{{ titleText }}</span>
       <button type="button" class="terminal-history-btn" :title="t('terminalHistory.close')" :aria-label="t('terminalHistory.close')" @click="emit('close')"><X /></button>
@@ -151,8 +143,7 @@ function onRowMousedown(event: MouseEvent, index: number) {
           :aria-selected="index === activeIndex"
           :class="{ active: index === activeIndex }"
           :title="entry.command"
-          @mousedown="onRowMousedown($event, index)"
-          @mouseenter="onRowEnter(index)"
+          @mousedown="onRowMousedown($event)"
           @click="emit('select', entry.command)"
         >
           <TerminalIcon class="terminal-history-prompt" aria-hidden="true" />

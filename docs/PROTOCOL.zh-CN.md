@@ -61,7 +61,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `sftp/download/start`、`next`、`finish` | 下载事务生命周期（`offset` 断点续传，见下文；桌面端可选 `downloadDir` 指定本机绝对保存目录）。**路径形态契约（M27-A）**：latin-1 生效时 `remotePath` 必须是 `sftp/list` 回传的 wire 形式（`pathFromUri(entry.uri)`）——wire 域内字面 `%` 已被 `escape_wire` 自转义为 `%25`，因此 wire 字符串中的 `%XX`（X∈hex）唯一解读就是转义还原（`has_wire_escapes` 判分支）；该入口不接受用户字面输入的显示文本，含字面 `%XX` 的真实文件名经列表回传时其 wire 形式为 `%25XX`，往返无损。**车道判定按生效编码区分（M28-B 修 D-7）**：latin-1 维持上述 raw 车道；auto 生效时一律走高层客户端——auto 列表 uri 由高层产出、字面 `%` 未经 `%25` 自转义，wire 串里的 `%XX` 是文件名字面量而非转义，不还原（auto 以字面量语义与列表一致）。响应附 `compression: "gzip"\|"none"`（M33 压缩通道决策结果，见「压缩传输（gzip 混合方案）」节；`offset > 0` 续传恒为 `none`） |
 | `sftp/download/tree/start` | 递归目录下载启动：远端 `read_dir` 走树扫描（有界），本地镜像目录布局后复用 `sftp/download/next`/`finish`/`sftp/transfer/cancel` 分块管线（见「递归目录下载」节）。`remotePath` 路径形态契约同 `sftp/download/start`（M27-A：列表回传的 wire 形式）。响应附 `compression`（M33：满足压缩条件时改走「远端 tar.gz 单流 → 本地解包 staging 树」通道，见「压缩传输（gzip 混合方案）」节） |
 | `sftp/stat`、`sftp/exists`、`sftp/touch`、`sftp/write` | 扩展文件操作：元信息单查、存在性检查、空文件创建、小文件直写；latin-1 下 `sftp/stat` 整条 wire 还原走裸包 LSTAT，`sftp/exists` 按 `form` 参数分工还原（缺省「wire 前缀 + 显示末段」、`form: "wire"` 整条），均走裸包 LSTAT（M17，见 `sftp/exists` 节） |
-| `sftp/archive`、`sftp/extract` | 远端 tar.gz 打包与解压 |
+| `sftp/archive`、`sftp/extract` | 远端 tar.gz 打包与解压；extract 可选 `sudo: true`（文件夹整包上传车道：列档/解包经 sudo 编排、跳过撞名预检恒覆盖），见「文件夹整包上传（folderArchive）」节 |
 | `sftp/copy`、`sftp/move` | 服务器内复制 / 剪切（逐项执行，目标存在需 `overwrite`）；latin-1 下覆盖预检与同目录 move rename 快路径走裸包字节保真（M17，shell 执行层边界见 `sftp/list` 节） |
 | `sftp/bookmarks/list`、`sftp/bookmarks/save`、`sftp/bookmarks/delete` | SFTP 路径书签管理（全局命名清单，插件数据目录持久化，见下文） |
 | `sftp/transfer/cancel` | 取消并清理临时状态（可选 `reason` slug 落入账本，见「上传两阶段计数与收尾语义」） |
@@ -88,6 +88,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `local/shells/list` | 本机可启动 shell 清单（用户登录 shell 置顶，含 `isDefault`/`isUserShell`/`injectable` 标记——最后一项表示该 shell 是否支持 integration 注入，不支持的在选择器中灰掉开关；Unix 读 `/etc/shells`+`dscl`，Windows 枚举 PATH 下的 pwsh/PowerShell/cmd/wsl），工作台 shell 选择器数据源 |
 | `local/terminal/launch-options` | 宿主 dock「+」启动选项（PR-A4 通用契约）：`{entries: [{label, description, context, group?}]}`——首项为默认 Shell 启动项，**不带 `group`**（宿主顶层首位平铺，最快常用动作；`description` 为解析后的默认 Shell，`localShell` 偏好优先，否则 DS/`$SHELL`/平台默认链；`context` 携带 `mode`），其余为本机扫描到的 shell 子项（`context` 额外携带 `shell` 固定程序），`group` 同为本地化「本地SHELL」标签，宿主渲染为紧随其后的单个可折叠分组（默认折叠）。可选参数 `locale`（宿主 UI 语言，如 `zh-CN`/`zh-TW`/`ja`/`es`/`it`/`pt-BR`/`en`；宿主侧 `options_action` 调用统一下发）：本地化 label/group/description 前缀，未识别语言回落英文；旧宿主不传参数行为不变（`group` 字段被忽略，平铺渲染）。默认 Shell 在设置·终端配置（`localShell` 偏好，与工作台 shell 选择器同一存储键） |
 | `local/session/list`、`local/session/close` | 本地终端会话清单（webview 重载后接回）与关闭 |
+| `local/metrics` | 本机系统快照（dock 面板左上角系统信息带，本地终端场景）：与 `ssh/metrics` 同一采集脚本走 sidecar 宿主机自身 shell（POSIX sh；macOS 走 sysctl/vm_stat/netstat 兜底分支），返回同形状文档（hostname/kernel/cpu/memory/disks/network/processes…），GPU/NPU 两段保持 SSH-only、本地文档缺省。无会话参数；Windows 无捆绑 sh 时返回结构化错误（`local metrics unavailable`），前端整条隐藏不占位 |
 | `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。`transfer_concurrency`（u64，1..=10，默认 3）、`transfer_duplicate_policy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`transfer_max_active`（M14-B 会话级并发传输深度，u64，1..=8，默认 3；sidecar 每次任务启动现读现用——改动即时生效，新任务按新深度启动，进行中任务按旧深度自然完成）、`transfer_download_limit_kib`（M31-B 下载限速，issue #66：SFTP 下载速度上限，u64，0..=1048576 KiB/s，0=不限速（缺省）；超界钳制、非法回落 0。sidecar 在下载任务启动（`sftp/download/start`、`sftp/download/tree/start`）时对现值快照一次并整个任务沿用——改动对下一个下载任务生效，进行中任务按原节奏完成）、`transfer_compress_mode`（M33 压缩传输策略，`auto`/`on`/`off` 白名单，默认 `auto`，非法值报错。`auto`=智能综合判断：大小/类型/远端工具/只读/latin-1 之外再计本机 CPU——并行度 ≤2 核直接跳过，上传压缩预压另有运行时吞吐守卫（实测速率 <20 MiB/s 中止回退，对所有策略生效）；`on`=始终尝试（豁免 CPU 门槛，其余回退条件与吞吐守卫不变）；`off`=关闭。语义见「压缩传输（gzip 混合方案）」节——任务 start 时现读现决，改动对下一个任务生效）、`transfer_compress_threshold_mib`（M33 压缩生效阈值，u64，0..=65536 MiB，默认 64，0=不限下限；超界钳制、非法回落默认）、`sftp_compat_mode`（M14-B 老旧服务器兼容模式，bool，默认 false；开启后 SFTP 会话不做流水线并发（读写各 1 路）并把并发深度强制 1，对新建 SFTP 会话生效（重连后应用）；SFTP 探测失败时 sidecar 对该会话一次性在错误信息中附带建议开启的提示）、`sftp_name_encoding`（M14-B 文件名显示编码，`auto`/`latin-1`，默认 `auto`，语义见 `sftp/list` 节）、`sftp_name_encoding_overrides`（M16 连接级文件名编码覆盖，对象按 connectionId 分桶 `{ <connectionId>: "auto"|"latin-1" }`；整体非对象报错，桶内非法值/空 connectionId 清洗丢弃，桶数上限 512；缺省语义为「跟随全局」——桶内无本连接条目即回退全局 `sftp_name_encoding`，再缺省 `auto`；判定优先级 连接覆盖 > 全局偏好 > 缺省 auto，覆盖值非法（白名单外）同样按未覆盖回退；判定点现读现用（`sftp/list`、`sftp/rename`、`sftp/delete`、`sftp/createDirectory`、`sftp/download/tree/start`），改动对下一次调用即时生效；sessionId 无法映射到连接（已断开）时按未覆盖处理）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
 | `serial/upload/start`、`serial/upload/data`、`serial/upload/cancel` | 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：协议状态机在 sidecar（`backend/src/serial_xmodem.rs` 纯状态机，由串口读线程喂数据/取输出），文件字节由前端 File API 分块（≤64KiB）经 `data` 送入，sidecar 不落盘；单次上传总量上限 256 MiB；进度事件 `serial/upload/progress`（`sent`/`total`，不含文件内容）；同一会话同一时刻至多一个上传（并发第二次 `start` 报错），见「串口文件上传（X/Y/ZMODEM）」节 |
 | `serial/ports/list` | 本机串口清单（连接弹窗端口下拉数据源）：`{ports: [path], portDetails: [{path, description}]}`，按路径排序；枚举失败回落空清单，USB/PCI/Bluetooth 描述尽力标注 |
@@ -1083,14 +1084,16 @@ sudo 模式下向登录用户不可写目录（如 `/root`）上传（对标 sud
   resumeTaskId? }` → `{ taskId, chunkSize, resumeOffset?, compression }`，参数名沿用上传族
   `remotePath`）。分块二进制帧（`sftp/upload/<taskId>`）、`sftp/transfer/progress` 事件、
   `sftp/transfer/cancel`、断点续传（`resumeTaskId` 校验同一份 spool meta）**全部复用**。
-  `compression` 恒为 `"none"`：远端 gunzip 需要写目标目录，在不可写目标上不成立，压缩优化本期
-  不进 sudo 车道（登记边界）。
+  压缩通道（M33）对 sudo 车道**正常参与**：`.gz` 暂存与远端 `gunzip -c` 还原都落在登录用户
+  home 暂存件上（gunzip 为 plain exec，home 由登录用户可写，无需 sudo），全程不触碰目标目录；
+  latin-1 连接决策强制 none（与普通车道同源）。
 - **提交流程**（`sudo/upload/finish`）：spool → SFTP 推到**登录用户 SFTP home** 下的
   `.dbx-sudo-ul-<taskId>.part`（home 由 `canonicalize "."` 探测，注册前定死以便取消收尾；刻意
-  不用 /tmp——常见 tmpfs 会把大文件吃进内存）→ 目标已存在时 sudo `stat` 取权限位、sudo `chmod`
-  拷到暂存件（对齐普通车道「+x 保持」语义，best-effort）→ 单条 sudo `sh -c` 完成
-  「target→backup 让位 → 暂存件 `mv -f` 到位 → backup 清理」，mv 失败把 backup 滚回 target 后
-  非零退出。提交 exec 超时 300s。
+  不用 /tmp——常见 tmpfs 会把大文件吃进内存）→ 压缩任务先推 `.gz` 暂存件再 plain exec
+  `gunzip -c` 还原（推送/解压失败回落普通推送，与普通车道同语义）→ 目标已存在时 sudo `stat`
+  取权限位、sudo `chmod` 拷到暂存件（对齐普通车道「+x 保持」语义，best-effort）→ 单条 sudo
+  `sh -c` 完成「target→backup 让位 → 暂存件 `mv -f` 到位 → backup 清理」，mv 失败把 backup
+  滚回 target 后非零退出。提交 exec 超时 300s。
 - **限制与边界（登记）**：`mv` 跨文件系统时退化为复制+删除（非原子，普通车道的同目录 rename
   原子性在此不成立）；暂存期间登录用户 home 需要与文件等量的临时空间；latin-1 连接下目标名按
   显示字符串进 exec 命令串（UTF-8 边界，非 UTF-8 字节名不适用，与 sudo 族其他成员同源）；会话
@@ -1103,6 +1106,30 @@ sudo 模式下向登录用户不可写目录（如 `/root`）上传（对标 sud
   文件自动换 `sudo/download/start`，sudo 模式下独立「sudo 下载」菜单项隐藏避免重复入口；目录
   保持普通树下载——sudo 下载无目录暂存语义）。
 - 只读连接不换道（sudo 族对只读 fail closed，普通车道对可读目标的下载/上传不受影响）。
+
+### 文件夹整包上传（folderArchive）
+
+大目录（≥200 个文件，前端 `FOLDER_ARCHIVE_THRESHOLD`）拖拽/选择器上传自动换「流式 tar 整包」：
+前端把文件清单生成**单个 POSIX ustar tar**（纯实现无新依赖，512 头 + 内容补齐逐字节可预算，
+声明大小精确、无需预压缩），走既有上传管线（网络腿 gzip 由 M33 决策、sudo 车道由 UploadSudo
+接管），落盘后一条命令在远端解包——大目录从「N 次上传（sudo 车道 N 次 sudo 编排）」变成
+「1 次归档上传 + 1 条 `tar -x`」，也绕开宿主桥拖拽目录展开的 2000 文件/8 层上限对**后续**
+上传次数的放大。
+
+- **前端**（`lib/folderArchive.ts`）：tar 名字 ≤100 字节直接入 name 字段，更长先试 ustar
+  前缀拆分（prefix ≤155），拆不开走 GNU LongLink（`././@LongLink`，typeflag `L`）；单文件
+  ≥8 GiB 的 size 字段走 base-256。条目 mode 统一 0644、uid/gid=0；宿主桥清单不含 mtime 的
+  条目落档时刻。`readChunk` 只向前推进，断点续传时本地重生成并丢弃前缀（不经网络）。整包
+  超过 16 GiB（sidecar `MAX_TRANSFER_SIZE`）回退逐文件并提示。latin-1 连接不走该车道
+  （tar 头名字节与解包命令串都是 UTF-8 边界，登记边界）。
+- **远端解包**：复用 `sftp/extract` 新增可选 `sudo: true`——列档（`tar -t` 校验坏档/空档）与
+  解包（`mkdir -p` + `tar -x[z]f`）都经 sudo 编排；sudo 分支跳过 SFTP 撞名预检（整包语义就是
+  解包覆盖，逐文件的 rename/ask 策略作用于归档文件名本身，由上传预检承担）。解包成功后前端
+  删除归档（sudo 车道 `sudo/remove`）；解包失败保留归档供手工处理。
+- **边界（登记）**：进度按归档字节（不再逐文件）；解包非原子（中途失败留部分文件，与逐文件
+  车道同类）；条目权限/属主统一（需要保留可执行位时用单文件/归档右键功能）；宿主桥拖拽清单
+  本身仍受宿主 2000 文件上限——整包车道只影响已交付清单的上传方式，截断提示由前端
+  `hostDrop.truncated` 通知承担。
 
 ### ssh/metrics/history
 

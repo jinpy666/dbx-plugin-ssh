@@ -5600,13 +5600,12 @@ impl SshRuntime {
         let remote_path = normalize_remote_path(&remote_path)?;
         // 压缩通道决策（M33，W6 单入口）：偏好/阈值/黑名单 + 远端 gunzip
         // 探测一次，决策结果随任务存续，finish 推送前消费。latin-1 车道
-        // 强制 None；sudo 车道同样强制 None——远端 gunzip 落目标目录的语义
-        // 在不可写目标上不成立，压缩优化本期不进 sudo 车道（登记边界）。
+        // 强制 None（远端 gunzip 的 shell 路径不做 latin-1 字节）；sudo 车道
+        // 正常参与——gz 暂存与远端 gunzip 都落在登录用户 home 暂存件上
+        // （finish 的 gz 分支按 push_target 分派），全程不触碰目标目录。
         // 只读对上传无意义（ensure_writable 已整体拦截）。
-        let compression = if sudo_lane {
-            CompressionMode::None
-        } else {
-            self.decide_transfer_compression(
+        let compression = self
+            .decide_transfer_compression(
                 &session_id,
                 size,
                 Some(remote_path.rsplit('/').next().unwrap_or("")),
@@ -5614,8 +5613,7 @@ impl SshRuntime {
                 false,
                 encoding == NameEncoding::Latin1,
             )
-            .await
-        };
+            .await;
         // Resume path: re-register a previously interrupted upload job. The
         // spool file and its sidecar meta (written on the first start) hold
         // the received prefix; the caller re-streams only the missing tail.
@@ -6121,12 +6119,14 @@ impl SshRuntime {
                 let push_target = sudo_staging
                     .clone()
                     .unwrap_or_else(|| temporary.clone());
-                // 压缩通道推送（M33）：.gz → 远端 `<temporary>.gz` → 远端
-                // gunzip 还原成 `<temporary>` → 与普通路径合流走原子提交。
+                // 压缩通道推送（M33）：.gz → 远端 `<推送暂存件>.gz` → 远端
+                // gunzip 还原成推送暂存件 → 与普通路径合流走原子提交。
+                // 普通车道的暂存件在目标目录、sudo 车道在登录用户 home
+                // （push_target 分派）——gz 与 gunzip 都不触碰不可写目标。
                 // 推送/解压任一步失败且非取消时，清理 .gz 临时件并回落普通
                 // 推送（宁可多传一次原始字节，不让任务失败）；取消立即终止。
                 if let Some((gz_path, gz_size)) = gz_local.take() {
-                    let gz_temporary = format!("{temporary}.gz");
+                    let gz_temporary = format!("{push_target}.gz");
                     if let Err(error) = Self::push_compressed_stream(
                         &sftp,
                         &gz_path,
@@ -6149,8 +6149,11 @@ impl SshRuntime {
                             "[sftp] upload {task_id} compressed push failed, plain push: {error}"
                         );
                     } else {
+                        // gunzip 是 plain exec（登录用户身份）：还原目标在
+                        // push_target——普通车道在目标目录内、sudo 车道在其
+                        // home 暂存件上，home 由登录用户可写，无需 sudo。
                         let command =
-                            transfer_compress::remote_gunzip_command(&gz_temporary, &temporary);
+                            transfer_compress::remote_gunzip_command(&gz_temporary, &push_target);
                         let decompressed = match this
                             .exec(&session_id, None, &command, false, Some(300))
                             .await
@@ -6185,18 +6188,33 @@ impl SshRuntime {
                                     let _ = sftp
                                         .lock()
                                         .await
-                                        .remove_file(temporary.clone())
+                                        .remove_file(push_target.clone())
                                         .await;
                                     return Err(upload_cancel_error(None));
                                 }
                                 served_compression = CompressionMode::Gzip;
-                                return commit_remote_file(
-                                    &sftp,
-                                    &temporary,
-                                    &remote_path,
-                                    &backup,
-                                )
-                                .await;
+                                // 提交分道：sudo 车道 exec `sudo mv`，普通车道
+                                // SFTP 同目录 rename（与 plain 推送路径同款）。
+                                return match sudo_staging.as_deref() {
+                                    Some(staging) => {
+                                        this.commit_sudo_upload(
+                                            &session_id,
+                                            staging,
+                                            &remote_path,
+                                            &backup,
+                                        )
+                                        .await
+                                    }
+                                    None => {
+                                        commit_remote_file(
+                                            &sftp,
+                                            &temporary,
+                                            &remote_path,
+                                            &backup,
+                                        )
+                                        .await
+                                    }
+                                };
                             }
                             Err(error) => {
                                 served_compression = CompressionMode::None;
@@ -6206,7 +6224,7 @@ impl SshRuntime {
                                 // 假设）：断链它可能仍握着的 temporary——僵尸
                                 // gunzip 的后续写入落在已断链的 inode 上，不会
                                 // 与回退普通推送写同一文件交错。
-                                let _ = sftp.lock().await.remove_file(temporary.clone()).await;
+                                let _ = sftp.lock().await.remove_file(push_target.clone()).await;
                                 eprintln!(
                                     "[sftp] upload {task_id} remote gunzip failed, plain push: {error}"
                                 );

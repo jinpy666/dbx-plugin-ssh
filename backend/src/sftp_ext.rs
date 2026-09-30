@@ -487,17 +487,44 @@ pub async fn archive(
 /// `destination_path` after `mkdir -p`. With `overwrite` disabled the member
 /// listing is compared against the destination first and any name collision
 /// aborts before anything is written. `.zip` is unsupported.
+///
+/// `sudo`（文件夹整包上传车道配套）：列档与解包都经 sudo 编排（root 读归档、
+/// 写登录用户不可写的目标目录）；撞名预检跳过——整包车道的语义就是解包覆盖，
+/// 逐文件的 rename/ask 策略作用于归档文件名本身。
 pub async fn extract(
     runtime: &SshRuntime,
     session_id: &str,
     archive_path: &str,
     destination_path: &str,
     overwrite: bool,
+    sudo: bool,
 ) -> Result<(), String> {
     runtime.ensure_writable(session_id).await?;
     let archive = normalize_remote_path(archive_path)?;
     let destination = normalize_remote_path(destination_path)?;
     let compressed = tar_z_flag(&archive)?;
+    if sudo {
+        // 列档先行仍是归档校验（坏档/空档在 sudo tar -t 的非零退出或空输出
+        // 上暴露），再解包。
+        let listing = crate::sudo_fs::sudo_exec(
+            runtime,
+            session_id,
+            &build_tar_list_command(&archive, compressed),
+            REMOTE_TAR_TIMEOUT_SECS,
+        )
+        .await?;
+        if listing.trim().is_empty() {
+            return Err("Archive is empty or could not be listed".to_string());
+        }
+        crate::sudo_fs::sudo_exec(
+            runtime,
+            session_id,
+            &build_extract_command(&archive, &destination, compressed),
+            REMOTE_TAR_TIMEOUT_SECS,
+        )
+        .await?;
+        return Ok(());
+    }
     // Listing first validates the archive and yields its top-level entries.
     let listing = runtime
         .exec(

@@ -1074,12 +1074,15 @@ impl Plugin {
                     .get("overwrite")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                // sudo（文件夹整包上传车道配套）：列档/解包走 sudo 编排。
+                let sudo = params.get("sudo").and_then(Value::as_bool).unwrap_or(false);
                 self.runtime.block_on(sftp_ext::extract(
                     &self.ssh,
                     session_id,
                     archive_path,
                     destination_path,
                     overwrite,
+                    sudo,
                 ))?;
                 Ok(json!({ "success": true }))
             }
@@ -2015,6 +2018,11 @@ impl Plugin {
                 local_fs::browse_local_dir(path, &plugin_data_dir())
             }
             "local/fs/drives" => Ok(json!({ "drives": local_fs::list_local_drives() })),
+            // 本地终端的系统信息带（dock 面板左上角）：同一采集脚本走本机
+            // shell（POSIX sh；Windows 无 sh 时结构化报错，前端整条隐藏）。
+            // 无会话参数——采样对象是 sidecar 宿主机本身；GPU/NPU 探测保持
+            // SSH-only，本地文档缺省两段。
+            "local/metrics" => metrics::collect_local_metrics(),
             // 「询问我」冲突策略的预检：目标目录下同名文件是否已存在。
             "local/fs/exists" => {
                 let dir = required_string(&params, "dir")?;
