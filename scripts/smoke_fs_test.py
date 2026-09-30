@@ -1640,6 +1640,55 @@ def main() -> None:
                 raise AssertionError(f"recording {recording_id} still listed after delete")
             print(f"    recorded {summary.get('events')} events, captured {marker}, deleted")
 
+        def case_local_recording_flow():
+            # 本地终端录制（dock 本地终端录制按钮的数据面）：本地 PTY 会话
+            # 上挂同一 asciicast 录制器，录出来的文件进同一 recordings 目录，
+            # ssh/recording/list|get|delete 全家族照常可用。
+            marker = f"smoke-local-rec-{uuid.uuid4().hex[:8]}"
+            opened = req("local/terminal/start", {"workbenchId": "smoke-fs-local-rec",
+                                                  "cols": 100, "rows": 24})
+            local_id = opened.get("sessionId")
+            if not local_id:
+                raise AssertionError(f"local/terminal/start -> {json.dumps(opened)[:160]}")
+            try:
+                start = req("local/recording/start", {"sessionId": local_id})
+                recording_id = start.get("recordingId")
+                if not recording_id:
+                    raise AssertionError(f"local/recording/start -> {json.dumps(start)[:160]}")
+                try:
+                    req("local/recording/start", {"sessionId": local_id})
+                    raise AssertionError("double local/recording/start accepted")
+                except SidecarError as error:
+                    if "already being recorded" not in str(error):
+                        raise
+                client.send_binary(f"local/terminal/in/{local_id}",
+                                   struct.pack(">Q", 1) + f"echo {marker}\r".encode())
+                time.sleep(2.0)
+            finally:
+                summary = req("local/recording/stop", {"sessionId": local_id})
+            if summary.get("recordingId") != recording_id:
+                raise AssertionError(f"stop -> {json.dumps(summary)[:160]}")
+            if not summary.get("events"):
+                raise AssertionError(f"no events captured: {json.dumps(summary)[:160]}")
+            try:
+                req("local/recording/stop", {"sessionId": local_id})
+                raise AssertionError("stop without active recording accepted")
+            except SidecarError as error:
+                if "no active recording" not in str(error):
+                    raise
+            listing = req("ssh/recording/list", {})
+            entry = next((item for item in listing.get("recordings", [])
+                          if item.get("recordingId") == recording_id), None)
+            if not entry:
+                raise AssertionError(f"recording {recording_id} not listed: {json.dumps(listing)[:160]}")
+            page = req("ssh/recording/get", {"recordingId": recording_id, "offset": 0, "limit": 500})
+            blob = json.dumps(page.get("events", []), ensure_ascii=False)
+            if marker not in blob:
+                raise AssertionError(f"marker {marker} not captured ({page.get('total')} events)")
+            req("ssh/recording/delete", {"recordingId": recording_id})
+            print(f"    local shell recorded {summary.get('events')} events, captured {marker}, deleted")
+            req("local/session/close", {"sessionId": local_id})
+
         def case_audit_clear():
             req("ssh/audit/clear", {})
             result = req("ssh/audit/list", {"limit": 100})
@@ -1685,6 +1734,8 @@ def main() -> None:
         report.run("ssh/metrics/history samples", "ssh/metrics/history", case_metrics_history)
         report.run("ssh/recording start/stop/list/get/delete", "ssh/recording/start",
                    case_recording_flow)
+        report.run("local/recording start/stop + shared recordings family",
+                   "local/recording/start", case_local_recording_flow)
 
         # -- 压缩传输（M33，gzip 混合方案）group --------------------------------
         # 阈值 0 + 开关开：可压缩文件走压缩通道（响应 compression=gzip、终态

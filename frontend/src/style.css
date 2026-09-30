@@ -129,6 +129,8 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--primary); o
   font-variant-numeric: tabular-nums;
 }
 .panel-metrics b { font-weight: 600; color: var(--foreground); }
+/* 降级带（ssh/metrics 失败）：占位数字弱化，原因在 tooltip 里，成功即回正常。 */
+.panel-metrics-degraded b { color: var(--muted-foreground); opacity: 0.7; }
 
 /* 工具条隐藏后的还原微钮：贴右上角悬浮于终端上，低透明度、hover 复原。 */
 .panel-toolbar-reveal {

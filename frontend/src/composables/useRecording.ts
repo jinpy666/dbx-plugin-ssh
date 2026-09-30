@@ -21,7 +21,8 @@ export function useRecording(options: {
   t: (key: string, values?: Record<string, string | number>) => string;
   showNotice: (message: string, actions?: Array<{ label: string; run: () => void }>) => void;
   showError: (cause: unknown, target?: "terminal" | "sftp") => void;
-  session: Ref<{ sessionId?: string } | undefined>;
+  /** 录制目标会话：SSH 会话或本地 PTY（dock 本地终端），缺省=无可录制会话。 */
+  recordingTarget: Ref<{ kind: "ssh" | "local"; sessionId: string } | undefined>;
   appearance: Ref<{ terminal: { fontSize: number } }>;
   terminalTheme: () => TerminalThemeLike;
   openTransferTarget: (path: string) => Promise<void>;
@@ -38,7 +39,7 @@ export function useRecording(options: {
   probeLocalCapabilities: () => Promise<{ canSaveLocal: boolean; downloadsDir: string } | undefined>;
   saveHostFile: (chunks: Uint8Array[], fileName: string) => Promise<void>;
 }) {
-  const { t, showNotice, showError, session, appearance, terminalTheme, openTransferTarget, revealTransferTarget, terminalFontOverride, terminalAppearance, hostFontFamily, closeMetrics, loadDownloadDir, loadDownloadUseDefaultDir, askDownloadTarget, applyChosenDirAsDefault, resolveDownloadConflictFor, probeLocalCapabilities, saveHostFile } = options;
+  const { t, showNotice, showError, recordingTarget, appearance, terminalTheme, openTransferTarget, revealTransferTarget, terminalFontOverride, terminalAppearance, hostFontFamily, closeMetrics, loadDownloadDir, loadDownloadUseDefaultDir, askDownloadTarget, applyChosenDirAsDefault, resolveDownloadConflictFor, probeLocalCapabilities, saveHostFile } = options;
 
 const recordingActive = ref(false);
 const recordingsOpen = ref(false);
@@ -65,7 +66,7 @@ let recordCountdownTimer = 0;
 let recordingElapsedTimer = 0;
 
 function beginRecordCountdown() {
-  if (!session.value || recordCountdown.value !== null) return;
+  if (!recordingTarget.value || recordCountdown.value !== null) return;
   recordCountdown.value = RECORD_COUNTDOWN_START;
   window.clearInterval(recordCountdownTimer);
   recordCountdownTimer = window.setInterval(() => {
@@ -101,9 +102,13 @@ function stopRecordingClock() {
 }
 
 async function startRecordingNow() {
-  if (!session.value || recordingActive.value) return;
+  const target = recordingTarget.value;
+  if (!target || recordingActive.value) return;
   try {
-    await window.dbxPlugin.invoke("ssh/recording/start", { sessionId: session.value.sessionId });
+    await window.dbxPlugin.invoke(
+      target.kind === "local" ? "local/recording/start" : "ssh/recording/start",
+      { sessionId: target.sessionId },
+    );
     recordingActive.value = true;
     startRecordingClock();
     showNotice(t("recordingStarted"));
@@ -113,13 +118,17 @@ async function startRecordingNow() {
 }
 
 async function toggleRecording() {
-  if (!session.value) return;
+  const target = recordingTarget.value;
+  if (!target) return;
   if (!recordingActive.value) {
     beginRecordCountdown();
     return;
   }
   try {
-    await window.dbxPlugin.invoke("ssh/recording/stop", { sessionId: session.value.sessionId });
+    await window.dbxPlugin.invoke(
+      target.kind === "local" ? "local/recording/stop" : "ssh/recording/stop",
+      { sessionId: target.sessionId },
+    );
     recordingActive.value = false;
     stopRecordingClock();
     showNotice(t("recordingStopped"));
@@ -128,6 +137,15 @@ async function toggleRecording() {
     showError(cause);
   }
 }
+
+// 目标会话消失（SSH 断开 / 本地 shell 退出）：sidecar 侧录制随会话槽位
+// 终止，前端红点与计时器同步复位，不悬挂在已消失的会话上。
+watch(recordingTarget, (target) => {
+  if (!target && recordingActive.value) {
+    recordingActive.value = false;
+    stopRecordingClock();
+  }
+});
 
 async function loadRecordings() {
   recordingsLoading.value = true;
