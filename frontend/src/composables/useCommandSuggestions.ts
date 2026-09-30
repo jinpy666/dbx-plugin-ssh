@@ -267,6 +267,10 @@ function closeSuggestions() {
   // 结构化补全浮层与历史建议浮层同一生命周期（Ctrl+C/回车/Esc 同步关闭）；
   // dismiss 同步作废挂起调度与在途结果（revision 前进）。
   completionController.dismiss();
+  // 同步落输入门：关闭后 lineChanged/settle 触发的重调度（如 history 面板
+  // 开启期间选中回填触发 lineChanged）不再把补全菜单重新拉起——面板与建议/
+  // 补全互斥；常规键入路径（refreshSuggestionsAfterInput）会重新放行。
+  completionInputAllowed = false;
   closeCompletionMenu();
 }
 

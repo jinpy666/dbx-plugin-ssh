@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 // TerminalHistoryPanel 组件测试：标题计数、逐条渲染（提示符图标 + 命令文本 +
-// 相对时间）、点击回填、悬停/按下激活（悬停武装）、关闭按钮、空态、锚点降级
-// 与 Warp 版式（全宽、bottom 贴输入行上方）、搜索框（聚焦/上抛 query/清除/键盘转发）。
+// 相对时间）、点击选中（唯一选中通道：悬停/按下不激活不改输入）、关闭按钮、
+// 空态、锚点降级与 Warp 版式（全宽、bottom 贴输入行上方）、搜索框（聚焦/
+// 上抛 query/清除/键盘转发）。
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import TerminalHistoryPanel from "./TerminalHistoryPanel.vue";
@@ -47,21 +48,24 @@ describe("TerminalHistoryPanel", () => {
     expect(wrapper.emitted("select")?.[0]).toEqual(["tail -f /var/log/syslog"]);
   });
 
-  it("mousedown activates without moving focus; pointermove-armed hover activates", async () => {
+  it("hover and mousedown never activate; click is the only selection channel", async () => {
     const wrapper = mountPanel();
     const second = wrapper.findAll(".terminal-history-hit")[1];
-    await second.trigger("mousedown");
-    expect(wrapper.emitted("activate")?.[0]).toEqual([1]);
-    // 悬停武装：指针未移动过时静止 hover 不抢选。
-    await second.trigger("mouseenter");
-    expect(wrapper.emitted("activate")).toHaveLength(1);
+    // 悬停（即便指针在浮层上移动过）与按下都不派发激活：移入面板不得即刻
+    // 改写输入行，弹出位置恰在鼠标下也不得抢键盘选择（App 侧无 activate 接线）。
     await wrapper.find(".terminal-history-panel").trigger("pointermove");
     await second.trigger("mouseenter");
-    expect(wrapper.emitted("activate")?.[1]).toEqual([1]);
-    // 激活态由父层 activeIndex 驱动。
+    await second.trigger("mousedown");
+    expect(wrapper.emitted("select")).toBeUndefined();
+    expect(wrapper.emitted("panel-key")).toBeUndefined();
+    // 高亮只由父层 activeIndex 驱动（键盘 ↑↓）。
     wrapper.setProps({ activeIndex: 1 });
     await wrapper.vm.$nextTick();
     expect(wrapper.findAll(".terminal-history-hit")[1].classes()).toContain("active");
+    // 点击是唯一选中通道：上抛 select 回填（悬停不产生 select）。
+    await second.trigger("click");
+    expect(wrapper.emitted("select")?.[0]).toEqual(["tail -f /var/log/syslog"]);
+    expect(wrapper.emitted("select")).toHaveLength(1);
   });
 
   it("the close button emits close", async () => {

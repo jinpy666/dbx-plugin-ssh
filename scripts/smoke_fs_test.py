@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -25,6 +26,7 @@ import secrets
 import shutil
 import struct
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -524,6 +526,48 @@ def main() -> None:
                 raise AssertionError(f"conflict should defer: {json.dumps(second)[:160]}")
             req("sudo/remove", {"sessionId": session_id, "path": f"{sudo_dir}/{base_name}"})
             print(f"    sudo rename-unique defers to {second.get('name')}")
+
+        def case_sudo_extract():
+            # 文件夹整包上传车道的远端半边（sftp/extract sudo）：python tarfile
+            # 打 .tar.gz（含嵌套子目录）→ sudo/upload 车道上传 → sudo:true 解包
+            # 到 root 属主的 sudo_dir → sudo/readFile 校验内容 → 清理归档与产物。
+            buf = io.BytesIO()
+            alpha, beta = b"dbx sudo extract alpha\n", b"beta-payload"
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                info = tarfile.TarInfo("pack-a.txt")
+                info.size = len(alpha)
+                tar.addfile(info, io.BytesIO(alpha))
+                nested = tarfile.TarInfo("sub/pack-b.txt")
+                nested.size = len(beta)
+                tar.addfile(nested, io.BytesIO(beta))
+            archive = buf.getvalue()
+            archive_path = f"{sudo_dir}/.dbx-sudo-extract-pack.tar.gz"
+            info = req("sudo/upload/start", {"sessionId": session_id, "remotePath": archive_path, "size": len(archive)})
+            task_id = str(info.get("taskId") or "")
+            if not task_id:
+                raise AssertionError(f"sudo/upload/start shape: {json.dumps(info)[:160]}")
+            client.send_binary(f"sftp/upload/{task_id}", struct.pack(">Q", 0) + archive)
+            time.sleep(1)
+            req("sudo/upload/finish", {"taskId": task_id})
+            status = {}
+            for _ in range(100):
+                status = req("sftp/transfer/status", {"taskId": task_id})
+                if status.get("status") in ("completed", "failed", "cancelled"):
+                    break
+                time.sleep(0.1)
+            if status.get("status") != "completed":
+                raise AssertionError(f"archive upload did not complete: {json.dumps(status)[:160]}")
+            req("sftp/extract", {"sessionId": session_id, "archivePath": archive_path,
+                                 "destinationPath": sudo_dir, "overwrite": True, "sudo": True})
+            for name, expected in (("pack-a.txt", alpha), ("sub/pack-b.txt", beta)):
+                read_back = req("sudo/readFile", {"sessionId": session_id, "path": f"{sudo_dir}/{name}", "maxBytes": 4096})
+                content = base64.b64decode(str(read_back.get("dataBase64") or ""))
+                if content != expected:
+                    raise AssertionError(f"extracted {name} mismatch: {content!r}")
+            req("sudo/remove", {"sessionId": session_id, "path": archive_path})
+            req("sudo/remove", {"sessionId": session_id, "path": f"{sudo_dir}/pack-a.txt"})
+            req("sudo/removeAll", {"sessionId": session_id, "path": f"{sudo_dir}/sub"})
+            print(f"    sudo extract of {len(archive)}-byte archive unpacked and verified")
 
         def case_sudo_remove_all():
             req("sudo/removeAll", {"sessionId": session_id, "path": sudo_dir})
@@ -1291,6 +1335,8 @@ def main() -> None:
                    needs="sudo/chmod 0700 + verify mode")
         report.run("sudo/rename-unique collision probe", "sftp/rename-unique",
                    case_sudo_rename_unique, needs="sudo/chmod 0700 + verify mode")
+        report.run("sudo/extract folder archive", "sftp/extract", case_sudo_extract,
+                   needs="sudo/chmod 0700 + verify mode")
         report.run("sudo/removeAll .sudo-test", "sudo/removeAll", case_sudo_remove_all,
                    needs="sudo/mkdir .sudo-test")
 
@@ -1432,6 +1478,23 @@ def main() -> None:
             if not isinstance(caps.get("platform"), str) or not caps["platform"]:
                 raise AssertionError(f"platform missing: {json.dumps(caps)[:120]}")
             print(f"    canSaveLocal={caps['canSaveLocal']} dir={caps['downloadsDir']} platform={caps['platform']}")
+
+        def case_local_metrics_shape():
+            # 本地终端的系统信息带数据面：本机 shell 跑同一采集脚本。Windows
+            # 无捆绑 sh 时结构化报错（"local metrics unavailable"），按环境
+            # 缺失 SKIP 而非 FAIL。
+            try:
+                sample = req("local/metrics", {})
+            except SidecarError as error:
+                if "local metrics unavailable" in str(error):
+                    raise SkipSignal(f"local sh unavailable on this host: {error}") from error
+                raise
+            for key in ("cpu", "memory", "network"):
+                if sample.get(key) is None:
+                    raise AssertionError(f"{key} section missing: {json.dumps(sample)[:160]}")
+            if "gpu" in sample:
+                raise AssertionError(f"gpu probe must stay ssh-only: {json.dumps(sample)[:160]}")
+            print(f"    cpu={json.dumps(sample['cpu'])[:80]}")
 
         def case_local_sink_download_roundtrip():
             raw = b"local-sink-smoke-payload-2026"
@@ -1611,6 +1674,8 @@ def main() -> None:
                    case_upload_resume_rejects_unknown_task)
         report.run("local/capabilities shape", "local/capabilities",
                    case_local_capabilities_shape)
+        report.run("local/metrics shape", "local/metrics",
+                   case_local_metrics_shape)
         report.run("local sink download round-trip + reveal guard", "sftp/download/start",
                    case_local_sink_download_roundtrip)
         report.run("local sink download binary frame shape", "sftp/download/next",

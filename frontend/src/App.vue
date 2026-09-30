@@ -223,7 +223,7 @@ import { useCommandDialog } from "./composables/useCommandDialog";
 import { useExternalEdits } from "./composables/useExternalEdits";
 import { useSftpSidebar } from "./composables/useSftpSidebar";
 import { useBatchSend } from "./composables/useBatchSend";
-import { useMetricsPanel } from "./composables/useMetricsPanel";
+import { useMetricsPanel, type ServerMetrics } from "./composables/useMetricsPanel";
 import { useTrzsz } from "./composables/useTrzsz";
 import { useRecording } from "./composables/useRecording";
 import { useHighlightRules } from "./composables/useHighlightRules";
@@ -577,7 +577,9 @@ let transportReuseState = createSessionTransportReuseState({});
 // Bottom dock panel surface (surface=panel, host §8.3): hide the workbench identity block so the panel
 // and focus the terminal itself; multi-open/shell switching goes through the panel "+" menu (bridge openWorkbench opens another panel).
 // Declared early: the batch bar / sftp pane initializers below must know the surface at setup time.
-const panelSurface = computed(() => hostContext.value.surface === "panel");
+// 宿主表面词表（开放集合，未知回退）："tab" 主工作台多标签 / "dock" 底部栏
+// （2026-09-30 起，旧值 "panel" 兼容期保留）/ "sidebar-left|right" / "window" 预留。
+const panelSurface = computed(() => hostContext.value.surface === "dock" || hostContext.value.surface === "panel");
 // 宿主未下发 appearance 前的兜底：DBX `.dark` 规范令牌。
 const appearance = ref(resolveAppearance());
 const terminalState = ref<"connecting" | "connected" | "disconnected" | "error">("connecting");
@@ -759,7 +761,6 @@ const {
   completionAnchor,
   completionLoading,
   closeSuggestions,
-  closeSuggestionsOnly,
   handleSuggestionKey,
   handleCompletionKey,
   refreshSuggestionsAfterInput,
@@ -2125,9 +2126,10 @@ const {
 // 纯逻辑（过滤/键位映射/门判定）在 lib/historyPanel.ts；这里只做状态接线——
 // 打开即全量视图 + 聚焦面板内搜索框（过滤只认搜索框 query，不读行缓冲——
 // 行缓冲模型在 Ctrl+U/方向键编辑后会残留残影）。选中即回填（shell ↑ 语义）：
-// 打开/↑↓/悬停激活/搜索框重过滤都把当前高亮命令实时写进输入行（replace
-// TerminalLineWith 整行擦重打，不回车），行内容与面板高亮恒一致；取消导航
-// （Esc / 底部最新一条再 ↓）恢复打开前的原输入行并收起面板。
+// 打开/↑↓/点击/搜索框重过滤都把当前高亮命令实时写进输入行（replace
+// TerminalLineWith 整行擦重打，不回车），行内容与面板高亮恒一致；悬停只
+// 浏览不改高亮不改输入（选中只认键盘与点击）；取消导航（Esc / 底部最新一条
+// 再 ↓）恢复打开前的原输入行并收起面板。
 // ---------------------------------------------------------------------------
 /** 打开门：任一浮层/alternate 屏/命令运行中/传输占用时不拦截 ↑。 */
 function historyPanelGateOpen(): boolean {
@@ -2162,7 +2164,10 @@ function openHistoryPanel() {
   syncHistoryPanelLine();
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
   hideGhostSuggestion();
-  closeSuggestionsOnly();
+  // 与建议/补全浮层互斥：打开时连带关闭结构化补全（含在途结果）并落输入门，
+  // 后续选中回填触发的 lineChanged 重调度不再把补全菜单滑到面板之下；开启
+  // 期间 onData 键入分流本就不开浮层，两侧单向互斥闭环。
+  closeSuggestions();
   historyPanelOpen.value = true;
 }
 
@@ -2177,17 +2182,12 @@ function closeHistoryPanel() {
 }
 
 /** 高亮项实时回填输入行（shell ↑ 语义）：光标处内容与面板高亮一致；行内容
- *  已相同时跳过（重复激活/重过滤不产生无谓的擦除重打字节）。 */
+ *  已相同时跳过（重复激活/重过滤不产生无谓的擦除重打字节）。悬停不改行——
+ *  面板条目不派发悬停激活，选中只认键盘 ↑↓ 与点击。 */
 function syncHistoryPanelLine() {
   const entry = historyPanelEntries.value[historyPanelActiveIndex.value];
   if (!entry || pendingTerminalInput === entry.command) return;
   replaceTerminalLineWith(entry.command, false);
-}
-
-/** 悬停/按下激活：高亮与输入行同步一体（与键盘导航同一语义）。 */
-function activateHistoryPanelEntry(index: number) {
-  historyPanelActiveIndex.value = index;
-  syncHistoryPanelLine();
 }
 
 /** 取消导航：恢复打开前的原输入行并收起面板。行未被改写过（无候选/未同步/
@@ -3822,7 +3822,9 @@ function sessionTabContext(reuseAuthenticatedTransport: boolean, spawnCommand?: 
 function openNewSessionTab() {
   const api = window.dbxPlugin;
   if (!api.openWorkbench || !connectionId.value) return;
-  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(false), { forceNew: true });
+  // target: "tab"：面板表面（dock iframe）调用时显式指定主工作台 tab 落点；
+  // tab 表面调用本就落 tab，旧宿主忽略该选项回落面板条目（可选降级）。
+  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(false), { forceNew: true, target: "tab" });
 }
 
 // 复制会话：新 tab 仍拥有独立 PTY、回放缓冲和 workbenchId，但后端在当前
@@ -3831,7 +3833,7 @@ function openNewSessionTab() {
 function openCopiedSessionTab() {
   const api = window.dbxPlugin;
   if (!api.openWorkbench || !connectionId.value || !connected.value) return;
-  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(true), { forceNew: true });
+  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(true), { forceNew: true, target: "tab" });
 }
 
 // 命令会话（WT-4，WezTerm spawn 对标）：复制会话的同族入口，channel 启动
@@ -3852,7 +3854,7 @@ function confirmCommandSessionTab() {
   const api = window.dbxPlugin;
   if (!api?.openWorkbench || !connectionId.value || !connected.value || !command) return;
   spawnSessionDialogOpen.value = false;
-  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(true, command), { forceNew: true });
+  void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(true, command), { forceNew: true, target: "tab" });
 }
 
 
@@ -6035,22 +6037,44 @@ const {
 
 // —— dock 面板左上角系统信息（CPU/内存/网速）：复用 ssh/metrics 既有链路 ——
 
-// 连接建立后 5s 环境轮询（与指标卡同一 refreshMetrics/采样环；指标卡打开时
-// 让位其自带轮询，避免双发）。隐藏的 webview 不打扰；断开/失败整体隐藏。
-let panelMetricsTimer = 0;
-watch([connected, panelSurface], ([isConnected, onPanel]) => {
-  window.clearInterval(panelMetricsTimer);
-  if (!onPanel || !isConnected) return;
+// 本地终端（运行中或恢复的 shell）没有 SSH 会话，面板带改采本机样本：
+// local/metrics 复用同一采集脚本走本机 shell（macOS/Linux；Windows 无 sh
+// 时结构化报错、整条隐藏）。telnet/serial/vnc/rdp 的用户语义在远端设备，
+// 本机指标会造成误导——不适用（connected 分支天然排除它们）。
+const localTerminalActive = computed(() => isLocalMode.value || localShellRestored.value);
+
+async function refreshPanelMetrics() {
+  if (localTerminalActive.value) {
+    const sample = await window.dbxPlugin
+      .invoke<ServerMetrics>("local/metrics", {}, { timeoutMs: 30_000 })
+      .catch(() => undefined);
+    if (sample) {
+      metrics.value = sample;
+      metricsError.value = "";
+    } else {
+      metricsError.value = "local metrics unavailable";
+    }
+    return;
+  }
   void refreshMetrics();
+}
+
+// 连接建立（或本地终端激活）后 5s 环境轮询（与指标卡同一采样环；指标卡打开
+// 时让位其自带轮询，避免双发）。隐藏的 webview 不打扰；断开/失败整体隐藏。
+let panelMetricsTimer = 0;
+watch([connected, panelSurface, localTerminalActive], ([isConnected, onPanel, isLocal]) => {
+  window.clearInterval(panelMetricsTimer);
+  if (!onPanel || (!isConnected && !isLocal)) return;
+  void refreshPanelMetrics();
   panelMetricsTimer = window.setInterval(() => {
-    if (!metricsOpen.value && !metricsLoading.value && document.visibilityState === "visible") void refreshMetrics();
+    if (!metricsOpen.value && !metricsLoading.value && document.visibilityState === "visible") void refreshPanelMetrics();
   }, 5000);
 }, { immediate: true });
 onBeforeUnmount(() => window.clearInterval(panelMetricsTimer));
 
 // 三项就绪才显示（首拍未回/旧 sidecar 缺 network 字段/请求失败都不渲染占位）。
 const panelMetricsVisible = computed(() =>
-  panelSurface.value && connected.value && !localUiMode.value && metrics.value != null && !metricsError.value,
+  panelSurface.value && (connected.value || localTerminalActive.value) && metrics.value != null && !metricsError.value,
 );
 const panelCpuPercent = computed<number | null>(() => {
   const value = metrics.value?.cpu?.percent;
@@ -6613,7 +6637,10 @@ async function initialize() {
   unsubscribeEvent = api.onEvent(handleEvent);
   unsubscribeBinary = api.onBinary(handleBinary);
   unsubscribeFileDrag = api.fileTransfer?.onDragState((active) => (dragActive.value = active));
-  unsubscribeFileDrop = api.fileTransfer?.onDrop((files) => {
+  unsubscribeFileDrop = api.fileTransfer?.onDrop((files, drop) => {
+    // 宿主目录展开撞上限（如单文件夹 2000 文件）只交付前缀：明确提示而不是
+    // 静默丢文件；完整上传指引工具栏「上传文件夹」选择器（浏览器枚举，无此限）。
+    if (drop?.truncated) showNotice(t("hostDrop.truncated"));
     void handleHostFileDrop(files);
   });
   // §8.3 面板加载生命周期：探活与终端创建并行。探活只是一次 sidecar 往返，
@@ -7321,10 +7348,10 @@ onBeforeUnmount(() => {
           @close="closeQuickSelect"
         />
         <!-- Warp 式 history 面板（↑ 唤起）：commandHistory 可视化快速回填，
-             选中（打开/↑↓/悬停/搜索过滤）即实时回填输入行（仅回填不执行）；
-             面板内搜索框聚焦过滤，↑↓/Enter/Tab/Esc 经 panel-key 转发给
-             handleHistoryPanelKey（焦点留在输入框，回填后回终端），锚点定位
-             与翻转语义同建议浮层。 -->
+             选中（打开/↑↓/点击/搜索过滤）即实时回填输入行（仅回填不执行），
+             悬停只浏览不抢高亮不改输入；面板内搜索框聚焦过滤，↑↓/Enter/Tab/
+             Esc 经 panel-key 转发给 handleHistoryPanelKey（焦点留在输入框，
+             回填后回终端），锚点定位与翻转语义同建议浮层。 -->
         <TerminalHistoryPanel
           v-if="historyPanelOpen"
           :locale="locale"
@@ -7333,7 +7360,6 @@ onBeforeUnmount(() => {
           :anchor="historyPanelAnchor"
           :query="historyPanelQuery"
           :viewport="suggestionViewport"
-          @activate="activateHistoryPanelEntry"
           @update:query="(value: string) => { historyPanelQuery = value; updateHistoryPanelFilter(true); }"
           @panel-key="handleHistoryPanelPanelKey"
           @select="selectHistoryEntry"

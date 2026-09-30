@@ -6,7 +6,7 @@ import { filterDiskMounts, filterNetworkInterfaces } from "../lib/metricsView";
 import { canKillProcess, sortProcessRows, type ProcessSortKey } from "../lib/processActions";
 import { type GpuOverviewView, type NpuOverviewView } from "../lib/metricsGpuNpu";
 
-interface ServerMetrics {
+export interface ServerMetrics {
   hostname?: string | null;
   kernel?: string | null;
   uptimeSeconds?: number | null;

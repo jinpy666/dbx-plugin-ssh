@@ -1643,8 +1643,8 @@ window.dbxPlugin = {
   // Mirrors the §11 host authority: the plugin payload stays under context.plugin while plugin-supplied
   // reserved fields (workbenchId/restored/surface) are always dropped and the identity is injected by the mock (host)
   // generated identity is injected — an early test surface for host A1 behavior.
-  openWorkbench: async (contributionId, childContext) => {
-    console.info("[mock] openWorkbench", contributionId, childContext);
+  openWorkbench: async (contributionId, childContext, options) => {
+    console.info("[mock] openWorkbench", contributionId, childContext, options);
     const payload = (childContext && typeof childContext === "object" && !Array.isArray(childContext) ? childContext : {}) as Record<string, unknown>;
     delete payload.workbenchId;
     delete payload.restored;

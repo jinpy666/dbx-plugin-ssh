@@ -31,8 +31,10 @@ interface DbxPluginFileTransferApi {
   cancel(handleId: string): Promise<void>;
   onDragState(listener: (active: boolean) => void): () => void;
   /** onDrop 条目：relativePath 为可选增量——宿主遍历拖入目录后按树内相对路径
-   * （`/` 分隔，含文件名）附带，文件夹上传据此重建目录结构；旧宿主不带。 */
-  onDrop(listener: (files: Array<{ handleId: string; name: string; size: number; contentType: string; relativePath?: string }>) => void): () => void;
+   * （`/` 分隔，含文件名）附带，文件夹上传据此重建目录结构；旧宿主不带。
+   * drop 为第二参数：truncated 表示宿主目录展开撞上限（如单文件夹 2000 文件）
+   * 只交付了前缀——宿主桥对旧监听器保持单参兼容，插件按需消费。 */
+  onDrop(listener: (files: Array<{ handleId: string; name: string; size: number; contentType: string; relativePath?: string }>, drop?: { dropId?: string; truncated?: boolean }) => void): () => void;
 }
 
 interface DbxPluginTheme {
@@ -74,7 +76,8 @@ interface DbxPluginApi {
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
   invoke<T = unknown>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T>;
   notify(method: string, params?: unknown): Promise<void>;
-  openWorkbench?(contributionId: string, context?: Record<string, unknown>, options?: { forceNew?: boolean }): Promise<void>;
+  /** `target: "tab"`：面板 webview 显式请求主工作台 tab 落点（宿主桥扩展；旧宿主/不支持的面板忽略该选项，保持原落点）。 */
+  openWorkbench?(contributionId: string, context?: Record<string, unknown>, options?: { forceNew?: boolean; target?: "tab" }): Promise<void>;
   /** 请宿主按当前最新配置重开连接（含 vault 最新凭据回推）。Host API 1.2+；旧宿主无此方法。 */
   reopenConnection?(connectionId: string): Promise<unknown>;
   sendBinary(channel: string, data: Uint8Array | ArrayBuffer | string): Promise<void>;
