@@ -11,7 +11,7 @@
  * - `ssh/forward/state`（事件）{ id, state, error? }
  */
 
-export type ForwardKind = "local" | "remote";
+export type ForwardKind = "local" | "remote" | "dynamic";
 
 export interface PortForward {
   id: string;
@@ -66,7 +66,7 @@ function numberField(record: Record<string, unknown>, key: string): number {
 }
 
 function parseKind(value: unknown): ForwardKind {
-  return value === "remote" ? "remote" : "local";
+  return value === "remote" || value === "dynamic" ? value : "local";
 }
 
 /** `ssh/forward/list` / `ssh/forward/start` 载荷 → 面板行；坏行直接丢弃。 */
@@ -129,10 +129,10 @@ export function validateForwardForm(draft: ForwardFormDraft): ForwardFormError {
   if (!isValidHost(draft.listenHost.trim(), { allowEmpty: true, allowWildcard: draft.kind === "remote" })) {
     return "listenHost";
   }
-  if (!isValidHost(draft.targetHost.trim(), { allowEmpty: false, allowWildcard: false })) {
+  if (draft.kind !== "dynamic" && !isValidHost(draft.targetHost.trim(), { allowEmpty: false, allowWildcard: false })) {
     return "targetHost";
   }
-  for (const port of [draft.listenPort, draft.targetPort]) {
+  for (const port of draft.kind === "dynamic" ? [draft.listenPort] : [draft.listenPort, draft.targetPort]) {
     const value = Number(port.trim());
     if (!port.trim() || !Number.isInteger(value) || value < 0 || value > 65535) return "port";
   }
@@ -201,7 +201,7 @@ export function findForwardConflict(
   return (
     rows.find(
       (row) =>
-        row.kind === draft.kind &&
+        (draft.kind === "remote" ? row.kind === "remote" : row.kind !== "remote") &&
         row.listenPort === port &&
         (WILDCARD_HOSTS.has(host) ||
           WILDCARD_HOSTS.has(normalizePickHost(row.listenHost)) ||
@@ -255,7 +255,7 @@ export interface ListenHostOption {
  * 通过 validateForwardForm（`*` 仅远程合法，本地组刻意不含）。
  */
 export function listenHostOptions(kind: ForwardKind): ListenHostOption[] {
-  if (kind === "local") {
+  if (kind !== "remote") {
     return [
       { value: "0.0.0.0", labelKey: "forwards.allInterfaces" },
       { value: "127.0.0.1", labelKey: "forwards.loopback" },
@@ -273,20 +273,23 @@ export function listenHostOptions(kind: ForwardKind): ListenHostOption[] {
 }
 
 /** 校验通过后的 RPC 参数（端口转数字；listenHost 空串交给 sidecar 默认）。 */
-export function forwardStartParams(draft: ForwardFormDraft, sessionId: string) {
+export function forwardStartParams(draft: ForwardFormDraft, ownerId: string, independent = false) {
   return {
-    sessionId,
+    ...(independent ? { connectionId: ownerId } : { sessionId: ownerId }),
     kind: draft.kind,
     listenHost: draft.listenHost.trim(),
     listenPort: Number(draft.listenPort.trim()),
-    targetHost: draft.targetHost.trim(),
-    targetPort: Number(draft.targetPort.trim()),
+    ...(draft.kind === "dynamic" ? {} : {
+      targetHost: draft.targetHost.trim(),
+      targetPort: Number(draft.targetPort.trim()),
+    }),
   };
 }
 
 /** 面板行主文案：`127.0.0.1:8080 → db:5432`，0 端口显示实际绑定值。 */
 export function formatForwardRoute(row: Pick<PortForward, "kind" | "listenHost" | "listenPort" | "boundPort" | "targetHost" | "targetPort">): string {
   const listen = row.boundPort > 0 ? row.boundPort : row.listenPort;
+  if (row.kind === "dynamic") return `SOCKS5 ${row.listenHost}:${listen}`;
   const arrow = row.kind === "remote" ? "←" : "→";
   return `${row.listenHost}:${listen} ${arrow} ${row.targetHost}:${row.targetPort}`;
 }

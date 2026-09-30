@@ -88,6 +88,7 @@ describe("validateForwardForm", () => {
   it("accepts complete forms, loopback default and server-picked ports", () => {
     expect(validateForwardForm(draft({}))).toBeNull();
     expect(validateForwardForm(draft({ listenHost: "", listenPort: "0", targetPort: "65535" }))).toBeNull();
+    expect(validateForwardForm(draft({ kind: "dynamic", targetHost: "", targetPort: "" }))).toBeNull();
   });
 
   it("accepts IPv4, IPv6 (bracketed) and hostname targets", () => {
@@ -124,6 +125,7 @@ describe("findForwardConflict", () => {
     expect(findForwardConflict(rows, { kind: "local", listenHost: "127.0.0.1", listenPort: "8080" })?.id).toBe("fwd-1");
     expect(findForwardConflict(rows, { kind: "local", listenHost: "0.0.0.0", listenPort: "8080" })?.id).toBe("fwd-1");
     expect(findForwardConflict(rows, { kind: "local", listenHost: "127.0.0.1", listenPort: "8081" })).toBeNull();
+    expect(findForwardConflict(rows, { kind: "dynamic", listenHost: "127.0.0.1", listenPort: "8080" })?.id).toBe("fwd-1");
     // Different direction: the same port lives on different machines.
     expect(findForwardConflict(rows, { kind: "remote", listenHost: "127.0.0.1", listenPort: "8080" })).toBeNull();
   });
@@ -160,6 +162,7 @@ describe("listenHostOptions", () => {
 
   it("offers all-interfaces and loopback literals for local binds", () => {
     expect(values("local")).toEqual(["0.0.0.0", "127.0.0.1", "::1"]);
+    expect(listenHostOptions("dynamic")).toEqual(listenHostOptions("local"));
   });
 
   it("defaults remote binds to server-side loopback and wildcard group", () => {
@@ -207,6 +210,11 @@ describe("forwardStartParams", () => {
       targetPort: 3000,
     });
   });
+  it("starts independent SOCKS5 mappings without a fixed target", () => {
+    expect(forwardStartParams({ kind: "dynamic", listenHost: "127.0.0.1", listenPort: "1080", targetHost: "", targetPort: "" }, "c-1", true)).toEqual({
+      connectionId: "c-1", kind: "dynamic", listenHost: "127.0.0.1", listenPort: 1080,
+    });
+  });
 });
 
 describe("formatForwardRoute", () => {
@@ -215,6 +223,7 @@ describe("formatForwardRoute", () => {
     expect(
       formatForwardRoute(row({ kind: "remote", listenPort: 0, boundPort: 31234, targetHost: "web", targetPort: 3000 })),
     ).toBe("127.0.0.1:31234 ← web:3000");
+    expect(formatForwardRoute(row({ kind: "dynamic", boundPort: 1080 }))).toBe("SOCKS5 127.0.0.1:1080");
   });
 });
 

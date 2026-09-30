@@ -8,6 +8,8 @@ then exercises user-facing port forwards against the test container:
                through the tunnel and expect an SSH banner;
   remote (-R): ask the server to listen on a server-picked port and relay a
                busybox-nc payload into a local echo server;
+  dynamic (-D): negotiate SOCKS5 CONNECT using a domain resolved by the SSH
+                server, including concurrent clients and independent lifetime;
   lifecycle:  list rows, stop semantics, unknown-id error, session-close
                cleanup.
 
@@ -27,8 +29,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import socket
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -145,6 +149,21 @@ def read_ssh_banner(port: int, timeout: float = 10.0) -> str:
         return sock.recv(64).decode("utf-8", "replace")
 
 
+def read_socks5_banner(proxy_port: int, target_port: int) -> str:
+    """Use a domain-form CONNECT so localhost is resolved by the SSH server."""
+    with socket.create_connection(("127.0.0.1", proxy_port), timeout=10) as sock:
+        sock.settimeout(10)
+        sock.sendall(b"\x05\x01\x00")
+        if sock.recv(2) != b"\x05\x00":
+            raise AssertionError("SOCKS5 no-auth negotiation failed")
+        host = b"localhost"
+        sock.sendall(b"\x05\x01\x00\x03" + bytes([len(host)]) + host + target_port.to_bytes(2, "big"))
+        reply = sock.recv(10)
+        if len(reply) != 10 or reply[:2] != b"\x05\x00":
+            raise AssertionError(f"SOCKS5 CONNECT failed: {reply!r}")
+        return sock.recv(64).decode("utf-8", "replace")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
@@ -154,7 +173,8 @@ def main() -> None:
     args = parser.parse_args()
 
     started = time.monotonic()
-    client = SidecarClient.start(timeout=30)
+    data_dir = tempfile.mkdtemp(prefix="dbx-forward-smoke-")
+    client = SidecarClient.start(timeout=30, data_dir=data_dir)
     try:
         step("plugin/initialize")
         client.initialize()
@@ -313,6 +333,42 @@ def main() -> None:
                 raise AssertionError(f"probe missing loopback address: {sorted(addrs)}")
             print(f"    probe returned {len(rows)} addresses (loopback present)")
 
+        def case_independent_dynamic():
+            """A PTY-free -D stays live across terminal close, then frees its port."""
+            result = req("ssh/forward/start", {
+                "connectionId": connection_id,
+                "kind": "dynamic",
+                "listenPort": 0,
+            }, timeout=60)
+            forward = result["forward"]
+            bound = int(forward["boundPort"])
+            if forward["sessionId"] or forward["listenHost"] != "127.0.0.1" or bound <= 0:
+                raise AssertionError(f"independent dynamic row invalid: {forward!r}")
+            try:
+                req("ssh/session/close", {"sessionId": session_id})
+                results: list[str] = []
+                errors: list[Exception] = []
+
+                def worker():
+                    try:
+                        results.append(read_socks5_banner(bound, args.port))
+                    except Exception as error:  # noqa: BLE001 - report from worker
+                        errors.append(error)
+
+                workers = [threading.Thread(target=worker) for _ in range(2)]
+                for worker_thread in workers:
+                    worker_thread.start()
+                for worker_thread in workers:
+                    worker_thread.join(15)
+                if errors or len(results) != 2 or any(not item.startswith("SSH-") for item in results):
+                    raise AssertionError(f"concurrent SOCKS5 roundtrips failed: {results!r}, {errors!r}")
+                print(f"    -D 127.0.0.1:{bound} survived terminal close; concurrent domain CONNECT succeeded")
+            finally:
+                req("ssh/forward/stop", {"id": forward["id"]})
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", bound))
+            print(f"    stop released 127.0.0.1:{bound}")
+
         cases = [
             ("local -L roundtrip through the tunnel", case_local_forward_roundtrip, None),
             ("remote -R roundtrip via busybox nc", case_remote_forward_roundtrip, None),
@@ -344,9 +400,34 @@ def main() -> None:
             except Exception:  # noqa: S110 - best-effort teardown
                 pass
 
+        step("independent SOCKS5 survives terminal close and frees port")
+        try:
+            case_independent_dynamic()
+        except Exception as error:  # noqa: BLE001 - feature contract must pass
+            fail(f"independent SOCKS5: {error}", client)
+
+        step("connection disconnect cleans independent listener")
+        try:
+            forward = req("ssh/forward/start", {
+                "connectionId": connection_id,
+                "kind": "dynamic",
+                "listenPort": 0,
+            }, timeout=60)["forward"]
+            bound = int(forward["boundPort"])
+            req("connection/disconnect", {"connection": {"id": connection_id}})
+            rows = req("ssh/forward/list", {"connectionId": connection_id}).get("forwards") or []
+            if any(row["id"] == forward["id"] for row in rows):
+                raise AssertionError(f"disconnected forward still listed: {rows!r}")
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", bound))
+            print(f"    disconnect removed {forward['id']} and released 127.0.0.1:{bound}")
+        except Exception as error:  # noqa: BLE001 - lifecycle contract must pass
+            fail(f"independent disconnect cleanup: {error}", client)
+
         print(f"\nALL FORWARD SMOKE CASES PASSED in {time.monotonic() - started:.1f}s")
     finally:
         client.close()
+        shutil.rmtree(data_dir)
 
 
 if __name__ == "__main__":

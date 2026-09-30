@@ -155,6 +155,12 @@ try {
   await expect(page, ".toolbar-actions", "toolbar actions");
   await expect(page, ".toolbar-separator", "toolbar separator");
 
+  console.log("==> SSH toolbar port-forward manager");
+  await page.locator('button[title="Port forwards"]').click();
+  await expectText(page, ".forwards-modal .forward-profiles h2", "Saved port forwards", "toolbar dialog shows saved mappings");
+  await expectText(page, ".forwards-modal .forward-section-title", "Active port forwards", "toolbar dialog shows active mappings");
+  await page.locator('.forwards-modal > header .icon-button').click();
+
   mkdirSync(SHOT_DIR, { recursive: true });
   await page.screenshot({ path: `${SHOT_DIR}/01-workbench.png`, fullPage: false });
   console.log(`  screenshot: docs/screenshots-ui-mock/01-workbench.png`);
@@ -394,6 +400,30 @@ try {
     }
     await localPage.close();
   }
+
+  console.log("==> independent tunnel manager and saved quick start");
+  const tunnelPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  tunnelPage.on("pageerror", (err) => pageError.push(String(err)));
+  await tunnelPage.goto(`${baseUrl}?tunnels=1&theme=light&noanim=1`, { waitUntil: "domcontentloaded" });
+  await expect(tunnelPage, "section.forwards-modal--standalone", "inline tunnel page");
+  check("tunnel page has no modal overlay", await tunnelPage.locator('[data-slot="dialog-overlay"]').count() === 0);
+  const primaryBackground = await tunnelPage.getByRole("button", { name: "Start all saved" }).evaluate((button) => getComputedStyle(button).backgroundColor);
+  check("light theme supplies a visible primary button", primaryBackground === "rgb(23, 23, 23)", primaryBackground);
+  await tunnelPage.locator('input[value="dynamic"]').check();
+  await tunnelPage.locator('.forward-form-addresses input').nth(1).fill("1080");
+  await tunnelPage.getByRole("button", { name: "Save preset" }).click();
+  await expectText(tunnelPage, ".forward-profiles .forward-row", "SOCKS5 127.0.0.1:1080", "saved SOCKS5 preset");
+  // Model a context-menu start while the manager is already mounted. The
+  // sidecar event only carries an ID, so the page must fetch the new row.
+  await tunnelPage.evaluate(() => window.dbxPlugin.invoke("ssh/forward/start", {
+    connectionId: "visual-connection", kind: "dynamic", listenHost: "127.0.0.1", listenPort: 1080,
+  }));
+  await expectText(tunnelPage, ".forwards-body > .forwards-list .forward-row", "SOCKS5 127.0.0.1:1080", "menu-started tunnel appears without reopening manager");
+  await tunnelPage.goto(`${baseUrl}?tunnels=quick&theme=light&noanim=1`, { waitUntil: "domcontentloaded" });
+  await expectText(tunnelPage, ".forwards-body > .forwards-list .forward-row", "SOCKS5 127.0.0.1:1080", "quick start restored saved tunnel");
+  check("quick start has no modal overlay", await tunnelPage.locator('[data-slot="dialog-overlay"]').count() === 0);
+  await tunnelPage.screenshot({ path: `${SHOT_DIR}/tunnel-manager.png`, fullPage: false });
+  await tunnelPage.close();
 
   if (pageError.length) {
     failures.push(`page errors: ${pageError.slice(0, 3).join(" | ")}`);

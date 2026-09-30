@@ -25,6 +25,7 @@ go_sdk="$(ls -d "$(npm root -g 2>/dev/null)/@dbx-app/plugin-cli/sdk-root/plugins
 if [ -n "$go_sdk" ] && [ -f "$go_sdk/go.mod" ]; then
   ln -s "$go_sdk" "$shim/plugins/sdk/go/dbx-plugin-sdk"
 else
+  mkdir -p "$shim/plugins/sdk/go/dbx-plugin-sdk"
   printf 'module dbx-plugin-sdk\n\ngo 1.21\n' > "$shim/plugins/sdk/go/dbx-plugin-sdk/go.mod"
 fi
 

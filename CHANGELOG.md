@@ -4,6 +4,12 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.1-beta.17] — 2026-09-30
+
+- 新增 SOCKS5 动态端口映射：支持 IPv4、IPv6 和远端解析的域名目标；独立映射无需打开终端，并在停止最后一条映射或断开连接时释放 SSH 传输。
+- 连接右键端口映射菜单根据已保存预设和实时状态提供二级菜单，可逐条或批量启动、停止；管理入口改为宿主弹框，SSH 终端右上角按钮复用同一管理界面。
+- 管理界面即时同步从右键菜单启动的映射；界面文案统一使用“端口映射”，并补齐七语翻译。此功能依赖具备动态插件菜单与弹框能力的 DBX 0.6.28 构建。
+
 ## [0.7.1-beta.16] — 2026-09-30
 
 - **SFTP sudo 上传车道（UploadSudo）：sudo 模式下向 root 目录上传不再撞权限墙**。新增 sudo/upload/start|finish：分块先落登录用户 home 暂存件（`.dbx-sudo-ul-*`），提交走单条 `sudo mv`（目标同名先让位备份、失败回滚，`sudo chmod` 保持权限位）；分块帧/进度/取消/断点续传全复用既有上传管线，压缩通道在 sudo 车道强制关闭。前端 sudo 模式 + 可写判定全链自动换道（上传、重复名预检、文件夹建目录、预览回落下载）；`sftp/rename-unique` 支持sudo 探测让位；协议文档登记「sudo 上传」边界（mv 跨盘非原子、home 暂存空间）。

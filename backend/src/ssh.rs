@@ -1846,10 +1846,13 @@ pub struct SshRuntime {
     /// Live user-facing port mappings (Xshell-style 端口映射, -L/-R):
     /// forward id -> mapping row. Runtime-scoped on purpose; rows die with
     /// their session so a closed SSH session cannot leave phantom ports.
-    forwards: forward::ForwardRegistry,
+    forwards: Arc<forward::ForwardRegistry>,
+    /// One authenticated, PTY-free transport per connection with independent
+    /// mappings. Serialized creation prevents duplicate dials on concurrent starts.
+    forward_transports: Arc<AsyncMutex<HashMap<String, Arc<forward::ForwardTransport>>>>,
     /// Per-connection `(listen_host, bound_port) -> dial target` tables the
     /// forwarded-tcpip handler consults (see `SshClient::remote_forwards`).
-    remote_tables: Mutex<HashMap<String, Arc<RemoteForwardTable>>>,
+    remote_tables: Arc<Mutex<HashMap<String, Arc<RemoteForwardTable>>>>,
     /// Trust-on-first-use for unknown host keys (MCP stdio mode).
     auto_trust: bool,
     /// 会话维度的「建议开启兼容模式」一次性提示标记（M14-B）：SFTP 探测
@@ -1895,8 +1898,9 @@ impl SshRuntime {
             sudo_keepalive: Arc::new(Mutex::new(HashMap::new())),
             metrics_cache: Mutex::new(HashMap::new()),
             exec_tasks: Mutex::new(HashMap::new()),
-            forwards: forward::ForwardRegistry::default(),
-            remote_tables: Mutex::new(HashMap::new()),
+            forwards: Arc::new(forward::ForwardRegistry::default()),
+            forward_transports: Arc::new(AsyncMutex::new(HashMap::new())),
+            remote_tables: Arc::new(Mutex::new(HashMap::new())),
             agent_modes: Mutex::new(agent_terminal::load_modes(&data_dir)),
             agent_challenges: Mutex::new(HashMap::new()),
             auto_trust: false,
@@ -1949,10 +1953,34 @@ impl SshRuntime {
     }
 
     pub async fn disconnect_connection(&self, connection_id: &str) -> Result<(), String> {
+        // Serialize against an independent forward being authenticated and
+        // registered for this connection.
+        let mut forward_guard = self.forward_transports.lock().await;
         self.connections
             .write()
             .map_err(|_| "Connection registry is poisoned".to_string())?
             .remove(connection_id);
+        let old_transport = forward_guard.remove(connection_id);
+        drop(forward_guard);
+        let independent: Vec<_> = self
+            .forwards
+            .rows()
+            .into_iter()
+            .filter(|row| {
+                row.connection_id == connection_id
+                    && row.transport.as_ref().is_some_and(|transport| {
+                        old_transport
+                            .as_ref()
+                            .is_some_and(|old| Arc::ptr_eq(transport, old))
+                    })
+            })
+            .collect();
+        for entry in independent {
+            self.teardown_forward(&entry).await;
+        }
+        if let Some(transport) = old_transport {
+            Self::close_forward_transport(&transport).await;
+        }
         let session_ids = self
             .sessions
             .read()
@@ -3075,11 +3103,22 @@ impl SshRuntime {
         params: &Value,
         emitter: PluginEmitter,
     ) -> Result<Value, String> {
-        let session_id = params
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .ok_or("sessionId is required")?;
-        let session = self.session(session_id).await?;
+        let session_id = params.get("sessionId").and_then(Value::as_str);
+        let session = if let Some(id) = session_id {
+            Some(self.session(id).await?)
+        } else {
+            None
+        };
+        let connection_id = if let Some(session) = &session {
+            session.connection_id.clone()
+        } else {
+            params
+                .get("connectionId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or("sessionId or connectionId is required")?
+                .to_string()
+        };
         let (kind, listen_host, listen_port, target_host, target_port) =
             forward::parse_spec(params)?;
         // Conflict pre-check ahead of bind/tcpip-forward, so a duplicate gets
@@ -3089,9 +3128,11 @@ impl SshRuntime {
         // server — same connection only.
         if listen_port != 0 {
             let conflicting = self.forwards.rows().into_iter().find(|row| {
-                row.kind == kind
-                    && (kind == forward::ForwardKind::Local
-                        || row.connection_id == session.connection_id)
+                (kind == forward::ForwardKind::Remote
+                    && row.kind == forward::ForwardKind::Remote
+                    && row.connection_id == connection_id
+                    || kind != forward::ForwardKind::Remote
+                        && row.kind != forward::ForwardKind::Remote)
                     && forward::listen_endpoints_conflict(
                         &listen_host,
                         listen_port,
@@ -3114,15 +3155,60 @@ impl SshRuntime {
                 ));
             }
         }
+        let mut created_transport = false;
+        let mut transport_guard = if session.is_none() {
+            Some(self.forward_transports.lock().await)
+        } else {
+            None
+        };
+        let transport = if let Some(guard) = transport_guard.as_mut() {
+            // Disconnect removes the stored connection under this same lock.
+            // Recheck even when a transport already exists so a concurrent
+            // start cannot resurrect a mapping after disconnect.
+            let connection = self
+                .connections
+                .read()
+                .map_err(|_| "Connection registry is poisoned".to_string())?
+                .get(&connection_id)
+                .cloned()
+                .ok_or("Connection is not active; reopen it from DBX")?;
+            if let Some(existing) = guard.get(&connection_id) {
+                Some(existing.clone())
+            } else {
+                let connection = resolve_password_command(&connection).await;
+                let (handle, jumps) = self
+                    .connect_authenticated(
+                        &connection,
+                        &Uuid::new_v4().to_string(),
+                        Some(emitter.clone()),
+                    )
+                    .await?;
+                let created = Arc::new(forward::ForwardTransport {
+                    handle: Arc::new(handle),
+                    jump_chain: jumps.into_iter().map(Arc::new).collect(),
+                });
+                guard.insert(connection_id.clone(), created.clone());
+                created_transport = true;
+                Some(created)
+            }
+        } else {
+            None
+        };
+        let handle = session
+            .as_ref()
+            .map(|session| session.handle.clone())
+            .or_else(|| transport.as_ref().map(|transport| transport.handle.clone()))
+            .ok_or("No SSH transport available for forwarding")?;
         let entry = Arc::new(forward::ForwardEntry {
             id: Uuid::new_v4().to_string(),
-            session_id: session_id.to_string(),
-            connection_id: session.connection_id.clone(),
+            session_id: session_id.unwrap_or("").to_string(),
+            connection_id: connection_id.clone(),
             kind,
             listen_host,
             listen_port,
             target_host,
             target_port,
+            transport: transport.clone(),
             bound_port: AtomicU32::new(0),
             state: Mutex::new(forward::ForwardState::Starting),
             error: Mutex::new(None),
@@ -3136,45 +3222,122 @@ impl SshRuntime {
             stopping: AtomicBool::new(false),
         });
         self.forwards.insert(entry.clone());
-        match kind {
-            forward::ForwardKind::Local => {
-                if let Err(error) =
-                    forward::spawn_local_listener(entry.clone(), session.handle.clone()).await
-                {
-                    self.forwards.remove(&entry.id);
-                    return Err(error);
-                }
+        let started: Result<(), String> = match kind {
+            forward::ForwardKind::Local | forward::ForwardKind::Dynamic => {
+                forward::spawn_local_listener(entry.clone(), handle.clone()).await
             }
             forward::ForwardKind::Remote => {
-                let bound = session
-                    .handle
-                    .tcpip_forward(&entry.listen_host, u32::from(entry.listen_port))
-                    .await;
-                let bound = match bound {
-                    Ok(port) => port,
-                    Err(error) => {
-                        self.forwards.remove(&entry.id);
-                        return Err(format!(
-                            "Server refused to listen on {}:{}: {error}",
-                            entry.listen_host, entry.listen_port
-                        ));
-                    }
-                };
-                let bound = u16::try_from(bound).unwrap_or(entry.listen_port.max(1));
-                entry.bound_port.store(u32::from(bound), Ordering::Relaxed);
-                let table = self.remote_table_for(&session.connection_id);
-                forward::register_remote_target(
-                    &table,
-                    &entry.listen_host,
-                    bound,
-                    &entry.target_host,
-                    entry.target_port,
-                    entry.clone(),
-                );
+                async {
+                    let bound = handle
+                        .tcpip_forward(&entry.listen_host, u32::from(entry.listen_port))
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "Server refused to listen on {}:{}: {error}",
+                                entry.listen_host, entry.listen_port
+                            )
+                        })?;
+                    let bound = u16::try_from(bound).unwrap_or(entry.listen_port.max(1));
+                    entry.bound_port.store(u32::from(bound), Ordering::Relaxed);
+                    let table = self.remote_table_for(&connection_id);
+                    forward::register_remote_target(
+                        &table,
+                        &entry.listen_host,
+                        bound,
+                        &entry.target_host,
+                        entry.target_port,
+                        entry.clone(),
+                    );
+                    Ok(())
+                }
+                .await
+            }
+        };
+        if let Err(error) = started {
+            self.forwards.remove(&entry.id);
+            if let (Some(mut guard), Some(transport)) = (transport_guard.take(), transport) {
+                if !self
+                    .forwards
+                    .rows()
+                    .iter()
+                    .any(|row| row.connection_id == connection_id && row.transport.is_some())
+                {
+                    guard.remove(&connection_id);
+                    drop(guard);
+                    Self::close_forward_transport(&transport).await;
+                }
+            }
+            return Err(error);
+        }
+        drop(transport_guard);
+        if created_transport {
+            if let Some(transport) = transport {
+                self.monitor_forward_transport(connection_id, transport);
             }
         }
         forward::set_state(&entry, forward::ForwardState::Active, None);
         Ok(json!({ "forward": entry.payload() }))
+    }
+
+    /// A network loss does not send connection/disconnect from the host. Drop
+    /// listeners and registry rows when the underlying SSH transport closes.
+    fn monitor_forward_transport(
+        &self,
+        connection_id: String,
+        transport: Arc<forward::ForwardTransport>,
+    ) {
+        let transports = self.forward_transports.clone();
+        let forwards = self.forwards.clone();
+        let remote_tables = self.remote_tables.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let mut guard = transports.lock().await;
+                if !guard
+                    .get(&connection_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &transport))
+                {
+                    break;
+                }
+                if !transport.handle.is_closed() {
+                    continue;
+                }
+                guard.remove(&connection_id);
+                drop(guard);
+                for entry in forwards.rows().into_iter().filter(|entry| {
+                    entry
+                        .transport
+                        .as_ref()
+                        .is_some_and(|owner| Arc::ptr_eq(owner, &transport))
+                }) {
+                    forward::abort_tasks(&entry);
+                    forwards.remove(&entry.id);
+                    forward::set_state(
+                        &entry,
+                        forward::ForwardState::Stopped,
+                        Some("SSH transport closed".to_string()),
+                    );
+                    if entry.kind == forward::ForwardKind::Remote {
+                        if let Some(table) = remote_tables
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .get(&connection_id)
+                        {
+                            table
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .retain(|_, target| target.entry.id != entry.id);
+                        }
+                    }
+                }
+                for jump in &transport.jump_chain {
+                    let _ = jump
+                        .disconnect(Disconnect::ByApplication, "SSH transport closed", "English")
+                        .await;
+                }
+                break;
+            }
+        });
     }
 
     /// `ssh/forward/stop`: tear the mapping down and report the final row.
@@ -3194,18 +3357,23 @@ impl SshRuntime {
     async fn teardown_forward(&self, entry: &Arc<forward::ForwardEntry>) {
         forward::abort_tasks(entry);
         if entry.kind == forward::ForwardKind::Remote {
-            let session = self.sessions.read().await.get(&entry.session_id).cloned();
-            if let Some(session) = session {
+            let handle = if let Some(transport) = &entry.transport {
+                Some(transport.handle.clone())
+            } else {
+                self.sessions
+                    .read()
+                    .await
+                    .get(&entry.session_id)
+                    .map(|session| session.handle.clone())
+            };
+            if let Some(handle) = handle {
                 let port = entry.bound_port.load(Ordering::Relaxed);
                 let port = if port == 0 {
                     u32::from(entry.listen_port)
                 } else {
                     port
                 };
-                let _ = session
-                    .handle
-                    .cancel_tcpip_forward(&entry.listen_host, port)
-                    .await;
+                let _ = handle.cancel_tcpip_forward(&entry.listen_host, port).await;
             }
             if let Some(table) = self
                 .remote_tables
@@ -3221,6 +3389,43 @@ impl SshRuntime {
         }
         self.forwards.remove(&entry.id);
         forward::set_state(entry, forward::ForwardState::Stopped, None);
+        if let Some(transport) = &entry.transport {
+            let mut guard = self.forward_transports.lock().await;
+            let has_other = self
+                .forwards
+                .rows()
+                .iter()
+                .any(|row| row.connection_id == entry.connection_id && row.transport.is_some());
+            if !has_other
+                && guard
+                    .get(&entry.connection_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, transport))
+            {
+                guard.remove(&entry.connection_id);
+                drop(guard);
+                Self::close_forward_transport(transport).await;
+            }
+        }
+    }
+
+    async fn close_forward_transport(transport: &forward::ForwardTransport) {
+        let _ = transport
+            .handle
+            .disconnect(
+                Disconnect::ByApplication,
+                "DBX SSH forwarding stopped",
+                "English",
+            )
+            .await;
+        for jump in &transport.jump_chain {
+            let _ = jump
+                .disconnect(
+                    Disconnect::ByApplication,
+                    "DBX SSH forwarding stopped",
+                    "English",
+                )
+                .await;
+        }
     }
 
     /// Session teardown: every mapping of the session dies with it. Called
