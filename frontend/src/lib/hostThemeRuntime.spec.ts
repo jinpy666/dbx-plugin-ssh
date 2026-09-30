@@ -111,4 +111,30 @@ describe("shared hostThemeRuntime", () => {
     // 缺失颜色字段不写空串（避免无效内联）。
     expect(el.style.getPropertyValue("--muted-foreground")).toBe("");
   });
+
+  it("applyAppearanceColorVars defers to the bridge only for host-written inline tokens", () => {
+    const el = document.createElement("div");
+    // 宿主 SDK 把令牌 inline 写在根节点：插件变量让位给 themeSync 桥。
+    el.style.setProperty("--color-background", "oklch(0.2 0 0)");
+    applyAppearanceColorVars(el, { background: "rgb(1 2 3)" });
+    expect(el.style.getPropertyValue("--background")).toBe("");
+    // 宿主令牌撤掉后（SDK 清空 inline），下一次 appearance 推送回写插件色板。
+    el.style.removeProperty("--color-background");
+    applyAppearanceColorVars(el, { background: "rgb(1 2 3)" });
+    expect(el.style.getPropertyValue("--background")).toBe("rgb(1 2 3)");
+  });
+
+  it("applyAppearanceColorVars survives the boot→replay double application (theme cycle regression)", () => {
+    // 回归：boot 首次应用写入 inline 色板后，紧随的 appearance 重放（mock 的
+    // onAppearanceChange 立即回调）曾据 computed 值误判「宿主接管」而
+    // removeProperty，复活 --background ↔ --color-background 循环、整站失色。
+    // 判定只看 inline 令牌：自身色板不是宿主接管信号，重放必须保持幂等。
+    const el = document.createElement("div");
+    const colors = { background: "rgb(19 20 22)", foreground: "rgb(215 215 219)" };
+    applyAppearanceColorVars(el, colors);
+    applyAppearanceColorVars(el, colors);
+    applyAppearanceColorVars(el, colors);
+    expect(el.style.getPropertyValue("--background")).toBe("rgb(19 20 22)");
+    expect(el.style.getPropertyValue("--foreground")).toBe("rgb(215 215 219)");
+  });
 });

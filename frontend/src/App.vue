@@ -1234,6 +1234,9 @@ const t = (key: string, values: Record<string, string | number> = {}) => workben
 // 宿主用 iframe 的 document.title 命名工作台标签：标题跟随 locale，
 // 中文环境显示「终端」而不是静态的英文插件名。
 watch(locale, (value) => { document.title = workbenchMessage(value, "pluginName"); }, { immediate: true });
+// html lang 同步跟随 locale：屏幕阅读器/拼写检查按它选语言，滞留 zh-CN 会让
+// 其他语种读错音（i18n 走查实录：locale=ja 时翻译已切换而 lang 仍为 zh-CN）。
+watch(locale, (value) => { document.documentElement.lang = value; }, { immediate: true });
 const connectionId = computed(() => normalizeConnectionText(hostContext.value.connectionId));
 // Host API 1.1 provides a stable workbenchId in the host context; on 1.0 a
 // locally generated id keeps session scoping per workbench instance (A4 W1

@@ -12,6 +12,13 @@
 // 优先级永久冻结桥的引用。令牌缺失（Host API 1.0 / mock 缺省）才 inline 写
 // 规范色板，覆盖桥的暗色回退；appearance 消息带色但无令牌的部分下发同样走
 // inline，不出现拼色。
+//
+// 「宿主是否接管」只能看根节点 inline 的 --color-*（只有宿主 SDK 会 inline
+// 写令牌，插件从不写）。不能用 computed：独立运行（mock / Host API 1.0）下
+// tailwind theme 层的 --color-*:var(--*) 别名与 themeSync 桥的
+// var(--color-*) 引用互相成环，computed 恒为空不可分辨；而插件自己 inline
+// 过的色板又会让 computed 变非空——boot 写入后紧随的 appearance 重放据此
+// removeProperty 撤掉自己的色板、复活循环（mock 整站黑底黑字的根因）。
 export const APPEARANCE_COLOR_KEYS = [
   "background",
   "foreground",
@@ -28,12 +35,11 @@ export type DbxAppearanceColorKey = (typeof APPEARANCE_COLOR_KEYS)[number];
 export type DbxAppearanceColors = Partial<Record<DbxAppearanceColorKey, string>>;
 
 export function applyAppearanceColorVars(root: HTMLElement, colors: DbxAppearanceColors): void {
-  const tokens = getComputedStyle(root);
   for (const key of APPEARANCE_COLOR_KEYS) {
     const name = `--${key.replace(/([A-Z])/g, "-$1").toLowerCase()}`;
     const token = `--color-${name.slice(2)}`;
     const value = colors[key];
-    if (tokens.getPropertyValue(token).trim()) root.style.removeProperty(name);
+    if (root.style.getPropertyValue(token).trim()) root.style.removeProperty(name);
     else if (typeof value === "string" && value) root.style.setProperty(name, value);
   }
 }
