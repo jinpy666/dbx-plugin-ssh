@@ -44,8 +44,12 @@ export function useUploadChain(options: {
   loadDirectory: (path?: string) => Promise<void>;
   openTransferPanel: () => void;
   joinRemote: (parent: string, name: string) => string;
+  /** UploadSudo：与 useTransferQueue 同源判定（sudo 模式 + 可写连接）。重复
+   * 预检（exists/rename-unique）与文件夹上传的逐目录建目录随之换 sudo 族——
+   * 目标目录（如 /root）对登录用户不可读时 SFTP 探测/建目录必失败。 */
+  sudoUpload: () => boolean;
 }) {
-  const { t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath, terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy, uploadSource, loadTransferConcurrency, loadTransferMaxActive, loadTransferDuplicatePolicy, transferDuplicateState, terminal: terminalGet, loadDirectory, openTransferPanel, joinRemote } = options;
+  const { t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath, terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy, uploadSource, loadTransferConcurrency, loadTransferMaxActive, loadTransferDuplicatePolicy, transferDuplicateState, terminal: terminalGet, loadDirectory, openTransferPanel, joinRemote, sudoUpload } = options;
 
   // 批次并发与会话深度取小（评审 L-4）：批次上限（1..10）超过会话深度
   // （1..8，sidecar 权威）时，超出的任务会在 upload/start 被 "already has
@@ -261,7 +265,9 @@ async function resolveUploadDuplicateName(name: string, targetDir: string): Prom
   const targetPath = joinRemote(targetDir, name);
   let exists = false;
   try {
-    const probe = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", { sessionId, path: targetPath });
+    // sudo 车道预检换 sudo/exists（目标目录不可读时 sftp/exists 恒 false）。
+    const existsMethod = sudoUpload() ? "sudo/exists" : "sftp/exists";
+    const probe = await window.dbxPlugin.invoke<{ exists: boolean }>(existsMethod, { sessionId, path: targetPath });
     exists = probe.exists === true;
   } catch {
     // 预检不可用时保持原语义直接下发。
@@ -276,9 +282,10 @@ async function resolveUploadDuplicateName(name: string, targetDir: string): Prom
     uploadDuplicateBatchDecision = choice;
   }
   if (policy === "ask" && uploadDuplicateBatchDecision === "overwrite") return { name, proceed: true };
-  // rename（或 ask 选了重命名）：后端探测不冲突新名；旧 sidecar 无该方法时回落原名覆盖。
+  // rename（或 ask 选了重命名）：后端探测不冲突新名；旧 sidecar 无该方法时
+  // 回落原名覆盖。sudo 车道带 sudo 标记（后端改走 sudo test -e 探测）。
   try {
-    const result = await window.dbxPlugin.invoke<{ name: string }>("sftp/rename-unique", { sessionId, dir: targetDir, name });
+    const result = await window.dbxPlugin.invoke<{ name: string }>("sftp/rename-unique", { sessionId, dir: targetDir, name, sudo: sudoUpload() });
     return { name: result.name || name, proceed: true };
   } catch {
     return { name, proceed: true };
@@ -348,7 +355,10 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?
   for (const relative of plan.directories) {
     const remotePath = joinRemote(base, relative);
     try {
-      await window.dbxPlugin.invoke("sftp/createDirectory", { sessionId: session.value.sessionId, path: remotePath });
+      // sudo 车道建目录换 sudo/mkdir（参数族同用 path），父目录不可写时
+      // SFTP createDirectory 必失败。
+      const mkdirMethod = sudoUpload() ? "sudo/mkdir" : "sftp/createDirectory";
+      await window.dbxPlugin.invoke(mkdirMethod, { sessionId: session.value.sessionId, path: remotePath });
     } catch {
       // 已存在/权限不足等：由后续文件上传结果兜底，这里不中止整批。
     }
@@ -374,9 +384,11 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?
       const targetDir = dirSegments.length ? joinRemote(base, dirSegments.join("/")) : base;
       try {
         // ask 模式批量降级：预检已存在则跳过；不存在则带 preCheckedAbsent
-        // 上传，免去 uploadSource 内的第二次 sftp/exists（评审 M-4）。
+        // 上传，免去 uploadSource 内的第二次 exists（评审 M-4）。sudo 车道
+        // 预检换 sudo/exists（目标目录不可读时 sftp/exists 恒 false）。
         if (loadTransferDuplicatePolicy() === "ask") {
-          const probe = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", { sessionId, path: joinRemote(targetDir, fileName) }).catch(() => ({ exists: false }));
+          const existsMethod = sudoUpload() ? "sudo/exists" : "sftp/exists";
+          const probe = await window.dbxPlugin.invoke<{ exists: boolean }>(existsMethod, { sessionId, path: joinRemote(targetDir, fileName) }).catch(() => ({ exists: false }));
           if (probe.exists === true) {
             skipped += 1;
             progress = settleFolderUploadFile(progress, { file, ok: false });

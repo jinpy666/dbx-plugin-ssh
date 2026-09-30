@@ -172,7 +172,8 @@ async function openImagePreview(entry: PreviewEntry, mime: string) {
     });
     if (result.truncated) {
       previewOpen.value = false;
-      await downloadEntry(entry);
+      // 超出内联上限回落下载：sudo 模式 + 可写连接换 sudo 车道（root 图片）。
+      await downloadEntry(entry, sudoMode.value && canWrite.value);
       return;
     }
     previewImageUrl.value = `data:image/${mime};base64,${result.dataBase64}`;

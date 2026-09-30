@@ -1446,6 +1446,39 @@ struct UploadState {
     /// 压缩通道（M33）：start 时决策（偏好/阈值/黑名单/远端 gunzip 探测），
     /// finish 推送前对 spool 预压。latin-1 车道在决策处强制 None。
     compression: CompressionMode,
+    /// sudo 上传车道（UploadSudo）：finish 的推送目标从目标目录 `.part`
+    /// 改为登录用户可写位置的暂存件（[`sudo_upload_staging_name`]），
+    /// 最终提交走 exec `sudo mv`（让位→提交→回滚）。false = 普通
+    /// SFTP 车道（目标目录内暂存 + 同目录 rename 原子提交）。
+    sudo_lane: bool,
+}
+
+/// sudo 上传车道的暂存件名（登录用户 SFTP home 下）。独立前缀
+/// `.dbx-sudo-ul-` 与下载车道的 `.dbx-sudo-dl-` 互不误伤。
+fn sudo_upload_staging_name(task_id: &str) -> String {
+    format!(".dbx-sudo-ul-{task_id}.part")
+}
+
+/// sudo 上传车道的 exec 超时（exec 层钳到 5..300）：chmod 快路径 30s；
+/// 提交 mv 走最大档——跨文件系统时 mv 退化为复制，要给足大文件时间。
+const SUDO_UPLOAD_QUICK_SECS: u64 = 30;
+const SUDO_UPLOAD_COMMIT_SECS: u64 = 300;
+
+/// sudo 提交体（纯函数，供单测）：`target→backup` 让位 → 暂存件 `mv` 到
+/// 位 → backup 清理；mv 失败把 backup 滚回 target 后以非零退出。路径一律
+/// [`shell_quote`] 单引号转义；整体再经 exec 层 `sanitize_sudo_command`
+/// 包进 `sh -c '…'`。跨文件系统时 `mv` 退化为复制+删除（非原子，登记边界）。
+fn sudo_commit_body(staging: &str, target: &str, backup: &str) -> String {
+    let (staging, target, backup) = (
+        exec::shell_quote(staging),
+        exec::shell_quote(target),
+        exec::shell_quote(backup),
+    );
+    format!(
+        "if [ -e {target} ]; then mv -f -- {target} {backup}; fi; \
+         if mv -f -- {staging} {target}; then rm -f -- {backup}; exit 0; fi; \
+         if [ -e {backup} ]; then mv -f -- {backup} {target}; fi; exit 1"
+    )
 }
 
 /// Local (client-machine) persistence target for a download started with
@@ -1557,6 +1590,9 @@ struct FinishingUpload {
     /// 压缩通道（M33）：status/cancel 载荷标注（进度事件的 phase 分母以
     /// 事件自带字段为准）。
     compression: CompressionMode,
+    /// sudo 上传车道（UploadSudo）：推送暂存件路径（登录用户 home 下）。
+    /// 取消收尾按它删远端暂存件，而不是目标目录的 `.dbx-upload-<task>.part`。
+    sudo_staging: Option<String>,
 }
 
 /// 压缩下载 prep 的在途状态（M33）：`start_download`/`start_tree_download`
@@ -5538,6 +5574,7 @@ impl SshRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_upload(
         &self,
         session_id: String,
@@ -5545,6 +5582,7 @@ impl SshRuntime {
         size: u64,
         resume_task_id: Option<String>,
         encoding: NameEncoding,
+        sudo_lane: bool,
         emitter: &PluginEmitter,
     ) -> Result<Value, String> {
         self.ensure_writable(&session_id).await?;
@@ -5562,9 +5600,13 @@ impl SshRuntime {
         let remote_path = normalize_remote_path(&remote_path)?;
         // 压缩通道决策（M33，W6 单入口）：偏好/阈值/黑名单 + 远端 gunzip
         // 探测一次，决策结果随任务存续，finish 推送前消费。latin-1 车道
-        // 强制 None；只读对上传无意义（ensure_writable 已整体拦截）。
-        let compression = self
-            .decide_transfer_compression(
+        // 强制 None；sudo 车道同样强制 None——远端 gunzip 落目标目录的语义
+        // 在不可写目标上不成立，压缩优化本期不进 sudo 车道（登记边界）。
+        // 只读对上传无意义（ensure_writable 已整体拦截）。
+        let compression = if sudo_lane {
+            CompressionMode::None
+        } else {
+            self.decide_transfer_compression(
                 &session_id,
                 size,
                 Some(remote_path.rsplit('/').next().unwrap_or("")),
@@ -5572,7 +5614,8 @@ impl SshRuntime {
                 false,
                 encoding == NameEncoding::Latin1,
             )
-            .await;
+            .await
+        };
         // Resume path: re-register a previously interrupted upload job. The
         // spool file and its sidecar meta (written on the first start) hold
         // the received prefix; the caller re-streams only the missing tail.
@@ -5597,6 +5640,7 @@ impl SshRuntime {
                         file,
                         progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
                         compression,
+                        sudo_lane,
                     },
                 );
             let file_name = remote_path
@@ -5660,6 +5704,7 @@ impl SshRuntime {
                     file,
                     progress_throttle: crate::progress_throttle::ProgressThrottle::default(),
                     compression,
+                    sudo_lane,
                 },
             );
         let file_name = remote_path.rsplit('/').next().unwrap_or("upload");
@@ -5932,8 +5977,22 @@ impl SshRuntime {
             file,
             progress_throttle: _,
             compression,
+            sudo_lane,
         } = upload;
         drop(file);
+        // sudo 车道（UploadSudo）：注册前先解析登录用户 home 并定死暂存
+        // 路径——取消收尾也要用它。home 探测失败即整体失败，任务不进注册
+        // 表，前端收到同步错误。
+        let sudo_staging = if sudo_lane {
+            let home = self.sftp_home(&session_id).await?;
+            Some(format!(
+                "{}/{}",
+                home.trim_end_matches('/'),
+                sudo_upload_staging_name(task_id)
+            ))
+        } else {
+            None
+        };
         let transferred_bytes = Arc::new(AtomicU64::new(0));
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel_reason = Arc::new(Mutex::new(None::<String>));
@@ -5950,6 +6009,7 @@ impl SshRuntime {
                     cancelled: cancelled.clone(),
                     cancel_reason: cancel_reason.clone(),
                     compression,
+                    sudo_staging: sudo_staging.clone(),
                 },
             );
         let this = self.clone();
@@ -5998,7 +6058,9 @@ impl SshRuntime {
                 // 输入的显示末段」，write_path_bytes 还原为服务器字节后走裸包
                 // 暂存 + 原子提交。裸包客户端**建立**失败回退高层路径（此时
                 // 远端尚无任何动作）；操作发出后的失败原样上抛，不回退。
-                if encoding == NameEncoding::Latin1 {
+                // sudo 车道不进裸包快路：暂存件落在登录用户 home（ASCII 路
+                // 径，高层客户端无碍），最终提交本就要经 exec sudo mv。
+                if encoding == NameEncoding::Latin1 && sudo_staging.is_none() {
                     match this.raw_sftp_client(&session_id).await {
                         Ok(mut client) => {
                             // 进度事件时间窗节流（progress_throttle）：每
@@ -6053,6 +6115,12 @@ impl SshRuntime {
                 }
                 let sftp = this.sftp(&session_id).await?;
                 let (temporary, backup) = remote_transfer_paths(&remote_path, &task_id)?;
+                // sudo 车道（UploadSudo）：推送目标是登录用户 home 下的暂存
+                // 件（该目录对登录用户必可写），最终提交经 exec `sudo mv`；
+                // 普通车道保持目标目录内 `.part` + 同目录 rename 原子提交。
+                let push_target = sudo_staging
+                    .clone()
+                    .unwrap_or_else(|| temporary.clone());
                 // 压缩通道推送（M33）：.gz → 远端 `<temporary>.gz` → 远端
                 // gunzip 还原成 `<temporary>` → 与普通路径合流走原子提交。
                 // 推送/解压任一步失败且非取消时，清理 .gz 临时件并回落普通
@@ -6152,7 +6220,7 @@ impl SshRuntime {
                 let mut target = sftp
                     .lock()
                     .await
-                    .create(temporary.clone())
+                    .create(push_target.clone())
                     .await
                     .map_err(sftp_error)?;
                 let mut transferred = 0_u64;
@@ -6169,7 +6237,7 @@ impl SshRuntime {
                         let error = upload_cancel_error(reason.as_deref());
                         eprintln!("[sftp] upload {task_id} aborted by cancel ({error})");
                         drop(target);
-                        let _ = sftp.lock().await.remove_file(temporary.clone()).await;
+                        let _ = sftp.lock().await.remove_file(push_target.clone()).await;
                         return Err(error);
                     }
                     let read = source
@@ -6181,7 +6249,7 @@ impl SshRuntime {
                     }
                     if let Err(error) = target.write_all(&buffer[..read]).await {
                         drop(target);
-                        let _ = sftp.lock().await.remove_file(temporary.clone()).await;
+                        let _ = sftp.lock().await.remove_file(push_target.clone()).await;
                         return Err(format!("SFTP upload failed: {error}"));
                     }
                     transferred = transferred.saturating_add(read as u64);
@@ -6212,7 +6280,15 @@ impl SshRuntime {
                     .await
                     .map_err(|error| format!("SFTP upload flush failed: {error}"))?;
                 drop(target);
-                commit_remote_file(&sftp, &temporary, &remote_path, &backup).await
+                // 提交分道：sudo 车道经 exec `sudo mv` 让位提交（含回滚）；
+                // 普通车道走 SFTP 同目录 rename 原子提交。
+                match sudo_staging.as_deref() {
+                    Some(staging) => {
+                        this.commit_sudo_upload(&session_id, staging, &remote_path, &backup)
+                            .await
+                    }
+                    None => commit_remote_file(&sftp, &temporary, &remote_path, &backup).await,
+                }
             }
             .await;
             match this.finishing_uploads.lock() {
@@ -6272,6 +6348,42 @@ impl SshRuntime {
         Ok(
             json!({ "success": true, "taskId": response_task_id, "phase": UploadPhase::Uploading.as_str(), "accepted": expected_size }),
         )
+    }
+
+    /// sudo 上传车道提交（UploadSudo）：目标已存在时先把其权限位拷到暂存
+    /// 件（对齐普通车道 apply_preserved_permissions 的「+x 保持」语义，
+    /// best-effort 不阻断提交），再经一条 sudo `sh -c`（[`sudo_commit_body`]）
+    /// 完成「target→backup 让位 → 暂存件 mv 到位 → backup 清理 / 失败回滚」。
+    /// mv 跨文件系统时退化为复制+删除（非原子，登记边界）；会话死亡时的
+    /// 暂存件残留与普通车道 `.part` 残留同类，不追加额外清理链。
+    async fn commit_sudo_upload(
+        &self,
+        session_id: &str,
+        staging: &str,
+        target: &str,
+        backup: &str,
+    ) -> Result<(), String> {
+        if let Ok(stat) = crate::sudo_fs::stat(self, session_id, target).await {
+            if stat.get("kind").and_then(Value::as_str) == Some("file") {
+                if let Some(mode) = stat.get("mode").and_then(Value::as_str) {
+                    let chmod = format!("chmod {mode} -- {}", exec::shell_quote(staging));
+                    if let Err(error) =
+                        crate::sudo_fs::sudo_exec(self, session_id, &chmod, SUDO_UPLOAD_QUICK_SECS)
+                            .await
+                    {
+                        eprintln!("[sudo-upload] permission mirror failed: {error}");
+                    }
+                }
+            }
+        }
+        crate::sudo_fs::sudo_exec(
+            self,
+            session_id,
+            &sudo_commit_body(staging, target, backup),
+            SUDO_UPLOAD_COMMIT_SECS,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// 压缩上传的 spool 预压（M33）：`<spool>` → `<spool>.gz`，spawn_blocking
@@ -8366,7 +8478,12 @@ impl SshRuntime {
                     upload.compression,
                 );
                 task["error"] = json!(upload_cancel_error(reason));
-                (task, upload.session_id.clone(), upload.remote_path.clone())
+                (
+                    task,
+                    upload.session_id.clone(),
+                    upload.remote_path.clone(),
+                    upload.sudo_staging.clone(),
+                )
             });
         // 压缩下载 prep（M33）：置取消旗标让 prep 循环在块边界退出；prep
         // 独占（任务已不在 downloads registry 的竞窗）时由这里直接清理。
@@ -8413,11 +8530,20 @@ impl SshRuntime {
         // 推送阶段取消的远端收尾提前：推送循环要到下一个分块边界才观察到
         // cancelled 标志并自行删除远端临时文件，取消 RPC 返回后立刻列目录会
         // 看见最长一个分块周期的 .part 残留（#60 回归记录的竞窗）。这里
-        // best-effort 提前删掉 .part。只删临时件，绝不碰 .backup——取消可能与
-        // 提交链的 target→backup→target 往返并发，删 backup 会破坏回滚；
+        // best-effort 提前删掉推送暂存件。只删暂存件，绝不碰 .backup——取消
+        // 可能与提交链的 target→backup→target 往返并发，删 backup 会破坏回滚；
         // 与推送循环自身的 remove 并发安全（重复删除只是一次无害的 NoSuchFile）。
-        if let Some((_, session_id, remote_path)) = finishing.as_ref() {
-            if let Ok((temporary, _backup)) = remote_transfer_paths(remote_path, task_id) {
+        // sudo 车道（UploadSudo）的推送暂存件在登录用户 home 下，按注册时
+        // 定死的 sudo_staging 删，不落目标目录。
+        if let Some((_, session_id, remote_path, sudo_staging)) = finishing.as_ref() {
+            let temporary = match sudo_staging.as_ref() {
+                Some(staging) => staging.clone(),
+                None => match remote_transfer_paths(remote_path, task_id) {
+                    Ok((temporary, _backup)) => temporary,
+                    Err(_) => String::new(),
+                },
+            };
+            if !temporary.is_empty() {
                 match self.sftp(session_id).await {
                     Ok(sftp) => {
                         if let Err(error) = sftp.lock().await.remove_file(temporary).await {
@@ -8430,7 +8556,7 @@ impl SshRuntime {
                 }
             }
         }
-        let finishing = finishing.map(|(task, _, _)| task);
+        let finishing = finishing.map(|(task, _, _, _)| task);
         let task = upload
             .as_ref()
             .map(|upload| {
@@ -11691,6 +11817,34 @@ mod tests {
         // the single quotes except the fixed `sh -c ` prefix.
         let payload = spawn_exec_payload("a; b | c & d");
         assert!(payload.starts_with("sh -c '") && payload.ends_with("'"));
+    }
+
+    #[test]
+    fn sudo_upload_staging_name_uses_dedicated_prefix() {
+        let name = sudo_upload_staging_name("task-1");
+        assert!(name.starts_with(".dbx-sudo-ul-") && name.ends_with(".part"));
+        // 与下载车道前缀互不误伤（清理命令按前缀钉死命名空间）。
+        assert!(!name.starts_with(".dbx-sudo-dl-"));
+        assert_eq!(sudo_upload_staging_name("t"), ".dbx-sudo-ul-t.part");
+    }
+
+    #[test]
+    fn sudo_commit_body_quotes_paths_and_rolls_back() {
+        let body = sudo_commit_body(
+            "/home/u/.dbx-sudo-ul-t.part",
+            "/root/a.bin",
+            "/root/.dbx-upload-t.backup",
+        );
+        // 三个路径都单引号转义，让位→提交→清理/回滚次序固定。
+        assert!(body.contains(
+            "if [ -e '/root/a.bin' ]; then mv -f -- '/root/a.bin' '/root/.dbx-upload-t.backup'; fi"
+        ));
+        assert!(body.contains("if mv -f -- '/home/u/.dbx-sudo-ul-t.part' '/root/a.bin'; then rm -f -- '/root/.dbx-upload-t.backup'; exit 0; fi"));
+        assert!(body.ends_with("if [ -e '/root/.dbx-upload-t.backup' ]; then mv -f -- '/root/.dbx-upload-t.backup' '/root/a.bin'; fi; exit 1"));
+        // 嵌入单引号的路径经 POSIX '\'' 转义后整体仍是合法 shell。
+        let quoted = sudo_commit_body("/home/u'/x", "/t'/y", "/b'/z");
+        assert!(quoted.contains("'/home/u'\\''/x'"));
+        assert!(quoted.contains("'/t'\\''/y'"));
     }
 
     #[test]

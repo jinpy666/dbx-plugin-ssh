@@ -681,6 +681,9 @@ const {
   joinRemote, writeU64, syncPrefs,
   refreshTransferHistory: () => refreshTransferHistory(),
   refreshResumableUploads: () => refreshResumableUploads(),
+  // UploadSudo：sudo 模式 + 可写连接时上传走 sudo 车道（sudo/upload/*）。
+  // 只读连接不切——sudo 族对只读 fail closed，普通下载/上传可读目标不受影响。
+  sudoUpload: () => sudoMode.value && canWrite.value,
 });
 const columnsOpen = ref(false);
 const sudoMode = ref(false);
@@ -5357,6 +5360,8 @@ const {
   applyChosenDirAsDefault, resolveDownloadConflictFor,
   openTransferPanel: () => openTransferPanel(),
   pathFromUri,
+  // sudo 模式 + 可写连接时批量下载对普通文件走 sudo 车道（与右键单项一致）。
+  sudoDownload: () => sudoMode.value && canWrite.value,
 });
 
 // —— 断点续传：暂停/恢复 + 可续传上传 ———
@@ -5416,6 +5421,8 @@ const {
   loadDirectory,
   openTransferPanel,
   joinRemote,
+  // 与 useTransferQueue 同源判定：sudo 模式 + 可写连接（UploadSudo 车道）。
+  sudoUpload: () => sudoMode.value && canWrite.value,
 });
 
 // 沙箱 iframe 的剪贴板依赖注入：宿主桥是 optional 且现网宿主未提供，
@@ -7898,10 +7905,12 @@ onBeforeUnmount(() => {
                 </template>
                 <template v-else-if="fileMenu">
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'directory' || fileMenu.entry.kind === 'file'" @select="openEntry(fileMenu.entry)"><Folder v-if="fileMenu.entry.kind === 'directory'" /><FileText v-else />{{ fileMenu.entry.kind === "directory" ? t("openFolder") : t("preview") }}</ContextMenuItem>
-                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file' || fileMenu.entry.kind === 'directory'" @select="downloadEntry(fileMenu.entry)"><Download />{{ t("download") }}</ContextMenuItem>
+                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file' || fileMenu.entry.kind === 'directory'" @select="downloadEntry(fileMenu.entry, sudoMode && canWrite && fileMenu.entry.kind === 'file')"><Download />{{ t("download") }}</ContextMenuItem>
                   <!-- 以 root 下载（M14-C DownloadSudo）：root 大文件二进制下载，读只读门禁
-                       与 sudo 族一致（sidecar 对只读连接 fail closed，这里 canWrite 同步禁用）。 -->
-                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite" @select="downloadEntry(fileMenu.entry, true)"><Download />{{ t("sudoDownload.action") }}</ContextMenuItem>
+                       与 sudo 族一致（sidecar 对只读连接 fail closed，这里 canWrite 同步禁用）。
+                       sudo 模式下默认「下载」已自动换 sudo 车道（UploadSudo/DownloadSudo
+                       同一判定），该项隐藏避免重复入口。 -->
+                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file' && !sudoMode" :disabled="!canWrite" @select="downloadEntry(fileMenu.entry, true)"><Download />{{ t("sudoDownload.action") }}</ContextMenuItem>
                   <!-- 外部编辑器回传（P2-5，桌面端）：web/docker 的 sidecar 不在本机，
                        监听与回传都不可用，localCanSave 未探测到前也保持禁用。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite || !localCanSave" @select="openInExternalEditor(fileMenu.entry)"><ExternalLink />{{ t("sftpEdit.openExternal") }}</ContextMenuItem>

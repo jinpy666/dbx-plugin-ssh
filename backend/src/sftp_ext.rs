@@ -208,6 +208,11 @@ const MAX_UNIQUE_NAME_CHARS: usize = 255;
 /// `name(1)` .. `name(999)` are probed (the `(n)` is inserted before the last
 /// extension: `report.pdf` -> `report(1).pdf`). Returns `{name, conflict}`.
 ///
+/// `sudo`（UploadSudo 配套）：目标目录对登录用户不可读（如 /root）时，SFTP
+/// 探测全部失败会退化成原名覆盖；改走 sudo `test -e` 逐候选探测，撞名让位
+/// 语义与普通车道一致。latin-1 非 UTF-8 字节名是该车道登记边界（exec 命令
+/// 串是 UTF-8 String）。
+///
 /// 路径来源分工（M16）：`dir` 是列表回传的 wire 形式（latin-1 下整条按
 /// `%XX` 还原），`name` 是上传文件的新输入显示文本（latin-1 下连同 `(n)`
 /// 候选一起按 [`sftp_name::latin1_encode_display`] 编码回字节）。候选探测
@@ -220,9 +225,21 @@ pub async fn rename_unique(
     dir: &str,
     name: &str,
     encoding: NameEncoding,
+    sudo: bool,
 ) -> Result<Value, String> {
     let dir = normalize_remote_path(dir)?;
     let clean = clean_unique_name(name)?;
+    if sudo {
+        for (index, candidate) in unique_name_candidates(&clean).into_iter().enumerate() {
+            let full = join_remote_name(&dir, &candidate);
+            if !crate::sudo_fs::exists(runtime, session_id, &full).await? {
+                return Ok(json!({ "name": candidate, "conflict": index > 0 }));
+            }
+        }
+        return Err(format!(
+            "No unique name derived from '{clean}' within {UNIQUE_NAME_PROBE_LIMIT} attempts"
+        ));
+    }
     if encoding == NameEncoding::Latin1 {
         match runtime.raw_sftp_client(session_id).await {
             Ok(mut client) => {

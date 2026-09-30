@@ -74,6 +74,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `sudo/listDir`、`sudo/readFile`、`sudo/writeFile` | sudo 目录浏览与文件读写 |
 | `sudo/mkdir`、`sudo/remove`、`sudo/removeAll`、`sudo/chmod`、`sudo/rename` | sudo 写操作 |
 | `sudo/download/start`、`sudo/download/cancel` | sudo 下载（root 大文件二进制下载，M14-C DownloadSudo）：start 把源文件暂存进同目录 0600 临时件后复用 `sftp/download/next`/`finish` 分块管线与进度事件，见「sudo 下载（DownloadSudo）」节 |
+| `sudo/upload/start`、`sudo/upload/finish` | sudo 上传（sudo 模式下向 root 目录上传，UploadSudo）：start 参数族与 `sftp/upload/start` 一致（`remotePath`），分块二进制帧/进度事件/取消全复用；finish 把 spool 推到登录用户 home 暂存件后经 exec `sudo mv` 提交，见「sudo 上传（UploadSudo）」节 |
 | `sudo/profiles/list`、`sudo/profiles/save`、`sudo/profiles/delete` | 全局 Quick Sudo 配置管理（多套命名凭据/策略档，插件数据目录持久化，密钥永不回显） |
 | `sudo/profiles/options` | 连接表单动态下拉选项（`sudo_profile` 字段的 `options_action`）：返回 `{options: [{value: id, label: name}]}`，按名称排序，永不携带密钥 |
 | `connection/action` | 连接表单动作（manifest `connection-provider.actions` 声明）：`action=quick-sudo-profiles` 返回全局配置清单与本连接绑定状态的纯文本摘要（`{message, fieldValues}`） |
@@ -1071,6 +1072,37 @@ root 权限的大文件二进制下载（M14-C，对标 tiny-rdm DownloadSudo）
   只允许删除最终文件名以 `.dbx-sudo-dl-` 为前缀的路径。
 - `sudo/download/cancel`：参数 `{ taskId, reason? }`，与 `sftp/transfer/cancel` 同构（任务住同一个
   传输注册表；reason slug 语义相同）。前端取消路径走 `sftp/transfer/cancel`，效果一致。
+
+### sudo 上传（UploadSudo）
+
+sudo 模式下向登录用户不可写目录（如 `/root`）上传（对标 sudo 下载 M14-C 的对偶缺口）。普通上传车道
+的 `.part` 暂存件必须落在目标目录（同目录 rename 原子提交），在 0700 目录上必然 EACCES；终端里
+`sudo su` 只改变 shell 身份，SFTP 子系统永远以登录用户运行，协议层无解——所以上传换道而不是换身份。
+
+- `sudo/upload/start`：参数与返回同 `sftp/upload/start`（`{ sessionId, remotePath, size,
+  resumeTaskId? }` → `{ taskId, chunkSize, resumeOffset?, compression }`，参数名沿用上传族
+  `remotePath`）。分块二进制帧（`sftp/upload/<taskId>`）、`sftp/transfer/progress` 事件、
+  `sftp/transfer/cancel`、断点续传（`resumeTaskId` 校验同一份 spool meta）**全部复用**。
+  `compression` 恒为 `"none"`：远端 gunzip 需要写目标目录，在不可写目标上不成立，压缩优化本期
+  不进 sudo 车道（登记边界）。
+- **提交流程**（`sudo/upload/finish`）：spool → SFTP 推到**登录用户 SFTP home** 下的
+  `.dbx-sudo-ul-<taskId>.part`（home 由 `canonicalize "."` 探测，注册前定死以便取消收尾；刻意
+  不用 /tmp——常见 tmpfs 会把大文件吃进内存）→ 目标已存在时 sudo `stat` 取权限位、sudo `chmod`
+  拷到暂存件（对齐普通车道「+x 保持」语义，best-effort）→ 单条 sudo `sh -c` 完成
+  「target→backup 让位 → 暂存件 `mv -f` 到位 → backup 清理」，mv 失败把 backup 滚回 target 后
+  非零退出。提交 exec 超时 300s。
+- **限制与边界（登记）**：`mv` 跨文件系统时退化为复制+删除（非原子，普通车道的同目录 rename
+  原子性在此不成立）；暂存期间登录用户 home 需要与文件等量的临时空间；latin-1 连接下目标名按
+  显示字符串进 exec 命令串（UTF-8 边界，非 UTF-8 字节名不适用，与 sudo 族其他成员同源）；会话
+  死亡时暂存件残留与普通车道 `.part` 残留同类，不追加清理链。sudo 车道不进 latin-1 裸包快路
+  （暂存件是 ASCII 路径，高层客户端无碍）。
+- **前端分流**：`sudoMode && canWrite` 时上传全链换道——`uploadSource` 换 start/finish 方法；
+  重复预检 `sftp/exists`/`sftp/rename-unique` 分别换 `sudo/exists` 与 `sftp/rename-unique`
+  新增可选 `sudo: true`（后端改走 sudo `test -e` 逐候选探测，撞名让位语义与普通车道一致）；
+  文件夹上传的逐目录建目录换 `sudo/mkdir`。sudo 下载同判定（右键单项「下载」与批量下载对普通
+  文件自动换 `sudo/download/start`，sudo 模式下独立「sudo 下载」菜单项隐藏避免重复入口；目录
+  保持普通树下载——sudo 下载无目录暂存语义）。
+- 只读连接不换道（sudo 族对只读 fail closed，普通车道对可读目标的下载/上传不受影响）。
 
 ### ssh/metrics/history
 

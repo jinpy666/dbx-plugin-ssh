@@ -475,6 +475,56 @@ def main() -> None:
                 raise AssertionError(f"staging temp leftovers in {sudo_dir}: {leftovers}")
             print(f"    sudo download of {sudo_file_renamed} ({size} bytes) finished, no temp leftovers")
 
+        def case_sudo_upload():
+            # UploadSudo: sudo/upload/start -> binary chunks (sftp/upload/<taskId>)
+            # -> sudo/upload/finish。目标目录是 root 属主的 sudo_dir（登录用户
+            # 不可写），普通车道必 EACCES；完成后 sudo/readFile 校验内容、
+            # sudo/listDir 确认登录用户 home 没有 .dbx-sudo-ul- 暂存残留。
+            payload = b"dbx sudo upload smoke\n"
+            target = f"{sudo_dir}/.dbx-sudo-ul-smoke-target"
+            info = req("sudo/upload/start", {"sessionId": session_id, "remotePath": target, "size": len(payload)})
+            task_id = str(info.get("taskId") or "")
+            if not task_id:
+                raise AssertionError(f"sudo/upload/start shape: {json.dumps(info)[:160]}")
+            client.send_binary(f"sftp/upload/{task_id}", struct.pack(">Q", 0) + payload)
+            time.sleep(1)  # append_upload runs on the sidecar worker pool (smoke_test 同款)
+            req("sudo/upload/finish", {"taskId": task_id})
+            status = {}
+            for _ in range(100):
+                status = req("sftp/transfer/status", {"taskId": task_id})
+                if status.get("status") in ("completed", "failed", "cancelled"):
+                    break
+                time.sleep(0.1)
+            if status.get("status") != "completed":
+                raise AssertionError(f"sudo upload did not complete: {json.dumps(status)[:160]}")
+            read_back = req("sudo/readFile", {"sessionId": session_id, "path": target, "maxBytes": 4096})
+            content = base64.b64decode(str(read_back.get("dataBase64") or ""))
+            if content != payload:
+                raise AssertionError(f"sudo upload round-trip mismatch: {content!r}")
+            home_listing = req("sudo/listDir", {"sessionId": session_id, "path": home})
+            leftovers = [str(e.get("name")) for e in home_listing.get("entries", [])
+                         if str(e.get("name")).startswith(".dbx-sudo-ul-")]
+            if leftovers:
+                raise AssertionError(f"staging temp leftovers in home: {leftovers}")
+            req("sudo/remove", {"sessionId": session_id, "path": target})
+            print(f"    sudo upload of {len(payload)} bytes into {sudo_dir} finished, no staging leftovers")
+
+        def case_sudo_rename_unique():
+            # sftp/rename-unique 的 sudo 探测（UploadSudo 配套）：空闲名直赢，
+            # 撞名让位 name(1)——探测走 sudo test -e，不可读目录也准确。
+            base_name = "smoke-unique.bin"
+            first = req("sftp/rename-unique", {"sessionId": session_id, "dir": sudo_dir,
+                                               "name": base_name, "sudo": True})
+            if first.get("name") != base_name:
+                raise AssertionError(f"free name should win: {json.dumps(first)[:160]}")
+            req("sudo/touch", {"sessionId": session_id, "path": f"{sudo_dir}/{base_name}"})
+            second = req("sftp/rename-unique", {"sessionId": session_id, "dir": sudo_dir,
+                                                "name": base_name, "sudo": True})
+            if second.get("name") != "smoke-unique(1).bin":
+                raise AssertionError(f"conflict should defer: {json.dumps(second)[:160]}")
+            req("sudo/remove", {"sessionId": session_id, "path": f"{sudo_dir}/{base_name}"})
+            print(f"    sudo rename-unique defers to {second.get('name')}")
+
         def case_sudo_remove_all():
             req("sudo/removeAll", {"sessionId": session_id, "path": sudo_dir})
             try:  # verify via sudo/exists when that method is wired too
@@ -1237,6 +1287,10 @@ def main() -> None:
                    needs="sudo/rename inner file")
         report.run("sudo/download + temp cleanup", "sudo/download/start", case_sudo_download,
                    needs="sudo/chmod 0700 + verify mode")
+        report.run("sudo/upload + staging cleanup", "sudo/upload/start", case_sudo_upload,
+                   needs="sudo/chmod 0700 + verify mode")
+        report.run("sudo/rename-unique collision probe", "sftp/rename-unique",
+                   case_sudo_rename_unique, needs="sudo/chmod 0700 + verify mode")
         report.run("sudo/removeAll .sudo-test", "sudo/removeAll", case_sudo_remove_all,
                    needs="sudo/mkdir .sudo-test")
 

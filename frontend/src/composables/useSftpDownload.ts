@@ -33,8 +33,11 @@ export function useSftpDownload(options: {
   resolveDownloadConflictFor: (dir: string, fileName: string) => Promise<"rename" | "overwrite" | undefined>;
   openTransferPanel: () => void;
   pathFromUri: (uri: string) => string;
+  /** sudo 模式 + 可写连接（UploadSudo/DownloadSudo 同源判定）：批量下载对
+   * 普通文件走 sudo 车道，与右键单项下载的分流一致；目录仍走普通树下载。 */
+  sudoDownload: () => boolean;
 }) {
-  const { t, showNotice, showError, session, entries, fileMenu, localDownloadDir, localCanSave, transferTasks, cancelledTransferTasks, downloadChunkWaiters, waitWhilePaused, loadDownloadDir, loadDownloadUseDefaultDir, askDownloadTarget, applyChosenDirAsDefault, resolveDownloadConflictFor, openTransferPanel, pathFromUri } = options;
+  const { t, showNotice, showError, session, entries, fileMenu, localDownloadDir, localCanSave, transferTasks, cancelledTransferTasks, downloadChunkWaiters, waitWhilePaused, loadDownloadDir, loadDownloadUseDefaultDir, askDownloadTarget, applyChosenDirAsDefault, resolveDownloadConflictFor, openTransferPanel, pathFromUri, sudoDownload } = options;
 
 // 列表条目/下载起始信息的最小结构（App.vue 的 SftpEntry/DownloadInfo 为局部接口）。
 type DownloadListEntry = { uri: string; name: string; kind: SftpEntryKind; size?: number };
@@ -345,15 +348,18 @@ async function downloadDirectoryEntry(entry: DownloadListEntry) {
 }
 
 // 多选批量下载：文件与目录混选，逐项走各自管线（单项失败不阻断剩余项）。
+// sudo 模式 + 可写连接时普通文件换 sudo 车道（DownloadSudo），目录保持
+// 普通树下载（sudo 下载无目录暂存语义）。
 async function batchDownload() {
   const menu = fileMenu.value;
   fileMenu.value = undefined;
   if (!menu) return;
+  const sudoFiles = sudoDownload();
   const uris = menu.selection.length ? menu.selection : [menu.entry.uri];
   const targets = entries.value.filter((entry: DownloadListEntry) => uris.includes(entry.uri));
   for (const entry of targets) {
     if (entry.kind !== "file" && entry.kind !== "directory") continue;
-    await downloadEntry(entry);
+    await downloadEntry(entry, sudoFiles && entry.kind === "file");
   }
 }
 

@@ -976,11 +976,16 @@ impl Plugin {
                 let session_id = required_string(&params, "sessionId")?;
                 let dir = required_string(&params, "dir")?;
                 let name = required_string(&params, "name")?;
+                // sudo（UploadSudo 配套）：sudo 车道上传的撞名探测——目标目录
+                // （如 /root）对登录用户不可读，SFTP LSTAT 探测必失败，改走
+                // sudo test -e 逐候选探测。
+                let sudo = params.get("sudo").and_then(Value::as_bool).unwrap_or(false);
                 // latin-1（M16）：dir 按 wire 还原、name 是新输入显示文本，
-                // raw LSTAT 逐候选探测。
+                // raw LSTAT 逐候选探测。sudo 探测不进裸包快路（exec 命令串
+                // 是 UTF-8 String，非 UTF-8 字节名是登记边界）。
                 let encoding = self.resolve_sftp_encoding(session_id);
                 self.runtime.block_on(sftp_ext::rename_unique(
-                    &self.ssh, session_id, dir, name, encoding,
+                    &self.ssh, session_id, dir, name, encoding, sudo,
                 ))
             }
             "sftp/touch" => {
@@ -1824,8 +1829,45 @@ impl Plugin {
                     size,
                     resume_task_id,
                     encoding,
+                    false,
                     emitter,
                 ))
+            }
+            // UploadSudo：sudo 车道上传——参数族与 sftp/upload/start 一致
+            // （remotePath，上传族命名）。分块二进制帧（sftp/upload/<taskId>）、
+            // 进度事件与 sftp/transfer/cancel 全复用；只有 finish 换
+            // sudo/upload/finish（推送落登录用户 home 暂存件，提交走 sudo mv）。
+            "sudo/upload/start" => {
+                let session_id = required_string(&params, "sessionId")?.to_string();
+                let remote_path = required_string(&params, "remotePath")?.to_string();
+                let size = params
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .ok_or("Missing upload size")?;
+                let resume_task_id = params
+                    .get("resumeTaskId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                let encoding = self.resolve_sftp_encoding(&session_id);
+                self.runtime.block_on(self.ssh.start_upload(
+                    session_id,
+                    remote_path,
+                    size,
+                    resume_task_id,
+                    encoding,
+                    true,
+                    emitter,
+                ))
+            }
+            "sudo/upload/finish" => {
+                let task_id = required_string(&params, "taskId")?;
+                // sudo 车道不进 latin-1 裸包快路（暂存件是 ASCII 路径，高层
+                // 客户端无碍），编码取值只影响普通车道分支。
+                let session_id = self.ssh.upload_session_id(task_id);
+                let encoding = self.resolve_sftp_encoding_opt(session_id.as_deref());
+                self.runtime
+                    .block_on(self.ssh.finish_upload(task_id, encoding, emitter))
             }
             "sftp/upload/finish" => {
                 let task_id = required_string(&params, "taskId")?;

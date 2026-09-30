@@ -58,6 +58,10 @@ const localOnlyContext = fixtureParams.get("local") === "1";
 // ?local=1&restored=1 simulates a host-restored local-terminal tab: restore semantics (spec §7.6/§8.4)
 // requires restore-without-replay — no automatic shell, just the exit shell until the user explicitly starts one.
 const restoredFixture = fixtureParams.get("restored") === "1";
+// ?surface=panel simulates the host opening this webview as the bottom dock panel
+// (host §8.3 surface=panel)：dock 走查（紧凑工具条/配色快切）与跨表面外观同步
+// 的截图/联动验证入口；缺省仍为 tab。bridge openWorkbench 只开 tab，不受影响。
+const surfaceFixture = fixtureParams.get("surface") === "panel" ? "panel" : "tab";
 
 // ?rdpCert=1 让 rdp/start 在拨号早期发出 connection/challenge（kind=
 // rdp-certificate），供证书确认弹窗（指纹/knownHostStatus/120s 倒计时）的
@@ -1023,10 +1027,11 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     }
     result = { ...localPrefsState };
   }
-  else if (method === "sftp/upload/start") result = { taskId: `visual-upload-${++fixtureUploadCount.value}`, chunkSize: 262144 };
-  else if (method === "sftp/upload/finish") {
+  else if (method === "sftp/upload/start" || method === "sudo/upload/start") result = { taskId: `visual-upload-${++fixtureUploadCount.value}`, chunkSize: 262144 };
+  else if (method === "sftp/upload/finish" || method === "sudo/upload/finish") {
     // 镜像真实契约（issue #60）：finish 立即返回，推送在后台进行，终态经
-    // progress 事件回传。mock 无真实推送，直接补发完成事件。
+    // progress 事件回传。mock 无真实推送，直接补发完成事件。sudo/upload 是
+    // UploadSudo 车道（参数族同 remotePath，提交走 sudo mv），mock 同构。
     const taskId = String((params as Record<string, unknown>).taskId || "");
     result = { success: true, phase: "uploading" };
     queueMicrotask(() => {

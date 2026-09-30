@@ -25,8 +25,13 @@ export function useTransferQueue(options: {
   showError: (cause: unknown, target?: "terminal" | "sftp") => void;
   refreshTransferHistory: () => Promise<void>;
   refreshResumableUploads: () => Promise<void>;
+  /** UploadSudo：sudo 模式 + 可写连接时上传换 sudo 车道——start/finish 换
+   * sudo/upload/*（sidecar 把推送落到登录用户 home 暂存件，提交走 sudo mv），
+   * 分块二进制帧、进度事件与取消全复用普通管线。断点续传按恢复当刻的开关
+   * 状态选道（spool 是本地文件，车道只影响 finish 的远端提交方式）。 */
+  sudoUpload: () => boolean;
 }) {
-  const { t, showError, session, currentPath, panelSurface, resolveUploadDuplicateName, joinRemote, writeU64, syncPrefs, refreshTransferHistory, refreshResumableUploads } = options;
+  const { t, showError, session, currentPath, panelSurface, resolveUploadDuplicateName, joinRemote, writeU64, syncPrefs, refreshTransferHistory, refreshResumableUploads, sudoUpload } = options;
 
 // preferences 权威存储，localStorage 仅作同步缓存（语义同下载偏好）。
 const TRANSFER_CONCURRENCY_KEY = "ssh-transfer-concurrency";
@@ -372,7 +377,12 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
     if (!resolved.proceed) return;
     uploadName = resolved.name;
   }
-  const info = await window.dbxPlugin.invoke<{ taskId: string; chunkSize: number; resumeOffset?: number; compression?: string }>("sftp/upload/start", resume
+  // UploadSudo：车道在任务启动当刻定死，start 与 finish 必须同道（sidecar
+  // 按注册表里的 sudo 标记分派提交方式，finish 方法名只是前端契约一致性）。
+  const sudoLane = sudoUpload();
+  const startMethod = sudoLane ? "sudo/upload/start" : "sftp/upload/start";
+  const finishMethod = sudoLane ? "sudo/upload/finish" : "sftp/upload/finish";
+  const info = await window.dbxPlugin.invoke<{ taskId: string; chunkSize: number; resumeOffset?: number; compression?: string }>(startMethod, resume
     ? { sessionId: session.value.sessionId, remotePath: resume.remotePath, size, resumeTaskId: resume.taskId }
     : { sessionId: session.value.sessionId, remotePath: joinRemote(dir, uploadName), size });
   const startOffset = info.resumeOffset ?? 0;
@@ -403,7 +413,7 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
     // 可达数十分钟，长持 RPC 会被桥上任何一端的 deadline 判死并"自动取消"，
     // issue #60）；真正的完成/失败由终态 progress 事件回传，这里等它落地。
     try {
-      await window.dbxPlugin.invoke("sftp/upload/finish", { taskId: info.taskId }, { timeoutMs: 60_000 });
+      await window.dbxPlugin.invoke(finishMethod, { taskId: info.taskId }, { timeoutMs: 60_000 });
     } catch (cause) {
       throw Object.assign(cause instanceof Error ? cause : new Error(String(cause)), { code: "upload-start-failed" });
     }
