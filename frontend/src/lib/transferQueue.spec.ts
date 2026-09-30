@@ -3,8 +3,10 @@ import {
   clampTransferConcurrency,
   clampTransferDownloadLimit,
   clampTransferMaxActive,
+  isTransferCancelledCause,
   nextRunnable,
   runTransfers,
+  TRANSFER_CANCELLED_CODE,
   transferSlotsInUse,
   type TransferQueueItem,
 } from "./transferQueue";
@@ -176,5 +178,30 @@ describe("runTransfers (orchestration over the pure scheduler)", () => {
     // Worker a fails immediately; worker b may still finish its own item, but
     // no further items are picked up after the failure.
     expect(ran).not.toContain("c");
+  });
+
+  // 评审 H-3：用户取消（transfer-cancelled 码）不视为批次失败——取消项释放
+  // 槽位，剩余项照常派发，runTransfers 不外抛。
+  it("keeps dispatching remaining items after a user-cancelled item (review H-3)", async () => {
+    const ran: string[] = [];
+    const items = [{ id: "a", direction: "upload" as const }, { id: "b", direction: "upload" as const }, { id: "c", direction: "upload" as const }];
+    await expect(
+      runTransfers(items, 2, {
+        id: (item) => item.id,
+        run: async (item) => {
+          ran.push(item.id);
+          if (item.id === "a") throw Object.assign(new Error("cancelled by user"), { code: TRANSFER_CANCELLED_CODE });
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(ran).toEqual(["a", "b", "c"]);
+  });
+
+  it("treats only the transfer-cancelled code as a user cancel", () => {
+    expect(isTransferCancelledCause({ code: "transfer-cancelled" })).toBe(true);
+    expect(isTransferCancelledCause({ code: "transfer-terminal" })).toBe(false);
+    expect(isTransferCancelledCause(new Error("boom"))).toBe(false);
+    expect(isTransferCancelledCause(null)).toBe(false);
+    expect(isTransferCancelledCause(undefined)).toBe(false);
   });
 });

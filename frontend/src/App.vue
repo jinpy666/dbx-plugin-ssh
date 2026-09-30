@@ -5378,7 +5378,7 @@ const {
 } = useUploadChain({
   t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath,
   terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy,
-  uploadSource, loadTransferConcurrency, loadTransferDuplicatePolicy, transferDuplicateState,
+  uploadSource, loadTransferConcurrency, loadTransferMaxActive, loadTransferDuplicatePolicy, transferDuplicateState,
   terminal: () => terminal,
   loadDirectory,
   openTransferPanel,

@@ -954,18 +954,28 @@ offset 读（不再远端 seek），事件带 `compression: "gzip"`、分母回�
 
 **进度事件（`sftp/transfer/progress`）**：新增可选 `phase` 值与 `compression` 字段（"gzip"）。
 上传：`staging → compressing → uploading`（compressing 分母=原始大小、字节记 staged）；
-下载压缩任务：`compressing → fetching → decompressing → ready`，分块供给阶段无 phase 但带
-`compression`。各阶段事件 `transferred/size` 自描述（fetching 分母=压缩流体积，decompressing/
-transferring 分母=原始体积），普通下载事件无 phase（线上兼容）。前端归并按阶段切计数器，
+下载压缩任务：`compressing → fetching → decompressing → ready → transferring`。各阶段事件
+`transferred/size` 自描述（fetching 分母=压缩流体积，decompressing/transferring 分母=原始
+体积），普通下载与普通树事件无 phase（线上兼容）。前端归并按阶段切计数器，
 本地 CPU 阶段（staging/compressing/decompressing）不计速度。
 **上传事件恒带 `compression`（2026-09-29 补齐，与下载同语义）**：普通管线为 `"none"`；
 决策 gzip 的任务从建卡（start 响应）起各阶段事件带 `"gzip"`，预压不划算/压缩推送或远端
 gunzip 失败回退后，后续（uploading/终态）事件降回 `"none"`——前端据此清徽标；
 `sftp/transfer/list` 的上传行与 `sftp/transfer/status` 的上传分支同字段。
+**`transferring` 阶段（2026-09-30 补齐，评审 M-1）**：压缩单文件与压缩树（含 prep 回退）
+ready 之后的本地暂存分块供给段显式带 `phase: "transferring"`（分母=原始体积）——此前
+供给段无 phase，前端继承 ready 后计数冻结在解压终值（进度恒 100%、速度 0）。普通
+管线（含普通树）仍无 phase。
 
 **清理与磁盘**：两侧临时件（本地 `.part.gz`/`.tgz`、远端 `.dbx-*-<taskId>.gz/.tgz`）在完成/
 失败/取消三态 best-effort 清理（重复删除无害；取消与 prep 建件的竞窗由取消路径的远端删除 +
-prep 退出兜底双保险）。磁盘放大：上传本地 spool 2×（原始 + .gz）、远端 .gz+plain 2×、下载
+prep 退出兜底双保险）。**会话关闭是第四条等价清理路径（2026-09-30 补齐，评审 H-2）**：
+`cleanup_download_assets` 统一收口 sink `.part`、树半成品根目录、sudo 远端暂存与压缩任务的
+plain/`.gz`/远端临时件，取消与会话关闭都穿过它（此前会话关闭只删 `.part`，树半成品与压缩
+资产按 16GiB 级残留）；上传侧同路径补删 `<spool>.gz` 与孤儿 meta。**sidecar 启动清扫**
+（2026-09-30，评审 L-2）：`transfers/downloads/` 整目录清空（下载临时件不可续传），上传侧
+只清「meta 在而 spool 不在」的孤儿 meta 与永远可再生的 `.part.gz`，健康续传态
+（`.part`+`.json`）原样保留。磁盘放大：上传本地 spool 2×（原始 + .gz）、远端 .gz+plain 2×、下载
 本地 .gz+.plain 2×、树远端 .tgz+源树 2×；`MAX_TRANSFER_SIZE`（16 GiB）仍按原始大小语义。
 
 ### 递归目录下载（sftp/download/tree/start）

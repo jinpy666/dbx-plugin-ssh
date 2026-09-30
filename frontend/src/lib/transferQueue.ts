@@ -70,6 +70,15 @@ function occupiesSlot(status: TransferQueueStatus): boolean {
   return status === "running" || status === "paused";
 }
 
+/** 用户主动取消的错误码：cancelTransfer 拒绝 ack 等待器与终态 cancelled
+ * 事件的拒绝错误都带它（评审 H-3）。runTransfers 据此把取消与真实失败
+ * 区分开——取消项释放槽位，剩余项照常派发，批次不中止。 */
+export const TRANSFER_CANCELLED_CODE = "transfer-cancelled";
+
+export function isTransferCancelledCause(cause: unknown): boolean {
+  return (cause as { code?: unknown } | null | undefined)?.code === TRANSFER_CANCELLED_CODE;
+}
+
 export function transferSlotsInUse(queue: readonly TransferQueueItem[]): number {
   return queue.reduce((count, item) => count + (occupiesSlot(item.status) ? 1 : 0), 0);
 }
@@ -133,7 +142,8 @@ export function nextRunnable<T extends TransferQueueItem>(queue: readonly T[], r
 /**
  * 按调度策略批量执行传输：并发上限内逐个取 queued 项置 running 并交给
  * runner；runner 抛错视为该项取消（状态 cancelled、槽位释放）并向外传播，
- * 失败后不再派发新项（在途项自然跑完）。
+ * 失败后不再派发新项（在途项自然跑完）。用户取消（transfer-cancelled 码，
+ * 评审 H-3）只终止当前项，不置 failed、不外抛——剩余项继续派发。
  */
 export async function runTransfers<T>(items: readonly T[], limit: number, options: RunTransfersOptions<T>): Promise<void> {
   const directionOf = options.direction ?? (() => "upload" as TransferDirection);
@@ -158,8 +168,10 @@ export async function runTransfers<T>(items: readonly T[], limit: number, option
         byId.get(next.id)!.status = "done";
       } catch (cause) {
         byId.get(next.id)!.status = "cancelled";
-        failed = true;
-        throw cause;
+        if (!isTransferCancelledCause(cause)) {
+          failed = true;
+          throw cause;
+        }
       }
     }
   };

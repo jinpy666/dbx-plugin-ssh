@@ -59,7 +59,11 @@ const transferHistoryMenu = ref<{ taskId: string }>();
 const uploadAckWaiters = new Map<string, { nextOffset: number; resolve: () => void; reject: (error: Error) => void; timer: number }>();
 // 上传收尾等待器（issue #60）：finish RPC 只负责把远端推送交给 sidecar
 // 后台任务，真正的完成/失败经终态 progress 事件回传，这里据此结算。
-const transferCompletionWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+// 评审 H-1（2026-09-30）：等待器自带 watchdog 轮询——终态事件丢失（宿主
+// 桥抖动）或 sidecar 在长推送期间重启时，靠 sftp/transfer/status 兜底
+// 结算，不再让 uploadSource 永久挂起拖死整批队列。
+const COMPLETION_WATCHDOG_MS = 15_000;
+const transferCompletionWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void; watchdog: number }>();
 const downloadChunkWaiters = new Map<string, { offset: number; resolve: (bytes: Uint8Array) => void; reject: (error: Error) => void; timer: number }>();
 const transferSamples = new Map<string, TransferSpeedSample>();
 // Download task ids the user cancelled from the transfer panel; lets the download
@@ -178,24 +182,71 @@ onBeforeUnmount(() => {
   terminalTaskSweepTimers.clear();
 });
 
-/** 终态事件结算 finish 之后的收尾等待器：completed 兑现，cancelled/failed 拒绝。 */
+/** 终态事件结算 finish 之后的收尾等待器：completed 兑现；cancelled 按用户
+ * 取消回传（transfer-cancelled 码，runTransfers 据此继续派发剩余项，评审
+ * H-3）；failed 才视为批次失败。 */
 function settleTransferCompletion(taskId: string, status: TransferTask["status"]) {
   const waiter = transferCompletionWaiters.get(taskId);
   if (!waiter || (status !== "completed" && status !== "cancelled" && status !== "failed")) return;
   transferCompletionWaiters.delete(taskId);
+  window.clearTimeout(waiter.watchdog);
   if (status === "completed") waiter.resolve();
+  else if (status === "cancelled") waiter.reject(Object.assign(new Error(transferTasks[taskId]?.error || t(`transferStatus.${status}`)), { code: "transfer-cancelled" }));
   else waiter.reject(Object.assign(new Error(transferTasks[taskId]?.error || t(`transferStatus.${status}`)), { code: "transfer-terminal" }));
 }
 
-/** 挂起直到该任务收到终态 progress 事件（完成/取消/失败）；注册前已终态则立即结算。 */
+/** 后端状态快照统一入账（评审 H-1）：面板对账与 watchdog 轮询共用——
+ * 终态才生效，且必须穿过 settleTransferCompletion。此前 reconcile 直接改
+ * task.status 绕过结算，事件丢失后等待器永不兑现、批次挂死。 */
+function applyTransferStatusSnapshot(taskId: string, status: { transferred?: number; status: string; phase?: string }): boolean {
+  const task = transferTasks[taskId];
+  if (!task) return true;
+  const normalized = normalizeTransferStatus(status.status, task.status);
+  if (normalized !== "queued" && normalized !== "running") {
+    task.status = normalized;
+    if (status.transferred != null) {
+      // staging 阶段的 transferred 字段是 spool 字节数，不能覆盖真实推送计数。
+      if (status.phase === "staging") task.staged = status.transferred;
+      else task.transferred = status.transferred;
+    }
+    settleTransferCompletion(taskId, normalized);
+    if (!isLiveTransferStatus(normalized)) scheduleTerminalTaskSweep(taskId);
+    return true;
+  }
+  return false;
+}
+
+/** 终态兜底轮询：终态已入账返回 true（等待器已结算）；否则继续等下一轮。
+ * 查询失败（sidecar 重启中/任务已被清收）不算终态。 */
+async function pollTransferStatus(taskId: string): Promise<boolean> {
+  try {
+    const status = await window.dbxPlugin.invoke<{ transferred?: number; status: string; phase?: string }>("sftp/transfer/status", { taskId });
+    return applyTransferStatusSnapshot(taskId, status);
+  } catch {
+    return false;
+  }
+}
+
+function armCompletionWatchdog(taskId: string): number {
+  return window.setTimeout(async () => {
+    if (!transferCompletionWaiters.has(taskId)) return;
+    if (await pollTransferStatus(taskId)) return;
+    const waiter = transferCompletionWaiters.get(taskId);
+    if (waiter) waiter.watchdog = armCompletionWatchdog(taskId);
+  }, COMPLETION_WATCHDOG_MS);
+}
+
+/** 挂起直到该任务收到终态 progress 事件（完成/取消/失败）；注册前已终态则
+ * 立即结算，否则挂等待器并武装 watchdog 轮询兜底（评审 H-1）。后台推送可
+ * 持续数十分钟（issue #60），轮询只是轻量 RPC，不设次数上限。 */
 function waitForTransferCompletion(taskId: string) {
   const existing = transferTasks[taskId];
   const status = existing?.status;
   if (status === "completed" || status === "cancelled" || status === "failed") {
-    return status === "completed" ? Promise.resolve() : Promise.reject(Object.assign(new Error(existing?.error || t(`transferStatus.${status}`)), { code: "transfer-terminal" }));
+    return status === "completed" ? Promise.resolve() : Promise.reject(Object.assign(new Error(existing?.error || t(`transferStatus.${status}`)), { code: status === "cancelled" ? "transfer-cancelled" : "transfer-terminal" }));
   }
   return new Promise<void>((resolve, reject) => {
-    transferCompletionWaiters.set(taskId, { resolve, reject });
+    transferCompletionWaiters.set(taskId, { resolve, reject, watchdog: armCompletionWatchdog(taskId) });
   });
 }
 
@@ -220,26 +271,19 @@ async function restoreTransfers() {
  * 面板打开时对账活跃任务：逐个向后端查询 `sftp/transfer/status`，后端已不
  * 认识的任务（sidecar 重启、页面重载后错过终态事件的“僵尸行”）标记为失败，
  * 终态以服务端为准。查询失败视为任务已死——存活任务的状态查询总会成功。
- * 不在每次历史刷新时做：新任务可能在快照之后才登记，避免误判。
+ * 入账统一走 applyTransferStatusSnapshot（评审 H-1）：直接改状态会绕过
+ * settleTransferCompletion，事件丢失时 uploadSource 的收尾等待永不兑现。
  */
 async function reconcileActiveTransfers() {
   for (const task of Object.values(transferTasks)) {
     if (task.status !== "queued" && task.status !== "running") continue;
     try {
       const status = await window.dbxPlugin.invoke<{ transferred?: number; status: string; phase?: string }>("sftp/transfer/status", { taskId: task.taskId });
-      const normalized = normalizeTransferStatus(status.status, "running");
-      // task.status 此处必为 queued/running（上方守卫），终态即差异。
-      if (normalized !== "queued" && normalized !== "running") {
-        task.status = normalized;
-        if (status.transferred != null) {
-          // staging 阶段的 transferred 字段是 spool 字节数，不能覆盖真实推送计数。
-          if (status.phase === "staging") task.staged = status.transferred;
-          else task.transferred = status.transferred;
-        }
-      }
+      applyTransferStatusSnapshot(task.taskId, status);
     } catch {
       task.status = "failed";
       task.error = t("transfersHistory.interrupted");
+      settleTransferCompletion(task.taskId, "failed");
     }
   }
 }
@@ -313,15 +357,17 @@ function persistTransferDownloadLimit(value: number) {
   void syncPrefs();
 }
 
-async function uploadSource(name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string) {
+async function uploadSource(name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean }) {
   if (!session.value) return;
   // resume 携带原 taskId/remotePath：后端校验 spool meta 后从已传前缀续接。
   // targetDir 仅新上传生效（终端拖入的自定义目标目录）；缺省仍是 SFTP 当前目录。
   const dir = targetDir ?? currentPath.value;
   // 重复目标预检（P1-5）：仅新上传生效；rename 可能改写最终远端文件名，
-  // 后续 remotePath 与传输面板展示名都用解析后的名字。
+  // 后续 remotePath 与传输面板展示名都用解析后的名字。duplicatePreChecked-
+  // Absent（评审 M-4）：文件夹批量 ask 模式已逐文件预检过不存在，跳过二次
+  // sftp/exists（千文件目录少一半往返）。
   let uploadName = name;
-  if (!resume) {
+  if (!resume && !options?.duplicatePreCheckedAbsent) {
     const resolved = await resolveUploadDuplicateName(name, dir);
     if (!resolved.proceed) return;
     uploadName = resolved.name;
@@ -419,6 +465,16 @@ async function cancelTransfer(task: TransferTask) {
       waiter.reject(new Error(t("transferStatus.cancelled")));
     }
     cancelledTransferTasks.add(task.taskId);
+  } else {
+    // 上传取消对称地立即释放 ack 等待器（评审 H-3）：后端取消即摘任务，
+    // ack 永不再来——不等 30s 超时。错误码 transfer-cancelled 让
+    // runTransfers 把用户取消与真实失败区分开、继续派发剩余项。
+    const waiter = uploadAckWaiters.get(task.taskId);
+    if (waiter) {
+      window.clearTimeout(waiter.timer);
+      uploadAckWaiters.delete(task.taskId);
+      waiter.reject(Object.assign(new Error(t("transferStatus.cancelled")), { code: "transfer-cancelled" }));
+    }
   }
   // reason=user 让后端账本把"用户主动取消"与异常清理区分开（issue #60）。
   await window.dbxPlugin.invoke("sftp/transfer/cancel", { taskId: task.taskId, reason: "user" }).catch((cause) => showError(cause));

@@ -1819,6 +1819,11 @@ pub struct SshRuntime {
     /// 会话维度的「建议开启兼容模式」一次性提示标记（M14-B）：SFTP 探测
     /// 失败时提示一次，之后同一会话静默。
     compat_hinted: Mutex<HashSet<String>>,
+    /// 远端压缩工具探测结果（M33）按会话缓存：`command -v` 探测在任务
+    /// start 时同步执行（5s 上限），目录批量上传逐文件 start 会放大成
+    /// N 次 exec。工具存在性在一条连接的生命周期内不变，会话级缓存
+    /// 一次即可；连接重建产生新 session id，天然失效。
+    compress_tool_probe: Mutex<HashMap<String, bool>>,
     pub prompts: PromptBroker,
     data_dir: PathBuf,
     known_hosts_path: PathBuf,
@@ -1841,6 +1846,7 @@ impl SshRuntime {
         let transfer_dir = data_dir.join("transfers");
         let known_hosts_path = data_dir.join("known_hosts");
         let _ = std::fs::create_dir_all(&transfer_dir);
+        sweep_stale_transfer_temps(&transfer_dir);
         Self {
             connections: RwLock::new(HashMap::new()),
             sessions: Arc::new(AsyncRwLock::new(HashMap::new())),
@@ -1859,6 +1865,7 @@ impl SshRuntime {
             agent_challenges: Mutex::new(HashMap::new()),
             auto_trust: false,
             compat_hinted: Mutex::new(HashSet::new()),
+            compress_tool_probe: Mutex::new(HashMap::new()),
             prompts: PromptBroker::default(),
             data_dir,
             known_hosts_path,
@@ -3228,7 +3235,7 @@ impl SshRuntime {
             .ok_or("SSH session was not found")?;
         let _ = session.terminal_tx.send(TerminalCommand::Close).await;
         session.transport_lease.release().await;
-        self.cleanup_session_transfers(session_id)?;
+        self.cleanup_session_transfers(session_id).await?;
         if let Ok(mut cache) = self.metrics_cache.lock() {
             cache.remove(session_id);
         }
@@ -5713,10 +5720,18 @@ impl SshRuntime {
     }
 
     /// 远端压缩工具探测（M33）：`command -v` 组合命令，退出码 0 且输出含
-    /// 标记串即可用。exec 错误/超时/非零都按不可用处理。
+    /// 标记串即可用。exec 错误/超时/非零都按不可用处理。结果按会话缓存
+    /// （工具存在性在连接生命周期内不变；目录批量上传逐文件 start 不再
+    /// 重复 exec），探测失败也缓存——失败会话每任务重试只会放大延迟。
     async fn probe_remote_compress_tools(&self, session_id: &str, needs_tar: bool) -> bool {
+        let cache_key = format!("{session_id}\u{0}{needs_tar}");
+        if let Ok(cache) = self.compress_tool_probe.lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return *cached;
+            }
+        }
         let command = transfer_compress::probe_command(needs_tar);
-        match self.exec(session_id, None, &command, false, Some(5)).await {
+        let available = match self.exec(session_id, None, &command, false, Some(5)).await {
             Ok(outcome) => {
                 outcome.get("exitCode").and_then(Value::as_i64) == Some(0)
                     && outcome
@@ -5728,7 +5743,11 @@ impl SshRuntime {
                 eprintln!("[sftp] compress tool probe failed, plain transfer: {error}");
                 false
             }
+        };
+        if let Ok(mut cache) = self.compress_tool_probe.lock() {
+            cache.insert(cache_key, available);
         }
+        available
     }
 
     /// Reopens an interrupted upload's spool file for appending, validating
@@ -6101,6 +6120,11 @@ impl SshRuntime {
                                 served_compression = CompressionMode::None;
                                 let _ =
                                     sftp.lock().await.remove_file(gz_temporary.clone()).await;
+                                // gunzip exec 超时≠远端进程死了（下载 prep 同款
+                                // 假设）：断链它可能仍握着的 temporary——僵尸
+                                // gunzip 的后续写入落在已断链的 inode 上，不会
+                                // 与回退普通推送写同一文件交错。
+                                let _ = sftp.lock().await.remove_file(temporary.clone()).await;
                                 eprintln!(
                                     "[sftp] upload {task_id} remote gunzip failed, plain push: {error}"
                                 );
@@ -6490,8 +6514,13 @@ impl SshRuntime {
         conflict: Option<&str>,
         emitter: &PluginEmitter,
     ) -> Result<Value, String> {
-        if self.active_transfer_count(session_id)? >= 3 {
-            return Err("This SSH session already has three active transfers".to_string());
+        // 与其余 start 路径同走 transfer_depth_limit（M14-B 偏好与 compat
+        // 模式强制 1 都要约束 sudo 车道；此前字面 3 绕过了两者）。
+        if self.active_transfer_count(session_id)? as u64 >= self.transfer_depth_limit() {
+            return Err(format!(
+                "This SSH session already has {} active transfers",
+                self.transfer_depth_limit()
+            ));
         }
         let staged = sudo_download::stage_source(self, session_id, path).await?;
         let outcome = self
@@ -7295,7 +7324,10 @@ impl SshRuntime {
             emitter
                 .event(
                     "sftp/transfer/progress",
-                    json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "compression": "gzip" }),
+                    // phase=transferring（2026-09-30 补齐）：ready 之后从本地
+                    // 解压暂存分块供给的真实网络外发段——前端归并器换阶段即
+                    // 重置计数（分母=原始体积），进度条/速度不再卡在解压终值。
+                    json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "phase": "transferring", "compression": "gzip" }),
                 )
                 .map_err(plugin_error)?;
         }
@@ -7524,6 +7556,9 @@ impl SshRuntime {
             let cancelled = Arc::new(AtomicBool::new(false));
             let cancel_reason = Arc::new(Mutex::new(None::<String>));
             let phase = Arc::new(Mutex::new("compressing"));
+            // Fallback 补建空目录骨架用（评审 L-3）：普通树在 start 建骨架，
+            // 压缩树由解包建目录、跳过空目录——回退普通管线后由 prep 补。
+            let tree_dirs: Arc<[String]> = scan.dirs.clone().into();
             self.download_preps
                 .lock()
                 .map_err(|_| "Download prep registry is poisoned".to_string())?
@@ -7553,6 +7588,7 @@ impl SshRuntime {
                     root_local,
                     remote_temp.expect("remote temp path present"),
                     throttle,
+                    tree_dirs,
                     cancelled,
                     cancel_reason,
                     phase,
@@ -7597,6 +7633,7 @@ impl SshRuntime {
         staging_root: PathBuf,
         remote_temp: String,
         throttle: Throttle,
+        dirs: Arc<[String]>,
         cancelled: Arc<AtomicBool>,
         _cancel_reason: Arc<Mutex<Option<String>>>,
         phase: Arc<Mutex<&'static str>>,
@@ -7646,6 +7683,20 @@ impl SshRuntime {
                     None,
                 )
                 .await;
+                // 空目录也保留（与普通树同语义，评审 L-3）：压缩决策的骨架
+                // 跳过在 Fallback 时补建——分块泵只为文件建父目录，空目录
+                // 只能在这里补。失败不阻断（后续文件上传会按父目录建链）。
+                for relative in dirs.iter() {
+                    let Some(path) = sftp_tree::safe_tree_path(&staging_root, relative) else {
+                        continue;
+                    };
+                    if let Err(error) = std::fs::create_dir_all(&path) {
+                        eprintln!(
+                            "[sftp] tree download {task_id} fallback skeleton failed: {error}"
+                        );
+                        break;
+                    }
+                }
                 {
                     // compression 保持原决策值（status 的 compression/ready
                     // 字段继续输出，前端等待环据此收口）；serving_plain 让
@@ -8084,11 +8135,15 @@ impl SshRuntime {
                 .unwrap_or(0);
             let eof = sftp_tree::tree_eof(tree.files.len(), current_remaining);
             if emit_progress || eof {
+                // 压缩树（含 prep 回退）供给段标 phase=transferring：前端换
+                // 阶段重置计数，不再停在解包终值（M-1，2026-09-30 补齐）。
+                // 普通树维持无 phase（线上兼容）。
+                let mut progress = json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "fileCount": tree.file_count, "fileIndex": tree.files_done + u64::from(tree.current.is_some()), "currentFile": tree.current.as_ref().map(|file| file.relative.clone()) });
+                if download.compression == CompressionMode::Gzip {
+                    progress["phase"] = json!("transferring");
+                }
                 emitter
-                    .event(
-                        "sftp/transfer/progress",
-                        json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "transferred": next_offset, "size": download.size, "status": "running", "fileCount": tree.file_count, "fileIndex": tree.files_done + u64::from(tree.current.is_some()), "currentFile": tree.current.as_ref().map(|file| file.relative.clone()) }),
-                    )
+                    .event("sftp/transfer/progress", progress)
                     .map_err(plugin_error)?;
             }
             // 树状态回写：零拷贝转移（store_tree_state），放在 eof/进度读取
@@ -8238,6 +8293,45 @@ impl SshRuntime {
     /// `sftp/transfer/cancel`. `reason` is an optional workbench slug ("user",
     /// "ack-timeout", ...) recorded in the ledger event so a cancellation can
     /// be told apart from a server failure on the next bug report.
+    /// 统一清理一个下载任务的全部临时资产（2026-09-30 收口，评审 H-2）：
+    /// sink .part、树半成品根目录、sudo 远端暂存、压缩任务的 plain 解压
+    /// 暂存/本地压缩流/远端 .gz。best-effort——路径可缺失，完成/取消/会话
+    /// 关闭多路径穿过这里，重复删除只是一次无害的 NoSuchFile。远端删除
+    /// 需要会话，会话已死时记 stderr（本地资产是会话关闭场景的主清理面）。
+    async fn cleanup_download_assets(&self, session_id: &str, download: &DownloadState) {
+        if let Some(sink) = download.sink.as_ref() {
+            let _ = std::fs::remove_file(&sink.part_path);
+        }
+        // 文件夹下载：整棵半成品目录删除，不在下载目录里留部分内容（根
+        // 目录是本任务创建的让位新目录，删除不伤及他物）。
+        if let Some(tree) = download.tree.as_ref() {
+            let _ = std::fs::remove_dir_all(&tree.root_local);
+        }
+        if let Some(tmp) = download.sudo_tmp.as_ref() {
+            if let Err(error) = sudo_download::discard_tmp(self, session_id, tmp).await {
+                eprintln!("[sudo-download] temp cleanup failed ({tmp}): {error}");
+            }
+        }
+        if download.compression == CompressionMode::Gzip {
+            if let Some(staged) = download.staged_plain.as_ref() {
+                let _ = std::fs::remove_file(staged);
+            }
+            if let Some(gz) = download.gz_staging.as_ref() {
+                let _ = std::fs::remove_file(gz);
+            }
+            if let Some(tmp) = download.remote_temp.as_ref() {
+                match self.sftp(session_id).await {
+                    Ok(sftp) => {
+                        if let Err(error) = sftp.lock().await.remove_file(tmp.clone()).await {
+                            eprintln!("[sftp] cleanup: remote temp not removed: {error}");
+                        }
+                    }
+                    Err(error) => eprintln!("[sftp] cleanup: session unavailable: {error}"),
+                }
+            }
+        }
+    }
+
     pub async fn cancel_transfer(
         &self,
         task_id: &str,
@@ -8304,48 +8398,8 @@ impl SshRuntime {
             remove_upload_meta(&self.transfer_dir, task_id);
         }
         if let Some(download) = download.as_ref() {
-            if let Some(sink) = download.sink.as_ref() {
-                let _ = std::fs::remove_file(&sink.part_path);
-            }
-            // 文件夹下载的取消语义：整棵半成品目录删除，不在下载目录里留
-            // 部分内容（根目录是本任务创建的让位新目录，删除不伤及他物）。
-            if let Some(tree) = download.tree.as_ref() {
-                let _ = std::fs::remove_dir_all(&tree.root_local);
-            }
-            // sudo 下载取消：远端临时件同样属于本任务，best-effort 删除。
-            if let Some(tmp) = download.sudo_tmp.as_ref() {
-                if let Err(error) =
-                    sudo_download::discard_tmp(self, &download.session_id, tmp).await
-                {
-                    eprintln!("[sudo-download] temp cleanup failed ({tmp}): {error}");
-                }
-            }
-            // 压缩任务（M33）：plain 解压暂存 / 压缩流暂存 / 远端 .gz 临时
-            // 件都是本任务资产，best-effort 删除（远端删除同时关闭「取消
-            // 与 prep 建件竞窗」——prep 循环退出时还会兜底清一次，重复删除
-            // 只是一次无害的 NoSuchFile）。
-            if download.compression == CompressionMode::Gzip {
-                if let Some(staged) = download.staged_plain.as_ref() {
-                    let _ = std::fs::remove_file(staged);
-                }
-                if let Some(gz) = download.gz_staging.as_ref() {
-                    let _ = std::fs::remove_file(gz);
-                }
-                if let Some(tmp) = download.remote_temp.as_ref() {
-                    match self.sftp(&download.session_id).await {
-                        Ok(sftp) => {
-                            if let Err(error) = sftp.lock().await.remove_file(tmp.clone()).await {
-                                eprintln!(
-                                    "[sftp] cancel cleanup: remote temp not removed: {error}"
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("[sftp] cancel cleanup: session unavailable: {error}")
-                        }
-                    }
-                }
-            }
+            self.cleanup_download_assets(&download.session_id, download)
+                .await;
         }
         // prep 独占的取消（任务条目已被先前的取消摘除）：直接清压缩产物。
         if let (true, Some((remote_temp, gz_staging, session_id))) =
@@ -9093,7 +9147,7 @@ impl SshRuntime {
         Ok(uploads + finishing_uploads + downloads)
     }
 
-    fn cleanup_session_transfers(&self, session_id: &str) -> Result<(), String> {
+    async fn cleanup_session_transfers(&self, session_id: &str) -> Result<(), String> {
         let removed_uploads = {
             let mut uploads = self
                 .uploads
@@ -9111,6 +9165,10 @@ impl SshRuntime {
         };
         for (task_id, upload) in removed_uploads {
             let _ = std::fs::remove_file(&upload.local_path);
+            // 压缩预压半成品与 sidecar meta 同属本任务（评审 L-2）：完成
+            // 路径已清的这里重复删除无害。
+            let _ = std::fs::remove_file(format!("{}.gz", upload.local_path.display()));
+            remove_upload_meta(&self.transfer_dir, &task_id);
             // A session close aborts its unfinished uploads; record them as
             // failed so the persisted history keeps no silent ghosts.
             self.persist_transfer_record(&json!({
@@ -9124,7 +9182,7 @@ impl SshRuntime {
                 "error": "Transfer was aborted because the session closed",
             }));
         }
-        {
+        let removed_downloads = {
             let mut downloads = self
                 .downloads
                 .lock()
@@ -9134,24 +9192,28 @@ impl SshRuntime {
                 .filter(|(_, download)| download.session_id == session_id)
                 .map(|(task_id, _)| task_id.clone())
                 .collect::<Vec<_>>();
-            for task_id in task_ids {
-                let Some((task_id, download)) = downloads.remove_entry(&task_id) else {
-                    continue;
-                };
-                if let Some(sink) = download.sink.as_ref() {
-                    let _ = std::fs::remove_file(&sink.part_path);
-                }
-                self.persist_transfer_record(&json!({
-                    "taskId": task_id,
-                    "sessionId": download.session_id,
-                    "direction": "download",
-                    "fileName": download.file_name,
-                    "size": download.size,
-                    "transferred": download.next_offset,
-                    "status": "failed",
-                    "error": "Transfer was aborted because the session closed",
-                }));
-            }
+            task_ids
+                .into_iter()
+                .filter_map(|task_id| downloads.remove_entry(&task_id))
+                .collect::<Vec<_>>()
+        };
+        for (task_id, download) in removed_downloads {
+            // 会话关闭与取消是等价的清理事件（评审 H-2）：树半成品根、
+            // 压缩 plain/.gz、远端临时件统一穿过 cleanup_download_assets，
+            // 不再只删 sink .part。（registry guard 不跨 await——摘除在
+            // 锁内完成，清理在锁外执行。）
+            self.cleanup_download_assets(&download.session_id, &download)
+                .await;
+            self.persist_transfer_record(&json!({
+                "taskId": task_id,
+                "sessionId": download.session_id,
+                "direction": "download",
+                "fileName": download.file_name,
+                "size": download.size,
+                "transferred": download.next_offset,
+                "status": "failed",
+                "error": "Transfer was aborted because the session closed",
+            }));
         }
         for upload in self
             .finishing_uploads
@@ -10671,6 +10733,45 @@ fn write_upload_meta(path: &Path, meta: &Value) -> Result<(), String> {
 /// Removes the upload spool meta file when it is no longer resumable.
 fn remove_upload_meta(transfer_dir: &Path, task_id: &str) {
     let _ = std::fs::remove_file(transfer_dir.join(format!("upload-{task_id}.json")));
+}
+
+/// 启动清扫（评审 H-2/L-2，2026-09-30）：sidecar 上个生命周期遗留的孤儿
+/// 临时件。下载侧临时件（`downloads/` 下 .part/.part.gz/.plain/.tgz）全部
+/// 不可续传，进程不在即成孤儿，整目录清空；上传 spool 支持断点续传
+/// （by design 跨重启保留），只清两类无主件——meta 在而 spool 不在的孤儿
+/// meta，以及永远可再生的 `.part.gz` 压缩半成品（有效续传态只由
+/// `.part`+`.json` 构成，finish 推送会重新生成 .gz）。全部 best-effort，
+/// 清扫失败不阻塞启动。
+fn sweep_stale_transfer_temps(transfer_dir: &Path) {
+    let downloads = transfer_dir.join("downloads");
+    if let Ok(entries) = std::fs::read_dir(&downloads) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(transfer_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let spool_id = name
+                .strip_prefix("upload-")
+                .and_then(|rest| rest.strip_suffix(".json"));
+            if let Some(id) = spool_id {
+                if !transfer_dir.join(format!("upload-{id}.part")).exists() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            } else if name.starts_with("upload-") && name.ends_with(".part.gz") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Scans the transfer directory for interrupted uploads that can still be
@@ -12400,6 +12501,39 @@ matrix-ed25519";
         assert_eq!(tasks[0]["resumableBytes"], 40);
         // A missing transfer dir yields an empty list, not an error.
         assert!(resumable_uploads_from(Path::new("/nonexistent-dbx-ssh"), &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 启动清扫（评审 H-2/L-2）：下载侧临时件整目录清空、上传孤儿 meta 与
+    // 可再生的 .gz 清除、健康续传态（.part+.json）原样保留。
+    #[test]
+    fn sweep_stale_transfer_temps_keeps_resumable_spools_only() {
+        let dir = temp_transfer_dir();
+        let transfer_dir = dir.join("transfers");
+        let downloads = transfer_dir.join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        // 下载侧：不可续传，全部清。
+        std::fs::write(downloads.join("download-x.part"), b"p").unwrap();
+        std::fs::write(downloads.join("download-x.part.gz"), b"g").unwrap();
+        std::fs::write(downloads.join("download-x.plain"), b"l").unwrap();
+        std::fs::write(downloads.join("tree-x.tgz"), b"t").unwrap();
+        std::fs::create_dir_all(downloads.join("stale-sub")).unwrap();
+        // 上传侧：健康续传态保留；孤儿 meta 与无主 .gz 清除。
+        std::fs::write(transfer_dir.join("upload-keep.part"), b"data").unwrap();
+        std::fs::write(transfer_dir.join("upload-keep.json"), "{}").unwrap();
+        std::fs::write(transfer_dir.join("upload-keep.part.gz"), b"gz").unwrap();
+        std::fs::write(transfer_dir.join("upload-orphan.json"), "{}").unwrap();
+        std::fs::write(transfer_dir.join("upload-orphan.part.gz"), b"gz").unwrap();
+        sweep_stale_transfer_temps(&transfer_dir);
+        assert!(
+            std::fs::read_dir(&downloads).unwrap().next().is_none(),
+            "download temps must be swept"
+        );
+        assert!(transfer_dir.join("upload-keep.part").exists());
+        assert!(transfer_dir.join("upload-keep.json").exists());
+        assert!(!transfer_dir.join("upload-keep.part.gz").exists());
+        assert!(!transfer_dir.join("upload-orphan.json").exists());
+        assert!(!transfer_dir.join("upload-orphan.part.gz").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
