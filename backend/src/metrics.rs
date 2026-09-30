@@ -126,7 +126,10 @@ pub fn collect_local_metrics() -> Result<serde_json::Value, String> {
     // output is a failure; defensive `|| true` fallbacks normally keep the
     // script at 0 with parseable output even on partial /proc holes.
     if !output.status.success() && text.trim().is_empty() {
-        return Err(format!("local metrics collection failed: {}", output.status));
+        return Err(format!(
+            "local metrics collection failed: {}",
+            output.status
+        ));
     }
     Ok(parse_metrics_output(&text))
 }
@@ -834,9 +837,18 @@ mod tests {
         // 断言基础三段齐全即可，数值随机器漂移不作断言。
         let sample = collect_local_metrics().expect("local collector should run on unix hosts");
         assert!(sample.get("cpu").is_some(), "cpu section missing: {sample}");
-        assert!(sample.get("memory").is_some(), "memory section missing: {sample}");
-        assert!(sample.get("network").is_some(), "network section missing: {sample}");
-        assert!(sample.get("gpu").is_none(), "gpu probe must stay ssh-only: {sample}");
+        assert!(
+            sample.get("memory").is_some(),
+            "memory section missing: {sample}"
+        );
+        assert!(
+            sample.get("network").is_some(),
+            "network section missing: {sample}"
+        );
+        assert!(
+            sample.get("gpu").is_none(),
+            "gpu probe must stay ssh-only: {sample}"
+        );
     }
 
     /// Full collector output in Linux shape: /proc/net/dev twice around the

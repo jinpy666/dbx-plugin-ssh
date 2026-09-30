@@ -989,6 +989,24 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
       ],
     };
   } else if (method === "local/capabilities") result = { canSaveLocal: false, downloadsDir: "" };
+  else if (method === "local/metrics") {
+    // 本地指标（dock 本地终端系统信息带）：与 ssh/metrics 同形状，但反映
+    // sidecar 宿主机本身——无 gpu/npu（SSH-only 语义）、无 osId/osPretty
+    // （本地宿主无 os-release，optional 降级缺省）。
+    metricsRefreshTick += 1;
+    const localWave = (base: number, amplitude: number) => Math.max(0, Math.round(base + amplitude * Math.sin(metricsRefreshTick / 2)));
+    result = {
+      hostname: "macbook-local",
+      kernel: "darwin 25.6.0",
+      uptimeSeconds: 86_400 * 3 + 7_200,
+      cpu: { cores: 10, percent: localWave(18, 12), load1: 1.8, load5: 2.1, load15: 2.0 },
+      memory: { totalBytes: 17_179_869_184, availableBytes: 8_589_934_592, usedBytes: 8_589_934_592 },
+      network: [
+        { name: "en0", rxRate: localWave(90_000, 60_000), txRate: localWave(30_000, 20_000), rxTotal: 45_678_901_234, txTotal: 12_345_678_901 },
+        { name: "lo0", rxRate: localWave(800, 500), txRate: localWave(800, 500), rxTotal: 9_876_543, txTotal: 9_876_543 },
+      ],
+    };
+  }
   else if (method === "local/preferences/get") result = { ...localPrefsState };
   else if (method === "local/fs/drives") result = { drives: ["C:\\", "D:\\"] };
   else if (method === "local/fs/exists") result = { exists: false, path: "" };
