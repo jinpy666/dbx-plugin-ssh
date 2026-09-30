@@ -35,8 +35,9 @@ export function useUploadChain(options: {
   terminalDragActive: Ref<boolean>;
   sftpPaneOpen: Ref<boolean>;
   terminalTransferBusy: Ref<boolean>;
-  uploadSource: (name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string) => Promise<void>;
+  uploadSource: (name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean }) => Promise<void>;
   loadTransferConcurrency: () => number;
+  loadTransferMaxActive: () => number;
   loadTransferDuplicatePolicy: () => "rename" | "ask" | "overwrite";
   transferDuplicateState: Ref<"rename" | "ask" | "overwrite">;
   terminal: () => { focus: () => void } | undefined;
@@ -44,7 +45,12 @@ export function useUploadChain(options: {
   openTransferPanel: () => void;
   joinRemote: (parent: string, name: string) => string;
 }) {
-  const { t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath, terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy, uploadSource, loadTransferConcurrency, loadTransferDuplicatePolicy, transferDuplicateState, terminal: terminalGet, loadDirectory, openTransferPanel, joinRemote } = options;
+  const { t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath, terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy, uploadSource, loadTransferConcurrency, loadTransferMaxActive, loadTransferDuplicatePolicy, transferDuplicateState, terminal: terminalGet, loadDirectory, openTransferPanel, joinRemote } = options;
+
+  // 批次并发与会话深度取小（评审 L-4）：批次上限（1..10）超过会话深度
+  // （1..8，sidecar 权威）时，超出的任务会在 upload/start 被 "already has
+  // N active transfers" 拒绝并中止整批——源头钳住而不是事后补救。
+  const batchTransferLimit = () => Math.min(loadTransferConcurrency(), loadTransferMaxActive());
 
 const uploadInput = ref<HTMLInputElement>();
 // 文件夹上传（issue #78）：webkitdirectory 选择器 + 能力探测（缺失时入口隐藏）。
@@ -108,7 +114,7 @@ async function chooseUpload() {
 async function uploadHandleFiles(files: Array<{ handleId: string; name: string; size: number }>, targetDir?: string) {
   if (!window.dbxPlugin.fileTransfer || !files.length) return;
   uploadDuplicateBatchDecision = undefined;
-  await runTransfers(files, loadTransferConcurrency(), {
+  await runTransfers(files, batchTransferLimit(), {
     id: (file) => file.handleId,
     run: async (file) => {
       try {
@@ -213,7 +219,7 @@ async function uploadLocalFiles(files: readonly File[], targetDir?: string) {
   uploadDuplicateBatchDecision = undefined;
   // File 对象没有稳定 id：包一层带序号的 key 再交给调度器。
   const entries = files.map((file, index) => ({ file, key: `local-${index}` }));
-  await runTransfers(entries, loadTransferConcurrency(), {
+  await runTransfers(entries, batchTransferLimit(), {
     id: (entry) => entry.key,
     run: (entry) => uploadSource(entry.file.name, entry.file.size, async (offset, length) => new Uint8Array(await entry.file.slice(offset, offset + length).arrayBuffer()), undefined, targetDir),
   });
@@ -321,6 +327,9 @@ interface FolderUploadEntry {
 
 async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?: string) {
   if (!session.value || !canWrite.value) return;
+  // 并发 run 闭包里不能用 session.value（TS 无法跨异步闭包收窄）：守卫后
+  // 捕获一次。
+  const sessionId = session.value.sessionId;
   // baseDir：终端/宿主桥拖入的自定义落点；缺省仍是 SFTP 当前目录。
   const base = baseDir ?? currentPath.value;
   const plan = buildFolderUploadPlan(entries);
@@ -348,33 +357,44 @@ async function uploadFolderFiles(entries: readonly FolderUploadEntry[], baseDir?
   }
   let skipped = 0;
   let failed = 0;
-  for (const [index, file] of plan.files.entries()) {
-    const entry = entries[index];
-    progress.currentFile = file.relativePath;
-    publish(file.relativePath);
-    const segments = file.relativePath.split("/");
-    const dirSegments = segments.slice(0, -1);
-    const fileName = segments[segments.length - 1];
-    const targetDir = dirSegments.length ? joinRemote(base, dirSegments.join("/")) : base;
-    // ask 模式批量降级：已存在则跳过（rename/overwrite 走既有解析，不预检）。
-    if (loadTransferDuplicatePolicy() === "ask") {
-      const probe = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", { sessionId: session.value.sessionId, path: joinRemote(targetDir, fileName) }).catch(() => ({ exists: false }));
-      if (probe.exists === true) {
-        skipped += 1;
+  // 逐文件上传走 runTransfers（评审 M-4）：尊重批次并发偏好，不再纯串行；
+  // 聚合进度（文件 N/M · 当前相对路径）在并发 run 里同步推进（单线程事件
+  // 循环内 read-modify-write 无交错）。单文件失败计 failed 不中止整批——
+  // catch 吞掉不外抛，runTransfers 的失败中止语义不触发；用户取消同理
+  // （计 failed，批次继续，与既有串行语义一致）。
+  await runTransfers(plan.files.map((file, index) => ({ file, entry: entries[index], index })), batchTransferLimit(), {
+    id: (item) => `folder-${item.index}`,
+    run: async (item) => {
+      const { file, entry } = item;
+      progress.currentFile = file.relativePath;
+      publish(file.relativePath);
+      const segments = file.relativePath.split("/");
+      const dirSegments = segments.slice(0, -1);
+      const fileName = segments[segments.length - 1];
+      const targetDir = dirSegments.length ? joinRemote(base, dirSegments.join("/")) : base;
+      try {
+        // ask 模式批量降级：预检已存在则跳过；不存在则带 preCheckedAbsent
+        // 上传，免去 uploadSource 内的第二次 sftp/exists（评审 M-4）。
+        if (loadTransferDuplicatePolicy() === "ask") {
+          const probe = await window.dbxPlugin.invoke<{ exists: boolean }>("sftp/exists", { sessionId, path: joinRemote(targetDir, fileName) }).catch(() => ({ exists: false }));
+          if (probe.exists === true) {
+            skipped += 1;
+            progress = settleFolderUploadFile(progress, { file, ok: false });
+            publish();
+            return;
+          }
+          await uploadSource(fileName, file.size, entry.readChunk, undefined, targetDir, { duplicatePreCheckedAbsent: true });
+        } else {
+          await uploadSource(fileName, file.size, entry.readChunk, undefined, targetDir);
+        }
+        progress = settleFolderUploadFile(progress, { file, ok: true });
+      } catch {
+        failed += 1;
         progress = settleFolderUploadFile(progress, { file, ok: false });
-        publish(file.relativePath);
-        continue;
       }
-    }
-    try {
-      await uploadSource(fileName, file.size, entry.readChunk, undefined, targetDir);
-      progress = settleFolderUploadFile(progress, { file, ok: true });
-    } catch {
-      failed += 1;
-      progress = settleFolderUploadFile(progress, { file, ok: false });
-    }
-    publish();
-  }
+      publish();
+    },
+  });
   const outcome = folderUploadOutcome(progress, skipped, failed);
   folderUploadProgress.value = undefined;
   await loadDirectory();
