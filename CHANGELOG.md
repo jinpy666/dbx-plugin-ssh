@@ -4,6 +4,13 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.1-beta.15] — 2026-09-30
+
+- **修复工具条连接标识显示 UUID：宿主下发的 connection 配置被形状守卫整包丢弃**。M32（serial/rdp 路由）提交时把 `connection` computed 的守卫从 `typeof value !== "object"` 误写为 `=== "object"`，恰好把宿主注入的连接配置对象拒掉、`connection` 恒为空——工具条标题只能回落显示 connectionId（UUID）。现在守卫复原（对象之外视为缺失），只读徽标、连接色点与工具条着色、写门禁的 readOnly 分量、telnet/vnc/serial/rdp 协议路由一并恢复；工具条主标题改为连接名优先（未命名回退 `user@host:port`，hover 仍见技术标识，与连接卡同口径）。
+  **Fixed: the toolbar showed a UUID because a flipped shape guard dropped the host-provided connection object.** The M32 (serial/rdp routing) commit changed the `connection` computed's guard from `typeof value !== "object"` to `=== "object"`, which rejects exactly the connection object the host injects, leaving it permanently empty — the toolbar could only fall back to the connectionId (UUID). The guard is restored (anything but an object counts as missing); the read-only badge, connection color dot/tint, the readOnly component of the write gate and telnet/vnc/serial/rdp protocol routing all come back. The toolbar title now prefers the connection name (falling back to `user@host:port` when unnamed, hover keeps the technical identity — matching the connect card).
+- **history 面板选中即回填（shell ↑ 语义）**。打开/↑↓/悬停激活/搜索框重过滤都把当前高亮命令实时写入输入行（整行擦重打、不回车，行内容与面板高亮恒一致）；键位映射收拢为纯函数 `resolveHistoryPanelKey`——顶部最旧一条 ↑ 停住不回绕，Esc 及底部最新一条再 ↓ 恢复打开前的原输入行并收起；Enter/Tab 确认收起不执行（不新增自动执行命令路径）。
+  **History panel now live-fills the input line on selection (shell ↑ semantics).** Open/arrow moves/hover activation/re-filtering all write the highlighted command into the input line as you navigate (whole-line rewrite, no Enter — the line always matches the panel highlight); key handling is consolidated into the pure `resolveHistoryPanelKey` — ↑ stops at the oldest entry instead of wrapping, and Esc (or ↓ past the newest) restores the pre-open input line and closes; Enter/Tab confirm and close without executing (no new auto-execute path).
+
 ## [0.7.1-beta.14] — 2026-09-30
 
 - **修复压缩上传「看起来没生效」：传输面板的 gz 徽标此前对上传永不显示**。M33 压缩通道的决策与执行本身正常（端到端实测正常），但上传进度事件从未携带 `compression` 字段（协议文档写了要有）、前端也不消费 start 响应里的它——上传卡片永远不出 gzip 徽标，压没压缩无从判断。现在上传事件与下载同语义恒带该字段（预压不划算/推送或远端解压失败回退时降级 `none` 清徽标），任务建卡即从 start 响应点亮；顺带把 gunzip 失败回退普通推送前先断链远端临时件（远端僵尸解压进程不会再与回退推送写同一文件交错——此前可能静默损坏）。
