@@ -4,6 +4,21 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.1] — 2026-10-01
+
+- **传输与远端进程安全加固**。远端命令取消改为优雅关闭通道（此前丢弃 russh Channel——远端进程残留、sudo timestamp 锁死）；会话自发断开（网络丢失）现在完整清理上传表项、`.part`/spool 与 metrics；SFTP 客户端缓存新增失效路径（死通道不再让该会话 SFTP 永久报错），树下载遇通道死亡立即中止整批，不再烧完队列逐文件登记失败。
+  **Transfer & remote-process hardening.** Cancelling a remote command now closes the channel gracefully (previously it dropped the russh Channel, leaving remote processes behind and the sudo timestamp locked); a spontaneously dropped session (network loss) now cleans upload entries, `.part`/spool files and metrics; the SFTP client cache gained an invalidation path (a dead channel no longer errors that session's SFTP forever), and tree downloads abort the whole batch on channel death instead of failing every remaining file one by one.
+- **数据完整性 fail-closed**。`rename-unique` 与 `copy` 占用预检遇到瞬时 lstat 错误不再当作「目标不存在/未占用」——链路抖动下曾可能静默覆盖既有文件；sudo 写暂存名与归档暂存名掺 uuid，并发同路径不再交错产出损坏文件。
+  **Data-integrity fail-closed.** Transient lstat errors in `rename-unique` and copy occupancy pre-checks are no longer treated as "target absent/unoccupied" (a link flap could silently overwrite an existing file); sudo write-staging and archive staging names now carry a uuid so concurrent same-path writes can no longer corrupt each other.
+- **吞吐与内存**。下载分片复用已打开的远端句柄（每片省 2 个 RTT，高延迟链路吞吐大幅提升）；MCP sftp_upload 超限文件不再全量读入内存、sftp_download 改为流式落盘；MCP multi_exec 的 parallel 模式此前实为串行（10 条 300 秒命令排 3000 秒），改真并发；connections 写锁不再横跨整个 SFTP 传输（一次大传输不再堵死全部 MCP 工具调用）。
+  **Throughput & memory.** Download chunks reuse the open remote handle (2 fewer RTTs per chunk — a large win on high-latency links); MCP sftp_upload no longer buffers oversized files fully in memory and sftp_download streams to disk; MCP multi_exec's parallel mode was actually serial (ten 300s commands queued for 3000s) and is now truly concurrent; the connections write lock no longer spans whole SFTP transfers, so one big transfer can no longer stall every MCP tool call.
+- **前端批处理与面板修复**。数千文件批次的传输调度从 O(n³) 降到摊还 O(1)（大批次不再冻结主线程）；修回放加载竞态/倍速跳变、重连定时器叠加双开会话、OTP 面板失败后每秒重试、列宽拖拽监听泄漏、补全 worker 线程泄漏等；指标卡失败提示补七语文案。
+  **Front-end batching & panel fixes.** Transfer scheduling for multi-thousand-file batches dropped from O(n³) to amortized O(1) (large batches no longer freeze the UI); fixed replay-load races/speed-jump drift, reconnect timer stacking that double-opened sessions, the OTP panel's per-second retry hammering, column-drag listener leaks and completion worker leaks; metrics failure notices gained localized copy in all seven languages.
+- **MCP/stdio 稳健性**。stdio 行读取带上限预检（对端无换行流不再全额缓冲）；sudo 读文件 8 MiB 上限；confirm 弹窗被人工改写后的命令重跑全部安全闸（破坏性/白名单/只读不再被绕过）。
+  **MCP/stdio robustness.** stdio line reads bound-check before buffering (a newline-less stream no longer buffers unbounded); sudo file reads capped at 8 MiB; a command hand-edited in the MCP confirm dialog now re-runs all safety gates (destructive/allowlist/read-only checks can no longer be bypassed).
+- **工程门禁**。sidecar 方法名升级四路比对（backend 分派 ↔ mock 桩 ↔ 前端 invoke ↔ 协议文档）并纳入 CI；修复脚本对连字符方法名与别名分支的两个盲区，暴露的 10 个缺口逐一处置。完整审查清单与待办见 `docs/REVIEW_FOLLOWUPS.zh-CN.md`。
+  **Engineering gates.** Sidecar method names are now checked four ways (backend dispatch ↔ mock stubs ↔ frontend invoke ↔ protocol doc) in CI; two script blind spots (hyphenated method names and alias arms) fixed, with all 10 exposed gaps resolved. The full review list and remaining todos live in `docs/REVIEW_FOLLOWUPS.zh-CN.md`.
+
 ## [0.7.1-beta.17] — 2026-09-30
 
 - 新增 SOCKS5 动态端口映射：支持 IPv4、IPv6 和远端解析的域名目标；独立映射无需打开终端，并在停止最后一条映射或断开连接时释放 SSH 传输。

@@ -54,6 +54,10 @@ watch(reconnectPending, (pending) => {
 });
 
 function scheduleSessionReconnect() {
+  // 断开事件可能成对到达（sidecar 重启常伴双事件）：重复调度必须先撤旧
+  // timer 再设新的——直接覆盖会让被顶掉的 setTimeout 仍到点触发 openSession，
+  // 与新 timer 形成并发双开会话。
+  window.clearTimeout(reconnectTimer.value);
   if (!isDisposed() && reconnectAttempt.value < TERMINAL_RECONNECT_DELAYS.length) {
     const delay = terminalReconnectDelay(reconnectAttempt.value++);
     terminalState.value = "connecting";

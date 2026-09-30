@@ -151,7 +151,10 @@ pub fn save_store(data_dir: &Path, store: &OtpStore) -> Result<(), String> {
     });
     let text = serde_json::to_string_pretty(&value)
         .map_err(|error| format!("Failed to encode otp entries: {error}"))?;
-    let tmp = path.with_extension("json.tmp");
+    // tmp 名掺 uuid：固定名的 `.json.tmp` 在两个并发 save_store 时会交错写
+    // 同一个 tmp，损坏的 JSON 被 rename 发布后 load_store 按"损坏视为空"返回
+    // 空库——用户的 OTP 条目静默丢失。
+    let tmp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
     // 先建后写：`fs::write` 会先以平台默认权限（0644）落明文密文文件、
     // 再 chmod 0600，存在明文窗口；OpenOptions.mode 让首个字节前就是 0600。
     #[cfg(unix)]

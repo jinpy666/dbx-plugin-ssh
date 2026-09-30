@@ -54,11 +54,21 @@ const WEB_DOWNLOAD_WARNING_BYTES = 512 * MIB;
 async function waitForDownloadReady(taskId: string, compression: string | undefined): Promise<void> {
   if (compression !== "gzip") return;
   const deadline = Date.now() + 15 * 60 * 1000;
+  // 单次查询失败不判死（桥抖动/sidecar 瞬忙），连续失败才中止——一次抖动
+  // 就取消一个仍在健康打包的任务太脆（与 useTransferQueue watchdog 的口径
+  // 一致：查询失败不算终态）。连续上限 ≈10 轮，远短于 15 分钟窗口。
+  let pollFailures = 0;
+  const maxConsecutivePollFailures = 10;
   while (Date.now() < deadline) {
     if (cancelledTransferTasks.has(taskId)) throw new Error(t("transferStatus.cancelled"));
     const status = await window.dbxPlugin.invoke<{ ready?: boolean } | undefined>("sftp/transfer/status", { taskId }).catch(() => undefined);
-    if (!status) throw new Error(t("errors.downloadChunkTimeout"));
-    if (status.ready) return;
+    if (!status) {
+      pollFailures += 1;
+      if (pollFailures >= maxConsecutivePollFailures) throw new Error(t("errors.downloadChunkTimeout"));
+    } else {
+      pollFailures = 0;
+      if (status.ready) return;
+    }
     await new Promise((resolve) => window.setTimeout(resolve, 1000));
   }
   throw new Error(t("transferCompress.prepTimeout"));

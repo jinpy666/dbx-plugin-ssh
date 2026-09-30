@@ -2,7 +2,7 @@ import type { Terminal } from "@xterm/xterm";
 import type { QuickCommand } from "../lib/quickCommands";
 import type { CompletionEdit, CompletionItem, CompletionResponse } from "../lib/completion/core/types";
 import type { SuggestionAnchor } from "../lib/overlayPlacement";
-import { ref, type Ref } from "vue";
+import { onBeforeUnmount, ref, type Ref } from "vue";
 import { pushCommandHistory } from "../lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "../lib/commandSuggestions";
 import { CompletionController, type CompletionGeneratorChannel } from "../lib/completion/CompletionController";
@@ -82,6 +82,9 @@ const lastTerminalCommand = ref<string | null>(null);
 // 命令名位补 cmdlet/内建命令候选；detect 读 xterm buffer，只能在主线程，
 // 故必须在 runner（worker）外侧包装，worker 内不感知。
 const completionEngineSource = createEngineRunner({ createSource: () => figCompletionSource });
+// inline worker 无 GC 兜底：工作台重挂载（webview 重建/HMR）时旧 runner 的
+// 常驻线程必须显式回收，否则每次挂载泄漏一个 worker。
+onBeforeUnmount(() => completionEngineSource.dispose());
 const completionSource = withShellBuiltinsSource(completionEngineSource, sniffTerminalShell);
 
 // 声明式 generator 调度：目标取当前会话（ssh 优先，其次本地；串口无可执行

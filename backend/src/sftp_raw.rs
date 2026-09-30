@@ -391,13 +391,21 @@ fn skip_string(buf: &[u8], cursor: &mut usize) -> Result<(), String> {
 pub struct RawSftp<S> {
     stream: S,
     next_id: u32,
+    /// 一次超时/失步后置位：流里可能还压着迟到的回包帧，后续任何 request
+    /// 都会把陈旧帧当成新回包（reply id mismatch 连环炸）。整个 client
+    /// 一次性报废、报明确错误，比静默错位安全。
+    poisoned: bool,
 }
 
 impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
     /// 握手：发送 INIT（版本 3）并校验 VERSION 回包。服务器版本高于 3 拒绝
     /// （v4+ attrs 布局不同，宁可拒绝也不静默解错）。
     pub async fn init(stream: S) -> Result<Self, String> {
-        let mut client = Self { stream, next_id: 1 };
+        let mut client = Self {
+            stream,
+            next_id: 1,
+            poisoned: false,
+        };
         client.send(&build_init()).await?;
         let payload = tokio::time::timeout(REQUEST_TIMEOUT, client.recv())
             .await
@@ -795,14 +803,33 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
         }
     }
 
-    /// 发一收一：发送帧后读取响应帧，校验回包 id 匹配。
+    /// 发一收一：发送帧后读取响应帧，校验回包 id 匹配。超时/IO 失败/错位
+    /// 回包都会置 poisoned——顺序流一旦失步无法自愈，后续请求直接报错。
     async fn request(&mut self, frame: Vec<u8>, id: u32) -> Result<Vec<u8>, String> {
+        if self.poisoned {
+            return Err("SFTP raw client is out of sync after an earlier failure".to_string());
+        }
         self.send(&frame).await?;
-        let payload = tokio::time::timeout(REQUEST_TIMEOUT, self.recv())
-            .await
-            .map_err(|_| "SFTP raw request timed out".to_string())??;
-        let (_, reply_id, _) = parse_response_header(&payload)?;
+        let payload = match tokio::time::timeout(REQUEST_TIMEOUT, self.recv()).await {
+            Ok(Ok(payload)) => payload,
+            Ok(Err(error)) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+            Err(_) => {
+                self.poisoned = true;
+                return Err("SFTP raw request timed out".to_string());
+            }
+        };
+        let (_, reply_id, _) = match parse_response_header(&payload) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
         if reply_id != Some(id) {
+            self.poisoned = true;
             return Err("SFTP raw reply id mismatch".to_string());
         }
         Ok(payload)

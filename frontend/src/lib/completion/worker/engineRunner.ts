@@ -204,6 +204,23 @@ class EngineRunner {
     }
   }
 
+  /** 终结 runner：在途请求以 null 结清、worker 终止、永久转主线程直跑。
+   * 供 composable 卸载回收——inline worker 无 GC 兜底，不 dispose 会在
+   * 工作台重挂载（webview 重建/HMR）时累积常驻线程。dispose 后仍可安全
+   * resolve（退化为 syncSource 直跑）。 */
+  dispose(): void {
+    this.degraded = true;
+    this.dropPending();
+    const worker = this.worker;
+    this.worker = null;
+    if (worker === null) return;
+    try {
+      worker.terminate();
+    } catch {
+      // 终止失败不影响回收语义
+    }
+  }
+
   private degrade(): void {
     this.degraded = true;
     this.worker = null;
@@ -225,9 +242,10 @@ function isEngineWorkerResponse(data: unknown): data is EngineWorkerResponse {
  * 构造引擎 runner。返回值满足冻结接缝 FigCompletionSource（含主线程同步
  * 语义）；worker 模式下 resolve 运行时返回 Promise（thenable），由
  * CompletionController.dispatch 的既有 thenable 防御分支消费（见文件头
- * "同步/异步取舍"）——此处是全仓库唯一的类型桥接点。
+ * "同步/异步取舍"）——此处是全仓库唯一的类型桥接点。额外暴露 dispose()
+ * 供消费方在组件卸载时回收 worker。
  */
-export function createEngineRunner(options: EngineRunnerOptions): FigCompletionSource {
+export function createEngineRunner(options: EngineRunnerOptions): FigCompletionSource & { dispose(): void } {
   const runner = new EngineRunner(options);
-  return runner as unknown as FigCompletionSource;
+  return runner as unknown as FigCompletionSource & { dispose(): void };
 }

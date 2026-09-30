@@ -438,11 +438,21 @@ async fn accept_loop(
                     tokio::spawn(relay_local(entry.clone(), handle.clone(), tcp, peer))
                 };
                 retain_live_relays(&entry);
-                entry
+                let mut relays = entry
                     .relays
                     .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .push(relay.abort_handle());
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if entry.stopping.load(Ordering::Relaxed) {
+                    // stop 已 drain 过 relays：这个句柄再 push 也无人 abort，
+                    // 该连接会躲过停止继续搬运流量。锁内复查关闭竞态窗口，
+                    // 自行 abort 并回冲计数（被 abort 的任务不会再走
+                    // note_relay_end）。
+                    drop(relays);
+                    relay.abort();
+                    note_relay_end(&entry);
+                    return;
+                }
+                relays.push(relay.abort_handle());
             }
             Err(error) => {
                 set_state(
@@ -607,19 +617,30 @@ async fn relay_dynamic(
             return;
         }
     };
-    let channel = handle
-        .channel_open_direct_tcpip(
+    // 拨号也要限时：transport 半死（TCP 活着但不回包）时，无超时的
+    // channel_open 会让客户端停在"连接中"，且 connections_active 虚高。
+    let channel = tokio::time::timeout(
+        SOCKS5_HANDSHAKE_TIMEOUT,
+        handle.channel_open_direct_tcpip(
             host,
             u32::from(port),
             peer.ip().to_string(),
             u32::from(peer.port()),
-        )
-        .await;
+        ),
+    )
+    .await;
     let mut channel = match channel {
-        Ok(channel) => channel.into_stream(),
-        Err(error) => {
+        Ok(Ok(channel)) => channel.into_stream(),
+        Ok(Err(error)) => {
             socks5_reply(&mut tcp, 5).await;
             eprintln!("[ssh-forward] SOCKS5 channel open failed: {error}");
+            note_relay_end(&entry);
+            return;
+        }
+        Err(_) => {
+            // 6 = TTL expired：最能对上"上游打开超时"的 SOCKS5 回码。
+            socks5_reply(&mut tcp, 6).await;
+            eprintln!("[ssh-forward] SOCKS5 channel open timed out");
             note_relay_end(&entry);
             return;
         }

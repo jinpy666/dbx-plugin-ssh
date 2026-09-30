@@ -670,10 +670,15 @@ impl PromptBroker {
             self.pending.lock().await.remove(&challenge_id);
             return None;
         }
-        let result = tokio::time::timeout(Duration::from_secs(300), receiver)
-            .await
-            .ok()?
-            .ok();
+        let result = match tokio::time::timeout(Duration::from_secs(300), receiver).await {
+            Ok(answer) => answer.ok(),
+            // 超时同样要清 pending，否则无人应答的挑战把条目永久留在 map
+            // 里（只能等 sidecar 重启回收）。
+            Err(_) => {
+                self.pending.lock().await.remove(&challenge_id);
+                return None;
+            }
+        };
         self.pending.lock().await.remove(&challenge_id);
         result
     }
@@ -1552,6 +1557,11 @@ struct DownloadState {
     /// DownloadSink，压缩任务无 sink（解压直写 staged_plain），单独记录。
     final_dir: Option<PathBuf>,
     overwrite: bool,
+    /// 高层车道复用的远端读句柄：逐片 OPEN+SEEK+READ+CLOSE 每片多付 2 个
+    /// RTT，高延迟链路吞吐被 RTT 界死。File 的 Drop 发 close_nowait——槽位
+    /// 置 None 即完成关闭，无需显式清理链。树下载不使用（逐文件换目标，
+    /// 收益另计）；句柄错误时置 None 由下一片惰性重建。
+    read_handle: Arc<AsyncMutex<Option<russh_sftp::client::fs::File>>>,
 }
 
 /// Live state of one recursive folder download. Files stream through the same
@@ -1830,7 +1840,7 @@ pub struct SshRuntime {
     /// Last metrics snapshot per session, in-memory only (see `CachedMetrics`).
     metrics_cache: Mutex<HashMap<String, CachedMetrics>>,
     /// In-flight remote command executions, cancellable by exec id.
-    exec_tasks: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    exec_tasks: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
     /// Per-connection AI terminal mode (`agentTerminalMode`), persisted in
     /// `<data_dir>/agent-modes.json` so the toolbar toggle survives sidecar
     /// restarts (an app restart must not silently drop the user's choice
@@ -1997,7 +2007,7 @@ impl SshRuntime {
     }
 
     pub async fn open_session(
-        &self,
+        self: &Arc<Self>,
         request: &SessionOpenRequest,
         operation_id: &str,
         emitter: PluginEmitter,
@@ -2289,6 +2299,9 @@ impl SshRuntime {
         let task_id = session_id.clone();
         let directory_marker_id = session_id.clone();
         let sessions = self.sessions.clone();
+        // 自发断开收尾要清传输登记（'static spawn 拿不到 &self）：克隆运行时
+        // 句柄进读循环任务。
+        let runtime_for_cleanup = Arc::clone(self);
         // Auto-record 提示事件在 spawn 之后仍要用 emitter（主闭包已 move 走
         // 原值），提前留一个克隆；录制器槽同理（entry 已 move 进读循环任务）。
         let auto_record_emitter = emitter.clone();
@@ -2302,6 +2315,11 @@ impl SshRuntime {
             let mut zmodem_detector = crate::zmodem_detect::Detector::new();
             let mut directory_timeout = tokio::time::interval(Duration::from_millis(250));
             directory_timeout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // 跨帧 UTF-8 增量解码的尾部残留：多字节字符恰跨 SSH 包边界时，
+            // 逐帧独立 lossy 解码会把字符劈成两个 U+FFFD，中文提示词的触发器/
+            // auto-sudo 匹配稳定 miss（帧边界取决于远端写盘分片，非确定）。
+            // 只有 stdout 进文本观察链（stderr 直喂 recorder 原始字节）。
+            let mut stdout_utf8_carry: Vec<u8> = Vec::new();
             loop {
                 tokio::select! {
                     _ = directory_timeout.tick() => {
@@ -2397,7 +2415,8 @@ impl SshRuntime {
                             _ => continue,
                         };
                         if stream == TerminalStream::Stdout {
-                            let chunk_text = String::from_utf8_lossy(&data).into_owned();
+                            let carry = &mut stdout_utf8_carry;
+                            let chunk_text = decode_stream_text(carry, &data);
                             // Expect 式触发器先于终端 auto-sudo 观察（契约 D1
                             // 互斥防双答）：本 chunk 被触发器应答则跳过
                             // auto-sudo，反之亦然。锁在 .await 前释放。
@@ -2587,6 +2606,15 @@ impl SshRuntime {
             let removed = sessions.write().await.remove(&task_id);
             if let Some(removed) = removed {
                 removed.transport_lease.release().await;
+            }
+            // 会话消失也要清传输登记（upload/download 表项、.part/spool 暂存、
+            // metrics 缓存等）：它们此前只在 close_session 清——网络自发断开
+            // 路径漏掉，表项与暂存文件会一直挂到 sidecar 退出。
+            if let Err(error) = runtime_for_cleanup
+                .cleanup_session_transfers(&task_id)
+                .await
+            {
+                eprintln!("[ssh-trace] transfer cleanup after disconnect failed: {error}");
             }
         });
 
@@ -3474,7 +3502,16 @@ impl SshRuntime {
             .await
             .remove(session_id)
             .ok_or("SSH session was not found")?;
-        let _ = session.terminal_tx.send(TerminalCommand::Close).await;
+        // 限时投递：读循环可能正阻塞在死 transport 的 channel.data() 上且
+        // 输入队列（容量 256）已被灌满——无超时的 send 会无限期挂起，而
+        // disconnect_connection 是逐会话串行 await，一个僵尸会话就能拖死
+        // 整个断开 RPC。超时放弃即可：读循环随后会因 transport 死亡自行
+        // 退出（spontaneous 路径有完整的会话收尾）。
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            session.terminal_tx.send(TerminalCommand::Close),
+        )
+        .await;
         session.transport_lease.release().await;
         self.cleanup_session_transfers(session_id).await?;
         if let Ok(mut cache) = self.metrics_cache.lock() {
@@ -3622,7 +3659,13 @@ impl SshRuntime {
         let normalized = command.replace("\r\n", "\r").replace(['\n', '\r'], "\r");
         let mut payload = normalized.into_bytes();
         if payload.len() > MAX_BATCH_INPUT_BYTES {
-            payload.truncate(MAX_BATCH_INPUT_BYTES);
+            // Back off to a UTF-8 boundary: a raw byte cut would split a
+            // multibyte character and send garbage to the remote shell.
+            let mut end = MAX_BATCH_INPUT_BYTES;
+            while end > 0 && (payload[end] & 0xC0) == 0x80 {
+                end -= 1;
+            }
+            payload.truncate(end);
         }
         if append_newline {
             payload.push(b'\r');
@@ -3863,6 +3906,15 @@ impl SshRuntime {
             .map_err(|error| self.compat_hint(session_id, error))
     }
 
+    /// 通道级 SFTP 错误后使缓存失效：缓存槽若原样保留死通道，该会话所有
+    /// SFTP 操作会永久报错、只能重开会话。对已不存在的会话是空操作。
+    pub(crate) async fn invalidate_sftp_cache(&self, session_id: &str) {
+        let Ok(session) = self.session(session_id).await else {
+            return;
+        };
+        session.sftp.lock().await.take();
+    }
+
     /// SFTP 会话建立。老旧服务器兼容模式（M14-B，偏好 `sftp_compat_mode`）
     /// 生效时：请求/响应不做流水线并发（读写各 1 路），并避免依赖服务器端
     /// 扩展协商的路径。偏好改动对尚未建立的 SFTP 会话即时生效；已缓存的
@@ -4039,19 +4091,33 @@ impl SshRuntime {
         } else {
             false
         };
+        // cancel_exec 经 watch 发信号：exec 在下一个 await 点退出并经既有
+        // Err 路径优雅关闭 channel。裸 abort 会在 await 点丢弃 russh
+        // Channel——drop 不发 SSH_MSG_CHANNEL_CLOSE，远端进程残留，sudo 还
+        // 会持有 timestamp 锁死锁后续 sudo（exec.rs abort_exec_channel 的
+        // 自述场景）。
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
         let run = async move {
             let outcome = if sudo {
-                exec::exec_with_sudo(
+                exec::exec_with_sudo_cancellable(
                     &handle,
                     &orchestration,
                     &command,
                     timeout,
                     use_pty,
                     &connection.set_env,
+                    &mut cancel_rx,
                 )
                 .await?
             } else {
-                exec::exec_plain(&handle, &command, timeout, &connection.set_env).await?
+                exec::exec_plain_cancellable(
+                    &handle,
+                    &command,
+                    timeout,
+                    &connection.set_env,
+                    &mut cancel_rx,
+                )
+                .await?
             };
             Ok(outcome)
         };
@@ -4061,7 +4127,7 @@ impl SshRuntime {
                 let exec_id = exec_id.to_string();
                 let task = tokio::spawn(run);
                 if let Ok(mut tasks) = self.exec_tasks.lock() {
-                    tasks.insert(exec_id.clone(), task.abort_handle());
+                    tasks.insert(exec_id.clone(), cancel_tx);
                 }
                 let result = task
                     .await
@@ -4087,6 +4153,11 @@ impl SshRuntime {
     }
 
     /// Aborts an in-flight `ssh/exec`; ported from tiny-rdm's AbortCommand.
+    /// Sends the cancellation signal instead of aborting the task: the exec
+    /// future exits at its next await point and closes the channel through
+    /// the regular error path (see [`exec::EXEC_CANCELLED_MESSAGE`]), so the
+    /// remote process — and any sudo timestamp lock it holds — is reaped by
+    /// sshd instead of leaking with the dropped future.
     pub fn cancel_exec(&self, exec_id: &str) -> Result<(), String> {
         let task = self
             .exec_tasks
@@ -4094,8 +4165,10 @@ impl SshRuntime {
             .map_err(|_| "Exec registry is poisoned".to_string())?
             .remove(exec_id);
         match task {
-            Some(task) => {
-                task.abort();
+            // Send fails only when the receiver is gone (task already
+            // finished; registry removal raced the finish) — nothing to do.
+            Some(cancel) => {
+                let _ = cancel.send(true);
                 Ok(())
             }
             None => Err("Remote command was not found or already finished".to_string()),
@@ -6954,6 +7027,7 @@ impl SshRuntime {
                     remote_temp: None,
                     final_dir: None,
                     overwrite: false,
+                    read_handle: Arc::new(AsyncMutex::new(None)),
                 },
             );
         emitter
@@ -7157,6 +7231,7 @@ impl SshRuntime {
                     remote_temp: remote_temp.clone(),
                     final_dir,
                     overwrite: matches!(conflict, Some("overwrite")),
+                    read_handle: Arc::new(AsyncMutex::new(None)),
                 },
             );
         if compression == CompressionMode::Gzip {
@@ -7879,6 +7954,7 @@ impl SshRuntime {
                     remote_temp: remote_temp.clone(),
                     final_dir: (compression == CompressionMode::Gzip).then(|| base_dir.clone()),
                     overwrite: false,
+                    read_handle: Arc::new(AsyncMutex::new(None)),
                 },
             );
         if compression == CompressionMode::Gzip {
@@ -8256,7 +8332,10 @@ impl SshRuntime {
             ));
         }
         let sftp = self.sftp(&download.session_id).await?;
-        let Some(mut tree) = download.tree.clone() else {
+        // download 参数已持有所有权：move 而非再 clone——这里的 clone 会把
+        // 剩余 files 队列 + failures 全量再拷一份（树下载热路径的分配热点，
+        // 与读侧快照同量级）。回写仍走 store_tree_state 的零拷贝 swap。
+        let Some(mut tree) = download.tree else {
             return Err("Download task is not a folder download".to_string());
         };
         loop {
@@ -8379,8 +8458,32 @@ impl SshRuntime {
                 let mut source = match sftp.lock().await.open(file.remote_path.clone()).await {
                     Ok(source) => source,
                     Err(error) => {
+                        let error = sftp_error(error);
+                        // 通道级错误（NAT/服务器掐断 SFTP 子系统通道）：继续
+                        // 循环只会把整树文件逐个登记成失败——失效缓存并中止
+                        // 本批，前端按既有失败汇总语义收尾重试。
+                        if is_channel_level_sftp_error(&error) {
+                            self.invalidate_sftp_cache(&download.session_id).await;
+                            tree.failures
+                                .push(json!({ "path": file.relative, "error": error }));
+                            {
+                                let mut downloads = self
+                                    .downloads
+                                    .lock()
+                                    .map_err(|_| "Download registry is poisoned".to_string())?;
+                                if let Some(current) = downloads.get_mut(task_id) {
+                                    if let Some(tree_state) = current.tree.as_mut() {
+                                        Self::store_tree_state(tree_state, &mut tree);
+                                    }
+                                }
+                            }
+                            return Err(
+                                "SFTP channel died during folder download; reconnect and retry the remaining files"
+                                    .to_string(),
+                            );
+                        }
                         tree.failures
-                            .push(json!({ "path": file.relative, "error": sftp_error(error) }));
+                            .push(json!({ "path": file.relative, "error": error }));
                         discard_tree_current(&mut tree);
                         continue;
                     }
@@ -8397,7 +8500,30 @@ impl SshRuntime {
                 let length = match source.read(&mut chunk).await {
                     Ok(length) => length,
                     Err(error) => {
-                        tree.failures.push(json!({ "path": file.relative, "error": format!("SFTP download failed: {error}") }));
+                        let error = format!("SFTP download failed: {error}");
+                        // 同 open 分支：通道死亡中止整批而不是烧完队列。
+                        if is_channel_level_sftp_error(&error) {
+                            self.invalidate_sftp_cache(&download.session_id).await;
+                            tree.failures
+                                .push(json!({ "path": file.relative, "error": error }));
+                            {
+                                let mut downloads = self
+                                    .downloads
+                                    .lock()
+                                    .map_err(|_| "Download registry is poisoned".to_string())?;
+                                if let Some(current) = downloads.get_mut(task_id) {
+                                    if let Some(tree_state) = current.tree.as_mut() {
+                                        Self::store_tree_state(tree_state, &mut tree);
+                                    }
+                                }
+                            }
+                            return Err(
+                                "SFTP channel died during folder download; reconnect and retry the remaining files"
+                                    .to_string(),
+                            );
+                        }
+                        tree.failures
+                            .push(json!({ "path": file.relative, "error": error }));
                         discard_tree_current(&mut tree);
                         continue;
                     }
@@ -8512,6 +8638,10 @@ impl SshRuntime {
                 .cloned()
                 .ok_or("Download task was not found")?
         };
+        // 读侧快照对树任务仍是一次整树深拷贝（files 队列 + failures 随
+        // chunk 数 O(n²) 增长）；彻底消除需要把 tree 改成 Arc<tokio::Mutex>
+        // 并让 status/cancel/finish 全链路加锁——登记为后续项，当前网络腿
+        // IO 仍占大头，先不动结构。
         if download.tree.is_some() {
             return self
                 .download_tree_chunk(task_id, offset, download, emitter)
@@ -8549,24 +8679,50 @@ impl SshRuntime {
             )
             .await?
         } else {
-            let sftp = self.sftp(&download.session_id).await?;
-            let mut source = sftp
-                .lock()
-                .await
-                .open(download.remote_path.clone())
-                .await
-                .map_err(sftp_error)?;
-            source
-                .seek(std::io::SeekFrom::Start(offset))
-                .await
-                .map_err(|error| format!("SFTP download seek failed: {error}"))?;
-            let mut chunk = vec![0_u8; requested];
-            let length = source
-                .read(&mut chunk)
-                .await
-                .map_err(|error| format!("SFTP download failed: {error}"))?;
-            chunk.truncate(length);
-            chunk
+            // 句柄复用：首片 open 后缓存在任务槽（File 的 Drop 发
+            // close_nowait，槽位置 None 即完成关闭），后续片直接
+            // seek+read——逐片 OPEN/READ/CLOSE 每片多付 2 个 RTT，高延迟
+            // 链路吞吐被 RTT 界死。seek 用绝对 offset，断点续传/重试跳片
+            // 同样成立。
+            let read_result: Result<Vec<u8>, String> = async {
+                let sftp = self.sftp(&download.session_id).await?;
+                let mut handle_slot = download.read_handle.lock().await;
+                if handle_slot.is_none() {
+                    let opened = sftp
+                        .lock()
+                        .await
+                        .open(download.remote_path.clone())
+                        .await
+                        .map_err(sftp_error)?;
+                    *handle_slot = Some(opened);
+                }
+                let source = handle_slot.as_mut().expect("handle just ensured");
+                source
+                    .seek(std::io::SeekFrom::Start(offset))
+                    .await
+                    .map_err(|error| format!("SFTP download seek failed: {error}"))?;
+                let mut chunk = vec![0_u8; requested];
+                let length = source
+                    .read(&mut chunk)
+                    .await
+                    .map_err(|error| format!("SFTP download failed: {error}"))?;
+                chunk.truncate(length);
+                Ok(chunk)
+            }
+            .await;
+            match read_result {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    // 读失败即弃句柄（下一片惰性重建）；通道级错误连带失效
+                    // 整个 SFTP 客户端缓存——死通道被原样复用会把该会话
+                    // SFTP 打到永久报错（误判无害：重建只是多一次握手）。
+                    *download.read_handle.lock().await = None;
+                    if is_channel_level_sftp_error(&error) {
+                        self.invalidate_sftp_cache(&download.session_id).await;
+                    }
+                    return Err(error);
+                }
+            }
         };
         // 限速等待在读毕、本地落盘之前：等待本身计入下一块之前的墙钟，
         // 且不会推迟本地写完成的应答语义（前端循环按块等待）。
@@ -10262,7 +10418,10 @@ fn strip_invisible_paste_artifacts(text: &str) -> String {
         .chars()
         .filter(|c| !matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{feff}'))
         .collect();
-    let lower = filtered.to_lowercase();
+    // ASCII folding only: Unicode lowercasing can change byte lengths (e.g.
+    // `İ`), which would shift the mask offsets and corrupt the removals —
+    // the tags themselves are pure ASCII.
+    let lower = filtered.to_ascii_lowercase();
     let mut remove = vec![false; filtered.len()];
     for tag in ["<br />", "<br/>", "<br>"] {
         let mut from = 0;
@@ -11574,6 +11733,27 @@ fn directory_tracking_marker(session_id: &str) -> Vec<u8> {
     format!("\x1b]777;dbx-directory-ready-{session_id}\x07").into_bytes()
 }
 
+/// Decodes one terminal output frame for the text observers, carrying an
+/// incomplete multi-byte UTF-8 tail over to the next call. Returns the lossy
+/// decoding of the longest decodable prefix; the tail bytes wait in `carry`.
+/// A carry longer than the max UTF-8 sequence length means the stream is not
+/// valid UTF-8 there — flush it lossily instead of stalling forever.
+fn decode_stream_text(carry: &mut Vec<u8>, data: &[u8]) -> String {
+    carry.extend_from_slice(data);
+    if carry.len() > 8 {
+        let text = String::from_utf8_lossy(carry).into_owned();
+        carry.clear();
+        return text;
+    }
+    let valid = match std::str::from_utf8(carry) {
+        Ok(_) => carry.len(),
+        Err(error) => error.valid_up_to(),
+    };
+    let text = String::from_utf8_lossy(&carry[..valid]).into_owned();
+    carry.drain(..valid);
+    text
+}
+
 fn directory_tracking_script(enabled: bool, session_id: &str, shell: RemoteShell) -> String {
     let marker = format!("\\033]777;dbx-directory-ready-{session_id}\\007");
     let (body, history_flush) = match (shell, enabled) {
@@ -11599,11 +11779,17 @@ fn directory_tracking_script(enabled: bool, session_id: &str, shell: RemoteShell
 }
 
 /// A caller-supplied session id is honoured only when it is safe as a registry
-/// key and event-channel suffix: non-empty, no path separator, and bounded so
-/// a hostile caller cannot inflate map keys. Anything else falls back to a
-/// server-generated UUID.
+/// key, event-channel suffix, and shell literal: non-empty, bounded, and
+/// restricted to `[A-Za-z0-9._-]`. The id is interpolated into the
+/// single-quoted `printf` marker of [`directory_tracking_script`], so anything
+/// shell-active (`'`, `` ` ``, `$`, …) must fall back to a server-generated
+/// UUID rather than reach the remote shell.
 fn valid_requested_session_id(id: &str) -> bool {
-    !id.is_empty() && !id.contains('/') && id.len() <= 128
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 /// WT-4 (command session) command size cap, same magnitude as the per-command
@@ -11715,6 +11901,50 @@ pub fn connection_id_param(params: &Value) -> Result<&str, String> {
 
 fn sftp_error(error: impl std::fmt::Display) -> String {
     format!("SFTP operation failed: {error}")
+}
+
+/// 通道级（非文件级）SFTP 错误的保守判定。错误串已过 `Display`（变体信息
+/// 丢失）：russh-sftp 的 `Status` 变体是服务器正常应答的文件级状态（通道
+/// 健康），`I/O: …`/`Timeout`/`Unexpected …` 等形态通常意味着底层通道已死。
+/// 宁可误判——误失效的代价只是下次调用多做一次握手重建；漏判的代价是该
+/// 会话 SFTP 永久报错。
+fn is_channel_level_sftp_error(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    lowered.contains("i/o: ")
+        || lowered.contains("timeout")
+        || lowered.contains("unexpected packet")
+        || lowered.contains("unexpected behavior")
+        || lowered.contains("channel closed")
+        || lowered.contains("channel open failed")
+}
+
+#[cfg(test)]
+mod channel_error_tests {
+    use super::is_channel_level_sftp_error;
+
+    #[test]
+    fn classifies_channel_vs_file_level_sftp_errors() {
+        // 文件级（服务器正常应答的 Status 变体）：不失效。
+        assert!(!is_channel_level_sftp_error(
+            "SFTP operation failed: no-such-file: /tmp/x"
+        ));
+        assert!(!is_channel_level_sftp_error(
+            "SFTP operation failed: permission-denied: denied"
+        ));
+        // 通道级形态：失效（误判无害——重建只是多一次握手）。
+        assert!(is_channel_level_sftp_error(
+            "SFTP download failed: I/O: connection reset by peer"
+        ));
+        assert!(is_channel_level_sftp_error(
+            "SFTP operation failed: Timeout"
+        ));
+        assert!(is_channel_level_sftp_error(
+            "SFTP operation failed: Unexpected packet"
+        ));
+        assert!(is_channel_level_sftp_error(
+            "SFTP operation failed: I/O: channel closed"
+        ));
+    }
 }
 
 fn plugin_error(error: PluginError) -> String {
@@ -13239,11 +13469,21 @@ matrix-ed25519";
             b"a\rb\rc\rd\r".to_vec()
         );
         // Oversized commands are truncated, never rejected: a batch send is
-        // keyboard-level input, the shell copes with long lines.
+        // keyboard-level input, the shell copes with long lines. The cut
+        // backs off to a UTF-8 boundary instead of splitting a multibyte
+        // character into invalid bytes.
         let huge = "x".repeat(300 * 1024);
         let payload = SshRuntime::batch_input_payload(&huge, true);
         assert_eq!(payload.len(), 256 * 1024 + 1);
         assert_eq!(*payload.last().unwrap(), b'\r');
+        let mut wide = String::new();
+        // '中' is 3 bytes; the cut lands on the 2nd byte of the final char.
+        while wide.len() <= 256 * 1024 {
+            wide.push('中');
+        }
+        let payload = SshRuntime::batch_input_payload(&wide, false);
+        assert_eq!(payload.len(), 256 * 1024 - 1);
+        assert!(std::str::from_utf8(&payload).is_ok());
     }
 
     #[test]
@@ -13312,13 +13552,42 @@ matrix-ed25519";
     }
 
     #[test]
+    fn stream_text_decode_carries_incomplete_utf8_across_frames() {
+        let mut carry: Vec<u8> = Vec::new();
+        // '中' (3 字节) 被劈成 1+2 两帧：第一帧尾部残留，第二帧拼出完整字符。
+        let first = decode_stream_text(&mut carry, "密码: ".as_bytes());
+        assert_eq!(first, "密码: ");
+        assert!(carry.is_empty());
+        let bytes = "中".as_bytes();
+        let part1 = decode_stream_text(&mut carry, &bytes[..1]);
+        assert_eq!(part1, "");
+        assert_eq!(carry, &bytes[..1]);
+        let part2 = decode_stream_text(&mut carry, &bytes[1..]);
+        assert_eq!(part2, "中");
+        assert!(carry.is_empty());
+        // 非法字节流不能永久滞留：超上限按 lossy 冲刷。
+        let mut carry: Vec<u8> = Vec::new();
+        let flushed = decode_stream_text(
+            &mut carry,
+            &[0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8, 0x41],
+        );
+        assert!(flushed.contains('\u{FFFD}'));
+        assert!(flushed.ends_with('A'));
+        assert!(carry.is_empty());
+    }
+
+    #[test]
     fn requested_session_ids_are_validated_before_registry_use() {
-        // 合法：非空、无路径分隔符、不超过 128 字节。
+        // 合法：非空、白名单字符（[A-Za-z0-9._-]）、不超过 128 字节。
         assert!(valid_requested_session_id("session-1"));
         assert!(valid_requested_session_id(&"a".repeat(128)));
-        // 非法：空串、路径分隔符、超长。
+        // 非法：空串、白名单外字符、超长。白名单外的代表行既防路径分隔符，
+        // 也防 id 进 directory_tracking_script 的单引号 shell 字面量后被闭合
+        // 注入（`'`、`` ` ``、`$`）。
         assert!(!valid_requested_session_id(""));
         assert!(!valid_requested_session_id("a/b"));
+        assert!(!valid_requested_session_id("it's"));
+        assert!(!valid_requested_session_id("a$(reboot)b"));
         assert!(!valid_requested_session_id(&"a".repeat(129)));
     }
 
@@ -13835,6 +14104,7 @@ matrix-ed25519";
                 remote_temp: None,
                 final_dir: None,
                 overwrite: false,
+                read_handle: Arc::new(AsyncMutex::new(None)),
             },
         );
         let no_connection = |_: &str| String::new();
@@ -13943,6 +14213,7 @@ matrix-ed25519";
                     remote_temp: None,
                     final_dir: None,
                     overwrite: false,
+                    read_handle: Arc::new(AsyncMutex::new(None)),
                 },
             );
         }
@@ -14433,9 +14704,11 @@ matrix-ed25519";
             .expect("parse koko connection")
         }
 
-        fn test_runtime() -> SshRuntime {
+        fn test_runtime() -> Arc<SshRuntime> {
+            // open_session 以 `self: &Arc<Self>` 接收者注册自发断开清理所需
+            // 的运行时克隆，测试统一从 Arc 出发。
             let data_dir = std::env::temp_dir().join(format!("dbx-koko-e2e-{}", Uuid::new_v4()));
-            SshRuntime::new(data_dir).with_auto_trust_keys()
+            Arc::new(SshRuntime::new(data_dir).with_auto_trust_keys())
         }
 
         fn test_emitter() -> PluginEmitter {
@@ -14494,7 +14767,7 @@ matrix-ed25519";
                 spawn_mock_koko(Shape::PasswordThenMfa, "请输入6位数字。", "[MFA认证]：").await;
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
-            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({}),
@@ -14536,7 +14809,7 @@ matrix-ed25519";
                 spawn_mock_koko(Shape::PasswordThenMfa, MFA_INSTRUCTION, MFA_QUESTION).await;
             let gateway = Arc::new(ManualOtpGateway::submitting("should-not-be-used"));
             let mut runtime = test_runtime();
-            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({ "totp_secret": MFA_CODE }),
@@ -14563,7 +14836,7 @@ matrix-ed25519";
                 spawn_mock_koko(Shape::PasswordThenMfa, "请输入6位数字。", "[MFA认证]：").await;
             let gateway = Arc::new(ManualOtpGateway::cancelling());
             let mut runtime = test_runtime();
-            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({}),
@@ -14597,7 +14870,7 @@ matrix-ed25519";
             .await;
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
-            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({}),
@@ -14676,7 +14949,7 @@ matrix-ed25519";
             .await;
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
-            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
             let connection = koko_connection(
                 port,
                 json!({}),
@@ -14792,7 +15065,7 @@ matrix-ed25519";
         async fn copied_session_without_a_live_transport_does_not_reprompt_for_mfa() {
             let gateway = Arc::new(ManualOtpGateway::submitting(MFA_CODE));
             let mut runtime = test_runtime();
-            runtime.prompts = PromptBroker::with_gateway(gateway.clone());
+            Arc::get_mut(&mut runtime).unwrap().prompts = PromptBroker::with_gateway(gateway.clone());
             runtime
                 .store_connection(koko_connection(
                     1,

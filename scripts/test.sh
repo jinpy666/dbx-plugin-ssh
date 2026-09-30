@@ -27,6 +27,9 @@ export DBX_PLUGIN_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dbx-ssh-test-data.XXXXX
 
 echo "==> backend unit tests"
 node scripts/connection-forms/verify.mjs
+# 方法注册四路比对（backend 分派 ↔ mock 桩 ↔ 前端 invoke ↔ PROTOCOL 文档）：
+# 分派臂/桩/调用点三方不一致是硬门禁，文档滞后 report-only。
+node scripts/mock_host_registry_check.mjs
 cargo test --manifest-path backend/Cargo.toml
 
 echo "==> dead-code warning gate"

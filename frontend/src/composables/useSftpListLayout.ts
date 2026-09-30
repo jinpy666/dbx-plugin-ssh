@@ -153,6 +153,9 @@ function onColResizeStart(column: SftpColumn | "name", event: PointerEvent) {
   document.body.classList.add("resizing-col");
   document.addEventListener("pointermove", onColResizeMove);
   document.addEventListener("pointerup", onColResizeEnd);
+  // 拖拽被系统中断（触摸手势、组件重渲染夺走指针）时 pointerup 永不来：
+  // 不收尾则 resizing 卡死、body class 与 document 监听永久残留。
+  document.addEventListener("pointercancel", onColResizeEnd);
 }
 function onColResizeMove(event: PointerEvent) {
   if (!sftpResizing) return;
@@ -170,8 +173,16 @@ function onColResizeEnd() {
   document.body.classList.remove("resizing-col");
   document.removeEventListener("pointermove", onColResizeMove);
   document.removeEventListener("pointerup", onColResizeEnd);
+  document.removeEventListener("pointercancel", onColResizeEnd);
   persistState();
 }
+
+onBeforeUnmount(() => {
+  // 拖拽中卸载：document 级监听不随组件作用域回收，必须显式摘除。
+  onColResizeEnd();
+  fileRowsResizeObserver?.disconnect();
+  fileRowsResizeObserver = undefined;
+});
 
 function toggleSort(column: SftpSortColumn) {
   sort.value = sort.value.column === column ? { column, direction: sort.value.direction === "asc" ? "desc" : "asc" } : { column, direction: "asc" };

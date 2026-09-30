@@ -2,6 +2,7 @@ import { type TerminalThemeLike } from "../lib/terminalScheme";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import { encodeGif } from "../lib/gifEncoder";
 import { nextCountdownValue, RECORD_COUNTDOWN_START } from "../lib/recordingCountdown";
+import { createRequestEpoch } from "../lib/requestEpoch";
 import { buildTimeline, eventIndexAtTime, gifFramePlan, mergeEventPages, replayDuration, type RecordingSummary, type ReplayEvent, type ReplayEventPage } from "../lib/replayScheduler";
 import { standaloneArrayBuffer } from "../lib/standaloneBuffer";
 import { terminalOptionPatch, type TerminalAppearanceState } from "../lib/terminalAppearance";
@@ -264,6 +265,8 @@ const filteredRecordings = computed(() => {
   });
 });
 
+const searchEpoch = createRequestEpoch();
+
 async function runRecordingSearch() {
   const query = recordingsQuery.value.trim();
   if (!query) {
@@ -271,21 +274,26 @@ async function runRecordingSearch() {
     recordingSearchBusy.value = false;
     return;
   }
+  // 即时全文扫描无持久索引，慢查询可能晚于新查询返回：过期响应整体丢弃，
+  // 不写 hits、不收 busy（收尾只属于最新请求）。
+  const epoch = searchEpoch.next();
   recordingSearchBusy.value = true;
   try {
     const result = await window.dbxPlugin.invoke<{ recordings: Array<{ recordingId: string; hits?: Array<{ excerpt: string }> }> }>(
       "ssh/recording/search",
       { query },
     );
+    if (!searchEpoch.isCurrent(epoch)) return;
     const hits: Record<string, string[]> = {};
     for (const row of result.recordings ?? []) {
       hits[row.recordingId] = (row.hits ?? []).map((hit) => hit.excerpt);
     }
     recordingHits.value = hits;
   } catch {
+    if (!searchEpoch.isCurrent(epoch)) return;
     recordingHits.value = {};
   } finally {
-    recordingSearchBusy.value = false;
+    if (searchEpoch.isCurrent(epoch)) recordingSearchBusy.value = false;
   }
 }
 
@@ -360,9 +368,15 @@ async function loadReplayEvents(recordingId: string): Promise<ReplayEvent[]> {
   return mergeEventPages(pages);
 }
 
+// 回放打开也走请求序号守卫：大录制（2 万事件封顶）分页拉取可达数秒，快速
+// 连点两条录制时，晚到的旧加载不得关闭/顶替用户新打开的回放。
+const replayEpoch = createRequestEpoch();
+
 async function openReplay(item: RecordingSummary) {
+  const epoch = replayEpoch.next();
   try {
     const events = await loadReplayEvents(item.recordingId);
+    if (!replayEpoch.isCurrent(epoch)) return;
     closeReplay();
     replayState.value = { summary: item, events };
     replayTimeline = buildTimeline(events, 1);
@@ -400,7 +414,7 @@ async function openReplay(item: RecordingSummary) {
       replayTerminal.unicode.activeVersion = "11";
     }
   } catch (cause) {
-    showError(cause);
+    if (replayEpoch.isCurrent(epoch)) showError(cause);
   }
 }
 
@@ -445,6 +459,15 @@ function toggleReplayPlay() {
   replayPlaying.value = true;
   replayRaf = requestAnimationFrame(replayFrame);
 }
+
+// 倍速只改推进速率，不改进度本身：播放中改档必须以当前进度重新锚定墙钟
+// 基准，否则 elapsed = (now - startWall) × 新倍率会把已播时长整段放大
+// （1x 播到 60s 切 2x，播放头直接跳到 120s）。
+watch(replaySpeed, () => {
+  if (!replayPlaying.value) return;
+  replayStartPlayhead = replayPlayheadMs.value;
+  replayStartWall = performance.now();
+});
 
 function onReplaySeek(event: Event) {
   const value = Number((event.target as HTMLInputElement).value);
@@ -666,12 +689,9 @@ onBeforeUnmount(() => {
   replayTerminal = null;
   window.clearInterval(recordCountdownTimer);
   window.clearInterval(recordingElapsedTimer);
+  // 搜索防抖：卸载后不再发起 invoke。
+  window.clearTimeout(recordingSearchTimer);
 });
-
-
-  onBeforeUnmount(() => {
-    window.clearInterval(recordCountdownTimer);
-  });
 
   return {
     recordingActive,

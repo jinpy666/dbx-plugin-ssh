@@ -1218,6 +1218,7 @@ const terminalSyncOutput: TerminalSyncOutput = {
 // dbx-term-diag=1 后每 2s 在控制台输出；始终挂在 window 上便于随时读取。
 const terminalDiag = reactive({ keys: 0, sends: 0, acks: 0, errors: 0, swallowed: 0 });
 const terminalDiagVisible = ref(false);
+let terminalDiagTimer = 0;
 if (typeof window !== "undefined") {
   (window as unknown as Record<string, unknown>).__dbxTerminalDiag = terminalDiag;
   let diagEnabled = false;
@@ -1227,7 +1228,9 @@ if (typeof window !== "undefined") {
     // 沙箱策略禁止 localStorage 时诊断保持关闭。
   }
   if (diagEnabled) {
-    window.setInterval(() => {
+    // 句柄入 onBeforeUnmount 清理：webview 反复重建时残留的 interval 会一直
+    // 打 console 并持有 reactive 对象。
+    terminalDiagTimer = window.setInterval(() => {
       console.info("[term-diag]", JSON.stringify(terminalDiag));
     }, 2000);
   }
@@ -4950,15 +4953,25 @@ interface DownloadPrompt {
 }
 const downloadPrompt = ref<DownloadPrompt | null>(null);
 
+// 单槽弹窗互斥（与 useUploadChain 的重复询问同款）：并发任务同时触发询问时，
+// 后问覆盖槽位会让先问的 promise 永久挂起（该下载/上传静默卡死）。串成链，
+// 后到者的询问等先到者结算完成后再占槽；弹窗 UI 保持一次只问一个。
+let downloadPromptAskChain: Promise<unknown> = Promise.resolve();
+
 function askDownloadTarget(fileName: string): Promise<{ dir: string; setDefault: boolean } | undefined> {
-  return new Promise((resolve) => {
-    downloadPrompt.value = {
-      fileName,
-      dir: loadDownloadDir() || localDownloadDir.value,
-      setDefault: false,
-      resolve,
-    };
-  });
+  const asked = downloadPromptAskChain.then(
+    () =>
+      new Promise<{ dir: string; setDefault: boolean } | undefined>((resolve) => {
+        downloadPrompt.value = {
+          fileName,
+          dir: loadDownloadDir() || localDownloadDir.value,
+          setDefault: false,
+          resolve,
+        };
+      }),
+  );
+  downloadPromptAskChain = asked.catch(() => undefined);
+  return asked;
 }
 
 function resolveDownloadPrompt(result?: { dir: string; setDefault: boolean }) {
@@ -5000,10 +5013,17 @@ interface DownloadConflictPrompt {
 }
 const downloadConflictPrompt = ref<DownloadConflictPrompt | null>(null);
 
+let downloadConflictAskChain: Promise<unknown> = Promise.resolve();
+
 function askDownloadConflict(fileName: string, path: string) {
-  return new Promise<"rename" | "overwrite" | undefined>((resolve) => {
-    downloadConflictPrompt.value = { fileName, path, resolve };
-  });
+  const asked = downloadConflictAskChain.then(
+    () =>
+      new Promise<"rename" | "overwrite" | undefined>((resolve) => {
+        downloadConflictPrompt.value = { fileName, path, resolve };
+      }),
+  );
+  downloadConflictAskChain = asked.catch(() => undefined);
+  return asked;
 }
 
 function resolveDownloadConflict(choice: "rename" | "overwrite" | undefined) {
@@ -5635,15 +5655,27 @@ async function sendConfirmedPaste(text: string) {
   terminal?.focus();
 }
 
+let pasteConfirmAskChain: Promise<unknown> = Promise.resolve();
+
 function confirmRiskyPaste(text: string): Promise<boolean> {
   // 多行/超长粘贴警告可关（对标 Tabby「Clipboard → Warn on multi-line paste」）；
   // 危险命令（rm -rf 等）的确认是安全兜底，不受该开关约束，永远要确认。
   const confirmation = buildPasteConfirmation(text, { warnOnMultiline: terminalBehavior.value.warnOnMultilinePaste });
   if (!confirmation.required) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    pasteConfirmResolver = resolve;
-    pasteConfirm.value = confirmation;
-  });
+  const asked = pasteConfirmAskChain.then(
+    () =>
+      new Promise<boolean>((resolve) => {
+        // 工作台已卸载：排队中的询问直接拒绝，不留孤儿弹窗态。
+        if (disposed) {
+          resolve(false);
+          return;
+        }
+        pasteConfirmResolver = resolve;
+        pasteConfirm.value = confirmation;
+      }),
+  );
+  pasteConfirmAskChain = asked.catch(() => undefined);
+  return asked;
 }
 
 function resolvePasteConfirm(accepted: boolean) {
@@ -6061,7 +6093,7 @@ async function refreshPanelMetrics() {
       metrics.value = sample;
       metricsError.value = "";
     } else {
-      metricsError.value = "local metrics unavailable";
+      metricsError.value = t("metricsLocalUnavailable");
     }
     return;
   }
@@ -6844,6 +6876,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(resizeTimer);
   window.clearTimeout(reconnectTimer.value);
   window.clearInterval(reconnectCountdownTimer.value);
+  window.clearInterval(terminalDiagTimer);
   stopCommandMarkerTick();
   stopAgentPromptTimer();
   resolvePasteConfirm(false);
@@ -7863,7 +7896,7 @@ onBeforeUnmount(() => {
                依赖 shell integration 注入的 633;E 命令行。 -->
           <template v-if="isLocalMode && localRecentCommands.length">
             <ContextMenuItem @select="rerunLocalCommand(localRecentCommands[0])"><History />{{ t("localTerminal.rerunLast") }}</ContextMenuItem>
-            <ContextMenuItem v-for="(command, index) in localRecentCommands.slice(0, 5)" :key="index" @select="rerunLocalCommand(command)"><span class="mono local-rerun-command">{{ command }}</span></ContextMenuItem>
+            <ContextMenuItem v-for="command in localRecentCommands.slice(0, 5)" :key="command" @select="rerunLocalCommand(command)"><span class="mono local-rerun-command">{{ command }}</span></ContextMenuItem>
             <ContextMenuSeparator />
           </template>
           <ContextMenuItem @select="selectAllTerminal"><TextSelect />{{ t("terminalSelectAll") }}</ContextMenuItem>

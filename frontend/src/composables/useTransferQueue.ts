@@ -362,8 +362,11 @@ function persistTransferDownloadLimit(value: number) {
   void syncPrefs();
 }
 
-async function uploadSource(name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean }) {
-  if (!session.value) return;
+/** 单文件上传入口。返回 boolean 供批次调用方区分成功与放弃：true=已交付
+ * sidecar（后台推送中也算），false=重复目标弹窗里放弃跳过（无会话同理）——
+ * 抛错仍是失败。成功提示的计数只该包含 true 的那份。 */
+async function uploadSource(name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean }): Promise<boolean> {
+  if (!session.value) return false;
   // resume 携带原 taskId/remotePath：后端校验 spool meta 后从已传前缀续接。
   // targetDir 仅新上传生效（终端拖入的自定义目标目录）；缺省仍是 SFTP 当前目录。
   const dir = targetDir ?? currentPath.value;
@@ -374,7 +377,7 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
   let uploadName = name;
   if (!resume && !options?.duplicatePreCheckedAbsent) {
     const resolved = await resolveUploadDuplicateName(name, dir);
-    if (!resolved.proceed) return;
+    if (!resolved.proceed) return false;
     uploadName = resolved.name;
   }
   // UploadSudo：车道在任务启动当刻定死，start 与 finish 必须同道（sidecar
@@ -393,6 +396,13 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
     let offset = startOffset;
     while (offset < size) {
       await waitWhilePaused(info.taskId);
+      // 暂停中被取消：releasePause 唤醒后循环会继续 sendBinary 打到已取消的
+      // taskId，后端报非取消错误码会把整批剩余任务一起中止（与 H-3 的用户
+      // 取消不中止整批语义相悖）。恢复后先查取消集，以 transfer-cancelled
+      // 出局，让 runTransfers 继续派发。
+      if (cancelledTransferTasks.has(info.taskId)) {
+        throw Object.assign(new Error(t("transferStatus.cancelled")), { code: "transfer-cancelled" });
+      }
       let chunk: Uint8Array;
       try {
         chunk = await readChunk(offset, info.chunkSize);
@@ -418,6 +428,7 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
       throw Object.assign(cause instanceof Error ? cause : new Error(String(cause)), { code: "upload-start-failed" });
     }
     await waitForTransferCompletion(info.taskId);
+    return true;
   } catch (cause) {
     await window.dbxPlugin.invoke("sftp/transfer/cancel", { taskId: info.taskId, reason: transferCancelReason(cause) }).catch(() => undefined);
     throw cause;
@@ -478,7 +489,10 @@ async function cancelTransfer(task: TransferTask) {
   } else {
     // 上传取消对称地立即释放 ack 等待器（评审 H-3）：后端取消即摘任务，
     // ack 永不再来——不等 30s 超时。错误码 transfer-cancelled 让
-    // runTransfers 把用户取消与真实失败区分开、继续派发剩余项。
+    // runTransfers 把用户取消与真实失败区分开、继续派发剩余项。同时登记
+    // 取消集：暂停中的任务没有挂起的 ack 等待器，恢复后的分片循环靠它
+    // 识别"恢复即终止"（见 uploadSource 的循环头检查）。
+    cancelledTransferTasks.add(task.taskId);
     const waiter = uploadAckWaiters.get(task.taskId);
     if (waiter) {
       window.clearTimeout(waiter.timer);

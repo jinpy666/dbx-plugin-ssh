@@ -875,6 +875,12 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   }
   else if (method === "sftp/createDirectory" || method === "sudo/mkdir") result = mockWriteEntry(String((params as Record<string, unknown>)?.path || ""), mockDir(String((params as Record<string, unknown>)?.path || "/").split("/").pop() || "folder"));
   else if (method === "sftp/touch") result = mockWriteEntry(String((params as Record<string, unknown>)?.path || ""), mockFile(String((params as Record<string, unknown>)?.path || "").split("/").pop() || "file.txt", 0));
+  // 撞名探测（上传 auto-rename 策略）：mock 文件树不做重名裁决，恒按
+  // "目标不存在"返回原名（后端同名响应形状：{name, conflict}）。
+  else if (method === "sftp/rename-unique") {
+    const input = params as Record<string, unknown>;
+    result = { name: String(input.name || ""), conflict: false };
+  }
   else if (method === "sftp/archive") {
     const input = params as Record<string, unknown>;
     const sources = Array.isArray(input.sourcePaths) ? (input.sourcePaths as string[]) : [];

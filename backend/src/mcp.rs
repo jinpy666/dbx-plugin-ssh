@@ -18,6 +18,7 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileType;
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 
 use crate::agent_approvals;
@@ -443,6 +444,46 @@ fn over_limit_line_response(bytes: usize, limit: usize) -> Value {
     })
 }
 
+/// One line read from the stdio peer, bounded by `max_line`.
+enum StdioLineRead {
+    /// EOF before any byte of this line.
+    Eof,
+    /// A line within the ceiling (raw bytes, newline included, in `raw`).
+    Line,
+    /// The ceiling filled without a newline: the remainder of the line has
+    /// been drained and discarded, `raw` holds only the drained tail.
+    OverLimit,
+}
+
+/// `read_until` without the unbounded-allocation hazard: a peer writing a
+/// newline-less flood used to be buffered whole before the limit check. The
+/// `Take` wrapper caps each read at `max_line + 1` bytes; a full cap without
+/// a newline means over-limit, and the rest of the line is consumed (and
+/// thrown away) so the session can continue with the next request.
+fn read_bounded_line(
+    reader: &mut impl BufRead,
+    max_line: usize,
+    raw: &mut Vec<u8>,
+) -> io::Result<StdioLineRead> {
+    raw.clear();
+    let mut limited = std::io::Read::take(&mut *reader, max_line as u64 + 1);
+    let read = limited.read_until(b'\n', raw)?;
+    if read == 0 {
+        return Ok(StdioLineRead::Eof);
+    }
+    if raw.len() == max_line + 1 && !raw.ends_with(b"\n") {
+        loop {
+            raw.clear();
+            let consumed = reader.read_until(b'\n', raw)?;
+            if consumed == 0 || raw.ends_with(b"\n") {
+                break;
+            }
+        }
+        return Ok(StdioLineRead::OverLimit);
+    }
+    Ok(StdioLineRead::Line)
+}
+
 pub fn run_mcp_stdio(data_dir: PathBuf) -> io::Result<()> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| io::Error::other(format!("Failed to create async runtime: {error}")))?;
@@ -464,11 +505,18 @@ pub fn run_mcp_stdio(data_dir: PathBuf) -> io::Result<()> {
     let max_line = stdio_max_line_bytes();
     let mut raw: Vec<u8> = Vec::new();
     loop {
-        raw.clear();
-        let read = stdin.lock().read_until(b'\n', &mut raw)?;
-        if read == 0 {
-            break; // EOF: stdin closed
+        match read_bounded_line(&mut stdin.lock(), max_line, &mut raw)? {
+            StdioLineRead::Eof => break,
+            StdioLineRead::OverLimit => {
+                write_response(&stdout, over_limit_line_response(max_line + 1, max_line))?;
+                continue;
+            }
+            StdioLineRead::Line => {}
         }
+        // Lossy decoding turns invalid UTF-8 into U+FFFD, which fails JSON
+        // parsing below into the same -32700 path (the InvalidData arm in
+        // `classify_stdio_line` stays as the defensive fallback for that
+        // error shape).
         let text = String::from_utf8_lossy(&raw);
         let text = text.trim_end_matches(['\n', '\r']).to_string();
         if text.len() > max_line {
@@ -588,22 +636,21 @@ impl McpConnection {
         self.sftp = Some(sftp.clone());
         Ok(sftp)
     }
+}
 
-    /// 独立打开一条 sftp 子系统通道跑裸包客户端（严格串行请求/响应），与
-    /// 高层会话并存不复用：latin-1 编码模式下列表/写操作保原始字节专用
-    /// （M17，语义与 `ssh.rs::raw_sftp_client` 一致）。
-    async fn raw_sftp(&mut self) -> Result<RawSftpClient, String> {
-        let channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|error| format!("Failed to open SFTP channel: {error}"))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|error| format!("Failed to start SFTP: {error}"))?;
-        sftp_raw::RawSftp::init(channel.into_stream()).await
-    }
+/// 在 `handle` 上独立打开一条 sftp 子系统通道跑裸包客户端（严格串行请求/
+/// 响应）。独立函数化：MCP 工具在释放 connections 写锁之后仍要按需新建
+/// 裸包客户端（latin-1 车道），不能依赖 &mut McpConnection。
+async fn open_raw_sftp(handle: &Handle<SshClient>) -> Result<RawSftpClient, String> {
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("Failed to open SFTP channel: {error}"))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|error| format!("Failed to start SFTP: {error}"))?;
+    sftp_raw::RawSftp::init(channel.into_stream()).await
 }
 
 pub struct McpState {
@@ -1082,60 +1129,20 @@ impl McpState {
                 ));
             }
         }
-        if matches!(name, "ssh_exec" | "ssh_exec_sudo" | "ssh_run_bg") {
-            let command = required_str(arguments, "command")?;
-            // Per-connection sudoers-style allowlist: privileged commands
-            // must match a `sudo_whitelist` entry when the connection
-            // declares one. Covers `ssh_exec_sudo` plus inline `sudo …` in
-            // `ssh_exec`/`ssh_run_bg` (NOPASSWD / cached-stamp bypasses).
-            if name == "ssh_exec_sudo" || mcp_safety::runs_under_sudo(command) {
-                let allowlist = self.sudo_allowlist_for(arguments).await?;
-                if !allowlist.is_empty() && !sudo_allowlist::is_allowed(&allowlist, command) {
-                    return Err(format!(
-                        "sudo command is not allowed by this connection's whitelist. \
-                         Allowed patterns: {}",
-                        sudo_allowlist::render_entries(&allowlist)
-                    ));
-                }
-            }
-            match mcp_safety::assess_command(command) {
-                CommandRisk::Destructive(reason) if read_only => {
-                    return Err(format!(
-                        "Refused on read-only connection ({reason}): {command}"
-                    ));
-                }
-                CommandRisk::Destructive(reason) => {
-                    let confirmed = arg_bool(arguments, "confirmDestructive")?.unwrap_or(false);
-                    if !confirmed {
-                        return Err(format!(
-                            "Command looks destructive ({reason}): {command}. \
-                             Retry with confirmDestructive: true if this is intended."
-                        ));
-                    }
-                }
-                CommandRisk::Unknown if name == "ssh_exec" && read_only => {
-                    return Err(format!(
-                        "Connection is read-only and the command is not recognized \
-                         as read-only: {command}. Only inspection commands (ls, cat, \
-                         df, ps, systemctl status, journalctl, docker ps, ...) pass."
-                    ));
-                }
-                _ => {}
-            }
-        }
-        if name == "ssh_terminal_input" {
-            // §1.2 gates run on the normalized text (the same text that will
-            // be typed), so normalization happens here once and the handler
-            // reuses the normalized form by re-deriving it from `input`.
-            let input = required_str(arguments, "input")?;
-            let normalized = mcp_safety::normalize_terminal_input(input);
-            let allowlist = self.sudo_allowlist_for(arguments).await?;
-            terminal_input_gate(
-                &normalized,
-                read_only,
-                arg_bool(arguments, "confirmDestructive")?.unwrap_or(false),
-                &allowlist,
-            )?;
+        // Command-text gates (sudo allowlist, destructive assessment, read-only
+        // whitelist, terminal-input gate) — run here on the original text, and
+        // again after a human-edited approval below. Editing during confirm
+        // must never widen what these gates accepted.
+        let command_text = if name == "ssh_terminal_input" {
+            required_str(arguments, "input")?.to_string()
+        } else if matches!(name, "ssh_exec" | "ssh_exec_sudo" | "ssh_run_bg") {
+            required_str(arguments, "command")?.to_string()
+        } else {
+            String::new()
+        };
+        if !command_text.is_empty() {
+            self.enforce_command_text_gates(name, &command_text, read_only, arguments)
+                .await?;
         }
         // §1.3 confirm permission mode: after every existing gate, before
         // any execution path (the L1 bridge forward included), a gated tool
@@ -1199,6 +1206,19 @@ impl McpState {
             }
         }
         let arguments = confirmed_arguments.as_ref().unwrap_or(arguments);
+        if let Some(rewritten) = confirmed_arguments.as_ref() {
+            // 人工在确认框里编辑过的命令文本必须重过同一组闸：批准的语义是
+            // "执行这条改写后的文本"，不是"豁免安全闸"——改写可以把无害
+            // 命令换成破坏性命令、把白名单外的 sudo 塞进来。
+            let edited = rewritten
+                .get(if name == "ssh_terminal_input" { "input" } else { "command" })
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !edited.is_empty() {
+                self.enforce_command_text_gates(name, edited, read_only, rewritten)
+                    .await?;
+            }
+        }
         // L1 stdio bridge fallback: a call referencing a `connectionId` that
         // is NOT in this session's lifecycle registry (the normal state of a
         // standalone `--mcp` session) is forwarded to the running DBX app's
@@ -2377,6 +2397,75 @@ impl McpState {
             .map_err(|error| format!("{error}. Open the connection in DBX and retry"))
     }
 
+    /// Command-text gates shared by the first pass (the caller-submitted text)
+    /// and the post-approval re-check (a human-edited confirmation text): the
+    /// per-connection sudo allowlist, the destructive assessment, the
+    /// read-only command whitelist, and the terminal-input gate. `command` is
+    /// the raw text for exec tools and the typed payload for
+    /// `ssh_terminal_input`.
+    async fn enforce_command_text_gates(
+        &self,
+        name: &str,
+        command: &str,
+        read_only: bool,
+        arguments: &Value,
+    ) -> Result<(), String> {
+        if matches!(name, "ssh_exec" | "ssh_exec_sudo" | "ssh_run_bg") {
+            // Per-connection sudoers-style allowlist: privileged commands
+            // must match a `sudo_whitelist` entry when the connection
+            // declares one. Covers `ssh_exec_sudo` plus inline `sudo …` in
+            // `ssh_exec`/`ssh_run_bg` (NOPASSWD / cached-stamp bypasses).
+            if name == "ssh_exec_sudo" || mcp_safety::runs_under_sudo(command) {
+                let allowlist = self.sudo_allowlist_for(arguments).await?;
+                if !allowlist.is_empty() && !sudo_allowlist::is_allowed(&allowlist, command) {
+                    return Err(format!(
+                        "sudo command is not allowed by this connection's whitelist. \
+                         Allowed patterns: {}",
+                        sudo_allowlist::render_entries(&allowlist)
+                    ));
+                }
+            }
+            match mcp_safety::assess_command(command) {
+                CommandRisk::Destructive(reason) if read_only => {
+                    return Err(format!(
+                        "Refused on read-only connection ({reason}): {command}"
+                    ));
+                }
+                CommandRisk::Destructive(reason) => {
+                    let confirmed = arg_bool(arguments, "confirmDestructive")?.unwrap_or(false);
+                    if !confirmed {
+                        return Err(format!(
+                            "Command looks destructive ({reason}): {command}. \
+                             Retry with confirmDestructive: true if this is intended."
+                        ));
+                    }
+                }
+                CommandRisk::Unknown if name == "ssh_exec" && read_only => {
+                    return Err(format!(
+                        "Connection is read-only and the command is not recognized \
+                         as read-only: {command}. Only inspection commands (ls, cat, \
+                         df, ps, systemctl status, journalctl, docker ps, ...) pass."
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if name == "ssh_terminal_input" {
+            // §1.2 gates run on the normalized text (the same text that will
+            // be typed), so normalization happens here once and the handler
+            // reuses the normalized form by re-deriving it from `input`.
+            let normalized = mcp_safety::normalize_terminal_input(command);
+            let allowlist = self.sudo_allowlist_for(arguments).await?;
+            terminal_input_gate(
+                &normalized,
+                read_only,
+                arg_bool(arguments, "confirmDestructive")?.unwrap_or(false),
+                &allowlist,
+            )?;
+        }
+        Ok(())
+    }
+
     async fn sftp_tool(&self, name: &str, arguments: &Value) -> Result<Value, String> {
         // Same lazy-establish contract as the transfer tools: resolve the
         // saved-connection reference (connectionId / connectionName /
@@ -2384,10 +2473,25 @@ impl McpState {
         // never ssh_exec'd first works instead of demanding a pre-existing
         // pool entry.
         self.connection(arguments).await?;
-        let mut guard = self.connections.write().await;
-        let entry = guard
-            .get_mut(&connection_pool_key(arguments))
-            .ok_or("Connection is not established")?;
+        // 写锁只圈住"取句柄 + 惰性建立高层 sftp 客户端"：传输本体全部在锁外
+        // 跑——写锁活到函数结束会让一次大文件读/写把其他连接的所有工具调用
+        // 堵在 connection() 读锁上数分钟。sftp 建立失败不在此硬上抛：
+        // sftp_copy 分支的 shell 回退语义要求 None + 错误串随行。
+        let pool_key = connection_pool_key(arguments);
+        let (handle, sftp_ready, sftp_ready_error) = {
+            let mut guard = self.connections.write().await;
+            let entry = guard
+                .get_mut(&pool_key)
+                .ok_or("Connection is not established")?;
+            match entry.sftp().await {
+                Ok(sftp) => (entry.handle.clone(), Some(sftp), String::new()),
+                Err(error) => (entry.handle.clone(), None, error),
+            }
+        };
+        // sftp_ready 为 None 的分支专用绑定：硬错误分支经它还原原错误文案。
+        let sftp_bind = |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
+            sftp_ready.clone().ok_or_else(|| error.to_string())
+        };
         // 文件名编码判定（M17，连接级）：连接覆盖 > 全局偏好 > 缺省 auto。
         // dispatch 层已把 connectionName/端点选择器归一化为显式 connectionId
         // （见 call_tool_inner），这里只需读 connectionId；内联拨号按未覆盖
@@ -2404,7 +2508,7 @@ impl McpState {
                     // 形式（latin-1 解码忠实可逆，AI 回传同一路径即落回原始
                     // 字节）。裸包路径任何失败回退高层（读操作回退安全，与
                     // 工作台 sftp_list_path 同策略）。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => match client
                             .readdir(&sftp_name::latin1_encode_display(&path))
                             .await
@@ -2428,7 +2532,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 let entries = sftp
                     .lock()
                     .await
@@ -2463,12 +2567,12 @@ impl McpState {
                     // attrs 不携带 uid/gid：shell 查询尽力而为补齐（M17 先例，
                     // 非 ASCII 名的字节参数边界登记在案）。仅裸包客户端建立
                     // 失败回退高层；操作错误原样上抛（工作台 stat 同策略）。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => {
                             let attrs = client
                                 .lstat(&sftp_name::latin1_encode_display(&path))
                                 .await?;
-                            let (uid, gid) = lookup_remote_uid_gid(&entry.handle, &path).await;
+                            let (uid, gid) = lookup_remote_uid_gid(&handle, &path).await;
                             return Ok(raw_stat_json(&path, attrs, uid, gid));
                         }
                         Err(error) => {
@@ -2478,7 +2582,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 let metadata = sftp
                     .lock()
                     .await
@@ -2502,7 +2606,7 @@ impl McpState {
                     // latin-1（M18）：裸包 LSTAT，只认 NO_SUCH_FILE 为
                     // 「不存在」，其余错误如实上抛。仅裸包客户端建立失败回退
                     // 高层（M17-B 写工具同策略）。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => {
                             let exists = raw_sftp_exists(&mut client, &path).await?;
                             return Ok(json!({ "path": path, "exists": exists }));
@@ -2514,7 +2618,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 // Only "no such file" means absent: a permission error or a
                 // dead channel must surface as an error, never as a
                 // misleading `exists: false`.
@@ -2526,7 +2630,7 @@ impl McpState {
                 Ok(json!({ "path": path, "exists": exists }))
             }
             "sftp_pwd" => {
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 let home = sftp
                     .lock()
                     .await
@@ -2553,7 +2657,7 @@ impl McpState {
                     // maxBytes（上限 maxDownloadBytes），超出标记 truncated。
                     // 读操作回退安全（M17-B readdir 同策略）：裸包路径任何
                     // 失败回退高层重读。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => {
                             match raw_sftp_read_file(&mut client, &path, offset, max_bytes).await {
                                 Ok((data, truncated)) => {
@@ -2575,7 +2679,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 let mut file = sftp.lock().await.open(&path).await.map_err(sftp_error)?;
                 if offset > 0 {
                     use tokio::io::AsyncSeekExt;
@@ -2614,7 +2718,7 @@ impl McpState {
                     // `.dbx-part` 暂存需求）。覆盖预检与写入同一字节口径
                     // （裸包 LSTAT）。仅裸包客户端建立失败回退高层（M17-B 写
                     // 工具同策略）；操作错误原样上抛，不回退（不会重复执行）。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => {
                             return raw_sftp_write_file(
                                 &mut client,
@@ -2631,7 +2735,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 if !overwrite && sftp.lock().await.metadata(&path).await.is_ok() {
                     return Err(format!(
                         "Remote path already exists: {path} (pass overwrite=true to replace)"
@@ -2654,7 +2758,7 @@ impl McpState {
                     // 字节后走裸包 MKDIR。仅裸包通道建立失败回退高层（建立阶段
                     // 尚未发出任何请求，回退不会重复执行）；操作错误原样上抛，
                     // 不回退（与工作台 sftp_create_directory 同策略）。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => {
                             client
                                 .mkdir(&sftp_name::latin1_encode_display(&path))
@@ -2668,7 +2772,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 sftp.lock()
                     .await
                     .create_dir(&path)
@@ -2687,7 +2791,7 @@ impl McpState {
                     // latin-1（M17）：显示路径还原字节后走裸包删除。LSTAT 判型
                     // 分派与高层分支一致（symlink/文件 REMOVE、目录递归树删、
                     // 非递归目录报错），符号链接绝不跟随。回退策略同 mkdir。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => {
                             let raw_path = sftp_name::latin1_encode_display(&path);
                             let attrs = client.lstat(&raw_path).await?;
@@ -2710,7 +2814,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 let metadata = sftp
                     .lock()
                     .await
@@ -2741,7 +2845,7 @@ impl McpState {
                     // 显示文本（latin-1 域内字符映回同值字节，域外 UTF-8 兜底，
                     // 与工作台新输入语义一致）。裸包 RENAME 保证改名不破坏
                     // 非 UTF-8 字节。回退策略同 mkdir。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => {
                             client
                                 .rename(
@@ -2762,7 +2866,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 sftp.lock()
                     .await
                     .rename(&source, &target)
@@ -2783,7 +2887,7 @@ impl McpState {
                     // latin-1（M18）：显示路径还原字节后裸包 SETSTAT（只带
                     // permissions 子集）。仅裸包客户端建立失败回退高层；操作
                     // 错误原样上抛（与 M17-B 写工具同策略）。
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(mut client) => {
                             return raw_sftp_chmod(&mut client, &path, mode).await;
                         }
@@ -2794,7 +2898,7 @@ impl McpState {
                         }
                     }
                 }
-                let sftp = entry.sftp().await?;
+                let sftp = sftp_bind(&sftp_ready_error)?;
                 let metadata = russh_sftp::protocol::FileAttributes {
                     permissions: Some(mode),
                     ..Default::default()
@@ -2815,15 +2919,12 @@ impl McpState {
                 let request = sftp_copy::parse_request(arguments)?;
                 // The SFTP channel only enables the rename fast path; its
                 // absence falls back to the shell for every item.
-                let sftp = match entry.sftp().await {
-                    Ok(sftp) => Some(sftp),
-                    Err(error) => {
-                        eprintln!(
-                            "[ssh] MCP {name}: SFTP channel unavailable ({error}); shell fallback only"
-                        );
-                        None
-                    }
-                };
+                let sftp = sftp_ready.clone();
+                if sftp.is_none() {
+                    eprintln!(
+                        "[ssh] MCP {name}: SFTP channel unavailable ({sftp_ready_error}); shell fallback only"
+                    );
+                }
                 // latin-1（M18）：裸包客户端可用时，覆盖预检与同目录 move 的
                 // RENAME 快路径走字节保真（工作台 M17-A 同模式；路径口径为
                 // 显示形式）。执行层边界（登记，同工作台 M17-A）：远端
@@ -2831,7 +2932,7 @@ impl McpState {
                 // shell 参数不可控，copy 与跨目录 move 的执行层保持字面量
                 // 发送（clean 名不受影响，非 ASCII 名由服务器侧报错）。
                 let raw = if encoding == sftp_name::NameEncoding::Latin1 {
-                    match entry.raw_sftp().await {
+                    match open_raw_sftp(&handle).await {
                         Ok(client) => Some(client),
                         Err(error) => {
                             eprintln!(
@@ -2843,7 +2944,7 @@ impl McpState {
                 } else {
                     None
                 };
-                Ok(sftp_copy::execute(&entry.handle, sftp, raw, op, &request)
+                Ok(sftp_copy::execute(&handle, sftp, raw, op, &request)
                     .await
                     .into_json())
             }
@@ -2875,10 +2976,23 @@ impl McpState {
         let local_source = std::fs::canonicalize(local_path)
             .map_err(|error| format!("Cannot read local file {local_path}: {error}"))?;
         self.ensure_local_transfer_allowed(&local_source)?;
-        let data = std::fs::read(&local_source).map_err(|error| {
-            format!("Cannot read local file {}: {error}", local_source.display())
-        })?;
+        // 大小预检先于读取：超限文件不再全量读进内存（limit 内的全量驻留
+        // 保持——真正的流式上传登记为后续项）；tokio::fs 消除阻塞 worker
+        // 线程的同步读。读后的二次检查防御 metadata 与 read 之间的竞窗。
         let upload_limit = self.size_limits().max_upload_bytes;
+        let source_size = tokio::fs::metadata(&local_source)
+            .await
+            .map(|meta| meta.len())
+            .map_err(|error| format!("Cannot read local file {local_path}: {error}"))?;
+        if source_size > upload_limit {
+            return Err(format!(
+                "Local file {local_path} is {source_size} bytes and exceeds the MCP upload \
+                 limit of {upload_limit} bytes (adjust maxUploadBytes via mcp/settings/set)"
+            ));
+        }
+        let data = tokio::fs::read(&local_source)
+            .await
+            .map_err(|error| format!("Cannot read local file {local_path}: {error}"))?;
         if data.len() as u64 > upload_limit {
             return Err(format!(
                 "Local file {local_path} is {} bytes and exceeds the MCP upload limit of \
@@ -2904,10 +3018,21 @@ impl McpState {
         overwrite: bool,
     ) -> Result<Value, String> {
         self.connection(arguments).await?;
-        let mut guard = self.connections.write().await;
-        let entry = guard
-            .get_mut(&connection_pool_key(arguments))
-            .ok_or("Connection is not established")?;
+        // 同 sftp_tool：写锁只圈句柄准备，上传本体锁外。
+        let pool_key = connection_pool_key(arguments);
+        let (handle, sftp_ready, sftp_ready_error) = {
+            let mut guard = self.connections.write().await;
+            let entry = guard
+                .get_mut(&pool_key)
+                .ok_or("Connection is not established")?;
+            match entry.sftp().await {
+                Ok(sftp) => (entry.handle.clone(), Some(sftp), String::new()),
+                Err(error) => (entry.handle.clone(), None, error),
+            }
+        };
+        let sftp_bind = |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
+            sftp_ready.clone().ok_or_else(|| error.to_string())
+        };
         // latin-1（M19）：显示路径整条按 latin1_encode_display 还原字节后走
         // 裸包直写（选型：沿既有 sftp_upload 直写语义，无工作台上传族的
         // `.dbx-part` 暂存需求；覆盖预检与写入同一字节口径，复用 M18 的
@@ -2915,7 +3040,7 @@ impl McpState {
         // 同策略）；操作错误原样上抛，不回退（不会重复执行）。
         if mcp_sftp_encoding(&self.runtime.data_dir(), arguments) == sftp_name::NameEncoding::Latin1
         {
-            match entry.raw_sftp().await {
+            match open_raw_sftp(&handle).await {
                 Ok(mut client) => {
                     let bytes =
                         raw_sftp_write_bytes(&mut client, remote_path, data, overwrite).await?;
@@ -2932,7 +3057,7 @@ impl McpState {
                 }
             }
         }
-        let sftp = entry.sftp().await?;
+        let sftp = sftp_bind(&sftp_ready_error)?;
         if !overwrite && sftp.lock().await.metadata(remote_path).await.is_ok() {
             return Err(format!(
                 "Remote path already exists: {remote_path} (pass overwrite=true to replace)"
@@ -3030,10 +3155,21 @@ impl McpState {
     ) -> Result<Value, String> {
         self.connection(arguments).await?;
         let download_limit = self.size_limits().max_download_bytes;
-        let mut guard = self.connections.write().await;
-        let entry = guard
-            .get_mut(&connection_pool_key(arguments))
-            .ok_or("Connection is not established")?;
+        // 同 sftp_tool：写锁只圈句柄准备，下载本体锁外。
+        let pool_key = connection_pool_key(arguments);
+        let (handle, sftp_ready, sftp_ready_error) = {
+            let mut guard = self.connections.write().await;
+            let entry = guard
+                .get_mut(&pool_key)
+                .ok_or("Connection is not established")?;
+            match entry.sftp().await {
+                Ok(sftp) => (entry.handle.clone(), Some(sftp), String::new()),
+                Err(error) => (entry.handle.clone(), None, error),
+            }
+        };
+        let sftp_bind = |error: &str| -> Result<std::sync::Arc<tokio::sync::Mutex<SftpSession>>, String> {
+            sftp_ready.clone().ok_or_else(|| error.to_string())
+        };
         // latin-1（M19）：读侧沿 M18 sftp_read_file 同策略——显示路径整条
         // latin1_encode_display 还原字节后 OPEN(READ)+READ，裸包路径任何
         // 失败回退高层重读（读操作安全）。目录探测不单独走裸包 STAT：目录
@@ -3042,7 +3178,7 @@ impl McpState {
         // download_limit+1 探测封顶，不做无界传输）。
         if mcp_sftp_encoding(&self.runtime.data_dir(), arguments) == sftp_name::NameEncoding::Latin1
         {
-            match entry.raw_sftp().await {
+            match open_raw_sftp(&handle).await {
                 Ok(mut client) => {
                     match raw_sftp_read_file(&mut client, remote_path, 0, download_limit).await {
                         Ok((data, truncated)) => {
@@ -3053,7 +3189,7 @@ impl McpState {
                                      mcp/settings/set)"
                                 ));
                             }
-                            std::fs::write(local_target, &data).map_err(|error| {
+                            tokio::fs::write(local_target, &data).await.map_err(|error| {
                                 format!(
                                     "Cannot write local file {}: {error}",
                                     local_target.display()
@@ -3079,7 +3215,7 @@ impl McpState {
                 }
             }
         }
-        let sftp = entry.sftp().await?;
+        let sftp = sftp_bind(&sftp_ready_error)?;
         let metadata = sftp
             .lock()
             .await
@@ -3105,26 +3241,58 @@ impl McpState {
             .open(remote_path)
             .await
             .map_err(sftp_error)?;
-        // `take` is the hard cap for files that reported no size (or grew
-        // between stat and open); the stat check above is only the fast path.
-        let mut data = Vec::new();
-        file.take(download_limit.saturating_add(1))
-            .read_to_end(&mut data)
-            .await
-            .map_err(|error| format!("SFTP read failed: {error}"))?;
-        if data.len() as u64 > download_limit {
+        // 流式落盘：边读远端边写本地，整个文件不再驻留内存（此前是全量
+        // Vec + 同步写——阻塞 worker 且 RSS 峰值即文件大小）。`take` 仍是
+        // 无 size 文件（或 stat 后变大的文件）的硬上限；stat 快路径照旧。
+        let mut reader = file.take(download_limit.saturating_add(1));
+        let mut local = tokio::fs::File::create(local_target).await.map_err(|error| {
+            format!(
+                "Cannot create local file {}: {error}",
+                local_target.display()
+            )
+        })?;
+        let mut transferred: u64 = 0;
+        let mut buffer = vec![0_u8; 256 * 1024];
+        let copy_result: Result<(), String> = async {
+            loop {
+                let read = reader
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| format!("SFTP read failed: {error}"))?;
+                if read == 0 {
+                    break;
+                }
+                transferred += read as u64;
+                local
+                    .write_all(&buffer[..read])
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Cannot write local file {}: {error}",
+                            local_target.display()
+                        )
+                    })?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = copy_result {
+            // 半成品不留本地（overwrite=false 语义：失败后目标保持原状）。
+            let _ = tokio::fs::remove_file(local_target).await;
+            return Err(error);
+        }
+        if transferred > download_limit {
+            let _ = tokio::fs::remove_file(local_target).await;
             return Err(format!(
                 "Remote file {remote_path} exceeds the MCP download limit of {download_limit} \
                  bytes (adjust maxDownloadBytes via mcp/settings/set)"
             ));
         }
-        std::fs::write(local_target, &data).map_err(|error| {
-            format!(
-                "Cannot write local file {}: {error}",
-                local_target.display()
-            )
-        })?;
-        Ok(json!({ "remotePath": remote_path, "localPath": local_path, "bytes": data.len() }))
+        local
+            .flush()
+            .await
+            .map_err(|error| format!("Cannot flush local file {}: {error}", local_target.display()))?;
+        Ok(json!({ "remotePath": remote_path, "localPath": local_path, "bytes": transferred }))
     }
 
     async fn ssh_close(&self, arguments: &Value) -> Result<Value, String> {
@@ -3797,41 +3965,41 @@ fn unknown_tool_message(name: &str) -> String {
     )
 }
 
-/// Polls a dynamically sized batch of futures concurrently and returns all
+/// Runs a dynamically sized batch of futures concurrently and returns all
 /// outputs in input order. `tokio::join!` arities are static, so this small
-/// recursive helper covers `ssh_multi_exec`'s dynamic 1-10 fan-out without
-/// pulling in the `futures` crate. Each future is boxed+pinned so slots
-/// stay pollable across wakes without an `Unpin` bound on `F`.
-async fn join_all<F, T>(futures: Vec<F>) -> Vec<T>
+/// divide-and-conquer helper covers `ssh_multi_exec`'s dynamic 1-10 fan-out
+/// without pulling in the `futures` crate: halves recurse (depth ≤4 for 10
+/// targets) until each leaf is a static-arity `join!`. The previous single
+/// sweep awaited each slot to completion inside the loop — sequential
+/// execution wearing a concurrent signature; 10 targets × a 300s timeout
+/// serialized to up to 3000s.
+async fn join_all<F, T>(mut futures: Vec<F>) -> Vec<T>
 where
     F: Future<Output = T> + Send,
     T: Send,
 {
-    let mut slots: Vec<std::pin::Pin<Box<dyn Future<Output = T> + Send>>> = futures
-        .into_iter()
-        .map(|future| Box::pin(future) as std::pin::Pin<Box<dyn Future<Output = T> + Send>>)
-        .collect();
-    let mut outputs: Vec<Option<T>> = std::iter::repeat_with(|| None).take(slots.len()).collect();
-    loop {
-        let mut pending = false;
-        for (index, slot) in slots.iter_mut().enumerate() {
-            if outputs[index].is_some() {
-                continue;
-            }
-            let output = slot.as_mut().await;
-            outputs[index] = Some(output);
-            // Reset the await point for the next sweep; completed slots are
-            // skipped by the `outputs` guard above.
-            pending = true;
+    match futures.len() {
+        0 => Vec::new(),
+        1 => {
+            let mut iter = futures;
+            vec![iter.pop().expect("len 1").await]
         }
-        if !pending {
-            break;
+        2 => {
+            let mut iter = futures;
+            let second = iter.pop().expect("len 2");
+            let first = iter.pop().expect("len 2");
+            let (first_output, second_output) = tokio::join!(first, second);
+            vec![first_output, second_output]
+        }
+        len => {
+            let second = futures.split_off(len / 2);
+            // 递归分支经 Box::pin 间接化：async fn 直接自递归的 future 大小
+            // 无界，编译期即拒绝。
+            let (first_outputs, second_outputs) =
+                tokio::join!(Box::pin(join_all(futures)), Box::pin(join_all(second)));
+            first_outputs.into_iter().chain(second_outputs).collect()
         }
     }
-    outputs
-        .into_iter()
-        .map(|output| output.expect("every slot resolves before completion"))
-        .collect()
 }
 
 fn sftp_error(error: impl std::fmt::Display) -> String {
@@ -5645,6 +5813,112 @@ mod tests {
         assert_eq!(code, None);
         assert_eq!(alive, None);
         assert_eq!(tail, "");
+    }
+
+    #[tokio::test]
+    async fn join_all_runs_its_futures_concurrently() {
+        // 确定性并发探针：f1 轮询门闩直到 f2 置位。串行执行下 f1 的 100 次
+        // 1ms 轮询全空转、返回 0；真并发下 f2 先完成置位、f1 返回 1。
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // 两个 async block 类型不同，统一装箱成 trait object 才能进同一个 Vec。
+        let first: std::pin::Pin<Box<dyn Future<Output = i32> + Send>> = Box::pin({
+            let gate = gate.clone();
+            async move {
+                for _ in 0..100 {
+                    if gate.load(std::sync::atomic::Ordering::SeqCst) {
+                        return 1;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                0
+            }
+        });
+        let second: std::pin::Pin<Box<dyn Future<Output = i32> + Send>> = Box::pin(async move {
+            gate.store(true, std::sync::atomic::Ordering::SeqCst);
+            2
+        });
+        assert_eq!(join_all(vec![first, second]).await, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn join_all_preserves_input_order_across_recursion() {
+        // 二分递归路径（>2 元）：输出顺序必须仍与输入下标一致。
+        let futures: Vec<_> = (0..7).map(|value| async move { value * 10 }).collect();
+        assert_eq!(join_all(futures).await, vec![0, 10, 20, 30, 40, 50, 60]);
+    }
+
+    #[tokio::test]
+    async fn command_text_gates_refuse_destructive_and_unknown_on_read_only() {
+        // 提取自 call_tool_inner 的命令文本闸（确认改写后二次过闸复用同一
+        // 入口）：read-only 下破坏性命令无条件拒绝、白名单外命令拒绝、白名单
+        // 内只读命令放行。
+        let state = state();
+        let error = state
+            .enforce_command_text_gates("ssh_exec", "rm -rf /tmp/x", true, &json!({}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("read-only"), "got: {error}");
+        let error = state
+            .enforce_command_text_gates("ssh_exec", "curl example.test", true, &json!({}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("not recognized as read-only"), "got: {error}");
+        state
+            .enforce_command_text_gates("ssh_exec", "ls /tmp", true, &json!({}))
+            .await
+            .expect("inspection command passes the text gates");
+    }
+
+    #[test]
+    fn read_bounded_line_stays_within_the_ceiling() {
+        let max_line = 16;
+        // 正常行：含换行原样返回。
+        let mut reader = io::Cursor::new(b"ping\nnext\n".to_vec());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, max_line, &mut raw).unwrap(),
+            StdioLineRead::Line
+        ));
+        assert_eq!(raw, b"ping\n");
+        // EOF 尾行（无换行、且在上限内）：不算超限，正常返回。
+        let mut reader = io::Cursor::new(b"tail-no-nl".to_vec());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, max_line, &mut raw).unwrap(),
+            StdioLineRead::Line
+        ));
+        // 恰好 max_line 字节内容 + 换行：合法满行。
+        let mut full_line = vec![b'a'; max_line];
+        full_line.push(b'\n');
+        let mut reader = io::Cursor::new(full_line);
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, max_line, &mut raw).unwrap(),
+            StdioLineRead::Line
+        ));
+        assert_eq!(raw.len(), max_line + 1);
+        // 超限：读满上限仍无换行 → OverLimit，残余被吞弃，下一条是后续行。
+        let mut input = vec![b'x'; 100];
+        input.extend_from_slice(b"\nok\n");
+        let mut reader = io::Cursor::new(input);
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, max_line, &mut raw).unwrap(),
+            StdioLineRead::OverLimit
+        ));
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, max_line, &mut raw).unwrap(),
+            StdioLineRead::Line
+        ));
+        assert_eq!(raw, b"ok\n");
+        // EOF：空读。
+        let mut reader = io::Cursor::new(Vec::<u8>::new());
+        let mut raw = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, max_line, &mut raw).unwrap(),
+            StdioLineRead::Eof
+        ));
     }
 
     #[tokio::test]

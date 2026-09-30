@@ -14,14 +14,19 @@ export interface FolderUploadFile {
   size: number;
 }
 
-export interface FolderUploadPlan {
+export interface FolderUploadPlan<Source = unknown> {
   /**
    * 需要确保存在的远端目录（相对所选根目录），深度升序——父目录排在子目录
    * 之前，按序逐个 createDirectory 即可；已去重。
    */
   directories: string[];
-  /** 待上传文件（已跳过空路径段），relativePath 指向所选根目录内的目标。 */
-  files: FolderUploadFile[];
+  /**
+   * 待上传文件（已跳过空路径段），relativePath 指向所选根目录内的目标。
+   * `source` 是计划保留的原始入参条目：files 是 entries 的过滤子集且可能
+   * 少于 entries，消费方拿 readChunk 等附件字段必须经 source 回取——按数组
+   * 下标配对会在首条被跳过后整体错位（A 的字节传到 B 的名字下）。
+   */
+  files: Array<{ name: string; relativePath: string; size: number; source: Source }>;
   /** 总字节数（进度分母）。 */
   totalBytes: number;
 }
@@ -87,9 +92,9 @@ export function folderUploadPercent(state: FolderUploadProgress): number {
  *   与目录下载同语义——树落在当前目录下以所选目录命名的一层）。
  * - 文件相对路径推导出的全部中间目录入 directories 集（去重 + 深度升序）。
  */
-export function buildFolderUploadPlan(entries: readonly { name: string; relativePath: string; size: number }[]): FolderUploadPlan {
+export function buildFolderUploadPlan<Source extends { name: string; relativePath: string; size: number }>(entries: readonly Source[]): FolderUploadPlan<Source> {
   const directorySet = new Set<string>();
-  const files: FolderUploadFile[] = [];
+  const files: Array<{ name: string; relativePath: string; size: number; source: Source }> = [];
   let totalBytes = 0;
   for (const entry of entries) {
     const name = String(entry.name || "").trim();
@@ -101,7 +106,7 @@ export function buildFolderUploadPlan(entries: readonly { name: string; relative
     for (let depth = 1; depth <= dirSegments.length; depth += 1) {
       directorySet.add(dirSegments.slice(0, depth).join("/"));
     }
-    files.push({ name, relativePath: segments.join("/"), size: Number.isFinite(entry.size) && entry.size > 0 ? Math.floor(entry.size) : 0 });
+    files.push({ name, relativePath: segments.join("/"), size: Number.isFinite(entry.size) && entry.size > 0 ? Math.floor(entry.size) : 0, source: entry });
     totalBytes += Math.max(0, Math.floor(Number(entry.size) || 0));
   }
   return { directories: sortDirectoryPaths(directorySet), files, totalBytes };
