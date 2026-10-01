@@ -335,18 +335,23 @@ describe("command-history 动作（Warp 式 history 面板补充唤起键）", (
 });
 
 describe("completions 动作（Warp completions 手动唤起键）", () => {
-  it("默认键位登记 Ctrl+Space（两平台同键），默认表无冲突", () => {
-    expect(defaultTerminalHotkeys(true).completions).toEqual(["Ctrl+Space"]);
-    expect(defaultTerminalHotkeys(false).completions).toEqual(["Ctrl+Space"]);
+  it("默认键位登记 Ctrl+/（首选）与 Ctrl+Space（副键，系统输入法抢占时不可达），默认表无冲突", () => {
+    expect(defaultTerminalHotkeys(true).completions).toEqual(["Ctrl+/", "Ctrl+Space"]);
+    expect(defaultTerminalHotkeys(false).completions).toEqual(["Ctrl+/", "Ctrl+Space"]);
     expect(findHotkeyConflicts(defaultTerminalHotkeys(true))).toEqual([]);
     expect(findHotkeyConflicts(defaultTerminalHotkeys(false))).toEqual([]);
   });
 
   it("键盘事件经 keyComboFromEvent → matchTerminalHotkey 派发到 completions", () => {
-    const combo = keyComboFromEvent(event("Space", { ctrlKey: true }));
-    expect(combo).toBe("Ctrl+Space");
-    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), combo!)).toBe("completions");
-    expect(matchTerminalHotkey(defaultTerminalHotkeys(true), combo!)).toBe("completions");
+    // 首选 Ctrl+/：Slash 无系统/浏览器冲突（裸 Ctrl+Space 被 macOS 切输入源
+    // 与 Windows 中文输入法开关截走，键事件到不了网页层）。
+    const slashCombo = keyComboFromEvent(event("Slash", { ctrlKey: true }));
+    expect(slashCombo).toBe("Ctrl+/");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), slashCombo!)).toBe("completions");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(true), slashCombo!)).toBe("completions");
+    const spaceCombo = keyComboFromEvent(event("Space", { ctrlKey: true }));
+    expect(spaceCombo).toBe("Ctrl+Space");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), spaceCombo!)).toBe("completions");
     // 裸空格与 Shift 系组合不派发（空格是正常输入字符）。
     expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("Space"))!)).toBeNull();
     expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("Space", { shiftKey: true }))!)).toBeNull();
@@ -354,7 +359,7 @@ describe("completions 动作（Warp completions 手动唤起键）", () => {
 
   it("存量键位数据缺 completions 字段时回填平台默认（新增动作不失效）", () => {
     const legacy = sanitizeTerminalHotkeys({ search: ["Ctrl+Shift+F"] }, false);
-    expect(legacy.completions).toEqual(["Ctrl+Space"]);
+    expect(legacy.completions).toEqual(["Ctrl+/", "Ctrl+Space"]);
   });
 });
 

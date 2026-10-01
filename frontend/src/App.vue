@@ -273,11 +273,13 @@ import {
   type TerminalBehaviorSettings,
 } from "./lib/terminalBehavior";
 import {
+  formatHotkeyDisplay,
   keyComboFromEvent,
   loadTerminalHotkeys,
   matchTerminalHotkey,
   persistTerminalHotkeys,
   sanitizeTerminalHotkeys,
+  type TerminalHotkeyActionId,
   type TerminalHotkeyBindings,
 } from "./lib/terminalHotkeys";
 import { bridgeBinaryBytes } from "../../shared/frontend/binaryEvent";
@@ -7068,6 +7070,17 @@ const promptHintsEnabled = ref(loadPromptHintsEnabled());
 const promptHintsDismissed = ref(loadPromptHintsDismissed());
 const promptHintsLineEmpty = ref(true);
 const promptHintsAnchor = ref<SuggestionAnchor | null>(null);
+// 引导条键位标签跟随实时绑定（不写死键名）：历史搜索取 command-history 的
+// 首个 Ctrl 系绑定（默认表里即 Ctrl+R，⌘⇧H 在前但 mac 上 ⌘ 系不是终端键位
+// 心智），补全取 completions 首个绑定（默认 Ctrl+/）。解绑则隐藏对应项。
+function promptHintsKeyLabel(actionId: TerminalHotkeyActionId, preferCtrl: boolean): string {
+  const combos = terminalHotkeys.value[actionId] ?? [];
+  if (!combos.length) return "";
+  const pick = preferCtrl ? (combos.find((combo) => combo.startsWith("Ctrl+")) ?? combos[0]) : combos[0];
+  return formatHotkeyDisplay(pick, applePlatform);
+}
+const promptHintsHistoryKey = computed(() => promptHintsKeyLabel("command-history", true));
+const promptHintsCompletionsKey = computed(() => promptHintsKeyLabel("completions", false));
 const promptHintsVisible = computed(() =>
   shouldShowPromptHints({
     enabled: promptHintsEnabled.value,
@@ -7520,7 +7533,8 @@ function dismissPromptHints() {
         <TerminalPromptHints
           v-if="promptHintsVisible"
           :locale="locale"
-          :apple="applePlatform"
+          :history-key-label="promptHintsHistoryKey"
+          :completions-key-label="promptHintsCompletionsKey"
           :anchor="promptHintsAnchor"
           :viewport="suggestionViewport"
           @dismiss="dismissPromptHints"

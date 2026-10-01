@@ -62,9 +62,13 @@ export const TERMINAL_HOTKEY_ACTIONS: readonly TerminalHotkeyAction[] = [
   // （workspace:show_command_search），⌘⇧H / Ctrl+Shift+H 为原补充入口。
   // 需要远端 readline 原生 reverse-i-search 的用户可在热键编辑器解绑 Ctrl+R。
   { id: "command-history", labelKey: "terminalHotkeys.actionHistory", group: "view", apple: ["Meta+Shift+H", "Ctrl+R"], other: ["Ctrl+Shift+H", "Ctrl+R"] },
-  // 结构化补全菜单的手动唤起键（Warp completions 手动打开键；Tab 归远端
-  // shell 后 Ctrl+Space 即 Warp 的兜底默认）。随键入自动弹不受影响。
-  { id: "completions", labelKey: "terminalHotkeys.actionCompletions", group: "view", apple: ["Ctrl+Space"], other: ["Ctrl+Space"] },
+  // 结构化补全菜单的手动唤起键：默认 Ctrl+/（两平台），Ctrl+Space 为副键——
+  // 裸 Ctrl+Space 被 macOS「切换输入源」与 Windows 中文输入法开关系统级抢占，
+  // 键事件到不了网页层，故不作首选（Warp 同为 Ctrl+Space，但它是原生应用，
+  // 用户可在系统设置让路）；系统未占用的机器两个键都生效。Ctrl+/ 无系统/
+  // 浏览器冲突，透传远端仅对应 readline undo(0x1F)，被我们消费时不落键。
+  // 随键入自动弹不受影响。
+  { id: "completions", labelKey: "terminalHotkeys.actionCompletions", group: "view", apple: ["Ctrl+/", "Ctrl+Space"], other: ["Ctrl+/", "Ctrl+Space"] },
   { id: "copy", labelKey: "terminalHotkeys.actionCopy", group: "clipboard", apple: ["Meta+C"], other: ["Ctrl+Shift+C"] },
   { id: "paste", labelKey: "terminalHotkeys.actionPaste", group: "clipboard", apple: ["Meta+V"], other: ["Ctrl+V", "Ctrl+Shift+V"], nativeEvent: true },
   { id: "select-all", labelKey: "terminalHotkeys.actionSelectAll", group: "clipboard", apple: ["Meta+A"], other: ["Ctrl+Shift+A"] },

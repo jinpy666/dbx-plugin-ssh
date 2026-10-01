@@ -8,13 +8,16 @@
 import { computed, ref } from "vue";
 import { X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
-import { formatHotkeyDisplay } from "../lib/terminalHotkeys";
 import { flippedOverlayBottom, type SuggestionAnchor } from "../lib/overlayPlacement";
 
 interface Props {
   locale: string;
-  /** Apple 平台把 Ctrl 系键显示为 ⌃（与热键编辑器同一格式化器）。 */
-  apple: boolean;
+  /** 历史搜索键的展示标签（App 按实时绑定计算，Apple 平台渲染 ⌃/⌘ 符号）；
+   *  空 = 该动作已解绑，整项隐藏。 */
+  historyKeyLabel: string;
+  /** 补全手动键的展示标签（同上，跟随实时绑定——Ctrl+Space 被系统输入法
+   *  抢占的机器上默认键已改为 Ctrl+/，标签必须跟着绑定走而非写死）。 */
+  completionsKeyLabel: string;
   /** 光标格像素坐标（y 为光标行顶）；null = 定位不可用，贴终端底部。 */
   anchor: SuggestionAnchor | null;
   /** 定位包含块实测高度（terminal-pane）；缺省时走 fallback。 */
@@ -25,9 +28,6 @@ const props = defineProps<Props>();
 const emit = defineEmits<{ dismiss: [] }>();
 
 const t = (key: string) => workbenchMessage(props.locale, key);
-
-const ctrlR = computed(() => formatHotkeyDisplay("Ctrl+R", props.apple));
-const ctrlSpace = computed(() => formatHotkeyDisplay("Ctrl+Space", props.apple));
 
 const rootEl = ref<HTMLElement | null>(null);
 
@@ -46,8 +46,8 @@ const style = computed(() => {
 <template>
   <div ref="rootEl" class="terminal-prompt-hints" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="note" :aria-label="t('terminalHints.ariaLabel')">
     <span class="terminal-prompt-hints-item"><kbd>↑</kbd><span>{{ t("terminalHints.history") }}</span></span>
-    <span class="terminal-prompt-hints-item"><kbd>{{ ctrlR }}</kbd><span>{{ t("terminalHints.searchHistory") }}</span></span>
-    <span class="terminal-prompt-hints-item"><kbd>{{ ctrlSpace }}</kbd><span>{{ t("terminalHints.completions") }}</span></span>
+    <span v-if="historyKeyLabel" class="terminal-prompt-hints-item"><kbd>{{ historyKeyLabel }}</kbd><span>{{ t("terminalHints.searchHistory") }}</span></span>
+    <span v-if="completionsKeyLabel" class="terminal-prompt-hints-item"><kbd>{{ completionsKeyLabel }}</kbd><span>{{ t("terminalHints.completions") }}</span></span>
     <span class="terminal-prompt-hints-item"><kbd>→</kbd><span>{{ t("terminalHints.ghostAccept") }}</span></span>
     <button type="button" class="terminal-prompt-hints-dismiss" :title="t('terminalHints.dismiss')" :aria-label="t('terminalHints.dismiss')" @click="emit('dismiss')"><X /></button>
   </div>
