@@ -371,7 +371,7 @@ try {
       null,
       { timeout: 10_000 },
     );
-    ghostText = await historyPage.locator(".terminal-ghost").textContent() ?? "";
+    ghostText = await historyPage.locator(".terminal-ghost > span[aria-hidden]").textContent() ?? "";
   } catch {
     ghostText = "";
   }
@@ -390,9 +390,9 @@ try {
       null,
       { timeout: 10_000 },
     );
-    ghostAfterWord = await historyPage.locator(".terminal-ghost").textContent() ?? "";
+    ghostAfterWord = await historyPage.locator(".terminal-ghost > span[aria-hidden]").textContent() ?? "";
   } catch {
-    ghostAfterWord = await historyPage.locator(".terminal-ghost").textContent().catch(() => "") ?? "";
+    ghostAfterWord = await historyPage.locator(".terminal-ghost > span[aria-hidden]").textContent().catch(() => "") ?? "";
   }
   check("Ctrl+→ accepts one word (remainder shrinks)", ghostAfterWord === " ui-mock-history-a", `ghost="${ghostAfterWord}"`);
   await historyPage.keyboard.press("ArrowRight");
