@@ -1449,19 +1449,23 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
             // 段内容会落在 df 段里——os-release 的 `PRETTY_NAME="Alibaba Cloud
             // Linux release 3 (OpenAnolis)"` 恰好 6 个字段，宽松解析会把
             // "(OpenAnolis)" 混成 0 B 的幽灵磁盘行。
-            if fields.len() >= 6 && fields[5].starts_with('/') {
+            //
+            // 列从右往左锚定（mount 恒为最后一列）：文件系统名可能含空格——
+            // Windows 本地采集经 Git-Bash sh，MSYS df 把 Git 安装根报成
+            // `C:/Program Files/Git`，左锚定会把系统盘整行拒掉。
+            if fields.len() >= 6 && fields[fields.len() - 1].starts_with('/') {
                 if let (Ok(total_kib), Ok(used_kib), Ok(available_kib)) = (
-                    fields[1].parse::<u64>(),
-                    fields[2].parse::<u64>(),
-                    fields[3].parse::<u64>(),
+                    fields[fields.len() - 5].parse::<u64>(),
+                    fields[fields.len() - 4].parse::<u64>(),
+                    fields[fields.len() - 3].parse::<u64>(),
                 ) {
-                    if let Some(percent) = fields[4]
+                    if let Some(percent) = fields[fields.len() - 2]
                         .strip_suffix('%')
                         .and_then(|p| p.parse::<f64>().ok())
                     {
                         disks.push(json!({
-                            "filesystem": fields[0],
-                            "mount": fields[5],
+                            "filesystem": fields[..fields.len() - 5].join(" "),
+                            "mount": fields[fields.len() - 1],
                             "totalBytes": total_kib * 1024,
                             "usedBytes": used_kib * 1024,
                             "availableBytes": available_kib * 1024,
@@ -1505,7 +1509,20 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
         ),
     };
     let mem_total = mem_kib.get("MemTotal").copied().unwrap_or(0) * 1024;
-    let mem_available = mem_kib.get("MemAvailable").copied().unwrap_or(0) * 1024;
+    // Linux ≥3.14 reports MemAvailable directly; pre-3.14 kernels and the
+    // MSYS /proc shim the local collector hits on Windows (Git-Bash sh) only
+    // carry MemFree — fall back to the classic free+buffers+cached estimate,
+    // otherwise `used` degenerates to the full total and the dock band pins
+    // MEM at 100%.
+    let mem_available = match mem_kib.get("MemAvailable") {
+        Some(available) => *available * 1024,
+        None => {
+            (mem_kib.get("MemFree").copied().unwrap_or(0)
+                + mem_kib.get("Buffers").copied().unwrap_or(0)
+                + mem_kib.get("Cached").copied().unwrap_or(0))
+                * 1024
+        }
+    };
     let swap_total = mem_kib.get("SwapTotal").copied().unwrap_or(0) * 1024;
     let swap_free = mem_kib.get("SwapFree").copied().unwrap_or(0) * 1024;
     let uptime_seconds = uptime
@@ -2788,6 +2805,36 @@ tmpfs 8154428 0 8154428 0% /dev/shm
     }
 
     #[test]
+    fn meminfo_without_mem_available_falls_back_to_free() {
+        // MSYS（Windows 上 Git-Bash sh 的 /proc 垫片）只有 MemTotal/MemFree：
+        // 旧内核同形。缺 MemAvailable 时回退 classic free+buffers+cached，
+        // 否则 used=total，本地终端信息带 MEM 恒定 100%。
+        let output = "\
+hostname=win-pc
+--mem--
+MemTotal:       16772124 kB
+MemFree:        10700520 kB
+SwapTotal:       2490368 kB
+SwapFree:        2490368 kB
+--cpu--
+cpu  100 0 200 8000
+cpu  200 0 300 8100
+";
+        let metrics = parse_metrics_output(output);
+        assert_eq!(metrics["memory"]["totalBytes"], 16_772_124_u64 * 1024);
+        assert_eq!(metrics["memory"]["availableBytes"], 10_700_520_u64 * 1024);
+        assert_eq!(
+            metrics["memory"]["usedBytes"],
+            (16_772_124_u64 - 10_700_520) * 1024
+        );
+        // 老内核的 Buffers/Cached 也在估计之列。
+        let with_buffers = parse_metrics_output(
+            "--mem--\nMemTotal: 100 kB\nMemFree: 10 kB\nBuffers: 5 kB\nCached: 8 kB\n",
+        );
+        assert_eq!(with_buffers["memory"]["availableBytes"], 23 * 1024);
+    }
+
+    #[test]
     fn df_section_rejects_os_release_bleed() {
         // --os-- 段不被段切换识别，其内容会落在 --df-- 段里；
         // PRETTY_NAME 恰好 6 个字段，绝不能被解析成幽灵磁盘行。
@@ -2802,6 +2849,27 @@ PRETTY_NAME=\"Alibaba Cloud Linux release 3 (OpenAnolis)\"
         let disks = metrics["disks"].as_array().unwrap();
         assert_eq!(disks.len(), 1);
         assert_eq!(disks[0]["mount"], "/");
+    }
+
+    #[test]
+    fn df_row_with_spaces_in_filesystem_parses() {
+        // Windows 本地采集（Git-Bash sh → MSYS df）：文件系统名含空格
+        // （`C:/Program Files/Git` 即 Git 安装根/系统盘）。列右锚定后整行
+        // 可解析，左锚定会把 C 盘从本地终端的磁盘列表里丢掉。
+        let output = "\
+--df--
+E:                     262126588 184832468  77294120      71% /e
+C:/Program Files/Git   100955784  60314920  40640864      60% /
+";
+        let metrics = parse_metrics_output(output);
+        let disks = metrics["disks"].as_array().unwrap();
+        assert_eq!(disks.len(), 2);
+        assert_eq!(disks[0]["filesystem"], "E:");
+        assert_eq!(disks[0]["mount"], "/e");
+        assert_eq!(disks[1]["filesystem"], "C:/Program Files/Git");
+        assert_eq!(disks[1]["mount"], "/");
+        assert_eq!(disks[1]["totalBytes"], 100_955_784_u64 * 1024);
+        assert_eq!(disks[1]["percentUsed"], 60.0);
     }
 
     #[test]

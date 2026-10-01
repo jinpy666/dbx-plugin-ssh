@@ -63,7 +63,12 @@ const METRICS_SCRIPT: &str = concat!(
     "if [ \"$(uname -s 2>/dev/null)\" = Darwin ]; then df -i 2>/dev/null | tail -n +2 | head -n 24; ",
     "else df -iP 2>/dev/null | tail -n +2 | head -n 24; fi; ",
     "echo '--mem--'; ",
-    "if [ -r /proc/meminfo ]; then grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null; ",
+    // MemFree/Buffers/Cached are captured alongside MemAvailable so the
+    // parser's classic fallback (exec.rs) has real inputs on pre-3.14
+    // kernels and the MSYS /proc shim (Git-Bash sh on Windows) — neither
+    // carries MemAvailable, and without MemFree the fallback computes 0,
+    // which pins the local dock band's MEM at 100%.
+    "if [ -r /proc/meminfo ]; then grep -E '^(MemTotal|MemAvailable|MemFree|Buffers|Cached|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null; ",
     // macOS: total from hw.memsize (bytes -> kB); available = free + inactive
     // + speculative pages (vm_stat values carry a trailing dot); swap from
     // vm.swapusage in MB — all re-emitted in meminfo `Key: value kB` shape
@@ -853,6 +858,76 @@ mod tests {
         assert!(
             sample.get("gpu").is_none(),
             "gpu probe must stay ssh-only: {sample}"
+        );
+    }
+
+    #[test]
+    fn collector_grep_captures_memfree_for_the_available_fallback() {
+        // 解析端（exec.rs）缺 MemAvailable 时回退 free+buffers+cached；采集端
+        // 的 grep 必须把这三个键带出来，否则回退算出 0——MSYS（Windows 本地
+        // 终端经 Git-Bash sh）与 pre-3.14 内核都没有 MemAvailable，MEM 带会
+        // 恒定钉在 100%。本用例钉住脚本与解析器之间的这条契约。
+        let grep_pattern = METRICS_SCRIPT
+            .split("grep -E ")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').nth(1))
+            .expect("quoted meminfo grep pattern in script");
+        for key in ["MemTotal", "MemAvailable", "MemFree", "Buffers", "Cached"] {
+            assert!(
+                grep_pattern.contains(key),
+                "grep misses {key}: {grep_pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn msys_meminfo_shape_parses_with_nonzero_available() {
+        // 真实 MSYS（Git-Bash sh）/proc/meminfo 经采集 grep 后的准确形状：
+        // 只有 MemTotal/MemFree/SwapTotal/SwapFree，没有 MemAvailable。
+        // availableBytes 必须落在 MemFree 上，used 不得退化为 total。
+        let output = "\
+hostname=win-pc
+--mem--
+MemTotal:       16772124 kB
+MemFree:         9774672 kB
+SwapTotal:       2490368 kB
+SwapFree:        2452336 kB
+";
+        let sample = parse_metrics_output(output);
+        assert_eq!(sample["memory"]["totalBytes"], 16_772_124_u64 * 1024);
+        assert_eq!(sample["memory"]["availableBytes"], 9_774_672_u64 * 1024);
+        assert_eq!(
+            sample["memory"]["usedBytes"],
+            (16_772_124_u64 - 9_774_672) * 1024
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_collector_end_to_end_on_windows() {
+        // Windows 端到端（本仓库 CI 的 windows-regression 与本地开发机都带
+        // Git-Bash sh；PATH 里没有 sh 时跳过而非失败）：MEM 带的三个数值必须
+        // 满足 available > 0 且 used < total——这正是 MSYS 缺 MemAvailable 时
+        // 曾退化为 MEM=100% 的现场。
+        if std::process::Command::new("sh")
+            .arg("-c")
+            .arg("true")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no sh on PATH");
+            return;
+        }
+        let sample = collect_local_metrics().expect("local collector should run with sh present");
+        let memory = &sample["memory"];
+        let total = memory["totalBytes"].as_u64().expect("totalBytes");
+        let available = memory["availableBytes"].as_u64().expect("availableBytes");
+        let used = memory["usedBytes"].as_u64().expect("usedBytes");
+        assert!(total > 0, "totalBytes must be positive: {sample}");
+        assert!(available > 0, "availableBytes degenerated to 0: {sample}");
+        assert!(
+            used < total,
+            "usedBytes degenerated to total (MEM band pins at 100%): {sample}"
         );
     }
 

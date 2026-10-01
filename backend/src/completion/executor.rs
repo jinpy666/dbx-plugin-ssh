@@ -37,9 +37,16 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
+    // 用例与助手均限 unix（local 目标分派的端到端断言依赖 POSIX printf）；
+    // Windows 的 test target 里保持空模块，避免 unused/dead-code 撞 -D warnings。
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use serde_json::json;
 
+    // 唯一调用方是下方 #[cfg(unix)] 用例；Windows 的 test target 里是死代码，
+    // 会撞 -D warnings（CI 的 clippy 门禁跑在 Linux runner）。
+    #[cfg(unix)]
     fn local_request(command: &str, args: &[&str]) -> CompletionExecuteRequest {
         let mut req: CompletionExecuteRequest = serde_json::from_value(json!({
             "target": { "kind": "local", "sessionId": "wb-1" },
