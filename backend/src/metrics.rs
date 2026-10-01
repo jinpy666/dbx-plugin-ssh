@@ -120,13 +120,18 @@ pub async fn collect_metrics(handle: &Handle<SshClient>) -> Result<serde_json::V
 
 /// `local/metrics`: the same collector run through the sidecar host's own
 /// shell. Local terminals have no SSH session, so the dock panel's system
-/// band samples the local machine instead of a remote one. POSIX sh only
-/// (macOS/Linux); Windows has no bundled sh and fails with a structured
-/// error the UI hides the band on. GPU/NPU probes stay SSH-only — the base
-/// document omits both sections and [`project_metrics_sections`] treats
-/// missing keys like any other absent section.
+/// band samples the local machine instead of a remote one. POSIX sh only:
+/// macOS/Linux have one; on Windows it comes from Git-Bash (MSYS), whose
+/// /proc shim lacks MemAvailable — the parser's classic fallback (exec.rs)
+/// covers that shape. GPU/NPU probes stay SSH-only — the base document omits
+/// both sections and [`project_metrics_sections`] treats missing keys like
+/// any other absent section.
 pub fn collect_local_metrics() -> Result<serde_json::Value, String> {
-    let output = std::process::Command::new("sh")
+    collect_local_metrics_with_shell("sh")
+}
+
+fn collect_local_metrics_with_shell(shell: &str) -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new(shell)
         .arg("-c")
         .arg(METRICS_SCRIPT)
         .output()
@@ -866,18 +871,14 @@ mod tests {
         // 解析端（exec.rs）缺 MemAvailable 时回退 free+buffers+cached；采集端
         // 的 grep 必须把这三个键带出来，否则回退算出 0——MSYS（Windows 本地
         // 终端经 Git-Bash sh）与 pre-3.14 内核都没有 MemAvailable，MEM 带会
-        // 恒定钉在 100%。本用例钉住脚本与解析器之间的这条契约。
-        let grep_pattern = METRICS_SCRIPT
-            .split("grep -E ")
-            .nth(1)
-            .and_then(|rest| rest.split('\'').nth(1))
-            .expect("quoted meminfo grep pattern in script");
-        for key in ["MemTotal", "MemAvailable", "MemFree", "Buffers", "Cached"] {
-            assert!(
-                grep_pattern.contains(key),
-                "grep misses {key}: {grep_pattern}"
-            );
-        }
+        // 恒定钉在 100%。整段断言精确钉住 grep 模式，不做字符串切片手术
+        // （切片法在脚本新增第二个 grep -E 时会静默取错片段）。
+        assert!(
+            METRICS_SCRIPT.contains(
+                "grep -E '^(MemTotal|MemAvailable|MemFree|Buffers|Cached|SwapTotal|SwapFree):'",
+            ),
+            "meminfo grep must capture every key the parser's MemAvailable fallback reads"
+        );
     }
 
     #[test]
@@ -905,20 +906,36 @@ SwapFree:        2452336 kB
     #[cfg(windows)]
     #[test]
     fn local_collector_end_to_end_on_windows() {
-        // Windows 端到端（本仓库 CI 的 windows-regression 与本地开发机都带
-        // Git-Bash sh；PATH 里没有 sh 时跳过而非失败）：MEM 带的三个数值必须
-        // 满足 available > 0 且 used < total——这正是 MSYS 缺 MemAvailable 时
-        // 曾退化为 MEM=100% 的现场。
-        if std::process::Command::new("sh")
-            .arg("-c")
-            .arg("true")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipped: no sh on PATH");
+        // Windows 端到端：MEM 带的三个数值必须满足 available > 0 且 used <
+        // total——这正是 MSYS 缺 MemAvailable 时曾退化为 MEM=100% 的现场。
+        //
+        // sh 探测按候选顺序：PATH 之外再试 Git-Bash 标准安装路径——runner 与
+        // 常规开发机的 PATH 通常只有 Git\cmd（git.exe），sh.exe 所在的
+        // usr\bin 不在 PATH，且不能把整个 usr\bin 挂上去（coreutils 的
+        // link.exe 会抢占 MSVC 链接器，见 dbx-ssh-dev 技能的 Windows 故障
+        // 表）。CI（windows-regression）里 sh 必须可达，缺失即失败——静默
+        // 跳过会让这个双端修复的回归防线变成纸面；本地开发机允许跳过。
+        const SH_CANDIDATES: [&str; 3] = [
+            "sh",
+            "C:\\Program Files\\Git\\bin\\sh.exe",
+            "C:\\Program Files\\Git\\usr\\bin\\sh.exe",
+        ];
+        let sh = SH_CANDIDATES.into_iter().find(|sh| {
+            std::process::Command::new(sh)
+                .arg("-c")
+                .arg("true")
+                .output()
+                .is_ok()
+        });
+        let Some(sh) = sh else {
+            if std::env::var_os("CI").is_some() {
+                panic!("CI must provide a POSIX sh (Git-Bash); fix the environment, not this assertion");
+            }
+            eprintln!("skipped: no sh on PATH or standard Git-Bash install");
             return;
-        }
-        let sample = collect_local_metrics().expect("local collector should run with sh present");
+        };
+        let sample = collect_local_metrics_with_shell(sh)
+            .expect("local collector should run with sh present");
         let memory = &sample["memory"];
         let total = memory["totalBytes"].as_u64().expect("totalBytes");
         let available = memory["availableBytes"].as_u64().expect("availableBytes");
