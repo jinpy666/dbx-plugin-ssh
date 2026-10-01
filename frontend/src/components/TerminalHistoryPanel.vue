@@ -3,14 +3,16 @@
 // 快速选择的面板；选中即实时回填输入行不执行（键盘 ↑↓ 与点击，高亮与行
 // 内容一致，回车留给用户，Esc/底部再 ↓ 由 App 恢复原行）；悬停只浏览——
 // 不抢高亮、不改输入，选中只认点击。
-// 面板内搜索框（query 上抛 App 重过滤）：打开即聚焦，↑↓/Enter/Tab/Esc 经
-// panel-key 转发给 App 的面板按键处理（preventDefault 挡输入框默认行为），
-// 其余字符键进 query 实时过滤；Esc 关闭后焦点由 App 的 close 归还终端。
+// 面板内搜索框（query 上抛 App 重过滤）：**不自动聚焦**——面板打开后焦点留
+// 在命令行（#138 交互跟进：↑ 唤起即抢焦点会打断 shell 输入流），点击搜索框
+// 才聚焦，↑↓/Enter/Tab/Esc 经 panel-key 转发给 App 的面板按键处理
+// （preventDefault 挡输入框默认行为），字符键进 query 实时过滤；Esc 关闭后
+// 焦点由 App 的 close 归还终端。
 // 版式对标 Warp command history：占满终端宽度、底边贴输入行上一行向上展开
 // （光标贴顶等极端场景按既有 overlay 规则翻到下方），条目为 `>_` 提示符
 // 图标 + 命令文本 + 右侧相对时间。样式沿用 --popover/--border/--accent
 // 令牌体系随宿主主题，不引 reka 弹层——避免与 xterm 键盘捕获争焦点。
-import { computed, onMounted, ref, watchEffect } from "vue";
+import { computed, ref, watchEffect } from "vue";
 import { Search, Terminal as TerminalIcon, X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
 import type { HistoryPanelEntry } from "../lib/historyPanel";
@@ -42,17 +44,14 @@ const t = (key: string, values: Record<string, string | number> = {}) => workben
 
 const rootEl = ref<HTMLElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
-const searchEl = ref<HTMLInputElement | null>(null);
 
 watchEffect(() => {
   void props.entries.length;
 }, { flush: "post" });
 
-// 打开即聚焦搜索框（Warp 语义：面板 = 搜索/选择界面，打字即过滤）；焦点
-// 离开 xterm 后终端打字进 query，回填/关闭路径由 App 归还终端焦点。
-onMounted(() => {
-  searchEl.value?.focus({ preventScroll: true });
-});
+// 打开不抢焦点：焦点留在命令行（xterm textarea），↑↓/Enter/Esc 的键路在
+// App 的终端按键分支；搜索框仅点击聚焦后参与过滤（root 的 mousedown 守卫
+// 只挡行内焦点转移，不挡输入框）。
 
 /** 面板导航/回填/关闭键上抛 App 消费；字符键放行进搜索框。 */
 function onPanelKeydown(event: KeyboardEvent) {
@@ -113,7 +112,7 @@ function onRowMousedown(event: MouseEvent) {
 </script>
 
 <template>
-  <div ref="rootEl" class="terminal-history-panel" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="dialog" :aria-label="t('terminalHistory.title')" @mousedown.stop.prevent @contextmenu.stop>
+  <div ref="rootEl" class="terminal-history-panel" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="dialog" :aria-label="t('terminalHistory.title')" @mousedown.stop @contextmenu.stop>
     <div class="terminal-history-row">
       <span class="terminal-history-title">{{ titleText }}</span>
       <button type="button" class="terminal-history-btn" :title="t('terminalHistory.close')" :aria-label="t('terminalHistory.close')" @click="emit('close')"><X /></button>
@@ -121,7 +120,6 @@ function onRowMousedown(event: MouseEvent) {
     <div class="terminal-history-search">
       <Search class="terminal-history-search-icon" aria-hidden="true" />
       <input
-        ref="searchEl"
         class="terminal-history-search-input"
         type="text"
         :value="query"
@@ -142,7 +140,6 @@ function onRowMousedown(event: MouseEvent) {
           role="option"
           :aria-selected="index === activeIndex"
           :class="{ active: index === activeIndex }"
-          :title="entry.command"
           @mousedown="onRowMousedown($event)"
           @click="emit('select', entry.command)"
         >

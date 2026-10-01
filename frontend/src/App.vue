@@ -824,11 +824,11 @@ const searchResultIndex = ref(0);
 const searchResultCount = ref(0);
 // Quick Select Mode（WT-1，对标 WezTerm）：注册表动作 quick-select 唤起，
 // Warp 式 history 面板（↑ 唤起，对标 Warp command history）：commandHistory
-// 可视化快速回填（选中即回填不执行，行内容与面板高亮恒一致）。打开即聚焦
-// 面板内搜索框：↑↓/Enter/Tab/Esc
-// 由 App 的面板分支统一消费，字符键进搜索框实时过滤，其余按键放行。
+// 可视化快速回填（选中即回填不执行，行内容与面板高亮恒一致）。打开后焦点
+// 留在命令行（#138 交互跟进），↑↓/Enter/Tab/Esc 由 App 的面板分支统一消费；
+// 搜索框点击聚焦后字符键实时过滤，其余按键放行。
 const historyPanelOpen = ref(false);
-// 面板内搜索框的 query（开启期间焦点在输入框，打字即过滤；关闭随面板清空）。
+// 面板内搜索框的 query（点击聚焦后打字即过滤；关闭随面板清空）。
 const historyPanelQuery = ref("");
 const historyPanelEntries = ref<HistoryPanelEntry[]>([]);
 const historyPanelActiveIndex = ref(0);
@@ -2206,10 +2206,11 @@ function moveHistoryPanelActive(delta: number) {
   syncHistoryPanelLine();
 }
 
-/** 开启期间的过滤联动:只认搜索框 query(打开即聚焦,打字即过滤);重算
- *  条目后高亮置底(最新/最相关匹配,shell ↑ 语义),锚点跟随光标。syncLine
- *  仅搜索框驱动的重过滤置真——高亮变化同步进输入行;终端 onData 的无参
- *  重算路径不改行(用户正在终端打字,行内容不归面板管)。 */
+/** 开启期间的过滤联动:只认搜索框 query(点击聚焦后,打字即过滤;终端焦点
+ *  路径的打字进命令行,不过滤);重算条目后高亮置底(最新/最相关匹配,shell ↑
+ *  语义),锚点跟随光标。syncLine 仅搜索框驱动的重过滤置真——高亮变化同步进
+ *  输入行;终端 onData 的无参重算路径不改行(用户正在终端打字,行内容不归
+ *  面板管)。 */
 function updateHistoryPanelFilter(syncLine = false) {
   if (!historyPanelOpen.value) return;
   const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, historyPanelQuery.value), commandHistoryTimes.value);
@@ -2221,33 +2222,38 @@ function updateHistoryPanelFilter(syncLine = false) {
 
 /** 选中回填：抹掉当前行缓冲后写入命令文本，不回车（用户可再编辑/自行执行）。
  *  键盘导航路径行内容已同步，这里只做收起；点击路径兜底整行替换。 */
+/** 点击路径的选中回填：抹掉当前行缓冲后写入命令文本，不回车（用户可再
+ *  编辑/自行执行）。键盘导航路径不再经此——行内容已实时同步，Enter/Tab 在
+ *  handleHistoryPanelKey 按焦点来源分流，整行替换会覆盖用户对行的编辑。 */
 function selectHistoryEntry(command: string) {
   closeHistoryPanel();
   replaceTerminalLineWith(command, false);
 }
 
 /** 面板开启时的按键消费（键位→动作映射在 lib/historyPanel.resolveHistory
- *  PanelKey）：↑↓ 移动并实时同步行、Enter/Tab 确认回填、Esc/底部再 ↓ 取消
- *  恢复原行，其余按键放行。 */
-function handleHistoryPanelKey(event: KeyboardEvent): boolean {
+ *  PanelKey）：↑↓ 移动并实时同步行、Esc/底部再 ↓ 取消恢复原行，其余按键
+ *  放行。Enter/Tab 确认收起按焦点来源分流（#138 交互跟进）：命令行路径
+ *  return false 放行——行内容已与高亮实时同步，回车执行当前行（shell ↑
+ *  语义）、Tab 交远端补全；搜索框路径消费按键并归还终端焦点，不代执行。
+ *  两侧都不做整行替换——那会覆盖用户对行的编辑。 */
+function handleHistoryPanelKey(event: KeyboardEvent, fromSearchBox = false): boolean {
   if (event.type !== "keydown" || event.isComposing || event.keyCode === 229) return false;
   const action = resolveHistoryPanelKey(event.key, historyPanelActiveIndex.value, historyPanelEntries.value.length);
   if (!action) return false;
   if (action.kind === "move") moveHistoryPanelActive(action.delta);
-  else if (action.kind === "fill") {
-    const entry = historyPanelEntries.value[historyPanelActiveIndex.value];
-    if (entry) selectHistoryEntry(entry.command);
-    else closeHistoryPanel();
+  else if (action.kind === "fill" || action.kind === "close") {
+    closeHistoryPanel();
+    return fromSearchBox ? true : false;
   } else if (action.kind === "cancel") cancelHistoryPanelSelection();
   else closeHistoryPanel();
   return true;
 }
 
-/** 面板搜索框的键盘转发：焦点在输入框时导航/回填/关闭键由 App 的同一
- *  handleHistoryPanelKey 消费（preventDefault 挡住输入框的光标移动/焦点
- *  转移/表单提交），其余字符键放行进 query。 */
+/** 面板搜索框的键盘转发：焦点在输入框时导航/确认/关闭键由 App 的同一
+ *  handleHistoryPanelKey 以搜索框路径消费（preventDefault 挡住输入框的
+ *  光标移动/焦点转移/表单提交），其余字符键放行进 query。 */
 function handleHistoryPanelPanelKey(event: KeyboardEvent) {
-  if (handleHistoryPanelKey(event)) {
+  if (handleHistoryPanelKey(event, true)) {
     event.preventDefault();
     event.stopPropagation();
   }

@@ -103,8 +103,10 @@ describe("TerminalHistoryPanel", () => {
     expect(style).not.toContain("left");
   });
 
-  it("focuses the search input on mount and echoes the controlled query", () => {
-    // focus 生效要求真实挂进 document：默认 mount 只建离屏容器，activeElement 不会变。
+  it("leaves focus untouched on mount and echoes the controlled query", () => {
+    // #138 交互跟进：面板打开后焦点必须留在命令行（xterm textarea），搜索框
+    // 不自动抢焦点。activeElement 断言要求真实挂进 document（默认 mount 只建
+    // 离屏容器，activeElement 不会变）。
     const wrapper = mount(TerminalHistoryPanel, {
       attachTo: document.body,
       props: { locale: "en", entries, activeIndex: 0, anchor, query: "kubectl" },
@@ -112,7 +114,7 @@ describe("TerminalHistoryPanel", () => {
     const input = wrapper.find<HTMLInputElement>(".terminal-history-search-input");
     expect(input.element.value).toBe("kubectl");
     expect(input.attributes("placeholder")).toBe("Search history");
-    expect(document.activeElement).toBe(input.element);
+    expect(document.activeElement).not.toBe(input.element);
     wrapper.unmount();
   });
 

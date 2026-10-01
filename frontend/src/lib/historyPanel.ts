@@ -135,10 +135,12 @@ export function moveHistoryPanelIndex(index: number, delta: number, length: numb
 
 /** 面板开启期间的键位→动作映射（shell ↑ 语义，纯函数供单测；App 消费动作
  *  并把选中项实时回填输入行）。move=移动高亮；stay=消费但不动（顶部最旧
- *  一条再 ↑ 停住，不回绕到最新——readline 到最旧即止）；fill=确认当前高亮
- *  回填；cancel=取消导航：恢复打开前的原输入行并收起面板（Esc，以及底部
- *  最新一条再 ↓——越过最新回到原行，等价 shell 历史栈回退）；close=收起
- *  （空列表的 Enter/Tab 无可回填项）。返回 null 的按键不消费、放行远端。 */
+ *  一条再 ↑ 停住，不回绕到最新——readline 到最旧即止）；fill=确认收起——
+ *  行内容已与高亮实时同步，App 按焦点来源决定放行回车/Tab 归 shell 还是仅
+ *  收起（不做整行替换，避免覆盖行内编辑）；cancel=取消导航：恢复打开前的
+ *  原输入行并收起面板（Esc，以及底部最新一条再 ↓——越过最新回到原行，等价
+ *  shell 历史栈回退）；close=确认收起（空列表的 Enter/Tab 无高亮项）。返回
+ *  null 的按键不消费、放行远端。 */
 export type HistoryPanelKeyAction =
   | { kind: "move"; delta: -1 | 1 }
   | { kind: "stay" }

@@ -260,7 +260,8 @@ try {
   );
   await webglPage.close();
 
-  // --- Warp-style history panel: ↑ opens, typing filters, Enter fills only --
+  // --- Warp-style history panel: ↑ opens with focus kept on the terminal; --
+  // search box filters after click-focus; terminal Enter runs the line (#138).
   // 独立页面 + addInitScript 种子：commandHistory 水合在 App setup（晚于
   // addInitScript），mock 宿主 storage 的兜底档正是 window.localStorage。
   console.log("==> history panel walkthrough");
@@ -278,18 +279,31 @@ try {
   await historyPage.click(".terminal-host");
   await historyPage.keyboard.press("ArrowUp");
   await expect(historyPage, ".terminal-history-panel", "history panel opens on ArrowUp");
+  // #138 交互跟进：面板打开不抢焦点，光标留在命令行（xterm textarea）。
+  const focusOnLine = await historyPage.evaluate(() => document.activeElement?.classList?.contains("xterm-helper-textarea") === true);
+  check("focus stays on the terminal input line after ArrowUp", focusOnLine, `active=${await historyPage.evaluate(() => document.activeElement?.className ?? "null")}`);
   // mock PTY 启动回放会额外入一条 E 帧命令，计数不固定——只断言种子条目在列。
   await expectText(historyPage, ".terminal-history-hit", "echo ui-mock-history-a", "history panel lists the seeded history");
-  // 开启期间继续打字即过滤（行缓冲即 query）。
+  const unfilteredRows = await historyPage.locator(".terminal-history-hit").count();
+  // 终端焦点路径：打字进命令行（shell 语义），面板不过滤、列表保持原样。
+  await historyPage.keyboard.type("tail");
+  const rowsAfterLineTyping = await historyPage.locator(".terminal-history-hit").count();
+  check("terminal typing goes to the input line (panel stays unfiltered)", rowsAfterLineTyping === unfilteredRows, `rows=${rowsAfterLineTyping}/${unfilteredRows}`);
+  // 搜索框不再自动聚焦：点击聚焦后才过滤。
+  await historyPage.click(".terminal-history-search-input");
+  const focusOnSearch = await historyPage.evaluate(() => document.activeElement?.classList?.contains("terminal-history-search-input") === true);
+  check("clicking the search box focuses it", focusOnSearch, `active=${await historyPage.evaluate(() => document.activeElement?.className ?? "null")}`);
   await historyPage.keyboard.type("tail");
   const filteredRows = await historyPage.locator(".terminal-history-hit").count();
-  check("typing filters the panel to the single fuzzy hit", filteredRows === 1, `rows=${filteredRows}`);
+  check("search-box typing filters the panel to the single fuzzy hit", filteredRows === 1, `rows=${filteredRows}`);
   await expectText(historyPage, ".terminal-history-hit", "tail -f /var/log/ui-mock.log", "filtered entry text");
   await historyPage.screenshot({ path: `${SHOT_DIR}/04-history-panel.png`, fullPage: false }).catch(() => undefined);
-  // Enter 仅回填不执行：面板关闭、命令文本落在输入行（无 \r，mock 只回显）。
+  // Enter（搜索框路径）仅收起不执行：面板关闭、焦点归还终端（无 \r，mock 只回显）。
   await historyPage.keyboard.press("Enter");
   const panelsAfterEnter = await historyPage.locator(".terminal-history-panel").count();
-  check("Enter fills and closes the panel (no auto-run)", panelsAfterEnter === 0, `panels=${panelsAfterEnter}`);
+  check("Enter closes the panel without auto-run (search-box path)", panelsAfterEnter === 0, `panels=${panelsAfterEnter}`);
+  const focusBackOnLine = await historyPage.evaluate(() => document.activeElement?.classList?.contains("xterm-helper-textarea") === true);
+  check("focus returns to the terminal after search-box Enter", focusBackOnLine, `active=${await historyPage.evaluate(() => document.activeElement?.className ?? "null")}`);
   try {
     await historyPage.waitForFunction(
       () => document.querySelector(".terminal-host")?.textContent?.includes("tail -f /var/log/ui-mock.log"),
