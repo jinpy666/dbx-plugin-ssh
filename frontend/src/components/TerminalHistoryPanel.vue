@@ -14,6 +14,7 @@
 // 令牌体系随宿主主题，不引 reka 弹层——避免与 xterm 键盘捕获争焦点。
 import { computed, onMounted, ref, watchEffect } from "vue";
 import { Search, Terminal as TerminalIcon, X } from "@lucide/vue";
+import { formatCommandDuration } from "../lib/terminalCommandMarkers";
 import { workbenchMessage } from "../lib/i18n";
 import type { HistoryPanelEntry } from "../lib/historyPanel";
 import { chooseHistoryPanelPlacement, relativeHistoryAge } from "../lib/historyPanel";
@@ -155,6 +156,10 @@ function onRowMousedown(event: MouseEvent) {
         >
           <TerminalIcon class="terminal-history-prompt" aria-hidden="true" />
           <span class="terminal-history-command">{{ entry.command }}</span>
+          <!-- 富元数据（批 4d，Warp command search 同位）：时长 + 非零退出码
+               红色徽标；无 shell integration 的会话两列恒空不渲染。 -->
+          <span v-if="entry.durationMs != null" class="terminal-history-duration mono">{{ formatCommandDuration(entry.durationMs) }}</span>
+          <span v-if="entry.exitCode != null && entry.exitCode !== 0" class="terminal-history-exit">✗ {{ entry.exitCode }}</span>
           <span v-if="ageText(entry)" class="terminal-history-age">{{ ageText(entry) }}</span>
         </button>
       </li>
@@ -324,6 +329,28 @@ function onRowMousedown(event: MouseEvent) {
 }
 
 .terminal-history-hit.active .terminal-history-age {
+  color: var(--accent-foreground, inherit);
+  opacity: 0.75;
+}
+
+.terminal-history-duration {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.terminal-history-exit {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgb(239 68 68 / 16%);
+  color: rgb(239 68 68 / 90%);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.terminal-history-hit.active .terminal-history-duration {
   color: var(--accent-foreground, inherit);
   opacity: 0.75;
 }

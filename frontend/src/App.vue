@@ -295,8 +295,10 @@ import {
   filterHistoryEntries,
   moveHistoryPanelIndex,
   pruneHistoryTimes,
+  recordHistoryMeta,
   recordHistoryTime,
   resolveHistoryPanelKey,
+  sanitizeHistoryMeta,
   sanitizeHistoryTimes,
   type HistoryPanelEntry,
 } from "./lib/historyPanel";
@@ -503,6 +505,7 @@ const COMMAND_HISTORY_KEY = "ssh-command-history";
 // 执行时刻。不改 commandHistory（string[]）的形状——suggestion/ghost/命令弹窗
 // 多处消费零波及；时间只有面板用。
 const COMMAND_HISTORY_TIMES_KEY = "ssh-command-history-times";
+const COMMAND_HISTORY_META_KEY = "ssh-command-history-meta";
 // 终端字号/字体族键移入 lib/terminalFont.ts（issue #31 字体单独设置）统一管理。
 // SFTP 面板默认打开偏好：pluginStore 全局持久化（"false" = 新工作台仅终端）。
 const SFTP_PANE_OPEN_KEY = "ssh-sftp-pane-open";
@@ -734,6 +737,9 @@ const commandRunning = ref(false);
 const commandHistory = ref<string[]>(loadCommandHistory());
 // 命令 → 最近执行时刻（Warp 式 history 面板相对时间的数据面），与命令环同采集口推进。
 const commandHistoryTimes = ref<Record<string, number>>(loadCommandHistoryTimes());
+// 富元数据映射（批 4d，Warp command search 同位）：命令 → {时长, 退出码}，
+// OSC 633 D 帧写入；并行结构与时间映射同款，随其持久化。
+const commandHistoryMeta = ref<Record<string, import("./lib/historyPanel").HistoryMetaRow>>(loadCommandHistoryMeta());
 const commandHistoryIndex = ref(-1);
 const commandHistoryBackup = ref("");
 // 快速命令：用户自定义片段（≤20 条），全局存储在插件数据目录（sidecar），
@@ -2212,7 +2218,7 @@ function openHistoryPanel(focusSearch = false) {
   // 一次;loadRemoteShellHistory 按会话去重,成功过即跳过。
   const panelSessionId = session.value?.sessionId;
   if (panelSessionId && !isLocalMode.value) void loadRemoteShellHistory(panelSessionId);
-  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, ""), commandHistoryTimes.value);
+  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, ""), commandHistoryTimes.value, commandHistoryMeta.value);
   historyPanelEntries.value = next;
   // shell ↑ 语义:初始高亮最底部(最新执行的命令),↑ 一直往上翻更旧的;
   // 打开即回填——按下 ↑ 的瞬间输入行就出现最新一条,与 shell 完全一致。
@@ -2266,7 +2272,7 @@ function moveHistoryPanelActive(delta: number) {
  *  面板管)。 */
 function updateHistoryPanelFilter(syncLine = false) {
   if (!historyPanelOpen.value) return;
-  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, historyPanelQuery.value), commandHistoryTimes.value);
+  const next = decorateHistoryEntries(filterHistoryEntries(commandHistory.value, historyPanelQuery.value), commandHistoryTimes.value, commandHistoryMeta.value);
   historyPanelEntries.value = next;
   historyPanelActiveIndex.value = clampHistoryPanelIndex(next.length - 1, next.length);
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
@@ -2658,6 +2664,24 @@ function applyCommandMarker(updates: Osc633StreamUpdates) {
   }
   if (updates.lastExitCode !== undefined && updates.lastExitCode !== null) commandMarker.exitCode = updates.lastExitCode;
   if (updates.lastCommandDuration !== undefined) commandMarker.durationMs = updates.lastCommandDuration;
+  // 富元数据采集（批 4d）：D 帧的退出码/时长归档到命令 → 元数据映射（Warp
+  // command search 的时长/退出码列）；合并写（两值分帧到达），随时间映射同款
+  // 存续集淘汰 + 持久化。
+  if ((updates.lastExitCode !== undefined && updates.lastExitCode !== null) || updates.lastCommandDuration !== undefined) {
+    const command = commandMarker.command;
+    if (command) {
+      commandHistoryMeta.value = recordHistoryMeta(
+        commandHistoryMeta.value,
+        command,
+        {
+          exitCode: updates.lastExitCode !== undefined && updates.lastExitCode !== null ? updates.lastExitCode : undefined,
+          durationMs: updates.lastCommandDuration ?? undefined,
+        },
+        new Set(commandHistory.value),
+      );
+      persistCommandHistoryMeta();
+    }
+  }
   if (updates.cwd !== undefined) {
     commandMarker.cwd = updates.cwd;
     if (updates.cwd) terminalCwd.value = updates.cwd;
@@ -5834,6 +5858,24 @@ function persistCommandHistoryTimes() {
     pluginStore.setItem(COMMAND_HISTORY_TIMES_KEY, JSON.stringify(pruneHistoryTimes(commandHistoryTimes.value, commandHistory.value)));
   } catch {
     // 存储不可用时时间戳仅保留在内存中（面板回退为不显示时间）。
+  }
+}
+
+function loadCommandHistoryMeta(): Record<string, import("./lib/historyPanel").HistoryMetaRow> {
+  try {
+    return sanitizeHistoryMeta(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_META_KEY) || "null"));
+  } catch {
+    return {};
+  }
+}
+
+function persistCommandHistoryMeta() {
+  try {
+    const live = new Set(commandHistory.value);
+    const pruned = Object.fromEntries(Object.entries(commandHistoryMeta.value).filter(([command]) => live.has(command)));
+    pluginStore.setItem(COMMAND_HISTORY_META_KEY, JSON.stringify(Object.entries(pruned).map(([c, row]) => ({ c, d: row.durationMs, x: row.exitCode }))));
+  } catch {
+    // 存储不可用时元数据仅保留在内存中（面板回退为不显示时长/退出码）。
   }
 }
 

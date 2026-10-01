@@ -8,6 +8,8 @@ import {
   chooseHistoryPanelPlacement,
   clampHistoryPanelIndex,
   decorateHistoryEntries,
+  recordHistoryMeta,
+  sanitizeHistoryMeta,
   filterHistoryEntries,
   moveHistoryPanelIndex,
   pruneHistoryTimes,
@@ -159,9 +161,42 @@ describe("history times (Warp 式相对时间的数据面)", () => {
 
   it("decorateHistoryEntries attaches timestamps, null when unknown", () => {
     expect(decorateHistoryEntries(["ls", "cd .."], { ls: 42 })).toEqual([
-      { command: "ls", ts: 42 },
-      { command: "cd ..", ts: null },
+      { command: "ls", ts: 42, durationMs: null, exitCode: null },
+      { command: "cd ..", ts: null, durationMs: null, exitCode: null },
     ]);
+  });
+});
+
+describe("history meta (批 4d 富元数据: 时长/退出码)", () => {
+  it("sanitizeHistoryMeta keeps valid rows, drops invalid, caps at limit", () => {
+    const meta = sanitizeHistoryMeta([
+      { c: "ls -la", d: 1200, x: 0 },
+      { c: "fail", x: 1 },
+      { c: "timed", d: 500 },
+      { c: "", d: 1 },
+      { c: "norow" },
+      "junk",
+    ]);
+    expect(meta).toEqual({
+      "ls -la": { durationMs: 1200, exitCode: 0 },
+      fail: { durationMs: null, exitCode: 1 },
+      timed: { durationMs: 500, exitCode: null },
+    });
+    expect(sanitizeHistoryMeta("junk")).toEqual({});
+  });
+
+  it("recordHistoryMeta merges partial patches and prunes to live commands", () => {
+    const live = new Set(["ls", "gone"]);
+    let meta = recordHistoryMeta({}, "ls", { exitCode: 0 }, live);
+    meta = recordHistoryMeta(meta, "ls", { durationMs: 300 }, live);
+    meta = recordHistoryMeta(meta, "gone", { exitCode: 2 }, live);
+    meta = recordHistoryMeta(meta, "unknown", { exitCode: 9 }, live);
+    expect(meta).toEqual({ ls: { durationMs: 300, exitCode: 0 }, gone: { durationMs: null, exitCode: 2 } });
+  });
+
+  it("decorateHistoryEntries carries meta into panel rows", () => {
+    const entries = decorateHistoryEntries(["fail"], {}, { fail: { durationMs: 1500, exitCode: 1 } });
+    expect(entries).toEqual([{ command: "fail", ts: null, durationMs: 1500, exitCode: 1 }]);
   });
 });
 

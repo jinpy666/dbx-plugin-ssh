@@ -335,6 +335,23 @@ try {
   const panelsAfterHotkeyEsc = await historyPage.locator(".terminal-history-panel").count();
   check("Escape closes the hotkey-opened panel", panelsAfterHotkeyEsc === 0, `panels=${panelsAfterHotkeyEsc}`);
 
+  // 富元数据（批 4d，Warp command search）：mock 夹具 curl 命令 D 帧退出码 28
+  // → 重开面板应渲染 ✗ 28 红徽标。
+  await historyPage.keyboard.press("ArrowUp");
+  await expect(historyPage, ".terminal-history-panel", "history panel reopens for meta check");
+  try {
+    await historyPage.waitForFunction(
+      () => Array.from(document.querySelectorAll(".terminal-history-exit")).some((el) => el.textContent?.includes("28")),
+      null,
+      { timeout: 10_000 },
+    );
+    console.log('  ok  failed command shows the exit-code badge ("✗ 28")');
+  } catch {
+    failures.push('exit-code badge missing for the failed mock command');
+    console.log("  FAIL exit-code badge");
+  }
+  await historyPage.keyboard.press("Escape");
+
   // --- inline ghost (batch 2, P0-C): prefix hits go to ghost, not the -----
   // --- fuzzy overlay; Ctrl+→ accepts one word, → accepts the remainder. ---
   // 同页续用（历史已种子）。注意先回车清行：前段走查中 ↑ 同步进输入行的

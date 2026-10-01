@@ -13,15 +13,79 @@ export const HISTORY_PANEL_LIMIT = 50;
 /** 执行时间映射的容量上限（与 commandHistory 环形同额），超出按时间淘汰最旧。 */
 export const HISTORY_TIMES_LIMIT = 100;
 
-/** 面板条目：命令文本 + 最近一次执行时间（旧数据/未知来源无时间戳）。 */
+/** 面板条目：命令文本 + 最近执行时间 + 富元数据（批 4d，Warp command search
+ *  同位：执行时长 / 退出码；旧数据或无 shell integration 会话两值皆空）。 */
 export interface HistoryPanelEntry {
   command: string;
   ts: number | null;
+  durationMs: number | null;
+  exitCode: number | null;
 }
 
-/** 给过滤后的命令列表补时间戳（Warp 式右侧相对时间）。 */
-export function decorateHistoryEntries(commands: readonly string[], times: Readonly<Record<string, number>>): HistoryPanelEntry[] {
-  return commands.map((command) => ({ command, ts: times[command] ?? null }));
+/** 给过滤后的命令列表补时间戳与元数据（Warp 式右侧相对时间 + 时长/退出码）。 */
+export function decorateHistoryEntries(
+  commands: readonly string[],
+  times: Readonly<Record<string, number>>,
+  meta: Readonly<Record<string, HistoryMetaRow>> = {},
+): HistoryPanelEntry[] {
+  return commands.map((command) => {
+    const row = meta[command];
+    return { command, ts: times[command] ?? null, durationMs: row?.durationMs ?? null, exitCode: row?.exitCode ?? null };
+  });
+}
+
+// —— 富元数据映射（批 4d，并行结构与时间映射同款）：命令 → {时长, 退出码}。
+// OSC 633 D 帧的 lastCommandDuration/lastExitCode 在 applyCommandMarker 写入；
+// 无 shell integration 的会话（无 D 帧）两值恒空，面板不渲染这两列。
+
+export interface HistoryMetaRow {
+  durationMs: number | null;
+  exitCode: number | null;
+}
+
+export const HISTORY_META_LIMIT = 100;
+
+/** 解析持久化的元数据映射：仅保留合法键值对并按容量截断。 */
+export function sanitizeHistoryMeta(raw: unknown, limit = HISTORY_META_LIMIT): Record<string, HistoryMetaRow> {
+  if (!Array.isArray(raw)) return {};
+  const out: Record<string, HistoryMetaRow> = {};
+  const rows: Array<[string, HistoryMetaRow]> = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const { c, d, x } = item as { c?: unknown; d?: unknown; x?: unknown };
+    if (typeof c !== "string" || !c.trim()) continue;
+    const durationMs = typeof d === "number" && Number.isFinite(d) && d >= 0 ? d : null;
+    const exitCode = typeof x === "number" && Number.isFinite(x) ? x : null;
+    if (durationMs === null && exitCode === null) continue;
+    rows.push([c, { durationMs, exitCode }]);
+  }
+  for (const [command, row] of rows.slice(-limit)) out[command] = row;
+  return out;
+}
+
+/** 记录一条元数据：合并写（时长与退出码可能分两次到达），按时间映射的存续
+ *  命令集淘汰最旧。 */
+export function recordHistoryMeta(
+  meta: Readonly<Record<string, HistoryMetaRow>>,
+  command: string,
+  patch: Partial<HistoryMetaRow>,
+  liveCommands: ReadonlySet<string>,
+  limit = HISTORY_META_LIMIT,
+): Record<string, HistoryMetaRow> {
+  const trimmed = command.trim();
+  if (!trimmed || !liveCommands.has(trimmed)) return { ...meta };
+  const previous = meta[trimmed] ?? { durationMs: null, exitCode: null };
+  const next: Record<string, HistoryMetaRow> = {};
+  for (const [key, row] of Object.entries(meta)) {
+    if (key !== trimmed && liveCommands.has(key)) next[key] = row;
+  }
+  next[trimmed] = {
+    durationMs: patch.durationMs !== undefined ? patch.durationMs : previous.durationMs,
+    exitCode: patch.exitCode !== undefined ? patch.exitCode : previous.exitCode,
+  };
+  const entries = Object.entries(next);
+  if (entries.length <= limit) return next;
+  return Object.fromEntries(entries.slice(-limit));
 }
 
 // —— 执行时间映射（pluginStore 键 ssh-command-history-times 的内存形态）——

@@ -694,8 +694,10 @@ const shellIntegrationCycle = [
   "user@server:~$ cat /etc/nope; bash xyz\r\n",
   "cat: /etc/nope: No such file or directory\r\n",
   "bash: xyz: command not found\r\n",
+  `${OSC_633}E;curl -m 3 http://10.0.0.12:8080/health${BEL}`,
   "user@server:~$ curl -m 3 http://10.0.0.12:8080/health\r\n",
   "curl: (28) Connection timed out\r\n",
+  `${OSC_633}D;28${BEL}`,
   `${OSC_633}A${BEL}`,
   "user@server:~$ ",
 ].join("");
