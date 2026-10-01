@@ -392,6 +392,8 @@ try {
     );
     ghostAfterWord = await historyPage.locator(".terminal-ghost > span[aria-hidden]").textContent() ?? "";
   } catch {
+    // 抖动兜底：mock 回显 RTT 偶发让瞬时读取落空，缓冲后重读一次。
+    await sleep(1_200);
     ghostAfterWord = await historyPage.locator(".terminal-ghost > span[aria-hidden]").textContent().catch(() => "") ?? "";
   }
   check("Ctrl+→ accepts one word (remainder shrinks)", ghostAfterWord === " ui-mock-history-a", `ghost="${ghostAfterWord}"`);
@@ -399,6 +401,29 @@ try {
   await sleep(600);
   const ghostAfterFull = await historyPage.locator(".terminal-ghost").count();
   check("→ accepts the whole remainder (ghost disappears)", ghostAfterFull === 0, `ghost=${ghostAfterFull}`);
+  // Ctrl+F 整段接受（Warp 口径第二键；readline forward-char 等价截获）。
+  await historyPage.keyboard.press("Enter");
+  await sleep(600);
+  await historyPage.click(".terminal-host");
+  await historyPage.keyboard.type("ec");
+  try {
+    await historyPage.waitForFunction(() => !!document.querySelector(".terminal-ghost"), null, { timeout: 10_000 });
+  } catch { /* ghost miss handled below */ }
+  await historyPage.keyboard.press("Control+f");
+  await sleep(600);
+  const ghostAfterCtrlF = await historyPage.locator(".terminal-ghost").count();
+  check("Ctrl+F accepts the whole remainder (Warp second key)", ghostAfterCtrlF === 0, `ghost=${ghostAfterCtrlF}`);
+  try {
+    await historyPage.waitForFunction(
+      () => document.querySelector(".terminal-host")?.textContent?.includes("echo ui-mock-history-a"),
+      null,
+      { timeout: 10_000 },
+    );
+    console.log('  ok  Ctrl+F accepted ghost echoed into the input line');
+  } catch {
+    failures.push("Ctrl+F accepted ghost not echoed");
+    console.log("  FAIL Ctrl+F ghost echo");
+  }
   try {
     await historyPage.waitForFunction(
       () => document.querySelector(".terminal-host")?.textContent?.includes("echo ui-mock-history-a"),

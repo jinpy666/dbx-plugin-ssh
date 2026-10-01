@@ -72,6 +72,7 @@ function mountSettings(sessionId?: string) {
     attachTo: document.body,
     props: {
       open: false,
+  ghostTabAccept: false,
       profilesOpen: false,
       sessionId,
       terminalFontSize: 14,
@@ -176,7 +177,10 @@ describe("SettingsDialog 会话级门控", () => {
     expect(document.body.querySelector('div.task-error[role="alert"]'), "不出「SSH 设置加载失败」横幅").toBeNull();
 
     const nav = navLabels();
-    expect(nav).toHaveLength(9);
+    // 2026-10 反馈迭代：命令建议（suggestions）从终端分栏拆出独立成栏。
+    expect(nav).toHaveLength(10);
+    // 命令建议是全局分类（本地终端同样可用）；sudo/智能体才是会话级隐藏。
+    expect(nav).toContain(workbenchMessage("zh-CN", "settingsNav.suggestions"));
     for (const labelKey of ["settingsNav.sudo", "agentTerminalSection"]) {
       expect(nav).not.toContain(workbenchMessage("zh-CN", labelKey));
     }
@@ -193,8 +197,9 @@ describe("SettingsDialog 会话级门控", () => {
     expect(getCalls[0]![1]).toMatchObject({ sessionId: "sess-1", revealSecrets: true });
 
     const nav = navLabels();
-    expect(nav).toHaveLength(11);
-    for (const labelKey of ["settingsNav.sudo", "agentTerminalSection"]) {
+    // 同上：命令建议独立成栏后 SSH 会话导航 12 项。
+    expect(nav).toHaveLength(12);
+    for (const labelKey of ["settingsNav.suggestions", "settingsNav.sudo", "agentTerminalSection"]) {
       expect(nav).toContain(workbenchMessage("zh-CN", labelKey));
     }
     wrapper.unmount();

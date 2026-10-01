@@ -329,6 +329,8 @@ const props = defineProps<{
   localShell: string;
   /** 终端行为偏好（对标 Tabby「Terminal」页）：权威态在 App，本组件只读 + 上抛增量。 */
   terminalBehavior: TerminalBehaviorSettings;
+  /** ghost 接受键（批 4e/反馈迭代）：权威态在 App，本组件只读 + 上抛改动。 */
+  ghostTabAccept: boolean;
   /** 终端快捷键绑定（对标 Tabby「Hotkeys」页）：权威态在 App。 */
   terminalHotkeys: TerminalHotkeyBindings;
   /** 是否 Apple 平台：决定快捷键修饰键的显示符号与默认键位口径。 */
@@ -413,6 +415,7 @@ const emit = defineEmits<{
   (e: "set-local-shell", program: string): void;
   /** 行内 ghost 自动建议开关（组件自治持久化 pluginStore，App 只同步内存态）。 */
   (e: "update:ghostSuggest", value: boolean): void;
+  (e: "update:ghostTabAccept", value: boolean): void;
   /** 行为设置局部增量：App 侧会归一化 + 持久化 + 即时落地到 xterm 选项。 */
   (e: "update-behavior", patch: Partial<TerminalBehaviorSettings>): void;
   /** 快捷键整表替换（编辑器内部管理增删改，只上抛最终结果）。 */
@@ -455,6 +458,9 @@ const SETTINGS_CATEGORIES = [
   { id: "appearance", labelKey: "settingsNav.appearance" },
   { id: "scheme", labelKey: "settingsNav.scheme" },
   { id: "terminal", labelKey: "settingsNav.terminal" },
+  // 从 Terminal 分栏拆出（#138 反馈：建议/补全/ghost 配置挤在终端页难找）：
+  // 历史建议 + 结构化补全引擎 + 行内 ghost + 忽略列表 + 接受键换绑集中在此。
+  { id: "suggestions", labelKey: "settingsNav.suggestions" },
   // 从 Terminal 分栏拆出（内容过大且与终端行为关联性弱）：高亮规则是规则
   // 管理器、快速命令是片段管理器，各自独立成栏，导航标签复用现有键。
   { id: "highlight", labelKey: "highlightRules.title" },
@@ -527,6 +533,7 @@ function refreshSuggestionBlocklistCount() {
   suggestionBlocklistCount.value = loadSuggestionBlocklist().length;
 }
 watch(() => props.open, (open) => { if (open) refreshSuggestionBlocklistCount(); }, { immediate: true });
+const GHOST_ACCEPT_KEY_SETTING_VALUES = new Set(["ArrowRight", "CtrlArrowRight", "ShiftArrowRight", "Tab"]);
 function clearSuggestionBlocklistFromSettings() {
   clearSuggestionBlocklist();
   refreshSuggestionBlocklistCount();
@@ -2066,6 +2073,11 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("connNameEncoding.hint") }}</p>
             </template>
+            </div>
+            <!-- 命令建议独立分栏：从 Terminal 分栏拆出（#138 反馈——建议/补全/ghost
+                 配置挤在终端页难找）。历史建议 + 结构化补全 + 行内 ghost 三组
+                 配置与忽略列表、接受键换绑在此集中管理。 -->
+            <div v-show="settingsCategory === 'suggestions'" class="settings-pane">
 
             <h3 class="settings-section-title">{{ t("suggestions.settingsTitle") }}</h3>
             <label class="settings-field settings-switch-row">
@@ -2109,7 +2121,14 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <span>{{ t("terminalGhost.label") }}</span>
             </label>
             <p class="muted settings-note">{{ t("terminalGhost.hint") }}</p>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="ghostTabAccept" size="sm" @update:model-value="emit('update:ghostTabAccept', Boolean($event))" />
+              <span>{{ t("terminalGhost.tabAccept") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("terminalGhost.tabAcceptHint") }}</p>
+            <p class="muted settings-note">{{ t("terminalGhost.keysSummary") }}</p>
             </div>
+
 
             <!-- 关键词高亮独立分栏：从 Terminal 分栏拆出（规则管理器与终端行为
                  设置关联性弱），规则增删改/启停在此管理，终端渲染效果实时生效

@@ -194,23 +194,31 @@ try {
   console.log("==> settings: category order");
   await openSettings();
   const navTexts = (await page.locator(".settings-nav-item").allTextContents()).map((t) => t.trim());
-  // 走查环境带活跃 mock 会话：会话级分类 sudo / 智能体在导航可见（11 项）。
-  // 本地终端（无 sessionId）下这两类隐藏、导航 9 项——由 SettingsDialog.spec
+  // 走查环境带活跃 mock 会话：会话级分类 sudo / 智能体在导航可见（12 项）。
+  // 本地终端（无 sessionId）下这两类隐藏、导航 10 项——由 SettingsDialog.spec
   // 组件用例覆盖，浏览器走查没有无会话的设置入口。
-  check("eleven settings categories", navTexts.length === 11, JSON.stringify(navTexts));
+  // 2026-10 反馈迭代：命令建议（Command suggestions）从 Terminal 拆出独立成栏。
+  check("twelve settings categories", navTexts.length === 12, JSON.stringify(navTexts));
   check(
     "terminal categories come first, in Tabby order",
-    navTexts[0] === "Appearance" && navTexts[1] === "Color scheme" && navTexts[3] === "Keyword highlighting" && navTexts[4] === "Quick commands" && navTexts[5] === "Hotkeys",
-    JSON.stringify(navTexts.slice(0, 6)),
+    navTexts[0] === "Appearance" && navTexts[1] === "Color scheme" && navTexts[3] === "Command suggestions" && navTexts[4] === "Keyword highlighting" && navTexts[5] === "Quick commands" && navTexts[6] === "Hotkeys",
+    JSON.stringify(navTexts.slice(0, 7)),
   );
 
-  console.log("==> 关键词高亮 pane（从 Terminal 拆出的规则管理器）");
+  console.log("==> 命令建议 pane（从 Terminal 拆出，#138 反馈）");
   await openCategory(3);
+  const suggestionSections = await visibleSections();
+  check("suggestion pane has the suggestions section", suggestionSections.includes("Command suggestions"), JSON.stringify(suggestionSections));
+  check("suggestion pane exposes the accept-key select", (await page.locator(".settings-pane:visible .settings-field", { hasText: "Accept key" }).locator("select, [role='combobox']").count()) > 0);
+  await page.screenshot({ path: join(SHOT_DIR, "03b-suggestions.png") });
+
+  console.log("==> 关键词高亮 pane（从 Terminal 拆出的规则管理器）");
+  await openCategory(4);
   check("highlight pane renders the rules editor", (await page.locator(".settings-pane:visible .highlight-rule-list, .settings-pane:visible .highlight-editor").count()) > 0);
   await page.screenshot({ path: join(SHOT_DIR, "02b-keyword-highlighting.png") });
 
   console.log("==> 快速命令 pane（从 Terminal 拆出的片段管理器）");
-  await openCategory(4);
+  await openCategory(5);
   check("quick-commands pane renders the manager", (await page.locator(".settings-pane:visible .quick-commands-section").count()) === 1);
   await page.screenshot({ path: join(SHOT_DIR, "02c-quick-commands.png") });
 
@@ -265,7 +273,7 @@ try {
   await page.screenshot({ path: join(SHOT_DIR, "03-terminal.png") });
 
   console.log("==> 快捷键 pane: editor surface");
-  await openCategory(5);
+  await openCategory(6);
   const hotkeyRows = page.locator(".settings-pane:visible .hotkey-row");
   check("twelve bindable actions (incl. quick-select / command-history)", (await hotkeyRows.count()) === 12, String(await hotkeyRows.count()));
   const groupTitles = await page.locator(".settings-pane:visible .hotkey-group .settings-section-title").allTextContents();
@@ -357,7 +365,7 @@ try {
   const MOD = APPLE ? "Meta" : "Control";
   const DEFAULT_SEARCH_CHORD = APPLE ? `${MOD}+f` : `${MOD}+Shift+f`;
 
-  await openCategory(5);
+  await openCategory(6);
   const searchRowAgain = page.locator(".settings-pane:visible .hotkey-row", { hasText: "Find in terminal" });
   const searchChipsBefore = (await searchRowAgain.locator(".hotkey-chip").allTextContents()).map((t) => t.trim());
   await searchRowAgain.locator(".hotkey-chip").first().click();
@@ -412,7 +420,7 @@ try {
   // The dispatch group above closed the dialog to focus the terminal, so the
   // settings surface has to be reopened before touching the category nav again.
   await openSettings();
-  await openCategory(10);
+  await openCategory(11);
   const approvalField = page.locator(".settings-pane:visible label.settings-field", { hasText: "MCP execution approval" });
   check("MCP execution-approval field rendered", (await approvalField.count()) === 1);
   if (await approvalField.count()) {
@@ -451,8 +459,8 @@ try {
   const zhNav = (await zhPage.locator(".settings-nav-item").allTextContents()).map((t) => t.trim());
   check(
     "zh-CN nav translates the new categories",
-    zhNav[0] === "外观" && zhNav[1] === "配色方案" && zhNav[3] === "关键词高亮" && zhNav[5] === "快捷键",
-    JSON.stringify(zhNav.slice(0, 4)),
+    zhNav[0] === "外观" && zhNav[1] === "配色方案" && zhNav[3] === "命令建议" && zhNav[4] === "关键词高亮" && zhNav[6] === "快捷键",
+    JSON.stringify(zhNav.slice(0, 7)),
   );
   await zhPage.close();
 

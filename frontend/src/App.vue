@@ -132,7 +132,7 @@ import {
 import { isPersistableCommand, mergeShellHistory, parseShellHistoryText, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
-import { loadGhostAcceptKey, matchesGhostAcceptKey, saveGhostAcceptKey, type GhostAcceptKey } from "./lib/ghostAcceptKey";
+import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, saveGhostTabAccept } from "./lib/ghostAcceptKey";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
@@ -547,22 +547,16 @@ const transferCompressThresholdState = ref(64);
 const suggestionsEnabledState = ref(true);
 const suggestionMinCharsState = ref(1);
 const suggestionMaxCharsState = ref(64);
-// ghost 接受键（批 4e，可配置）：权威值 pluginStore，内存态供按键分支与
-// 设置页键位胶囊回显；SettingsDialog 上抛改动即时生效。
-const ghostAcceptKey = ref(loadGhostAcceptKey());
+// ghost 接受键（Warp 多键模型）：→ / Ctrl+F / Ctrl+E 整段、Ctrl+→ 逐词恒可用
+// （lib/ghostAcceptKey.ts 匹配矩阵）；唯一可配置项是「Tab 接受建议」开关
+// （Warp Tab key behavior），pluginStore 权威 + 内存态供按键分支与键帽回显。
+const ghostTabAccept = ref(loadGhostTabAccept());
 // 键位胶囊（Warp accept-autosuggestion-hint 同位）的下拉菜单与展示标签。
 const ghostKeycapMenuOpen = ref(false);
-const GHOST_ACCEPT_KEY_OPTIONS: ReadonlyArray<{ value: GhostAcceptKey; label: string }> = [
-  { value: "ArrowRight", label: "→" },
-  { value: "CtrlArrowRight", label: "Ctrl+→" },
-  { value: "ShiftArrowRight", label: "Shift+→" },
-  { value: "Tab", label: "Tab" },
-];
-const ghostAcceptKeyLabel = computed(() => GHOST_ACCEPT_KEY_OPTIONS.find((option) => option.value === ghostAcceptKey.value)?.label ?? "→");
-function setGhostAcceptKey(value: GhostAcceptKey) {
-  ghostAcceptKey.value = value;
-  ghostKeycapMenuOpen.value = false;
-  saveGhostAcceptKey(value);
+const ghostAcceptKeyLabel = computed(() => (ghostTabAccept.value ? "Tab" : "→"));
+function setGhostTabAccept(value: boolean) {
+  ghostTabAccept.value = value;
+  saveGhostTabAccept(value);
 }
 
 function sanitizeConflictPolicy(value: unknown): DownloadConflictPolicy {
@@ -1931,34 +1925,31 @@ function handleTerminalKey(event: KeyboardEvent) {
   };
   // IME 组合中不出 ghost（组合文本尚未落行；提交后的 onData 会重算）。
   if (event.isComposing || event.keyCode === 229) hideGhostSuggestion();
-  // ghost 逐词接受（Ctrl+→，Windows/Linux 的 Ctrl+Shift+→ 同收；对标 Warp
-  // word-accept）：只注入剩余文本的首个「空白串 + 词」块。#138 批 2 起与
-  // 结构化补全菜单同屏共存——菜单只占用 ↑↓/Tab/Esc，带修饰的 → 归 ghost。
-  // 配置接受键为 Ctrl+→ 时该键归整段接受，逐词让位（批 4e：一键一义）。
+  // ghost 逐词接受（Ctrl+→ / Ctrl+Shift+→，macOS / Windows·Linux 同收；
+  // Warp word-accept）：只注入剩余文本的首个「空白串 + 词」块。#138 批 2 起
+  // 与结构化补全菜单同屏共存——菜单只占用 ↑↓/Tab/Esc，带修饰的 → 归 ghost。
   // 复查 commandRunning/传输占用（与 evaluateGhost 同门）：update 与 accept
   // 之间远端可能已开跑（回车竞态），不能把剩余字节打进运行中的命令。
   if (
     ghostMatch.value &&
     !suggestionOpen.value &&
-    event.key === "ArrowRight" &&
-    event.ctrlKey &&
-    !event.metaKey &&
-    !event.altKey &&
-    ghostAcceptKey.value !== "CtrlArrowRight" &&
+    matchesGhostWordAccept(event.key, event) &&
     !(commandRunning.value || terminalTransferBusy.value)
   ) {
     acceptGhostSuggestionWord();
     return consume();
   }
-  // ghost 整段接受（键位可配置，批 4e——默认裸 →；Ctrl+→ / Shift+→ / Tab
-  // 可在设置换绑）：#138 批 2 起不再被结构化补全菜单抑制（菜单不占用裸 →；
-  // ghost 是行内灰字、菜单在光标行上/下，同屏共存，对标 Warp）。历史建议
-  // 浮层开着时无 ghost（数据分工），此判保持。未命中配置键的 →（含菜单态）
-  // 原样放行给 shell。
+  // ghost 整段接受（Warp 口径三键恒可用：裸 → / Ctrl+F / Ctrl+E——ghost 态
+  // 光标在行尾，截获 0x06/0x05 等价 → 与 End，无 ghost 时照发远端 readline；
+  // 「Tab 接受建议」开关开启时 Tab 在无菜单态也接受，菜单开着则归菜单）：
+  // #138 批 2 起不再被结构化补全菜单抑制（菜单不占用裸 →；ghost 是行内灰
+  // 字、菜单在光标行上/下，同屏共存）。历史建议浮层开着时无 ghost（数据分
+  // 工），此判保持。未命中接受键的按键原样放行给 shell。
   if (
     ghostMatch.value &&
     !suggestionOpen.value &&
-    matchesGhostAcceptKey(ghostAcceptKey.value, event.key, event) &&
+    (matchesGhostFullAccept(event.key, event) || (ghostTabAccept.value && event.key === "Tab" && !completionOpen.value)) &&
+    !(event.ctrlKey && event.key === "Tab") &&
     !(commandRunning.value || terminalTransferBusy.value)
   ) {
     acceptGhostSuggestion();
@@ -7505,7 +7496,9 @@ onBeforeUnmount(() => {
             @mousedown.stop.prevent
           >{{ ghostAcceptKeyLabel }}</button>
           <div v-if="ghostKeycapMenuOpen" class="terminal-ghost-keymenu">
-            <button v-for="option in GHOST_ACCEPT_KEY_OPTIONS" :key="option.value" type="button" class="terminal-ghost-keyoption" :class="{ active: option.value === ghostAcceptKey }" @click.stop.prevent="setGhostAcceptKey(option.value)">{{ option.label }}</button>
+            <button type="button" class="terminal-ghost-keyoption" :class="{ active: !ghostTabAccept }" @click.stop.prevent="setGhostTabAccept(false)">→</button>
+            <button type="button" class="terminal-ghost-keyoption" :class="{ active: ghostTabAccept }" @click.stop.prevent="setGhostTabAccept(true)">Tab</button>
+            <div class="terminal-ghost-keymenu-note">{{ t("terminalGhost.keysSummary") }}</div>
           </div>
         </div>
         <div v-if="terminalDragActive || (dragActive && !sftpPaneOpen)" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
@@ -8698,6 +8691,8 @@ onBeforeUnmount(() => {
       @update:gutter="updateGutterSettings"
       @update:ctx-search-engines="updateCtxSearchEngines"
       @update:ghost-suggest="setGhostEnabled"
+      :ghost-tab-accept="ghostTabAccept"
+      @update:ghost-tab-accept="setGhostTabAccept"
       @update:wallpaper-enabled="updateWallpaperEnabled"
       @update:wallpaper-opacity="updateWallpaperOpacity"
       @set-wallpaper-image="setWallpaperImage"
@@ -9377,6 +9372,13 @@ body.resizing-col { cursor: col-resize !important; user-select: none; }
 .terminal-ghost-keyoption.active,
 .terminal-ghost-keyoption:hover {
   background: var(--accent);
+}
+
+.terminal-ghost-keymenu-note {
+  padding: 4px 8px 2px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  white-space: nowrap;
 }
 /* RDP 证书确认弹窗：状态徽标 + 倒计时行（弹窗骨架复用 host-key-modal 的
    .remember/.fingerprint 全局类）。 */
