@@ -6,7 +6,7 @@
 // 放不下翻转到光标上方，两侧都不够选空间更大的一侧并收窄内滚，永不遮输入
 // 行（issue #120，lib/overlayPlacement，宿主高度以包含块实测为准）。
 import { computed, ref, watchEffect } from "vue";
-import { History, Zap } from "@lucide/vue";
+import { History, X, Zap } from "@lucide/vue";
 import type { CommandSuggestion } from "../lib/commandSuggestions";
 import {
   chooseOverlayPlacement,
@@ -35,6 +35,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   activate: [index: number];
   fill: [item: CommandSuggestion];
+  ignore: [item: CommandSuggestion];
 }>();
 
 const rootEl = ref<HTMLElement | null>(null);
@@ -135,6 +136,15 @@ function onRowEnter(index: number) {
         <template v-for="(segment, segmentIndex) in segments(item.command, item.indices)" :key="segmentIndex"><mark v-if="segment.matched">{{ segment.text }}</mark><template v-else>{{ segment.text }}</template></template>
       </span>
       <span class="suggestion-source">{{ sourceLabel(item) }}</span>
+      <!-- 行内 ✗（批 4c，Warp IgnoredSuggestions）：span 避开 button 嵌套；
+           mousedown 阻断防触发行的 click 回填，click 永久排除该建议。 -->
+      <span
+        class="suggestion-ignore"
+        role="button"
+        :aria-label="t('suggestions.ignoreHint')"
+        @mousedown.stop.prevent
+        @click.stop="emit('ignore', item)"
+      ><X /></span>
     </button>
     <!-- kbd 提示行（批 3c，#138 后 Tab 语义不平凡）：内联常驻、非 tooltip，
          弹出位置的静止鼠标不会再冒原生悬浮提示。 -->
@@ -214,6 +224,35 @@ function onRowEnter(index: number) {
   flex: none;
   font-size: 11px;
   opacity: 0.65;
+}
+
+/* 行内 ✗（批 4c）：静止时隐藏（不干扰纯键盘流），悬停行时浮现；hover 武装
+   门已挡静止指针抢选，✗ 只在真实移入后才可点。 */
+.suggestion-ignore {
+  flex: none;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.suggestion-ignore svg {
+  width: 12px;
+  height: 12px;
+}
+
+.suggestion-row:hover .suggestion-ignore,
+.suggestion-row.active .suggestion-ignore {
+  opacity: 0.6;
+}
+
+.suggestion-ignore:hover {
+  opacity: 1;
+  background: var(--border);
 }
 
 .suggestion-hint {

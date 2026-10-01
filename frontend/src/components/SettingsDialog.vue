@@ -154,6 +154,7 @@ function clampStartupDelayInput(raw: string): number {
   return Math.min(value, STARTUP_DELAY_MAX_MS);
 }
 import { COMPLETION_ENGINE_KEY, loadCompletionEngine, pluginStore, sanitizeCompletionEngine, type CompletionEngineSetting } from "../lib/pluginStore";
+import { clearSuggestionBlocklist, loadSuggestionBlocklist } from "../lib/suggestionBlocklist";
 
 /** 连接级 SFTP 文件名编码覆盖（M16）：同启动命令的自治 RPC 读写
  * （`sftp_name_encoding_overrides` 键按 connectionId 分桶）。控件缺省
@@ -519,6 +520,17 @@ const transferCompressThresholdDraft = ref(String(props.transferPrefs.loadCompre
 const suggestionsEnabledDraft = ref(props.suggestionPrefs.loadEnabled());
 const suggestionMinCharsDraft = ref(String(props.suggestionPrefs.loadMinChars()));
 const suggestionMaxCharsDraft = ref(String(props.suggestionPrefs.loadMaxChars()));
+// 建议黑名单（批 4c）：计数随每次打开设置重读（App 内行内 ✗ 即时持久化，
+// 这里只读展示 + 清空上抛）。
+const suggestionBlocklistCount = ref(0);
+function refreshSuggestionBlocklistCount() {
+  suggestionBlocklistCount.value = loadSuggestionBlocklist().length;
+}
+watch(() => props.open, (open) => { if (open) refreshSuggestionBlocklistCount(); }, { immediate: true });
+function clearSuggestionBlocklistFromSettings() {
+  clearSuggestionBlocklist();
+  refreshSuggestionBlocklistCount();
+}
 // 全局 quick sudo 配置：列表与编辑表单状态（密钥只在提交时发送）。设置弹窗
 // 内联 section 与独立 profiles 弹窗共存复用同一份状态。
 const sudoProfiles = ref<SudoProfileView[]>([]);
@@ -2071,6 +2083,11 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <input v-model="suggestionMaxCharsDraft" type="number" min="8" max="512" step="1" @change="suggestionMaxCharsDraft = String(Math.min(512, Math.max(8, Number.parseInt(suggestionMaxCharsDraft, 10) || 64)))" />
             </label>
             <p class="muted settings-note">{{ t("suggestions.settingsMaxCharsHint") }}</p>
+            <!-- 建议黑名单（批 4c）：计数 + 一键清空；行内 ✗ 的排除项在此恢复。 -->
+            <div v-if="suggestionBlocklistCount > 0" class="settings-field suggestion-blocklist-row">
+              <span class="muted settings-note">{{ t("suggestions.blocklistCount", { count: suggestionBlocklistCount }) }}</span>
+              <button type="button" class="connect-card-ghost-button" @click="clearSuggestionBlocklistFromSettings">{{ t("suggestions.blocklistClear") }}</button>
+            </div>
             <label class="settings-field">
               <span>{{ t("completionMenu.engine") }}</span>
               <Select :model-value="completionEngine" @update:model-value="setCompletionEngine(String($event))">

@@ -5,6 +5,7 @@ import type { SuggestionAnchor } from "../lib/overlayPlacement";
 import { onBeforeUnmount, ref, type Ref } from "vue";
 import { pushCommandHistory } from "../lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, resolveSuggestionTabKey, type CommandSuggestion } from "../lib/commandSuggestions";
+import { addToSuggestionBlocklist, loadSuggestionBlocklist } from "../lib/suggestionBlocklist";
 import { pickGhostMatch } from "../lib/terminalGhostSuggest";
 import { CompletionController, type CompletionGeneratorChannel } from "../lib/completion/CompletionController";
 import { applyEditToText, longestCommonPrefixEdit } from "../lib/completion/core/edit";
@@ -331,9 +332,21 @@ function suggestionSearchBounds() {
   };
 }
 
+// 建议黑名单（批 4c，Warp IgnoredSuggestions 语义）：行内 ✗ 永久排除单条
+// 建议，pluginStore 持久化；运行时 ref 供设置页计数与清空联动。
+const suggestionBlocklist = ref(loadSuggestionBlocklist());
+
 function runSuggestionSearch(query: string): CommandSuggestion[] {
   const bounds = suggestionSearchBounds();
-  return searchCommands(query, { history: commandHistory.value, quickCommands: quickCommands.value }, { ...bounds, limit: 12 });
+  const blocklisted = new Set(suggestionBlocklist.value);
+  return searchCommands(query, { history: commandHistory.value, quickCommands: quickCommands.value }, { ...bounds, limit: 12 })
+    .filter((item) => !blocklisted.has(item.command));
+}
+
+/** 行内 ✗：永久排除该建议并即时收起浮层（下次检索不再出现）。 */
+function ignoreSuggestion(command: string) {
+  suggestionBlocklist.value = addToSuggestionBlocklist(command, suggestionBlocklist.value);
+  closeSuggestionsOnly();
 }
 
 /** 单字符输入事件抽取：多字符粘贴 / 控制序列 / 回车返回 null。 */
@@ -673,5 +686,6 @@ function resetSuggestionsForSession() {
     completionController,
     lastTerminalCommand,
     resetSuggestionsForSession,
+    ignoreSuggestion,
   };
 }

@@ -775,6 +775,7 @@ const {
   completionController,
   lastTerminalCommand,
   resetSuggestionsForSession,
+  ignoreSuggestion,
 } = useCommandSuggestions({
   terminal: () => terminal,
   getTerminalHost: () => terminalHost.value,
@@ -7398,6 +7399,7 @@ onBeforeUnmount(() => {
           :t="t"
           @activate="(index) => (suggestionActiveIndex = index)"
           @fill="fillSuggestion"
+          @ignore="ignoreSuggestion"
         />
         <!-- 结构化补全浮层（FIG wave-1 最终架构；批次 2-1 两段渲染）：fig 引擎
              候选（CompletionItem）直用展示，keyboard.ts 规则表由
