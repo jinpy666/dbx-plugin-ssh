@@ -157,6 +157,11 @@ function openCompletionMenu(response: CompletionResponse) {
   completionActiveIndex.value = 0;
   completionAnchor.value = readTerminalSuggestionAnchor();
   completionOpen.value = true;
+  // 双浮层仲裁（#138 丝滑度 review P0-A）：worker 模式下补全响应异步到达，
+  // 键入时刻的互斥检查（refreshSuggestionsAfterInput 里 completionOpen 为
+  // false）已放行历史建议浮层；此处不收会出现两个同锚点浮层叠加到下一次
+  // 击键。补全菜单优先（结构化候选信息量更高），同步关掉建议浮层。
+  closeSuggestionsOnly();
 }
 
 /**

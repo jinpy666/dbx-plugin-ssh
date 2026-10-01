@@ -131,6 +131,7 @@ import {
 } from "./lib/sftpBookmarks";
 import { isPersistableCommand, mergeShellHistory, parseShellHistoryText, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
+import { applyLineEditControlChar } from "./lib/terminalLineModel";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
@@ -2241,6 +2242,11 @@ function handleHistoryPanelKey(event: KeyboardEvent, fromSearchBox = false): boo
   const action = resolveHistoryPanelKey(event.key, historyPanelActiveIndex.value, historyPanelEntries.value.length);
   if (!action) return false;
   if (action.kind === "move") moveHistoryPanelActive(action.delta);
+  else if (action.kind === "stay") {
+    // 顶部最旧一条再 ↑：消费按键、停住不回绕也不关面板（readline 到最旧即止；
+    // #138 丝滑度 review P0-D——原先落进兜底 else 被当成 close，翻到顶面板
+    // 直接消失）。
+  }
   else if (action.kind === "fill" || action.kind === "close") {
     closeHistoryPanel();
     return fromSearchBox ? true : false;
@@ -2287,7 +2293,14 @@ function trackPendingInput(data: string) {
       pendingTerminalInput = "";
     }
     else if (character === "\u007f") pendingTerminalInput = pendingTerminalInput.slice(0, -1);
-    else if (character >= " ") pendingTerminalInput += character;
+    else {
+      // readline 行编辑控制字节（Ctrl+U 清行 / Ctrl+W 删词）：回显不可见但
+      // 真实行已变，模型必须跟上，否则建议/补全对着死字符检索（#138 review
+      // P0-B）。未认领的字节按原逻辑放行（可打印追加，其余忽略）。
+      const edited = applyLineEditControlChar(pendingTerminalInput, character);
+      if (edited !== null) pendingTerminalInput = edited;
+      else if (character >= " ") pendingTerminalInput += character;
+    }
   }
   // 行缓冲变更点（FIG wave-1 锚点）：revision 前进作废在途结果 + 防抖调度
   // （输入门未放行时只作废不调度；常规键入路径随后由

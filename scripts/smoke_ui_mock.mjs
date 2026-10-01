@@ -315,9 +315,12 @@ try {
     failures.push('selected command not echoed ("tail -f /var/log/ui-mock.log")');
     console.log('  FAIL selected command echo');
   }
-  // Esc 关闭语义：重开 → Esc → 面板消失。
+  // Esc 关闭语义：重开 → ↑ 按到超过条目数（stay 停住不关面板，P0-D）→ Esc → 面板消失。
   await historyPage.keyboard.press("ArrowUp");
   await expect(historyPage, ".terminal-history-panel", "history panel reopens");
+  for (let i = 0; i < 8; i += 1) await historyPage.keyboard.press("ArrowUp");
+  const panelsAtTop = await historyPage.locator(".terminal-history-panel").count();
+  check("ArrowUp past the oldest entry keeps the panel open (stay)", panelsAtTop === 1, `panels=${panelsAtTop}`);
   await historyPage.keyboard.press("Escape");
   const panelsAfterEsc = await historyPage.locator(".terminal-history-panel").count();
   check("Escape closes the panel", panelsAfterEsc === 0, `panels=${panelsAfterEsc}`);
