@@ -194,6 +194,9 @@ try {
   console.log("==> settings: category order");
   await openSettings();
   const navTexts = (await page.locator(".settings-nav-item").allTextContents()).map((t) => t.trim());
+  // 走查环境带活跃 mock 会话：会话级分类 sudo / 智能体在导航可见（11 项）。
+  // 本地终端（无 sessionId）下这两类隐藏、导航 9 项——由 SettingsDialog.spec
+  // 组件用例覆盖，浏览器走查没有无会话的设置入口。
   check("eleven settings categories", navTexts.length === 11, JSON.stringify(navTexts));
   check(
     "terminal categories come first, in Tabby order",

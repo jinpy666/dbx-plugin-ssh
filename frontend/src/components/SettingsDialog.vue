@@ -467,6 +467,17 @@ const SETTINGS_CATEGORIES = [
 ] as const;
 type SettingsCategory = (typeof SETTINGS_CATEGORIES)[number]["id"];
 const settingsCategory = ref<SettingsCategory>("appearance");
+// 会话级分类（sudo / 智能体）只对 SSH 会话有意义：本地终端没有 sessionId，
+// 加载/保存/清密钥/摘要刷新四处门控都会跳过，面板沦为可编辑却永不可保存的
+// 死 UI——直接从导航隐藏。本地判定收敛成一处，新增会话级门控一律引用
+// isLocalSession，别再手写 `!props.sessionId`（漏写会重新制造「横幅替换
+// 整条弹窗」的原始 bug）。
+const isLocalSession = computed(() => !props.sessionId);
+const visibleSettingsCategories = computed(() =>
+  SETTINGS_CATEGORIES.filter(
+    (cat) => !isLocalSession.value || (cat.id !== "sudo" && cat.id !== "agent"),
+  ),
+);
 
 function onSettingsCategoryChange(value: string | number) {
   settingsCategory.value = value as SettingsCategory;
@@ -912,10 +923,9 @@ async function reloadSettings() {
   void loadStartupCommands();
   void loadConnNameEncoding();
   try {
-    // 本地终端没有 SSH 会话（保存路径同样按 sessionId 门控）：跳过会话级
-    // 设置拉取，只保留全局偏好面板——否则 required_string 直接报错，整条
-    // 弹窗被「SSH 设置加载失败」横幅替换。
-    if (props.sessionId) {
+    // 本地终端没有 SSH 会话：跳过会话级设置拉取，只保留全局偏好面板——
+    // 否则 required_string 直接报错，整条弹窗被「SSH 设置加载失败」横幅替换。
+    if (!isLocalSession.value) {
       // revealSecrets: 预填已存原值（原始凭据串），避免只能看到"已配置"占位。
       const meta = await window.dbxPlugin.invoke<SshSettings>("ssh/settings/get", { sessionId: props.sessionId, revealSecrets: true });
       settingsMeta.value = meta;
@@ -1113,7 +1123,7 @@ function cancelProfileEdit() {
 
 /// 全局配置或其绑定变化后，刷新设置弹窗的只读摘要（会话内即时生效）。
 async function refreshSettingsMeta() {
-  if (!props.open || !props.sessionId) return;
+  if (!props.open || isLocalSession.value) return;
   try {
     settingsMeta.value = await window.dbxPlugin.invoke<SshSettings>("ssh/settings/get", { sessionId: props.sessionId });
   } catch {
@@ -1209,7 +1219,7 @@ async function saveMcpSettings() {
  * MCP 表单非法时保持现有校验提示、静默跳过提交。
  */
 async function saveSettings() {
-  if (!props.sessionId || settingsSaving.value || settingsLoading.value || settingsLoadFailed.value || !settingsMeta.value) return;
+  if (isLocalSession.value || settingsSaving.value || settingsLoading.value || settingsLoadFailed.value || !settingsMeta.value) return;
   settingsSaving.value = true;
   try {
     props.downloadPrefs.persistDir(downloadDirDraft.value);
@@ -1253,7 +1263,7 @@ async function saveSettings() {
 }
 
 async function clearStoredSecrets() {
-  if (!props.sessionId || settingsSaving.value || settingsLoading.value || settingsLoadFailed.value || !settingsMeta.value) return;
+  if (isLocalSession.value || settingsSaving.value || settingsLoading.value || settingsLoadFailed.value || !settingsMeta.value) return;
   try {
     const meta = await window.dbxPlugin.invoke<SshSettings>("ssh/settings/set", {
       sessionId: props.sessionId,
@@ -1316,7 +1326,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             <nav class="settings-nav" aria-label="settings categories">
               <Tabs :model-value="settingsCategory" orientation="vertical" class="settings-nav-tabs" @update:model-value="onSettingsCategoryChange">
                 <TabsList class="settings-nav-list">
-                  <TabsTrigger v-for="cat in SETTINGS_CATEGORIES" :key="cat.id" :value="cat.id" class="settings-nav-item">{{ t(cat.labelKey) }}</TabsTrigger>
+                  <TabsTrigger v-for="cat in visibleSettingsCategories" :key="cat.id" :value="cat.id" class="settings-nav-item">{{ t(cat.labelKey) }}</TabsTrigger>
                 </TabsList>
               </Tabs>
             </nav>

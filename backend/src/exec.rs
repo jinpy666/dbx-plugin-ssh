@@ -1383,7 +1383,8 @@ pub async fn collect_metrics(handle: &Handle<SshClient>) -> Result<serde_json::V
 
 pub use crate::metrics::{project_metrics_sections, validate_section_names, METRICS_SECTIONS};
 
-/// Parses the output of [`METRICS_SCRIPT`] into a metrics JSON object.
+/// Parses the output of the collector script (`METRICS_SCRIPT` in metrics.rs)
+/// into a metrics JSON object.
 /// Pure so it can be unit-tested without a server.
 pub fn parse_metrics_output(output: &str) -> serde_json::Value {
     use serde_json::json;
@@ -1403,7 +1404,7 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
         if line.is_empty() {
             continue;
         }
-        if line == "--mem--" || line == "--cpu--" || line == "--df--" {
+        if is_section_marker(line) {
             section = line;
             continue;
         }
@@ -1445,10 +1446,9 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
             // filesystem total used avail pct mount
             let fields = line.split_whitespace().collect::<Vec<_>>();
             // 严格行形校验：容量三列必须是数字、百分比列必须以 % 结尾、挂载点
-            // 必须是绝对路径。段切换只认 --mem--/--cpu--/--df--，后面的 --os--
-            // 段内容会落在 df 段里——os-release 的 `PRETTY_NAME="Alibaba Cloud
-            // Linux release 3 (OpenAnolis)"` 恰好 6 个字段，宽松解析会把
-            // "(OpenAnolis)" 混成 0 B 的幽灵磁盘行。
+            // 必须是绝对路径。段切换认所有 `--name--` 标记（is_section_marker），
+            // `--os--` 之后的 os-release 行根本到不了这里；行形校验只兜底
+            // 非标记形状的杂散行。
             //
             // 列从右往左锚定（mount 恒为最后一列）：文件系统名可能含空格——
             // Windows 本地采集经 Git-Bash sh，MSYS df 把 Git 安装根报成
@@ -1466,9 +1466,11 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
                         disks.push(json!({
                             "filesystem": fields[..fields.len() - 5].join(" "),
                             "mount": fields[fields.len() - 1],
-                            "totalBytes": total_kib * 1024,
-                            "usedBytes": used_kib * 1024,
-                            "availableBytes": available_kib * 1024,
+                            // 伪造采集源的容量值可逼近 u64 上限：饱和避免
+                            // release 回绕 / debug panic。
+                            "totalBytes": total_kib.saturating_mul(1024),
+                            "usedBytes": used_kib.saturating_mul(1024),
+                            "availableBytes": available_kib.saturating_mul(1024),
                             "percentUsed": percent,
                         }));
                     }
@@ -1515,14 +1517,18 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
     // otherwise `used` degenerates to the full total and the dock band pins
     // MEM at 100%.
     let mem_available = match mem_kib.get("MemAvailable") {
-        Some(available) => *available * 1024,
-        None => {
-            (mem_kib.get("MemFree").copied().unwrap_or(0)
-                + mem_kib.get("Buffers").copied().unwrap_or(0)
-                + mem_kib.get("Cached").copied().unwrap_or(0))
-                * 1024
-        }
+        Some(available) => available.saturating_mul(1024),
+        None => mem_kib
+            .get("MemFree")
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(mem_kib.get("Buffers").copied().unwrap_or(0))
+            .saturating_add(mem_kib.get("Cached").copied().unwrap_or(0))
+            .saturating_mul(1024),
     };
+    // 异常数据源可能让回退估计超过 MemTotal（used 饱和到 0，MEM 带倒挂）：
+    // classic free 同样把 available 夹紧在 total 以内。
+    let mem_available = mem_available.min(mem_total);
     let swap_total = mem_kib.get("SwapTotal").copied().unwrap_or(0) * 1024;
     let swap_free = mem_kib.get("SwapFree").copied().unwrap_or(0) * 1024;
     let uptime_seconds = uptime
@@ -1551,6 +1557,22 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
 fn rest_after_colon(line: &str) -> Option<(&str, &str)> {
     let (key, value) = line.split_once(':')?;
     Some((key.trim(), value.trim()))
+}
+
+/// `--name--` 形状的段标记（内部只允许小写字母/数字/连字符）。解析器只消费
+/// --mem--/--cpu--/--df-- 三段，但必须识别**所有**标记：只认三个会让未来新增
+/// 段（如 --os-- 的 os-release）的内容漏进当前段——落在 df 段里就是幽灵磁盘行。
+fn is_section_marker(line: &str) -> bool {
+    let Some(inner) = line
+        .strip_prefix("--")
+        .and_then(|rest| rest.strip_suffix("--"))
+    else {
+        return false;
+    };
+    !inner.is_empty()
+        && inner
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Parses `df -kP <path>` output (header stripped) into a usage object.
@@ -2835,15 +2857,28 @@ cpu  200 0 300 8100
     }
 
     #[test]
+    fn meminfo_fallback_is_clamped_to_total() {
+        // 异常数据源可能让 free+buffers+cached 超过 MemTotal：available 钳到
+        // total、used 归零，MEM 带不至于倒挂（classic free 同样夹紧）。
+        let metrics = parse_metrics_output("--mem--\nMemTotal: 100 kB\nMemFree: 900 kB\n");
+        assert_eq!(metrics["memory"]["totalBytes"], 100 * 1024);
+        assert_eq!(metrics["memory"]["availableBytes"], 100 * 1024);
+        assert_eq!(metrics["memory"]["usedBytes"], 0);
+    }
+
+    #[test]
     fn df_section_rejects_os_release_bleed() {
-        // --os-- 段不被段切换识别，其内容会落在 --df-- 段里；
-        // PRETTY_NAME 恰好 6 个字段，绝不能被解析成幽灵磁盘行。
+        // 段切换认所有 `--name--` 标记，--os-- 之后的 os-release 行整体跳过；
+        // 行形校验只兜底非标记形状的杂散行。VERSION_ID 一行在形状上完全合法
+        // （末 token 以 / 开头、三列数字、% 后缀）——没有标记识别时它会变成
+        // 挂载点 /ghost" 的幽灵磁盘行。
         let output = "\
 --df--
 /dev/vda1 41022688 16785408 22573568 44% /
 --os--
 NAME=\"Alibaba Cloud Linux\"
 PRETTY_NAME=\"Alibaba Cloud Linux release 3 (OpenAnolis)\"
+VERSION_ID=\"3 2 4096 100 55% /ghost\"
 ";
         let metrics = parse_metrics_output(output);
         let disks = metrics["disks"].as_array().unwrap();
