@@ -118,6 +118,17 @@ describe("TerminalHistoryPanel", () => {
     wrapper.unmount();
   });
 
+  it("focuses the search box on mount when invoked via hotkey (focusSearchOnMount, 批 3d)", () => {
+    // 热键唤起（⌘⇧H / Ctrl+Shift+H）= Warp Ctrl+R 心智：打开即为搜索界面。
+    const wrapper = mount(TerminalHistoryPanel, {
+      attachTo: document.body,
+      props: { locale: "en", entries, activeIndex: 0, anchor, query: "", focusSearchOnMount: true },
+    });
+    const input = wrapper.find<HTMLInputElement>(".terminal-history-search-input");
+    expect(document.activeElement).toBe(input.element);
+    wrapper.unmount();
+  });
+
   it("typing in the search box emits update:query", async () => {
     const wrapper = mountPanel();
     await wrapper.find(".terminal-history-search-input").setValue("git st");

@@ -273,9 +273,33 @@ function syncSuggestionAnchorsOnSettle() {
 }
 
 function closeSuggestionsOnly() {
+  cancelSuggestionCloseGrace();
   suggestionOpen.value = false;
   suggestionItems.value = [];
   suggestionActiveIndex.value = 0;
+}
+
+// —— 空结果宽限（批 3b 防闪烁）：快速打词的中间态常瞬时无匹配（"doc"→
+// "dock"→"docker"），逐键即关即开会把浮层闪成频闪灯。空结果先挂 150ms
+// 宽限：窗口内下一次键入若重新命中则照常刷新（取消挂起关闭），真正无匹配
+// 才收起（VS Code 补全同款迟滞）。注意所有「立即关」路径都走
+// closeSuggestionsOnly（其内取消宽限），宽限只兜「打字中瞬时空洞」。 ——
+let suggestionCloseTimer: ReturnType<typeof setTimeout> | undefined;
+const SUGGESTION_CLOSE_GRACE_MS = 150;
+
+function cancelSuggestionCloseGrace() {
+  if (suggestionCloseTimer === undefined) return;
+  clearTimeout(suggestionCloseTimer);
+  suggestionCloseTimer = undefined;
+}
+
+function scheduleSuggestionCloseGrace() {
+  cancelSuggestionCloseGrace();
+  if (!suggestionOpen.value) return;
+  suggestionCloseTimer = setTimeout(() => {
+    suggestionCloseTimer = undefined;
+    closeSuggestionsOnly();
+  }, SUGGESTION_CLOSE_GRACE_MS);
 }
 
 function closeSuggestions() {
@@ -390,7 +414,9 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   }
   const items = runSuggestionSearch(query);
   if (!items.length) {
-    closeSuggestionsOnly();
+    // 空结果走宽限（批 3b 防闪烁）：瞬时空洞（打词中间态）不立即收浮层，
+    // 150ms 内下一次键入重新命中则无感刷新；真正无匹配才关。
+    scheduleSuggestionCloseGrace();
     return;
   }
   // 数据分工（#138 丝滑度批 2，P0-C——ghost 默认不可见的根因修复）：候选里
@@ -405,8 +431,10 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   suggestionQuery.value = query;
   suggestionItems.value = items;
   suggestionActiveIndex.value = 0;
-  // 候选随键入重算即回到「自动高亮」态：Tab 显式选中锁复位（issue #138）。
+  // 候选随键入重算即回到「自动高亮」态：Tab 显式选中锁复位（issue #138）；
+  // 空结果宽限一并取消（本键已重新命中，不得再被挂起的关闭收走）。
   suggestionTabArmed = false;
+  cancelSuggestionCloseGrace();
   suggestionAnchor.value = readTerminalSuggestionAnchor();
   suggestionOpen.value = true;
 }

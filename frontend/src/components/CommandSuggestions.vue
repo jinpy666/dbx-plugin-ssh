@@ -136,6 +136,9 @@ function onRowEnter(index: number) {
       </span>
       <span class="suggestion-source">{{ sourceLabel(item) }}</span>
     </button>
+    <!-- kbd 提示行（批 3c，#138 后 Tab 语义不平凡）：内联常驻、非 tooltip，
+         弹出位置的静止鼠标不会再冒原生悬浮提示。 -->
+    <div v-if="items.length" class="suggestion-hint" aria-hidden="true">{{ t("suggestions.kbdHint") }}</div>
   </div>
 </template>
 
@@ -211,5 +214,14 @@ function onRowEnter(index: number) {
   flex: none;
   font-size: 11px;
   opacity: 0.65;
+}
+
+.suggestion-hint {
+  flex: none;
+  padding: 4px 8px 2px;
+  font-size: 11px;
+  opacity: 0.6;
+  text-align: right;
+  user-select: none;
 }
 </style>

@@ -128,6 +128,9 @@ function onRowEnter(index: number) {
       <span class="completion-description">{{ item.description }}</span>
       <Flag v-if="item.kind === 'option'" class="completion-kind-mark" aria-hidden="true" />
     </button>
+    <!-- kbd 提示行（批 3c）：内联常驻非 tooltip；Enter 恒执行当前行（放行
+         shell），Tab 填静态候选，动态 hint 位与 loading 态透传——见 keyboard.ts。 -->
+    <div v-if="items.length" class="completion-hint" aria-hidden="true">{{ t("completionMenu.kbdHint") }}</div>
   </div>
 </template>
 
@@ -241,5 +244,14 @@ function onRowEnter(index: number) {
   .completion-loading-icon {
     animation: none;
   }
+}
+
+.completion-hint {
+  flex: none;
+  padding: 4px 8px 2px;
+  font-size: 11px;
+  opacity: 0.6;
+  text-align: right;
+  user-select: none;
 }
 </style>

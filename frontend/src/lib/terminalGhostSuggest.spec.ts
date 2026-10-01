@@ -6,6 +6,7 @@ import {
   createGhostState,
   evaluateGhost,
   firstGhostWordChunk,
+  terminalCharCells,
   ghostMenuSuppressed,
   isGhostPrefixMatch,
   nextGhostState,
@@ -252,5 +253,27 @@ describe("firstGhostWordChunk (Ctrl+→ word-by-word accept, Warp 语义)", () =
     // 「词」= 非空白连续段（fish token / 默认 zsh WORDCHARS）：整条路径是
     // 一个词，一次 Ctrl+→ 全收，不拦腰截断。
     expect(firstGhostWordChunk(" /var/log/messages")).toBe(" /var/log/messages");
+  });
+});
+
+describe("terminalCharCells (锚点乐观前进的简化 wcwidth, 批 3a)", () => {
+  it("counts ASCII and half-width Kana-adjacent punctuation as one cell", () => {
+    expect(terminalCharCells("a")).toBe(1);
+    expect(terminalCharCells("/")).toBe(1);
+    expect(terminalCharCells("é")).toBe(1);
+  });
+
+  it("counts CJK ideographs, Kana, Hangul and fullwidth forms as two cells", () => {
+    expect(terminalCharCells("中")).toBe(2);
+    expect(terminalCharCells("あ")).toBe(2);
+    expect(terminalCharCells("한")).toBe(2);
+    expect(terminalCharCells("Ａ")).toBe(2);
+  });
+
+  it("stays conservative for surrogate pairs and empty input", () => {
+    // 组合区段外的代理对（emoji 等）不在双宽表内——乐观前进少推一格，
+    // settle 校正兜底，优于多推。
+    expect(terminalCharCells("😀")).toBe(1);
+    expect(terminalCharCells("")).toBe(1);
   });
 });

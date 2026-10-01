@@ -207,6 +207,15 @@ export function ghostMenuSuppressed(suggestionOpen: boolean): boolean {
   return suggestionOpen;
 }
 
+/** 双宽字符区段（CJK/全角，简化 wcwidth）：击键期锚点乐观前进用，settle 后
+ *  按真实 buffer 校正，区段外的边缘误差可容忍。 */
+const DOUBLE_WIDTH_CELLS = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]/;
+
+/** 单个可打印字符占用的终端单元格数（CJK/全角 2，其余 1）。 */
+export function terminalCharCells(char: string): number {
+  return char.length === 1 && DOUBLE_WIDTH_CELLS.test(char) ? 2 : 1;
+}
+
 /**
  * 逐词接受的切块（对标 Warp Ctrl+→ / fish word-accept）：取剩余文本的首个
  * 「空白串 + 词」块（如 " status --long" → " status"）；剩余全空白时整段

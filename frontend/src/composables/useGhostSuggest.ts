@@ -3,7 +3,7 @@ import type { QuickCommand } from "../lib/quickCommands";
 import { ref, type Ref } from "vue";
 import { pluginStore } from "../lib/pluginStore";
 import { cursorAbsoluteRow } from "../lib/terminalAnchor";
-import { classifyGhostInput, createGhostState, evaluateGhost, firstGhostWordChunk, nextGhostState, ghostMenuSuppressed, type TerminalGhostState } from "../lib/terminalGhostSuggest";
+import { classifyGhostInput, createGhostState, evaluateGhost, firstGhostWordChunk, nextGhostState, ghostMenuSuppressed, terminalCharCells, type TerminalGhostState } from "../lib/terminalGhostSuggest";
 
 /** 终端行内 ghost 自动建议（对标 Warp/fish autosuggest）：状态机纯逻辑在
  * lib/terminalGhostSuggest.ts；数据源即 commandHistory/quickCommands refs
@@ -92,10 +92,13 @@ function terminalCursorAtLineEnd(): boolean {
 
 /** ghost 专用锚点：光标像素坐标（灰字从光标格起绘，y 取光标行行顶）。 */
 /** ghost 行内建议锚点：与建议浮层同一光标格换算（含 .xterm-screen 原点，
- *  可配置内边距自动计入），盖在光标行上。 */
+ *  可配置内边距自动计入），盖在光标行上。顺带缓存单元格宽度——击键期的
+ *  乐观前进要用，避免每键再读一帧。 */
+let lastCellWidth = 0;
 function readGhostAnchor(): { x: number; y: number } | null {
   const frame = readTerminalCellFrame();
   if (!frame) return null;
+  lastCellWidth = frame.cellWidth;
   return {
     x: Math.round(frame.originLeft + frame.cursorX * frame.cellWidth),
     y: Math.round(frame.originTop + frame.visibleRow * frame.cellHeight),
@@ -104,8 +107,29 @@ function readGhostAnchor(): { x: number; y: number } | null {
 
 /** onData 每次输入后调用：推进门状态并重算 ghost（与浮层建议同一采样点）。 */
 function refreshGhostAfterInput(data: string) {
+  const printable = data.length === 1 && data >= " ";
   ghostGate = nextGhostState(ghostGate, classifyGhostInput(data));
   updateGhostSuggestion();
+  // 锚点乐观前进（批 3a）：回显未达（SSH RTT 窗口）期间 buffer 光标停在旧
+  // 位，ghost 灰字会落后刚敲的字符一拍——按字符单元格宽度本地推进，回显
+  // settle 后由 syncGhostAnchorOnSettle 按真实光标校正。仅可打印单字符推进
+  // （退格/控制序列落点不可预测，交给 settle）。
+  if (printable && ghostMatch.value && ghostAnchor.value && lastCellWidth > 0) {
+    ghostAnchor.value = { x: ghostAnchor.value.x + terminalCharCells(data) * lastCellWidth, y: ghostAnchor.value.y };
+  }
+}
+
+/** 输出 settle（回显到达）后按真实 buffer 光标校正 ghost 锚点：rAF 合帧
+ *  （tail -f 高频输出时每帧至多一测），调用点与建议浮层的
+ *  syncSuggestionAnchorsOnSettle 同点（App 的 settleOutputChunk / resize）。 */
+let ghostAnchorSyncScheduled = false;
+function syncGhostAnchorOnSettle() {
+  if (ghostAnchorSyncScheduled || !ghostMatch.value) return;
+  ghostAnchorSyncScheduled = true;
+  requestAnimationFrame(() => {
+    ghostAnchorSyncScheduled = false;
+    if (ghostMatch.value) ghostAnchor.value = readGhostAnchor();
+  });
 }
 
 function updateGhostSuggestion() {
@@ -178,5 +202,6 @@ function acceptGhostSuggestionWord() {
     refreshGhostAfterInput,
     acceptGhostSuggestion,
     acceptGhostSuggestionWord,
+    syncGhostAnchorOnSettle,
   };
 }

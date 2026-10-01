@@ -833,6 +833,8 @@ const searchResultCount = ref(0);
 // 留在命令行（#138 交互跟进），↑↓/Enter/Tab/Esc 由 App 的面板分支统一消费；
 // 搜索框点击聚焦后字符键实时过滤，其余按键放行。
 const historyPanelOpen = ref(false);
+// 热键唤起时置 true（挂载即聚焦搜索框，批 3d）；裸 ↑ 唤起恒 false。
+const historyPanelFocusSearch = ref(false);
 // 面板内搜索框的 query（点击聚焦后打字即过滤；关闭随面板清空）。
 const historyPanelQuery = ref("");
 const historyPanelEntries = ref<HistoryPanelEntry[]>([]);
@@ -1186,6 +1188,7 @@ function settleOutputChunk(chunk: Uint8Array) {
   if (outputGate.feed(outputInFlightBytes) && outputGate.mode === "normal") onOutputGateRelease();
   stampGutterWrittenRows();
   syncSuggestionAnchorsOnSettle();
+  syncGhostAnchorOnSettle();
 }
 function onOutputGateRelease() {
   showNotice(t("backpressure.released"));
@@ -1862,6 +1865,7 @@ function createTerminal() {
   resizeObserver = new ResizeObserver(() => {
     scheduleFit();
     syncSuggestionAnchorsOnSettle();
+    syncGhostAnchorOnSettle();
   });
   resizeObserver.observe(terminalHost.value);
   if (webglEnabled.value && !wallpaperActive.value) {
@@ -1982,9 +1986,10 @@ function handleTerminalKey(event: KeyboardEvent) {
       else openQuickSelect();
       return consume();
     case "command-history":
-      // ↑ 裸键之外的补充唤起（可配置键位）：同一 gate，开↔关 toggle。
+      // ↑ 裸键之外的补充唤起（可配置键位）：同一 gate，开↔关 toggle；热键
+      // 入口聚焦搜索框（批 3d）——热键用户要的是 Warp Ctrl+R 式搜索流。
       if (historyPanelOpen.value) closeHistoryPanel();
-      else if (historyPanelGateOpen()) openHistoryPanel();
+      else if (historyPanelGateOpen()) openHistoryPanel(true);
       return consume();
     case "copy":
       // 无选区时不消费：裸 Ctrl+C 仍要作为 SIGINT 发给远端。
@@ -2166,9 +2171,13 @@ function historyPanelGateOpen(): boolean {
   });
 }
 
-function openHistoryPanel() {
+/** focusSearch（批 3d）：热键唤起（⌘⇧H / Ctrl+Shift+H）传 true——打开即
+ *  聚焦面板搜索框（Warp Ctrl+R 心智，打字即过滤）；裸 ↑ 唤起不传，焦点留
+ *  在命令行（shell ↑ 心智）。两个入口两种心智，互不打断。 */
+function openHistoryPanel(focusSearch = false) {
   if (!terminal) return;
   terminalMenuOpen.value = false;
+  historyPanelFocusSearch.value = focusSearch;
   // 每次打开都是全量视图:清掉上一次的搜索词,不读行缓冲(pendingTerminalInput
   // 是简单字符模型,Ctrl+U/方向键/Ctrl+W 等编辑后会残留残影,曾把面板过滤得
   // 只剩一条)。过滤只走面板内搜索框。
@@ -2411,6 +2420,7 @@ const {
   refreshGhostAfterInput,
   acceptGhostSuggestion,
   acceptGhostSuggestionWord,
+  syncGhostAnchorOnSettle,
 } = useGhostSuggest({
   terminal: () => terminal,
   sendTerminalBytes,
@@ -7453,6 +7463,7 @@ onBeforeUnmount(() => {
           :anchor="historyPanelAnchor"
           :query="historyPanelQuery"
           :viewport="suggestionViewport"
+          :focus-search-on-mount="historyPanelFocusSearch"
           @update:query="(value: string) => { historyPanelQuery = value; updateHistoryPanelFilter(true); }"
           @panel-key="handleHistoryPanelPanelKey"
           @select="selectHistoryEntry"

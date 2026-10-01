@@ -325,6 +325,16 @@ try {
   const panelsAfterEsc = await historyPage.locator(".terminal-history-panel").count();
   check("Escape closes the panel", panelsAfterEsc === 0, `panels=${panelsAfterEsc}`);
 
+  // 热键唤起聚焦搜索框（批 3d，Warp Ctrl+R 心智）：⌘⇧H（mac）/ Ctrl+Shift+H。
+  const historyHotkey = process.platform === "darwin" ? "Meta+Shift+h" : "Control+Shift+H";
+  await historyPage.keyboard.press(historyHotkey);
+  await expect(historyPage, ".terminal-history-panel", "history panel opens via hotkey");
+  const focusOnSearchHotkey = await historyPage.evaluate(() => document.activeElement?.classList?.contains("terminal-history-search-input") === true);
+  check("hotkey entry focuses the search box", focusOnSearchHotkey, `active=${await historyPage.evaluate(() => document.activeElement?.className ?? "null")}`);
+  await historyPage.keyboard.press("Escape");
+  const panelsAfterHotkeyEsc = await historyPage.locator(".terminal-history-panel").count();
+  check("Escape closes the hotkey-opened panel", panelsAfterHotkeyEsc === 0, `panels=${panelsAfterHotkeyEsc}`);
+
   // --- inline ghost (batch 2, P0-C): prefix hits go to ghost, not the -----
   // --- fuzzy overlay; Ctrl+→ accepts one word, → accepts the remainder. ---
   // 同页续用（历史已种子）。注意先回车清行：前段走查中 ↑ 同步进输入行的

@@ -12,7 +12,7 @@
 // （光标贴顶等极端场景按既有 overlay 规则翻到下方），条目为 `>_` 提示符
 // 图标 + 命令文本 + 右侧相对时间。样式沿用 --popover/--border/--accent
 // 令牌体系随宿主主题，不引 reka 弹层——避免与 xterm 键盘捕获争焦点。
-import { computed, ref, watchEffect } from "vue";
+import { computed, onMounted, ref, watchEffect } from "vue";
 import { Search, Terminal as TerminalIcon, X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
 import type { HistoryPanelEntry } from "../lib/historyPanel";
@@ -29,6 +29,9 @@ interface Props {
   query: string;
   /** 终端可视底界（terminal-host 净高）；缺省时回落实测包含块高度。 */
   viewport?: { height: number };
+  /** 挂载即聚焦搜索框（批 3d）：仅热键唤起（⌘⇧H / Ctrl+Shift+H，Warp Ctrl+R
+   *  心智——打开即为搜索界面）传入 true；裸 ↑ 唤起不传，焦点留在命令行。 */
+  focusSearchOnMount?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -44,6 +47,7 @@ const t = (key: string, values: Record<string, string | number> = {}) => workben
 
 const rootEl = ref<HTMLElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
+const searchEl = ref<HTMLInputElement | null>(null);
 
 watchEffect(() => {
   void props.entries.length;
@@ -51,7 +55,12 @@ watchEffect(() => {
 
 // 打开不抢焦点：焦点留在命令行（xterm textarea），↑↓/Enter/Esc 的键路在
 // App 的终端按键分支；搜索框仅点击聚焦后参与过滤（root 的 mousedown 守卫
-// 只挡行内焦点转移，不挡输入框）。
+// 只挡行内焦点转移，不挡输入框）。例外：热键唤起（focusSearchOnMount，
+// 批 3d）直接聚焦搜索框——热键用户要的就是 Warp Ctrl+R 式搜索流，省一次
+// 鼠标点击。
+onMounted(() => {
+  if (props.focusSearchOnMount) searchEl.value?.focus({ preventScroll: true });
+});
 
 /** 面板导航/回填/关闭键上抛 App 消费；字符键放行进搜索框。 */
 function onPanelKeydown(event: KeyboardEvent) {
@@ -120,6 +129,7 @@ function onRowMousedown(event: MouseEvent) {
     <div class="terminal-history-search">
       <Search class="terminal-history-search-icon" aria-hidden="true" />
       <input
+        ref="searchEl"
         class="terminal-history-search-input"
         type="text"
         :value="query"
