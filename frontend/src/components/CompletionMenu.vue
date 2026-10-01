@@ -119,7 +119,6 @@ function onRowEnter(index: number) {
       :class="{ active: index === activeIndex, hint: item.kind === 'hint' }"
       role="option"
       :aria-selected="index === activeIndex"
-      :title="`${item.description ?? item.label} · ${t('completionMenu.acceptHint')}`"
       @mouseenter="onRowEnter(index)"
       @mousedown.prevent
       @click="emit('accept', item)"
