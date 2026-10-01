@@ -40,3 +40,31 @@ export function trailingTokenEdit(text: string, token: string, addSpace: boolean
     replaceEnd: text.length,
   };
 }
+
+/**
+ * 多候选 Tab 的最长公共前缀 edit（批 4b，对标 Warp `prefix.rs::longest_common_prefix`
+ * 与 shell 补全语义）：所有候选共享同一替换区间（replaceStart/replaceEnd 逐项
+ * 相同）时，返回以候选文本最长公共前缀为 text 的 edit；否则返回 null（调用方
+ * 回落到接受高亮项）。公共前缀必须比行内区间现文本更长（有真实推进）才算命中
+ * ——已到公共边界时返回 null，保持菜单打开即可（shell 的"响铃列清单"等价物）。
+ */
+export function longestCommonPrefixEdit(items: ReadonlyArray<{ edit: CompletionEdit }>, line: string): CompletionEdit | null {
+  if (items.length < 2) return null;
+  const first = items[0]!.edit;
+  for (const item of items) {
+    if (item.edit.replaceStart !== first.replaceStart || item.edit.replaceEnd !== first.replaceEnd) return null;
+  }
+  let prefix = first.text;
+  for (const item of items) {
+    const candidate = item.edit.text;
+    const limit = Math.min(prefix.length, candidate.length);
+    let shared = 0;
+    while (shared < limit && prefix[shared] === candidate[shared]) shared += 1;
+    prefix = prefix.slice(0, shared);
+    if (!prefix) return null;
+  }
+  const start = Math.min(Math.max(0, first.replaceStart), line.length);
+  const end = Math.min(Math.max(start, first.replaceEnd), line.length);
+  if (prefix.length <= end - start) return null;
+  return { text: prefix, replaceStart: first.replaceStart, replaceEnd: first.replaceEnd };
+}

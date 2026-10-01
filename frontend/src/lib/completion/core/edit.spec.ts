@@ -2,7 +2,8 @@
 // 边界对齐 legacy 接受路径的 HEAD 语义：尾空格/空行 = 行尾纯插入点、
 // 引号 token 表面、--flag=val 整体替换、行漂移时的兜底范围。
 import { describe, expect, it } from "vitest";
-import { applyEditToText, trailingTokenEdit } from "./edit";
+import { applyEditToText, longestCommonPrefixEdit, trailingTokenEdit } from "./edit";
+import type { CompletionEdit } from "./types";
 
 describe("trailingTokenEdit", () => {
   it("replaces the trailing token surface and appends a space when asked", () => {
@@ -93,5 +94,49 @@ describe("applyEditToText", () => {
     const line = "git ch";
     const edit = trailingTokenEdit(line, "checkout", true);
     expect(applyEditToText(line, edit)).toEqual({ text: "git checkout ", cursor: 13 });
+  });
+});
+
+describe("longestCommonPrefixEdit (批 4b, Warp prefix.rs 语义)", () => {
+  const item = (text: string, replaceStart = 4, replaceEnd = 6) => ({
+    edit: { text, replaceStart, replaceEnd } as CompletionEdit,
+  });
+
+  it("completes to the shared prefix when all candidates share the replace range", () => {
+    const items = [item("checkout"), item("cherry-pick"), item("cherry")];
+    // LCP("checkout","cherry-pick","cherry") = "che"，比行内 "ch" 多一字符。
+    expect(longestCommonPrefixEdit(items, "git ch")).toEqual({
+      text: "che",
+      replaceStart: 4,
+      replaceEnd: 6,
+    });
+  });
+
+  it("returns null below two candidates or with mismatched ranges", () => {
+    expect(longestCommonPrefixEdit([item("checkout")], "git ch")).toBeNull();
+    expect(
+      longestCommonPrefixEdit([item("checkout"), item("cherry", 4, 7)], "git ch"),
+    ).toBeNull();
+  });
+
+  it("returns null when there is no progress beyond the typed token", () => {
+    // 候选 {status, stop} 的 LCP "st" 不比行内 "st" 长——无推进即不命中。
+    expect(
+      longestCommonPrefixEdit([item("status"), item("stop")], "git st"),
+    ).toBeNull();
+  });
+
+  it("returns null when candidates share no common prefix", () => {
+    expect(
+      longestCommonPrefixEdit([item("checkout"), item("branch")], "git ch"),
+    ).toBeNull();
+  });
+
+  it("completes the whole text when all candidates are identical", () => {
+    expect(longestCommonPrefixEdit([item("checkout"), item("checkout")], "git ch")).toEqual({
+      text: "checkout",
+      replaceStart: 4,
+      replaceEnd: 6,
+    });
   });
 });

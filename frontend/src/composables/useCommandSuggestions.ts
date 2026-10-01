@@ -7,7 +7,7 @@ import { pushCommandHistory } from "../lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, resolveSuggestionTabKey, type CommandSuggestion } from "../lib/commandSuggestions";
 import { pickGhostMatch } from "../lib/terminalGhostSuggest";
 import { CompletionController, type CompletionGeneratorChannel } from "../lib/completion/CompletionController";
-import { applyEditToText } from "../lib/completion/core/edit";
+import { applyEditToText, longestCommonPrefixEdit } from "../lib/completion/core/edit";
 import { rankItems } from "../lib/completion/core/ranking";
 import { figCompletionSource } from "../lib/completion/fig/figCompletionSource";
 import { GeneratorScheduler } from "../lib/completion/fig/generatorScheduler";
@@ -190,7 +190,17 @@ function handleCompletionKey(event: KeyboardEvent): boolean {
   switch (resolveCompletionKey(state, event.key)) {
     case "accept": {
       const item = items[completionActiveIndex.value];
-      if (item) acceptCompletionRow(item);
+      if (!item) return true;
+      // 批 4b（Warp prefix.rs / shell 语义）：多候选共享同一替换区间时，Tab
+      // 先补最长公共前缀并保持菜单打开（refreshCompletionMenu 按新行重算）；
+      // 无推进（已到公共边界）或区间不一致才接受高亮项。
+      const prefixEdit = longestCommonPrefixEdit(items, getPendingTerminalInput());
+      if (prefixEdit) {
+        completionController.accept({ ...item, edit: prefixEdit });
+        refreshCompletionMenu();
+        return true;
+      }
+      acceptCompletionRow(item);
       return true;
     }
     case "close":
