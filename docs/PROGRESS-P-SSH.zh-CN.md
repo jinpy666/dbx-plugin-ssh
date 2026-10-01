@@ -4476,3 +4476,17 @@ headless conhost 各烧满 1 核近 10 小时——sidecar 死亡（崩溃/更�
 剩余风险：GitHub runner 真实行为需推送后首跑观察；candidate 的
 cargo 垫片（musl 同步回 `release/`）逻辑未动，artifact 根目录 `ui/` 已由
 glob 锚定，风险低。
+
+## CI 实测结果：分支 CI 全绿 + 主仓验证链 5/6 点实证（2026-10-01 续）
+
+`ci-optimize-prebuilt-ui` 分支 draft PR #137 的真实 CI 全绿
+（run 36761530087：validate/backend/frontend/ssh-smoke/windows-regression
++ 5 平台 candidate；首轮 windows-regression 失败系 runner docker daemon
+15s 探测超时的存量 flaky——main 近 5 次两次闪红——已加步骤级重试修复）。
+主仓 build-candidates 的 ssh 目标验证：Linux ×2 全绿（sccache ×
+cargo-zigbuild 组合实证可用；两处连锁问题修复：pip ziglang shim 在
+打包 CLI 受限 PATH 下不可解析→改绝对路径 shim；setup-python@v7 遮蔽
+系统 PKG_CONFIG_PATH→补 libudev-dev 并加回系统路径）。ssh/windows-x64
+主仓侧曾因 choco nasm 与 AWS_LC_SYS_PREBUILT_NASM=1 预编译路径冲突
+而红，已移除 choco 步骤对齐插件 CI 配置（修复见主仓分支），待额度
+窗口恢复后由 run 36801747516 收口。
