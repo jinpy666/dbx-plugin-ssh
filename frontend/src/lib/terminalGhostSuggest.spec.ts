@@ -198,8 +198,9 @@ describe("evaluateGhost (gates + search + accept bytes)", () => {
   });
 
   it("applies the query length gate", () => {
-    expect(evaluate({ line: "g" }).match).toBeNull();
-    expect(evaluate({ line: "g", bounds: { minLength: 1 } }).match).not.toBeNull();
+    // 批 4：默认 minLength 2→1（Warp 首字符即建议），单字符默认即出 ghost。
+    expect(evaluate({ line: "g" }).match).not.toBeNull();
+    expect(evaluate({ line: "g", bounds: { minLength: 2 } }).match).toBeNull();
     expect(evaluate({ line: "x".repeat(65) }).match).toBeNull();
   });
 
@@ -217,7 +218,7 @@ describe("evaluateGhost (gates + search + accept bytes)", () => {
   });
 
   it("documents the default bounds on top of the shared engine defaults", () => {
-    expect(TERMINAL_GHOST_DEFAULTS).toEqual({ minLength: 2, maxLength: 64, limit: 12 });
+    expect(TERMINAL_GHOST_DEFAULTS).toEqual({ minLength: 1, maxLength: 64, limit: 12 });
   });
 });
 

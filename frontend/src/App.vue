@@ -541,7 +541,7 @@ type SftpCompressMode = "auto" | "on" | "off";
 const transferCompressModeState = ref<SftpCompressMode>("auto");
 const transferCompressThresholdState = ref(64);
 const suggestionsEnabledState = ref(true);
-const suggestionMinCharsState = ref(2);
+const suggestionMinCharsState = ref(1);
 const suggestionMaxCharsState = ref(64);
 
 function sanitizeConflictPolicy(value: unknown): DownloadConflictPolicy {
@@ -4850,7 +4850,7 @@ function cachePrefs() {
     else window.localStorage.removeItem(TRANSFER_DUPLICATE_KEY);
     if (!suggestionsEnabledState.value) window.localStorage.setItem(SUGGESTIONS_ENABLED_KEY, "0");
     else window.localStorage.removeItem(SUGGESTIONS_ENABLED_KEY);
-    if (suggestionMinCharsState.value !== 2) window.localStorage.setItem(SUGGESTIONS_MIN_CHARS_KEY, String(suggestionMinCharsState.value));
+    if (suggestionMinCharsState.value !== 1) window.localStorage.setItem(SUGGESTIONS_MIN_CHARS_KEY, String(suggestionMinCharsState.value));
     else window.localStorage.removeItem(SUGGESTIONS_MIN_CHARS_KEY);
     if (suggestionMaxCharsState.value !== 64) window.localStorage.setItem(SUGGESTIONS_MAX_CHARS_KEY, String(suggestionMaxCharsState.value));
     else window.localStorage.removeItem(SUGGESTIONS_MAX_CHARS_KEY);

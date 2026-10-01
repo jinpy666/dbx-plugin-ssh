@@ -80,7 +80,9 @@ describe("searchCommands", () => {
   });
 
   it("returns empty for queries outside the length bounds", () => {
-    expect(searchCommands("g", SOURCES)).toEqual([]);
+    // 批 4：minLength 默认 2→1（Warp 首字符即建议；单字符经 ghost/浮层分工
+    // 去噪——前缀命中归 ghost），单字符查询现在有结果。
+    expect(searchCommands("g", SOURCES).length).toBeGreaterThan(0);
     expect(searchCommands("a".repeat(65), SOURCES)).toEqual([]);
     expect(searchCommands("   ", SOURCES)).toEqual([]);
   });
@@ -111,7 +113,7 @@ describe("searchCommands", () => {
   });
 
   it("applies the documented default bounds and limit", () => {
-    expect(SEARCH_COMMANDS_DEFAULTS).toMatchObject({ limit: 12, minLength: 2, maxLength: 64 });
+    expect(SEARCH_COMMANDS_DEFAULTS).toMatchObject({ limit: 12, minLength: 1, maxLength: 64 });
     const many = Array.from({ length: 20 }, (_, i) => `git command ${i}`);
     const results = searchCommands("git", { history: many, quickCommands: [] });
     expect(results).toHaveLength(12);

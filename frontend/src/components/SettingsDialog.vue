@@ -1234,7 +1234,7 @@ async function saveSettings() {
     props.transferPrefs.persistCompressMode(transferCompressModeDraft.value);
     props.transferPrefs.persistCompressThreshold(Math.min(65536, Math.max(0, Number.parseInt(transferCompressThresholdDraft.value, 10) || 0)));
     props.suggestionPrefs.persistEnabled(suggestionsEnabledDraft.value);
-    props.suggestionPrefs.persistMinChars(Number.parseInt(suggestionMinCharsDraft.value, 10) || 2);
+    props.suggestionPrefs.persistMinChars(Number.parseInt(suggestionMinCharsDraft.value, 10) || 1);
     props.suggestionPrefs.persistMaxChars(Number.parseInt(suggestionMaxCharsDraft.value, 10) || 64);
     if (profileEditing.value) await saveProfileDraft();
     const updates: Record<string, unknown> = {
@@ -2063,7 +2063,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             <p class="muted settings-note">{{ t("suggestions.settingsEnabledHint") }}</p>
             <label class="settings-field">
               <span>{{ t("suggestions.settingsMinChars") }}</span>
-              <input v-model="suggestionMinCharsDraft" type="number" min="1" max="16" step="1" @change="suggestionMinCharsDraft = String(Math.min(16, Math.max(1, Number.parseInt(suggestionMinCharsDraft, 10) || 2)))" />
+              <input v-model="suggestionMinCharsDraft" type="number" min="1" max="16" step="1" @change="suggestionMinCharsDraft = String(Math.min(16, Math.max(1, Number.parseInt(suggestionMinCharsDraft, 10) || 1)))" />
             </label>
             <p class="muted settings-note">{{ t("suggestions.settingsMinCharsHint") }}</p>
             <label class="settings-field">

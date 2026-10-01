@@ -457,7 +457,7 @@ pub fn load_preferences(data_dir: &Path) -> Value {
         );
     }
     if map.contains_key("history_suggestion_min_chars") {
-        let min_chars = sanitize_u64_clamped(&map["history_suggestion_min_chars"], 1, 16, 2);
+        let min_chars = sanitize_u64_clamped(&map["history_suggestion_min_chars"], 1, 16, 1);
         prefs.insert(
             "history_suggestion_min_chars".to_string(),
             Value::from(min_chars),

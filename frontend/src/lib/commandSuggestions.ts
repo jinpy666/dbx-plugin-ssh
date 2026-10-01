@@ -30,7 +30,7 @@ export interface SearchCommandsOptions {
 
 export const SEARCH_COMMANDS_DEFAULTS = {
   limit: 12,
-  minLength: 2,
+  minLength: 1,
   maxLength: 64,
 } as const;
 
