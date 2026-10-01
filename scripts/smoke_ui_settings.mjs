@@ -198,11 +198,12 @@ try {
   // 本地终端（无 sessionId）下这两类隐藏、导航 10 项——由 SettingsDialog.spec
   // 组件用例覆盖，浏览器走查没有无会话的设置入口。
   // 2026-10 反馈迭代：命令建议（Command suggestions）从 Terminal 拆出独立成栏。
-  check("twelve settings categories", navTexts.length === 12, JSON.stringify(navTexts));
+  // AI 助手（Warp AI 对齐批）独立成栏后 13 项。
+  check("thirteen settings categories", navTexts.length === 13, JSON.stringify(navTexts));
   check(
     "terminal categories come first, in Tabby order",
-    navTexts[0] === "Appearance" && navTexts[1] === "Color scheme" && navTexts[3] === "Command suggestions" && navTexts[4] === "Keyword highlighting" && navTexts[5] === "Quick commands" && navTexts[6] === "Hotkeys",
-    JSON.stringify(navTexts.slice(0, 7)),
+    navTexts[0] === "Appearance" && navTexts[1] === "Color scheme" && navTexts[3] === "Command suggestions" && navTexts[4] === "Keyword highlighting" && navTexts[5] === "Quick commands" && navTexts[6] === "AI assist" && navTexts[7] === "Hotkeys",
+    JSON.stringify(navTexts.slice(0, 8)),
   );
 
   console.log("==> 命令建议 pane（从 Terminal 拆出，#138 反馈）");
@@ -225,6 +226,17 @@ try {
   await openCategory(5);
   check("quick-commands pane renders the manager", (await page.locator(".settings-pane:visible .quick-commands-section").count()) === 1);
   await page.screenshot({ path: join(SHOT_DIR, "02c-quick-commands.png") });
+
+  console.log("==> AI 助手 pane（Warp AI 对齐批）");
+  await openCategory(6);
+  // mock 宿主默认 ai 能力在位：无能力缺失横幅，三开关可交互，修复条授权位
+  // 默认未确认（重置按钮禁用）。
+  check("ai pane has no capability-missing banner", (await page.locator(".settings-pane:visible .settings-note", { hasText: "AI panel bridge" }).count()) === 0, "banner count");
+  check("ai pane exposes the # search toggle", (await page.locator(".settings-pane:visible label.settings-switch-row", { hasText: "AI command search" }).locator("[role='switch']").count()) === 1);
+  check("ai pane exposes the fix toggle", (await page.locator(".settings-pane:visible label.settings-switch-row", { hasText: "AI fix for failed commands" }).locator("[role='switch']").count()) === 1);
+  check("ai pane exposes the assist toggle", (await page.locator(".settings-pane:visible label.settings-switch-row", { hasText: "Open AI assistant hotkey" }).locator("[role='switch']").count()) === 1);
+  check("ai fix consent reset starts disabled", await page.locator(".settings-pane:visible button", { hasText: "don't ask again" }).isDisabled());
+  await page.screenshot({ path: join(SHOT_DIR, "02d-ai.png") });
 
   console.log("==> 外观 pane (typography only)");
   await openCategory(0);
@@ -277,9 +289,9 @@ try {
   await page.screenshot({ path: join(SHOT_DIR, "03-terminal.png") });
 
   console.log("==> 快捷键 pane: editor surface");
-  await openCategory(6);
+  await openCategory(7);
   const hotkeyRows = page.locator(".settings-pane:visible .hotkey-row");
-  check("thirteen bindable actions (incl. quick-select / command-history / completions)", (await hotkeyRows.count()) === 13, String(await hotkeyRows.count()));
+  check("fifteen bindable actions (incl. quick-select / command-history / completions / ai-fix / ai-assist)", (await hotkeyRows.count()) === 15, String(await hotkeyRows.count()));
   const groupTitles = await page.locator(".settings-pane:visible .hotkey-group .settings-section-title").allTextContents();
   check("actions grouped clipboard / view / navigation", groupTitles.map((t) => t.trim()).join("|") === "Clipboard|View|Navigation", JSON.stringify(groupTitles));
   const searchRow = hotkeyRows.filter({ hasText: "Find in terminal" });
@@ -369,7 +381,7 @@ try {
   const MOD = APPLE ? "Meta" : "Control";
   const DEFAULT_SEARCH_CHORD = APPLE ? `${MOD}+f` : `${MOD}+Shift+f`;
 
-  await openCategory(6);
+  await openCategory(7);
   const searchRowAgain = page.locator(".settings-pane:visible .hotkey-row", { hasText: "Find in terminal" });
   const searchChipsBefore = (await searchRowAgain.locator(".hotkey-chip").allTextContents()).map((t) => t.trim());
   await searchRowAgain.locator(".hotkey-chip").first().click();
@@ -424,7 +436,7 @@ try {
   // The dispatch group above closed the dialog to focus the terminal, so the
   // settings surface has to be reopened before touching the category nav again.
   await openSettings();
-  await openCategory(11);
+  await openCategory(12);
   const approvalField = page.locator(".settings-pane:visible label.settings-field", { hasText: "MCP execution approval" });
   check("MCP execution-approval field rendered", (await approvalField.count()) === 1);
   if (await approvalField.count()) {
@@ -463,8 +475,8 @@ try {
   const zhNav = (await zhPage.locator(".settings-nav-item").allTextContents()).map((t) => t.trim());
   check(
     "zh-CN nav translates the new categories",
-    zhNav[0] === "外观" && zhNav[1] === "配色方案" && zhNav[3] === "命令建议" && zhNav[4] === "关键词高亮" && zhNav[6] === "快捷键",
-    JSON.stringify(zhNav.slice(0, 7)),
+    zhNav[0] === "外观" && zhNav[1] === "配色方案" && zhNav[3] === "命令建议" && zhNav[4] === "关键词高亮" && zhNav[6] === "AI 助手" && zhNav[7] === "快捷键",
+    JSON.stringify(zhNav.slice(0, 8)),
   );
   await zhPage.close();
 

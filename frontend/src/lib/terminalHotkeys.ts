@@ -25,6 +25,8 @@ export type TerminalHotkeyActionId =
   | "quick-select"
   | "command-history"
   | "completions"
+  | "ai-fix"
+  | "ai-assist"
   | "copy"
   | "paste"
   | "select-all"
@@ -69,6 +71,11 @@ export const TERMINAL_HOTKEY_ACTIONS: readonly TerminalHotkeyAction[] = [
   // 浏览器冲突，透传远端仅对应 readline undo(0x1F)，被我们消费时不落键。
   // 随键入自动弹不受影响。
   { id: "completions", labelKey: "terminalHotkeys.actionCompletions", group: "view", apple: ["Ctrl+/", "Ctrl+Space"], other: ["Ctrl+/", "Ctrl+Space"] },
+  // Warp AI 对齐批：ai-fix 触发失败命令修复条（有修复条在场才动作）；ai-assist
+  // 唤起宿主 AI 面板（选中文本/当前屏快照为上下文）。两者受设置开关与宿主
+  // capabilities.ai 门控，无能力时消费按键并给可见降级提示。
+  { id: "ai-fix", labelKey: "terminalHotkeys.actionAiFix", group: "view", apple: ["Meta+Shift+I"], other: ["Ctrl+Shift+I"] },
+  { id: "ai-assist", labelKey: "terminalHotkeys.actionAiAssist", group: "view", apple: ["Meta+Shift+Y"], other: ["Ctrl+Shift+Y"] },
   { id: "copy", labelKey: "terminalHotkeys.actionCopy", group: "clipboard", apple: ["Meta+C"], other: ["Ctrl+Shift+C"] },
   { id: "paste", labelKey: "terminalHotkeys.actionPaste", group: "clipboard", apple: ["Meta+V"], other: ["Ctrl+V", "Ctrl+Shift+V"], nativeEvent: true },
   { id: "select-all", labelKey: "terminalHotkeys.actionSelectAll", group: "clipboard", apple: ["Meta+A"], other: ["Ctrl+Shift+A"] },

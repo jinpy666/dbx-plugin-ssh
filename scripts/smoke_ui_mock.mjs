@@ -586,6 +586,83 @@ try {
   await tunnelPage.screenshot({ path: `${SHOT_DIR}/tunnel-manager.png`, fullPage: false });
   await tunnelPage.close();
 
+  // --- Warp AI 对齐批：# 命令搜索 / 失败修复条 / 能力降级 -----------------
+  // ?aifix=1 把 SSH 回显换成 633 全链路失败命令夹具（token/password 敏感值
+  // 在场）；host.ai.openConversation 会话请求记录进 __dbxMockAiConversations。
+  console.log("==> Warp AI: # command search + fix bar");
+  const aiPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  aiPage.on("pageerror", (err) => pageError.push(String(err)));
+  await aiPage.addInitScript(() => {
+    localStorage.setItem("ssh-ai-assist", JSON.stringify({ search: true, fix: true, assist: true, fixConsent: false }));
+  });
+  await aiPage.goto(`${baseUrl}?render=dom&aifix=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await aiPage.bringToFront();
+  await aiPage.click(".terminal-host");
+
+  // # 模式：键入 # 即本地改道（字节不进 PTY），提示条出现且随打字更新。
+  await aiPage.keyboard.press("#");
+  await expect(aiPage, ".terminal-ai-search", "# mode hint appears");
+  await aiPage.keyboard.type("list files by size");
+  await expectText(aiPage, ".terminal-ai-search-query", "list files by size", "# mode shows the natural language query");
+  // Esc 退出：不发起会话。
+  await aiPage.keyboard.press("Escape");
+  check("Escape leaves # mode", (await aiPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  // 再次进入并发起：Enter 后提示条收起、宿主 AI 会话记录到位。
+  await aiPage.keyboard.press("#");
+  await aiPage.keyboard.type("list files by size");
+  await aiPage.keyboard.press("Enter");
+  check("Enter leaves # mode after submit", (await aiPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  await expect(aiPage, ".notice", "sent notice appears");
+  const aiConversations = await aiPage.evaluate(() => window.__dbxMockAiConversations ?? []);
+  check("host.ai.openConversation recorded the search request", aiConversations.length === 1, `count=${aiConversations.length}`);
+  check(
+    "search request carries query + kind + ask mode",
+    aiConversations[0]?.context?.kind === "ai-command-search" && aiConversations[0]?.context?.query === "list files by size" && aiConversations[0]?.mode === "ask" && aiConversations[0]?.send === true,
+    JSON.stringify(aiConversations[0] ?? {}).slice(0, 200),
+  );
+
+  // 失败命令 → 修复条：开屏 transcript 自带 curl D;28 夹具条，先关掉它，
+  // 再跑 deploy（633 D exit 2 夹具）；首次点击走快照预览确认。
+  await aiPage.click(".terminal-ai-fix-close");
+  // 关条点击会把焦点从 xterm textarea 挪走：重聚焦再键入（真实用户路径一致）。
+  await aiPage.click(".terminal-host");
+  await aiPage.waitForTimeout(300);
+  await aiPage.keyboard.type("deploy");
+  await aiPage.keyboard.press("Enter");
+  await expectText(aiPage, ".terminal-ai-fix-command", "deploy", "fix bar carries the deploy command");
+  await expect(aiPage, ".terminal-ai-fix", "fix bar appears for the failed command");
+  await expectText(aiPage, ".terminal-ai-fix-exit", "✗ 2", "fix bar shows the exit code");
+  await aiPage.click(".terminal-ai-fix-btn");
+  await expect(aiPage, ".small-modal", "snapshot preview confirm dialog opens");
+  const previewText = await aiPage.locator(".small-modal").first().textContent();
+  check("preview shows the command and exit code", previewText?.includes("deploy") && previewText?.includes("2"), String(previewText).slice(0, 120));
+  await aiPage.locator(".small-modal footer button").last().click();
+  check("fix bar dismisses after send", (await aiPage.locator(".terminal-ai-fix").count()) === 0, "bar count");
+  const aiConversationsAfterFix = await aiPage.evaluate(() => window.__dbxMockAiConversations ?? []);
+  check("fix request recorded (2 conversations total)", aiConversationsAfterFix.length === 2, `count=${aiConversationsAfterFix.length}`);
+  const fixContext = aiConversationsAfterFix[1]?.context ?? {};
+  check(
+    "fix snapshot is redacted (secrets replaced, exit code kept)",
+    fixContext?.exitCode === 2 && typeof fixContext?.output === "string" && fixContext.output.includes("***") && !fixContext.output.includes("hunter2") && !fixContext.output.includes("ghp_"),
+    JSON.stringify(fixContext).slice(0, 200),
+  );
+
+  // 降级（?ai=off 模拟旧宿主）：# 照常进终端（shell 注释），无模式提示。
+  const degradedPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  degradedPage.on("pageerror", (err) => pageError.push(String(err)));
+  await degradedPage.goto(`${baseUrl}?render=dom&ai=off`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await degradedPage.bringToFront();
+  await degradedPage.click(".terminal-host");
+  await degradedPage.keyboard.press("#");
+  await degradedPage.waitForTimeout(300);
+  check("degraded host: no # mode hint", (await degradedPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  check("degraded host: # passes through to the PTY echo", (await degradedPage.locator(".terminal-host").textContent())?.includes("#") === true, "echo check");
+  const degradedConversations = await degradedPage.evaluate(() => window.__dbxMockAiConversations ?? []);
+  check("degraded host records no conversations", degradedConversations.length === 0, `count=${degradedConversations.length}`);
+  await aiPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai.png`, fullPage: false }).catch(() => undefined);
+  await aiPage.close();
+  await degradedPage.close();
+
   if (pageError.length) {
     failures.push(`page errors: ${pageError.slice(0, 3).join(" | ")}`);
   }

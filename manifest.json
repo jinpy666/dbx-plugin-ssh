@@ -19,7 +19,8 @@
     "host.filesystem",
     "host.workbench",
     "host.storage",
-    "host.clipboard:read"
+    "host.clipboard:read",
+    "host.ai"
   ],
   "entrypoints": {
     "backend": {

@@ -1223,3 +1223,16 @@ FIG 补全引擎的专用执行通道（wave-1 lane B）：把一条 generator �
 - 错误统一字符串 Err 惯例并带 **`completion:` 前缀** 分类（如 `completion: mode not allowed`、`completion: invalid command`、`completion: too many args (max 32)`）。
 
 wave-1 不做 `completion/listDirectory`、`completion/environment`（wave 2+）。端到端冒烟：`scripts/smoke_completion.py`（方法未注册时 SKIP 而非 FAIL）。
+
+## 宿主 AI 通道（Warp AI 对齐批，前端桥）
+
+本插件自 2026-10-02 起经**宿主桥 JS 能力**接入 DBX AI 面板，sidecar 无新增方法、协议帧无变化：
+
+- 桥方法 `host.ai.openConversation`（manifest 需声明 `permissions: ["host.ai"]`）：参数
+  `{ title, prompt, context, send?, mode? }`，由宿主归一化并快照化（`snapshotPluginWorkbenchContext`）。
+  插件侧封装在 `frontend/src/lib/aiBridge.ts`，能力位 `capabilities.ai`（旧宿主缺省 = 不支持）。
+- **上下文契约**：`context.connectionId`（DBX 连接 id，AI 面板据此绑定连接）、`context.cwd`
+  （OSC 7/633 跟踪值）、终端输出快照——快照必须经 `lib/outputRedaction.ts`
+  （截断 + 脱敏）后方可出境；`#` 命令搜索只发自然语言与元数据。
+- **执行红线**：AI 生成内容不回写 PTY、不代执行；Agent 档（opt-in）的执行面为既有
+  MCP 工具 + `execPermissionMode` 审批 + `ssh/agent/prompt` 终端挑战，本插件不新增执行路径。

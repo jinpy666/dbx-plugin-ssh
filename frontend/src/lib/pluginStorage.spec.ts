@@ -42,6 +42,8 @@ describe("ssh pluginStore wiring", () => {
         // 即禁止任何退役键回流，故此处不写字面量，避免命中退役 grep 门禁）。
         "ssh-completion-engine",
         "ssh-terminal-ghost-suggest",
+        // AI 助手三开关 + AI 修复「不再询问」授权位（Warp AI 对齐批）。
+        "ssh-ai-assist",
         // Docker/Podman 引擎连接设置（单键 JSON 映射，dockerEngine.ts 自治）。
         "ssh-docker-engine",
         "ssh-tunnel-profiles",
