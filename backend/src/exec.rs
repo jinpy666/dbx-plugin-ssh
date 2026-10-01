@@ -1449,19 +1449,23 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
             // 段内容会落在 df 段里——os-release 的 `PRETTY_NAME="Alibaba Cloud
             // Linux release 3 (OpenAnolis)"` 恰好 6 个字段，宽松解析会把
             // "(OpenAnolis)" 混成 0 B 的幽灵磁盘行。
-            if fields.len() >= 6 && fields[5].starts_with('/') {
+            //
+            // 列从右往左锚定（mount 恒为最后一列）：文件系统名可能含空格——
+            // Windows 本地采集经 Git-Bash sh，MSYS df 把 Git 安装根报成
+            // `C:/Program Files/Git`，左锚定会把系统盘整行拒掉。
+            if fields.len() >= 6 && fields[fields.len() - 1].starts_with('/') {
                 if let (Ok(total_kib), Ok(used_kib), Ok(available_kib)) = (
-                    fields[1].parse::<u64>(),
-                    fields[2].parse::<u64>(),
-                    fields[3].parse::<u64>(),
+                    fields[fields.len() - 5].parse::<u64>(),
+                    fields[fields.len() - 4].parse::<u64>(),
+                    fields[fields.len() - 3].parse::<u64>(),
                 ) {
-                    if let Some(percent) = fields[4]
+                    if let Some(percent) = fields[fields.len() - 2]
                         .strip_suffix('%')
                         .and_then(|p| p.parse::<f64>().ok())
                     {
                         disks.push(json!({
-                            "filesystem": fields[0],
-                            "mount": fields[5],
+                            "filesystem": fields[..fields.len() - 5].join(" "),
+                            "mount": fields[fields.len() - 1],
                             "totalBytes": total_kib * 1024,
                             "usedBytes": used_kib * 1024,
                             "availableBytes": available_kib * 1024,
@@ -2845,6 +2849,27 @@ PRETTY_NAME=\"Alibaba Cloud Linux release 3 (OpenAnolis)\"
         let disks = metrics["disks"].as_array().unwrap();
         assert_eq!(disks.len(), 1);
         assert_eq!(disks[0]["mount"], "/");
+    }
+
+    #[test]
+    fn df_row_with_spaces_in_filesystem_parses() {
+        // Windows 本地采集（Git-Bash sh → MSYS df）：文件系统名含空格
+        // （`C:/Program Files/Git` 即 Git 安装根/系统盘）。列右锚定后整行
+        // 可解析，左锚定会把 C 盘从本地终端的磁盘列表里丢掉。
+        let output = "\
+--df--
+E:                     262126588 184832468  77294120      71% /e
+C:/Program Files/Git   100955784  60314920  40640864      60% /
+";
+        let metrics = parse_metrics_output(output);
+        let disks = metrics["disks"].as_array().unwrap();
+        assert_eq!(disks.len(), 2);
+        assert_eq!(disks[0]["filesystem"], "E:");
+        assert_eq!(disks[0]["mount"], "/e");
+        assert_eq!(disks[1]["filesystem"], "C:/Program Files/Git");
+        assert_eq!(disks[1]["mount"], "/");
+        assert_eq!(disks[1]["totalBytes"], 100_955_784_u64 * 1024);
+        assert_eq!(disks[1]["percentUsed"], 60.0);
     }
 
     #[test]
