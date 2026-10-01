@@ -10,9 +10,9 @@ import type { HistoryPanelEntry } from "../lib/historyPanel";
 
 const NOW = Date.now();
 const entries: HistoryPanelEntry[] = [
-  { command: "kubectl get pods -n prod", ts: NOW - 120_000 },
-  { command: "tail -f /var/log/syslog", ts: NOW - 3 * 3_600_000 },
-  { command: "git status", ts: null },
+  { command: "kubectl get pods -n prod", ts: NOW - 120_000, durationMs: 4_200, exitCode: 0 },
+  { command: "tail -f /var/log/syslog", ts: NOW - 3 * 3_600_000, durationMs: null, exitCode: null },
+  { command: "git status", ts: null, durationMs: null, exitCode: null },
 ];
 const anchor = { x: 40, y: 300, cellHeight: 17, cellWidth: 8 };
 

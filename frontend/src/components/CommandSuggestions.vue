@@ -35,7 +35,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   activate: [index: number];
   fill: [item: CommandSuggestion];
-  ignore: [item: CommandSuggestion];
+  ignore: [command: string];
 }>();
 
 const rootEl = ref<HTMLElement | null>(null);
@@ -143,7 +143,7 @@ function onRowEnter(index: number) {
         role="button"
         :aria-label="t('suggestions.ignoreHint')"
         @mousedown.stop.prevent
-        @click.stop="emit('ignore', item)"
+        @click.stop="emit('ignore', item.command)"
       ><X /></span>
     </button>
     <!-- kbd 提示行（批 3c，#138 后 Tab 语义不平凡）：内联常驻、非 tooltip，
