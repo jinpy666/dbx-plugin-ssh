@@ -331,6 +331,8 @@ const props = defineProps<{
   terminalBehavior: TerminalBehaviorSettings;
   /** ghost 接受键（批 4e/反馈迭代）：权威态在 App，本组件只读 + 上抛改动。 */
   ghostTabAccept: boolean;
+  /** 空提示符快捷键引导条开关（权威态在 App）：只读 + 上抛改动。 */
+  promptHintsEnabled: boolean;
   /** 终端快捷键绑定（对标 Tabby「Hotkeys」页）：权威态在 App。 */
   terminalHotkeys: TerminalHotkeyBindings;
   /** 是否 Apple 平台：决定快捷键修饰键的显示符号与默认键位口径。 */
@@ -416,6 +418,8 @@ const emit = defineEmits<{
   /** 行内 ghost 自动建议开关（组件自治持久化 pluginStore，App 只同步内存态）。 */
   (e: "update:ghostSuggest", value: boolean): void;
   (e: "update:ghostTabAccept", value: boolean): void;
+  /** 空提示符快捷键引导条开关（权威态在 App；App 侧重开时会顺带清消散旗标）。 */
+  (e: "update:promptHintsEnabled", value: boolean): void;
   /** 行为设置局部增量：App 侧会归一化 + 持久化 + 即时落地到 xterm 选项。 */
   (e: "update-behavior", patch: Partial<TerminalBehaviorSettings>): void;
   /** 快捷键整表替换（编辑器内部管理增删改，只上抛最终结果）。 */
@@ -2127,6 +2131,13 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("terminalGhost.tabAcceptHint") }}</p>
             <p class="muted settings-note">{{ t("terminalGhost.keysSummary") }}</p>
+            <!-- 空提示符快捷键引导条开关：终端空行静置时的 kbd 提示（↑/Ctrl+R/
+                 Ctrl+Space/→），用过即散；设置里重开即清消散旗标。 -->
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="promptHintsEnabled" size="sm" @update:model-value="emit('update:promptHintsEnabled', Boolean($event))" />
+              <span>{{ t("terminalHints.settingsLabel") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("terminalHints.settingsHint") }}</p>
             </div>
 
 

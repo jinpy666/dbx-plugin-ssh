@@ -277,6 +277,25 @@ try {
   await sleep(2_500);
   await historyPage.bringToFront();
   await historyPage.click(".terminal-host");
+
+  // 空提示符快捷键引导条：静置空行显示 → 键入隐藏 → 退格清行恢复；随后
+  // ↑ 开面板即「用过即散」（面板关闭后不再出现，旗标持久化）。
+  try {
+    await historyPage.waitForSelector(".terminal-prompt-hints", { timeout: 5_000 });
+    console.log("  ok  shortcut hint strip shows on empty prompt");
+  } catch {
+    failures.push("shortcut hint strip missing on empty prompt");
+    console.log("  FAIL shortcut hint strip");
+  }
+  await historyPage.keyboard.type("e");
+  await sleep(200);
+  const hintsAfterType = await historyPage.locator(".terminal-prompt-hints").count();
+  check("shortcut hint strip hides while typing", hintsAfterType === 0, `hints=${hintsAfterType}`);
+  await historyPage.keyboard.press("Backspace");
+  await sleep(200);
+  const hintsAfterBackspace = await historyPage.locator(".terminal-prompt-hints").count();
+  check("shortcut hint strip returns after clearing the line", hintsAfterBackspace === 1, `hints=${hintsAfterBackspace}`);
+
   await historyPage.keyboard.press("ArrowUp");
   await expect(historyPage, ".terminal-history-panel", "history panel opens on ArrowUp");
   // #138 交互跟进：面板打开不抢焦点，光标留在命令行（xterm textarea）。
@@ -324,6 +343,9 @@ try {
   await historyPage.keyboard.press("Escape");
   const panelsAfterEsc = await historyPage.locator(".terminal-history-panel").count();
   check("Escape closes the panel", panelsAfterEsc === 0, `panels=${panelsAfterEsc}`);
+  // 用过即散：↑ 开面板命中引导条教的键位，面板关闭后引导条不再出现。
+  const hintsAfterPanelUse = await historyPage.locator(".terminal-prompt-hints").count();
+  check("hint strip stays dismissed after using the panel (used-once dismissal)", hintsAfterPanelUse === 0, `hints=${hintsAfterPanelUse}`);
 
   // 热键唤起聚焦搜索框（批 3d，Warp Ctrl+R 心智）：⌘⇧H（mac）/ Ctrl+Shift+H。
   const historyHotkey = process.platform === "darwin" ? "Meta+Shift+h" : "Control+Shift+H";

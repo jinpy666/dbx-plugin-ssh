@@ -213,6 +213,7 @@ try {
   // 唯一可配置项是「用 Tab 接受建议」开关（Warp Tab key behavior），旧行内
   // 下拉已移除——断言开关行存在且可交互。
   check("suggestion pane exposes the ghost Tab-accept toggle", (await page.locator(".settings-pane:visible label.settings-switch-row", { hasText: "Use Tab to accept" }).locator("[role='switch']").count()) === 1);
+  check("suggestion pane exposes the prompt-hints toggle", (await page.locator(".settings-pane:visible label.settings-switch-row", { hasText: "Shortcut hints on empty prompt" }).locator("[role='switch']").count()) === 1);
   await page.screenshot({ path: join(SHOT_DIR, "03b-suggestions.png") });
 
   console.log("==> 关键词高亮 pane（从 Terminal 拆出的规则管理器）");

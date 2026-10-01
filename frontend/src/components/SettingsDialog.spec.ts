@@ -72,7 +72,8 @@ function mountSettings(sessionId?: string) {
     attachTo: document.body,
     props: {
       open: false,
-  ghostTabAccept: false,
+      ghostTabAccept: false,
+      promptHintsEnabled: true,
       profilesOpen: false,
       sessionId,
       terminalFontSize: 14,

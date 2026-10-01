@@ -133,6 +133,7 @@ import { isPersistableCommand, mergeShellHistory, parseShellHistoryText, pushCom
 import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
 import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, saveGhostTabAccept } from "./lib/ghostAcceptKey";
+import { loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
@@ -288,6 +289,7 @@ import JsonPreviewPanel from "./components/JsonPreviewPanel.vue";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
 import TerminalQuickSelectPanel from "./components/TerminalQuickSelectPanel.vue";
 import TerminalHistoryPanel from "./components/TerminalHistoryPanel.vue";
+import TerminalPromptHints from "./components/TerminalPromptHints.vue";
 import {
   canOpenHistoryPanel,
   clampHistoryPanelIndex,
@@ -800,7 +802,11 @@ const {
   getTerminalHost: () => terminalHost.value,
   sendTerminalBytes,
   getPendingTerminalInput: () => pendingTerminalInput,
-  setPendingTerminalInput: (value) => { pendingTerminalInput = value; },
+  setPendingTerminalInput: (value) => {
+    pendingTerminalInput = value;
+    // 同 trackPendingInput：整行替换（回填/接受）也改变行空态。
+    promptHintsLineEmpty.value = value === "";
+  },
   commandRunning,
   isTerminalTransferBusy: () => terminalTransferBusy.value,
   terminalCwd, commandHistory, quickCommands,
@@ -1953,6 +1959,8 @@ function handleTerminalKey(event: KeyboardEvent) {
     !(event.ctrlKey && event.key === "Tab") &&
     !(commandRunning.value || terminalTransferBusy.value)
   ) {
+    // 用过即散：接受 ghost 命中引导条教的键位（→ / Ctrl+F / Ctrl+E），此后不再教。
+    dismissPromptHints();
     acceptGhostSuggestion();
     return consume();
   }
@@ -2023,6 +2031,8 @@ function handleTerminalKey(event: KeyboardEvent) {
       // 重算刷新。引擎 off 或无候选由 controller 原样关闭，无副作用。
       if (historyPanelOpen.value || searchOpen.value) return consume();
       if (commandRunning.value || terminalTransferBusy.value || terminal?.buffer.active.type === "alternate") return consume();
+      // 用过即散：手动补全命中引导条教的键位（Ctrl+Space），此后不再教。
+      dismissPromptHints();
       openCompletionsManually();
       return consume();
     case "copy":
@@ -2210,6 +2220,8 @@ function historyPanelGateOpen(): boolean {
  *  在命令行（shell ↑ 心智）。两个入口两种心智，互不打断。 */
 function openHistoryPanel(focusSearch = false) {
   if (!terminal) return;
+  // 用过即散：面板是引导条教的键位之一，真用过就不再教（持久化旗标）。
+  dismissPromptHints();
   terminalMenuOpen.value = false;
   historyPanelFocusSearch.value = focusSearch;
   // 每次打开都是全量视图:清掉上一次的搜索词,不读行缓冲(pendingTerminalInput
@@ -2366,6 +2378,9 @@ function trackPendingInput(data: string) {
   // （输入门未放行时只作废不调度；常规键入路径随后由
   // refreshSuggestionsAfterInput 的 request("typing") 即时冲掉防抖）。
   completionController.lineChanged();
+  // 引导条的行空判定与行缓冲同步推进（pendingTerminalInput 是普通变量，
+  // 引导条显隐要响应式，就在这个唯一汇点镜像一份）。
+  promptHintsLineEmpty.value = pendingTerminalInput === "";
 }
 
 /** 回车行兜底采集：门过滤 + 回显对照后写入 commandHistory；与 E 帧/命令
@@ -7041,6 +7056,48 @@ onBeforeUnmount(() => {
     waiter.reject(new Error(t("errors.workbenchDetached")));
   }
 });
+
+// 空提示符快捷键引导条（TerminalPromptHints）：引导 Warp 对齐批次的键位
+// （↑ 历史 / Ctrl+R 搜索 / Ctrl+Space 补全 / → 接受行内建议）。开关与一次性
+// 消散旗标存 pluginStore；显隐门在 lib/terminalPromptHints.ts（纯函数），
+// 行空判定经 trackPendingInput / setPendingTerminalInput 两个汇点镜像；
+// 用户实际用过任一被引导功能（开面板/手动补全/接受 ghost）即永久消散。
+// 声明位置收在 setup 尾部：watch 立即求值 computed（→ terminalTransferBusy
+// → zmodemBusy），依赖链上有后段才声明的 const，放前面必踩 TDZ。
+const promptHintsEnabled = ref(loadPromptHintsEnabled());
+const promptHintsDismissed = ref(loadPromptHintsDismissed());
+const promptHintsLineEmpty = ref(true);
+const promptHintsAnchor = ref<SuggestionAnchor | null>(null);
+const promptHintsVisible = computed(() =>
+  shouldShowPromptHints({
+    enabled: promptHintsEnabled.value,
+    dismissed: promptHintsDismissed.value,
+    sessionActive: isLocalMode.value || !!session.value?.sessionId,
+    lineEmpty: promptHintsLineEmpty.value,
+    alternateActive: terminal?.buffer.active.type === "alternate",
+    commandRunning: commandRunning.value,
+    transferBusy: terminalTransferBusy.value,
+    overlayOpen: suggestionOpen.value || completionOpen.value || historyPanelOpen.value || quickSelectOpen.value || searchOpen.value,
+  }),
+);
+watch(promptHintsVisible, (visible) => {
+  if (visible) promptHintsAnchor.value = readTerminalSuggestionAnchor();
+});
+function setPromptHintsEnabled(value: boolean) {
+  promptHintsEnabled.value = value;
+  savePromptHintsEnabled(value);
+  // 重开开关即清除消散旗标——用户明确要再看引导。
+  if (value && promptHintsDismissed.value) {
+    promptHintsDismissed.value = false;
+    savePromptHintsDismissed(false);
+  }
+}
+/** 消散（✗ 或用过任一功能）：置位 + 持久化，本安装不再弹。 */
+function dismissPromptHints() {
+  if (promptHintsDismissed.value) return;
+  promptHintsDismissed.value = true;
+  savePromptHintsDismissed(true);
+}
 </script>
 
 <template>
@@ -7457,6 +7514,17 @@ onBeforeUnmount(() => {
         <div v-if="terminalDiagVisible" class="terminal-diag-overlay" @dblclick="terminalDiagVisible = false">
           keys {{ terminalDiag.keys }} · sends {{ terminalDiag.sends }} · acks {{ terminalDiag.acks }} · errors {{ terminalDiag.errors }} · swallowed {{ terminalDiag.swallowed }}
         </div>
+        <!-- 空提示符快捷键引导条（引导 Warp 对齐键位）：空行静置时浮在光标行
+             上方，用过任一功能或 ✗ 永久消散（lib/terminalPromptHints.ts 门）；
+             定位与建议浮层同一光标锚点坐标系，底边贴光标行顶不遮输入行。 -->
+        <TerminalPromptHints
+          v-if="promptHintsVisible"
+          :locale="locale"
+          :apple="applePlatform"
+          :anchor="promptHintsAnchor"
+          :viewport="suggestionViewport"
+          @dismiss="dismissPromptHints"
+        />
         <!-- 命令模糊建议浮层（P1-1）：锚点为光标像素坐标，读不到时贴终端底部；
              键盘（↑↓/Tab/Enter/Esc）由 handleTerminalKey 在浮层开启时优先消费。 -->
         <CommandSuggestions
@@ -8704,6 +8772,8 @@ onBeforeUnmount(() => {
       @update:ghost-suggest="setGhostEnabled"
       :ghost-tab-accept="ghostTabAccept"
       @update:ghost-tab-accept="setGhostTabAccept"
+      :prompt-hints-enabled="promptHintsEnabled"
+      @update:prompt-hints-enabled="setPromptHintsEnabled"
       @update:wallpaper-enabled="updateWallpaperEnabled"
       @update:wallpaper-opacity="updateWallpaperOpacity"
       @set-wallpaper-image="setWallpaperImage"
