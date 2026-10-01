@@ -19,6 +19,10 @@ export interface AiTerminalContext {
   connectionId?: string;
   cwd?: string;
   shell?: string;
+  /** 多语言（LLM 以终端用户语言回答）/ 多系统口径——App 的 aiContextExtras
+   *  组装，构造器全量透传。 */
+  locale?: string;
+  os?: string;
 }
 
 function contextWithExtras(context: AiTerminalContext, extras: Record<string, unknown>): Record<string, unknown> {
