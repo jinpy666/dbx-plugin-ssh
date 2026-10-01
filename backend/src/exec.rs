@@ -1505,7 +1505,20 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
         ),
     };
     let mem_total = mem_kib.get("MemTotal").copied().unwrap_or(0) * 1024;
-    let mem_available = mem_kib.get("MemAvailable").copied().unwrap_or(0) * 1024;
+    // Linux ≥3.14 reports MemAvailable directly; pre-3.14 kernels and the
+    // MSYS /proc shim the local collector hits on Windows (Git-Bash sh) only
+    // carry MemFree — fall back to the classic free+buffers+cached estimate,
+    // otherwise `used` degenerates to the full total and the dock band pins
+    // MEM at 100%.
+    let mem_available = match mem_kib.get("MemAvailable") {
+        Some(available) => *available * 1024,
+        None => {
+            (mem_kib.get("MemFree").copied().unwrap_or(0)
+                + mem_kib.get("Buffers").copied().unwrap_or(0)
+                + mem_kib.get("Cached").copied().unwrap_or(0))
+                * 1024
+        }
+    };
     let swap_total = mem_kib.get("SwapTotal").copied().unwrap_or(0) * 1024;
     let swap_free = mem_kib.get("SwapFree").copied().unwrap_or(0) * 1024;
     let uptime_seconds = uptime
@@ -2785,6 +2798,36 @@ tmpfs 8154428 0 8154428 0% /dev/shm
         assert_eq!(disks.len(), 3);
         assert_eq!(disks[1]["mount"], "/dev/shm");
         assert_eq!(disks[2]["percentUsed"], 55.0);
+    }
+
+    #[test]
+    fn meminfo_without_mem_available_falls_back_to_free() {
+        // MSYS（Windows 上 Git-Bash sh 的 /proc 垫片）只有 MemTotal/MemFree：
+        // 旧内核同形。缺 MemAvailable 时回退 classic free+buffers+cached，
+        // 否则 used=total，本地终端信息带 MEM 恒定 100%。
+        let output = "\
+hostname=win-pc
+--mem--
+MemTotal:       16772124 kB
+MemFree:        10700520 kB
+SwapTotal:       2490368 kB
+SwapFree:        2490368 kB
+--cpu--
+cpu  100 0 200 8000
+cpu  200 0 300 8100
+";
+        let metrics = parse_metrics_output(output);
+        assert_eq!(metrics["memory"]["totalBytes"], 16_772_124_u64 * 1024);
+        assert_eq!(metrics["memory"]["availableBytes"], 10_700_520_u64 * 1024);
+        assert_eq!(
+            metrics["memory"]["usedBytes"],
+            (16_772_124_u64 - 10_700_520) * 1024
+        );
+        // 老内核的 Buffers/Cached 也在估计之列。
+        let with_buffers = parse_metrics_output(
+            "--mem--\nMemTotal: 100 kB\nMemFree: 10 kB\nBuffers: 5 kB\nCached: 8 kB\n",
+        );
+        assert_eq!(with_buffers["memory"]["availableBytes"], 23 * 1024);
     }
 
     #[test]

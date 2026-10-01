@@ -912,20 +912,25 @@ async function reloadSettings() {
   void loadStartupCommands();
   void loadConnNameEncoding();
   try {
-    // revealSecrets: 预填已存原值（原始凭据串），避免只能看到"已配置"占位。
-    const meta = await window.dbxPlugin.invoke<SshSettings>("ssh/settings/get", { sessionId: props.sessionId, revealSecrets: true });
-    settingsMeta.value = meta;
-    settingsDraft.quickSudo = meta.quickSudo;
-    settingsDraft.sudoUsePty = meta.sudoUsePty;
-    settingsDraft.authFlowMode = meta.authFlowMode || "password_then_otp";
-    settingsDraft.passwordPromptHint = meta.passwordPromptHint || "";
-    settingsDraft.totpPromptHint = meta.totpPromptHint || "";
-    settingsDraft.quickSudoProfileId = meta.quickSudoProfileId || "";
-    const agentMode = meta.agentTerminalMode;
-    settingsDraft.agentTerminalMode = agentMode && (AGENT_MODES as readonly string[]).includes(agentMode) ? agentMode : "off";
-    settingsDraft.rememberedCommands = sanitizeRememberedCommands(meta.rememberedCommands);
-    settingsDraft.sudoPassword = meta.sudoPassword || "";
-    settingsDraft.totpSecret = meta.totpSecret || "";
+    // 本地终端没有 SSH 会话（保存路径同样按 sessionId 门控）：跳过会话级
+    // 设置拉取，只保留全局偏好面板——否则 required_string 直接报错，整条
+    // 弹窗被「SSH 设置加载失败」横幅替换。
+    if (props.sessionId) {
+      // revealSecrets: 预填已存原值（原始凭据串），避免只能看到"已配置"占位。
+      const meta = await window.dbxPlugin.invoke<SshSettings>("ssh/settings/get", { sessionId: props.sessionId, revealSecrets: true });
+      settingsMeta.value = meta;
+      settingsDraft.quickSudo = meta.quickSudo;
+      settingsDraft.sudoUsePty = meta.sudoUsePty;
+      settingsDraft.authFlowMode = meta.authFlowMode || "password_then_otp";
+      settingsDraft.passwordPromptHint = meta.passwordPromptHint || "";
+      settingsDraft.totpPromptHint = meta.totpPromptHint || "";
+      settingsDraft.quickSudoProfileId = meta.quickSudoProfileId || "";
+      const agentMode = meta.agentTerminalMode;
+      settingsDraft.agentTerminalMode = agentMode && (AGENT_MODES as readonly string[]).includes(agentMode) ? agentMode : "off";
+      settingsDraft.rememberedCommands = sanitizeRememberedCommands(meta.rememberedCommands);
+      settingsDraft.sudoPassword = meta.sudoPassword || "";
+      settingsDraft.totpSecret = meta.totpSecret || "";
+    }
   } catch {
     settingsLoadFailed.value = true;
   } finally {
