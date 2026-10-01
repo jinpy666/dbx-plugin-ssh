@@ -304,9 +304,9 @@ describe("quick-select 动作（WT-1，注册表真实派发）", () => {
 });
 
 describe("command-history 动作（Warp 式 history 面板补充唤起键）", () => {
-  it("默认键位登记 Cmd/Ctrl+Shift+H，两平台默认表均无冲突", () => {
-    expect(defaultTerminalHotkeys(true)["command-history"]).toEqual(["Meta+Shift+H"]);
-    expect(defaultTerminalHotkeys(false)["command-history"]).toEqual(["Ctrl+Shift+H"]);
+  it("默认键位登记 Cmd/Ctrl+Shift+H 与 Ctrl+R（Warp Command Search 默认键），两平台默认表均无冲突", () => {
+    expect(defaultTerminalHotkeys(true)["command-history"]).toEqual(["Meta+Shift+H", "Ctrl+R"]);
+    expect(defaultTerminalHotkeys(false)["command-history"]).toEqual(["Ctrl+Shift+H", "Ctrl+R"]);
     expect(findHotkeyConflicts(defaultTerminalHotkeys(true))).toEqual([]);
     expect(findHotkeyConflicts(defaultTerminalHotkeys(false))).toEqual([]);
   });
@@ -318,13 +318,43 @@ describe("command-history 动作（Warp 式 history 面板补充唤起键）", (
     const appleCombo = keyComboFromEvent(event("KeyH", { metaKey: true, shiftKey: true }));
     expect(appleCombo).toBe("Meta+Shift+H");
     expect(matchTerminalHotkey(defaultTerminalHotkeys(true), appleCombo!)).toBe("command-history");
+    // Ctrl+R（Warp Command Search 默认键 workspace:show_command_search）同样派发；
+    // 需要远端 readline 原生 reverse-i-search 的用户可在热键编辑器解绑。
+    const ctrlR = keyComboFromEvent(event("KeyR", { ctrlKey: true }));
+    expect(ctrlR).toBe("Ctrl+R");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), ctrlR!)).toBe("command-history");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(true), ctrlR!)).toBe("command-history");
     // 裸 ↑ 不经注册表派发（App.vue 键盘链的 history 面板分支直达）。
     expect(matchTerminalHotkey(defaultTerminalHotkeys(false), "Up")).toBeNull();
   });
 
   it("存量键位数据缺 command-history 字段时回填平台默认（新增动作不失效）", () => {
     const legacy = sanitizeTerminalHotkeys({ search: ["Ctrl+Shift+F"] }, false);
-    expect(legacy["command-history"]).toEqual(["Ctrl+Shift+H"]);
+    expect(legacy["command-history"]).toEqual(["Ctrl+Shift+H", "Ctrl+R"]);
+  });
+});
+
+describe("completions 动作（Warp completions 手动唤起键）", () => {
+  it("默认键位登记 Ctrl+Space（两平台同键），默认表无冲突", () => {
+    expect(defaultTerminalHotkeys(true).completions).toEqual(["Ctrl+Space"]);
+    expect(defaultTerminalHotkeys(false).completions).toEqual(["Ctrl+Space"]);
+    expect(findHotkeyConflicts(defaultTerminalHotkeys(true))).toEqual([]);
+    expect(findHotkeyConflicts(defaultTerminalHotkeys(false))).toEqual([]);
+  });
+
+  it("键盘事件经 keyComboFromEvent → matchTerminalHotkey 派发到 completions", () => {
+    const combo = keyComboFromEvent(event("Space", { ctrlKey: true }));
+    expect(combo).toBe("Ctrl+Space");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), combo!)).toBe("completions");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(true), combo!)).toBe("completions");
+    // 裸空格与 Shift 系组合不派发（空格是正常输入字符）。
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("Space"))!)).toBeNull();
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("Space", { shiftKey: true }))!)).toBeNull();
+  });
+
+  it("存量键位数据缺 completions 字段时回填平台默认（新增动作不失效）", () => {
+    const legacy = sanitizeTerminalHotkeys({ search: ["Ctrl+Shift+F"] }, false);
+    expect(legacy.completions).toEqual(["Ctrl+Space"]);
   });
 });
 

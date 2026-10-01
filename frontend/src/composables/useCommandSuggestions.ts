@@ -243,6 +243,16 @@ function refreshCompletionMenu() {
   completionController.request("typing");
 }
 
+/** 手动唤起结构化补全菜单（Warp completions 手动键 Ctrl+Space 同位）：显式
+ *  请求放行输入门（completionInputAllowed 只在常规键入路径放行，热键路径
+ *  必须自开门，否则 request 会被 enabled() 拦下）；抑制门锁存（跟随程序/
+ *  历史面板期间）不拦显式动作——用户点名要菜单就给菜单。候选空/引擎 off
+ *  由 controller 原样关闭，无副作用。 */
+function openCompletionsManually() {
+  completionInputAllowed = true;
+  refreshCompletionMenu();
+}
+
 // CompletionController（lib/completion）：调度中枢。enabled = 引擎三态
 // （off 即关）+ 输入门；session id 取当前会话（无会话空串，guard 兜底）；
 // generators 通道接声明式 generator 调度（两段渲染 + 三重 guard 在 controller）。
@@ -677,6 +687,7 @@ function resetSuggestionsForSession() {
     handleCompletionKey,
     refreshSuggestionsAfterInput,
     refreshCompletionMenu,
+    openCompletionsManually,
     replaceTerminalLineWith,
     fillSuggestion,
     acceptCompletionRow,

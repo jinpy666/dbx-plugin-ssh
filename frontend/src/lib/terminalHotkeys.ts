@@ -24,6 +24,7 @@ export type TerminalHotkeyActionId =
   | "search"
   | "quick-select"
   | "command-history"
+  | "completions"
   | "copy"
   | "paste"
   | "select-all"
@@ -57,8 +58,13 @@ export const TERMINAL_HOTKEY_ACTIONS: readonly TerminalHotkeyAction[] = [
   // Shift+O 与既有默认键位零冲突；与用户自定义键相撞时由编辑器 findHotkeyConflicts
   // 标注（不拦截派发，动作表顺序先者生效）。
   { id: "quick-select", labelKey: "terminalHotkeys.actionQuickSelect", group: "view", apple: ["Meta+Shift+O"], other: ["Ctrl+Shift+O"] },
-  // Warp 式 history 面板（↑ 裸键直达是主入口；此处为可配置的补充唤起键）。
-  { id: "command-history", labelKey: "terminalHotkeys.actionHistory", group: "view", apple: ["Meta+Shift+H"], other: ["Ctrl+Shift+H"] },
+  // Warp 式 history 面板：Ctrl+R 是 Warp Command Search 的默认键
+  // （workspace:show_command_search），⌘⇧H / Ctrl+Shift+H 为原补充入口。
+  // 需要远端 readline 原生 reverse-i-search 的用户可在热键编辑器解绑 Ctrl+R。
+  { id: "command-history", labelKey: "terminalHotkeys.actionHistory", group: "view", apple: ["Meta+Shift+H", "Ctrl+R"], other: ["Ctrl+Shift+H", "Ctrl+R"] },
+  // 结构化补全菜单的手动唤起键（Warp completions 手动打开键；Tab 归远端
+  // shell 后 Ctrl+Space 即 Warp 的兜底默认）。随键入自动弹不受影响。
+  { id: "completions", labelKey: "terminalHotkeys.actionCompletions", group: "view", apple: ["Ctrl+Space"], other: ["Ctrl+Space"] },
   { id: "copy", labelKey: "terminalHotkeys.actionCopy", group: "clipboard", apple: ["Meta+C"], other: ["Ctrl+Shift+C"] },
   { id: "paste", labelKey: "terminalHotkeys.actionPaste", group: "clipboard", apple: ["Meta+V"], other: ["Ctrl+V", "Ctrl+Shift+V"], nativeEvent: true },
   { id: "select-all", labelKey: "terminalHotkeys.actionSelectAll", group: "clipboard", apple: ["Meta+A"], other: ["Ctrl+Shift+A"] },

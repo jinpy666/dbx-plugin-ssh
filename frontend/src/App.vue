@@ -784,6 +784,7 @@ const {
   handleCompletionKey,
   refreshSuggestionsAfterInput,
   refreshCompletionMenu,
+  openCompletionsManually,
   replaceTerminalLineWith,
   fillSuggestion,
   acceptCompletionRow,
@@ -2009,10 +2010,20 @@ function handleTerminalKey(event: KeyboardEvent) {
       else openQuickSelect();
       return consume();
     case "command-history":
-      // ↑ 裸键之外的补充唤起（可配置键位）：同一 gate，开↔关 toggle；热键
-      // 入口聚焦搜索框（批 3d）——热键用户要的是 Warp Ctrl+R 式搜索流。
+      // ↑ 裸键之外的补充唤起（可配置键位，默认含 Ctrl+R——Warp Command Search
+      // 的默认键 workspace:show_command_search）：同一 gate，开↔关 toggle；
+      // 热键入口聚焦搜索框（批 3d）——热键用户要的就是 Warp Ctrl+R 式搜索流。
       if (historyPanelOpen.value) closeHistoryPanel();
       else if (historyPanelGateOpen()) openHistoryPanel(true);
+      return consume();
+    case "completions":
+      // 手动唤起结构化补全菜单（Warp completions 手动键同位）：只在输入面
+      // 可用时开门——history 面板/终端搜索占用时不开（避免浮层叠在其下），
+      // alternate 屏/命令运行中/传输占用与自动弹出路径同门；菜单已开时等于
+      // 重算刷新。引擎 off 或无候选由 controller 原样关闭，无副作用。
+      if (historyPanelOpen.value || searchOpen.value) return consume();
+      if (commandRunning.value || terminalTransferBusy.value || terminal?.buffer.active.type === "alternate") return consume();
+      openCompletionsManually();
       return consume();
     case "copy":
       // 无选区时不消费：裸 Ctrl+C 仍要作为 SIGINT 发给远端。

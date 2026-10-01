@@ -335,6 +335,17 @@ try {
   const panelsAfterHotkeyEsc = await historyPage.locator(".terminal-history-panel").count();
   check("Escape closes the hotkey-opened panel", panelsAfterHotkeyEsc === 0, `panels=${panelsAfterHotkeyEsc}`);
 
+  // Ctrl+R（Warp Command Search 的默认键 workspace:show_command_search）：打开
+  // 即聚焦搜索框；收起走 Esc（焦点在搜索框时按键经面板转发链，Ctrl+R toggle
+  // 只在终端焦点路径成立）。
+  await historyPage.keyboard.press("Control+r");
+  await expect(historyPage, ".terminal-history-panel", "history panel opens via Ctrl+R (Warp command search)");
+  const focusOnSearchCtrlR = await historyPage.evaluate(() => document.activeElement?.classList?.contains("terminal-history-search-input") === true);
+  check("Ctrl+R entry focuses the search box", focusOnSearchCtrlR, `active=${await historyPage.evaluate(() => document.activeElement?.className ?? "null")}`);
+  await historyPage.keyboard.press("Escape");
+  const panelsAfterCtrlREsc = await historyPage.locator(".terminal-history-panel").count();
+  check("Escape closes the Ctrl+R-opened panel", panelsAfterCtrlREsc === 0, `panels=${panelsAfterCtrlREsc}`);
+
   // 富元数据（批 4d，Warp command search）：mock 夹具 curl 命令 D 帧退出码 28
   // → 重开面板应渲染 ✗ 28 红徽标。
   await historyPage.keyboard.press("ArrowUp");

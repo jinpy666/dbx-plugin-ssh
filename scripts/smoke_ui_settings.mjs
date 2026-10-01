@@ -209,7 +209,10 @@ try {
   await openCategory(3);
   const suggestionSections = await visibleSections();
   check("suggestion pane has the suggestions section", suggestionSections.includes("Command suggestions"), JSON.stringify(suggestionSections));
-  check("suggestion pane exposes the accept-key select", (await page.locator(".settings-pane:visible .settings-field", { hasText: "Accept key" }).locator("select, [role='combobox']").count()) > 0);
+  // 接受键模型已对齐 Warp 键位（→/Ctrl+F/Ctrl+E 整段、Ctrl+→ 逐词恒可用）：
+  // 唯一可配置项是「用 Tab 接受建议」开关（Warp Tab key behavior），旧行内
+  // 下拉已移除——断言开关行存在且可交互。
+  check("suggestion pane exposes the ghost Tab-accept toggle", (await page.locator(".settings-pane:visible label.settings-switch-row", { hasText: "Use Tab to accept" }).locator("[role='switch']").count()) === 1);
   await page.screenshot({ path: join(SHOT_DIR, "03b-suggestions.png") });
 
   console.log("==> 关键词高亮 pane（从 Terminal 拆出的规则管理器）");
@@ -275,7 +278,7 @@ try {
   console.log("==> 快捷键 pane: editor surface");
   await openCategory(6);
   const hotkeyRows = page.locator(".settings-pane:visible .hotkey-row");
-  check("twelve bindable actions (incl. quick-select / command-history)", (await hotkeyRows.count()) === 12, String(await hotkeyRows.count()));
+  check("thirteen bindable actions (incl. quick-select / command-history / completions)", (await hotkeyRows.count()) === 13, String(await hotkeyRows.count()));
   const groupTitles = await page.locator(".settings-pane:visible .hotkey-group .settings-section-title").allTextContents();
   check("actions grouped clipboard / view / navigation", groupTitles.map((t) => t.trim()).join("|") === "Clipboard|View|Navigation", JSON.stringify(groupTitles));
   const searchRow = hotkeyRows.filter({ hasText: "Find in terminal" });

@@ -8359,6 +8359,7 @@ const terminalHistoryPanelMessages: Record<string, Record<string, string>> = {
     "terminalHistory.hoursAgo": "{count} h ago",
     "terminalHistory.daysAgo": "{count} d ago",
     "terminalHotkeys.actionHistory": "Command history panel (fill input line)",
+    "terminalHotkeys.actionCompletions": "Completions menu (open manually)",
   },
   "zh-CN": {
     "terminalHistory.title": "历史命令",
@@ -8374,6 +8375,7 @@ const terminalHistoryPanelMessages: Record<string, Record<string, string>> = {
     "terminalHistory.hoursAgo": "{count} 小时前",
     "terminalHistory.daysAgo": "{count} 天前",
     "terminalHotkeys.actionHistory": "历史命令面板（回填输入行）",
+    "terminalHotkeys.actionCompletions": "补全菜单（手动唤起）",
   },
   "zh-TW": {
     "terminalHistory.title": "歷史命令",
@@ -8389,6 +8391,7 @@ const terminalHistoryPanelMessages: Record<string, Record<string, string>> = {
     "terminalHistory.hoursAgo": "{count} 小時前",
     "terminalHistory.daysAgo": "{count} 天前",
     "terminalHotkeys.actionHistory": "歷史命令面板（回填輸入行）",
+    "terminalHotkeys.actionCompletions": "補全選單（手動喚起）",
   },
   es: {
     "terminalHistory.title": "Historial de comandos",
@@ -8404,6 +8407,7 @@ const terminalHistoryPanelMessages: Record<string, Record<string, string>> = {
     "terminalHistory.hoursAgo": "hace {count} h",
     "terminalHistory.daysAgo": "hace {count} d",
     "terminalHotkeys.actionHistory": "Panel de historial de comandos (rellena la línea de entrada)",
+    "terminalHotkeys.actionCompletions": "Menú de autocompletado (abrir manualmente)",
   },
   it: {
     "terminalHistory.title": "Cronologia comandi",
@@ -8419,6 +8423,7 @@ const terminalHistoryPanelMessages: Record<string, Record<string, string>> = {
     "terminalHistory.hoursAgo": "{count} h fa",
     "terminalHistory.daysAgo": "{count} g fa",
     "terminalHotkeys.actionHistory": "Pannello cronologia comandi (compila la riga di input)",
+    "terminalHotkeys.actionCompletions": "Menu di completamento (apertura manuale)",
   },
   ja: {
     "terminalHistory.title": "コマンド履歴",
@@ -8434,6 +8439,7 @@ const terminalHistoryPanelMessages: Record<string, Record<string, string>> = {
     "terminalHistory.hoursAgo": "{count} 時間前",
     "terminalHistory.daysAgo": "{count} 日前",
     "terminalHotkeys.actionHistory": "コマンド履歴パネル（入力行へ反映）",
+    "terminalHotkeys.actionCompletions": "補完メニュー（手動で開く）",
   },
   "pt-BR": {
     "terminalHistory.title": "Histórico de comandos",
@@ -8449,6 +8455,7 @@ const terminalHistoryPanelMessages: Record<string, Record<string, string>> = {
     "terminalHistory.hoursAgo": "há {count} h",
     "terminalHistory.daysAgo": "há {count} d",
     "terminalHotkeys.actionHistory": "Painel de histórico de comandos (preenche a linha de entrada)",
+    "terminalHotkeys.actionCompletions": "Menu de preenchimento (abrir manualmente)",
   },
 };
 for (const locale of Object.keys(terminalHistoryPanelMessages)) {
