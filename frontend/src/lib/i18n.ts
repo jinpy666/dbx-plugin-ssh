@@ -5394,7 +5394,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.title": "Command suggestions",
     "suggestions.sourceHistory": "History",
     "suggestions.sourceQuick": "Quick",
-    "suggestions.fillHint": "Tab fills · Enter runs",
     "suggestions.settingsTitle": "Command suggestions",
     "suggestions.settingsEnabled": "Suggest commands while typing",
     "suggestions.settingsEnabledHint": "Shows a fuzzy-match overlay over command history and quick commands below the cursor. Suppressed inside full-screen programs (vim, top, pagers).",
@@ -5418,7 +5417,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.title": "命令建议",
     "suggestions.sourceHistory": "历史",
     "suggestions.sourceQuick": "快速命令",
-    "suggestions.fillHint": "Tab 填充 · Enter 执行",
     "suggestions.settingsTitle": "命令输入建议",
     "suggestions.settingsEnabled": "输入时建议命令",
     "suggestions.settingsEnabledHint": "在光标下方按模糊匹配展示命令历史与快速命令。全屏程序（vim、top、分页器）运行期间自动抑制。",
@@ -5442,7 +5440,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.title": "命令建議",
     "suggestions.sourceHistory": "歷史",
     "suggestions.sourceQuick": "快速命令",
-    "suggestions.fillHint": "Tab 填入 · Enter 執行",
     "suggestions.settingsTitle": "命令輸入建議",
     "suggestions.settingsEnabled": "輸入時建議命令",
     "suggestions.settingsEnabledHint": "在游標下方以模糊比對呈現命令歷史與快速命令。全螢幕程式（vim、top、分頁器）執行期間自動抑制。",
@@ -5466,7 +5463,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.title": "Sugerencias de comandos",
     "suggestions.sourceHistory": "Historial",
     "suggestions.sourceQuick": "Rápido",
-    "suggestions.fillHint": "Tab completa · Enter ejecuta",
     "suggestions.settingsTitle": "Sugerencias de comandos",
     "suggestions.settingsEnabled": "Sugerir comandos mientras se escribe",
     "suggestions.settingsEnabledHint": "Muestra un panel de coincidencia difusa con el historial y los comandos rápidos bajo el cursor. Se suprime en programas de pantalla completa (vim, top, localizadores).",
@@ -5490,7 +5486,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.title": "Suggerimenti comandi",
     "suggestions.sourceHistory": "Cronologia",
     "suggestions.sourceQuick": "Rapidi",
-    "suggestions.fillHint": "Tab completa · Invio esegue",
     "suggestions.settingsTitle": "Suggerimenti comandi",
     "suggestions.settingsEnabled": "Suggerisci comandi durante la digitazione",
     "suggestions.settingsEnabledHint": "Mostra un pannello con corrispondenze fuzzy su cronologia e comandi rapidi sotto il cursore. Suppresso nei programmi a schermo intero (vim, top, pager).",
@@ -5514,7 +5509,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.title": "コマンド候補",
     "suggestions.sourceHistory": "履歴",
     "suggestions.sourceQuick": "クイック",
-    "suggestions.fillHint": "Tab で入力 · Enter で実行",
     "suggestions.settingsTitle": "コマンド入力候補",
     "suggestions.settingsEnabled": "入力中にコマンドを候補表示",
     "suggestions.settingsEnabledHint": "カーソル下にコマンド履歴とクイックコマンドのあいまい一致候補を表示します。全画面プログラム（vim、top、ページャー）実行中は自動的に抑制されます。",
@@ -5538,7 +5532,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.title": "Sugestões de comandos",
     "suggestions.sourceHistory": "Histórico",
     "suggestions.sourceQuick": "Rápidos",
-    "suggestions.fillHint": "Tab preenche · Enter executa",
     "suggestions.settingsTitle": "Sugestões de comandos",
     "suggestions.settingsEnabled": "Sugerir comandos ao digitar",
     "suggestions.settingsEnabledHint": "Mostra um painel de correspondência difusa com o histórico e os comandos rápidos abaixo do cursor. Suprimido em programas de tela cheia (vim, top, paginadores).",
@@ -7907,7 +7900,6 @@ for (const locale of Object.keys(rdpMessages)) {
 const completionMenuMessages: Record<string, Record<string, string>> = {
   en: {
     "completionMenu.title": "Command completion",
-    "completionMenu.acceptHint": "Tab fills · Esc closes",
     "completionMenu.engine": "Completion engine",
     "completionMenu.engineFigSafe": "fig specs (safe, default)",
     "completionMenu.engineFig": "fig specs (full)",
@@ -7917,7 +7909,6 @@ const completionMenuMessages: Record<string, Record<string, string>> = {
   },
   es: {
     "completionMenu.title": "Autocompletado de comandos",
-    "completionMenu.acceptHint": "Tab completa · Esc cierra",
     "completionMenu.engine": "Motor de autocompletado",
     "completionMenu.engineFigSafe": "Especificaciones fig (seguro, predeterminado)",
     "completionMenu.engineFig": "Especificaciones fig (completo)",
@@ -7927,7 +7918,6 @@ const completionMenuMessages: Record<string, Record<string, string>> = {
   },
   it: {
     "completionMenu.title": "Completamento comandi",
-    "completionMenu.acceptHint": "Tab completa · Esc chiude",
     "completionMenu.engine": "Motore di completamento",
     "completionMenu.engineFigSafe": "Specifiche fig (sicuro, predefinito)",
     "completionMenu.engineFig": "Specifiche fig (completo)",
@@ -7937,7 +7927,6 @@ const completionMenuMessages: Record<string, Record<string, string>> = {
   },
   ja: {
     "completionMenu.title": "コマンド補完",
-    "completionMenu.acceptHint": "Tab で確定 · Esc で閉じる",
     "completionMenu.engine": "補完エンジン",
     "completionMenu.engineFigSafe": "fig スペック（セーフ、デフォルト）",
     "completionMenu.engineFig": "fig スペック（フル）",
@@ -7947,7 +7936,6 @@ const completionMenuMessages: Record<string, Record<string, string>> = {
   },
   "pt-BR": {
     "completionMenu.title": "Autocompletar comandos",
-    "completionMenu.acceptHint": "Tab preenche · Esc fecha",
     "completionMenu.engine": "Motor de autocompletar",
     "completionMenu.engineFigSafe": "Specs do fig (seguro, padrão)",
     "completionMenu.engineFig": "Specs do fig (completo)",
@@ -7957,7 +7945,6 @@ const completionMenuMessages: Record<string, Record<string, string>> = {
   },
   "zh-CN": {
     "completionMenu.title": "命令结构补全",
-    "completionMenu.acceptHint": "Tab 填充 · Esc 关闭",
     "completionMenu.engine": "补全引擎",
     "completionMenu.engineFigSafe": "fig 语料（安全模式，默认）",
     "completionMenu.engineFig": "fig 语料（完整）",
@@ -7967,7 +7954,6 @@ const completionMenuMessages: Record<string, Record<string, string>> = {
   },
   "zh-TW": {
     "completionMenu.title": "命令結構補全",
-    "completionMenu.acceptHint": "Tab 填入 · Esc 關閉",
     "completionMenu.engine": "補全引擎",
     "completionMenu.engineFigSafe": "fig 語料（安全模式，預設）",
     "completionMenu.engineFig": "fig 語料（完整）",

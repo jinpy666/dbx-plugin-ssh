@@ -12,7 +12,6 @@ import type { SuggestionAnchor } from "../lib/overlayPlacement";
 const t = (key: string) => {
   const table: Record<string, string> = {
     "completionMenu.title": "Command completion",
-    "completionMenu.acceptHint": "Tab fills · Esc closes",
   };
   return table[key] ?? key;
 };

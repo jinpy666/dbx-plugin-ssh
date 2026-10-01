@@ -125,7 +125,6 @@ function onRowEnter(index: number) {
       :class="{ active: index === activeIndex }"
       role="option"
       :aria-selected="index === activeIndex"
-      :title="`${sourceLabel(item)} · ${t('suggestions.fillHint')}`"
       @mouseenter="onRowEnter(index)"
       @mousedown.prevent
       @click="emit('fill', item)"
