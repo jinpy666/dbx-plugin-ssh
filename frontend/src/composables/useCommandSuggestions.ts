@@ -4,7 +4,7 @@ import type { CompletionEdit, CompletionItem, CompletionResponse } from "../lib/
 import type { SuggestionAnchor } from "../lib/overlayPlacement";
 import { onBeforeUnmount, ref, type Ref } from "vue";
 import { pushCommandHistory } from "../lib/commandHistory";
-import { searchCommands, commandSuggestionQueryAcceptable, type CommandSuggestion } from "../lib/commandSuggestions";
+import { searchCommands, commandSuggestionQueryAcceptable, resolveSuggestionTabKey, type CommandSuggestion } from "../lib/commandSuggestions";
 import { CompletionController, type CompletionGeneratorChannel } from "../lib/completion/CompletionController";
 import { applyEditToText } from "../lib/completion/core/edit";
 import { rankItems } from "../lib/completion/core/ranking";
@@ -55,6 +55,9 @@ export function useCommandSuggestions(options: {
 const suggestionOpen = ref(false);
 const suggestionItems = ref<CommandSuggestion[]>([]);
 const suggestionActiveIndex = ref(0);
+// Tab 接受的显式选中锁（issue #138）：↑↓ 导航置位，候选随键入重算时复位。
+// 仅锁存态允许 Tab 回填与当前行无关的模糊命中项；非响应式，不进渲染。
+let suggestionTabArmed = false;
 const suggestionAnchor = ref<SuggestionAnchor | null>(null);
 const suggestionQuery = ref("");
 // 抑制门锁存（跟随型程序命中后保持抑制，Ctrl+C/q 解除）：非响应式即可，
@@ -337,6 +340,14 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
     closeSuggestions();
     return;
   }
+  if (data === "\t") {
+    // 裸 Tab 已按 #138 语义放行 shell 做路径补全：本次键入不开浮层——guard 对
+    // 控制键返回 show，不拦会把刚关闭的浮层在同一按键的 onData 里重开。
+    // shell 补全回显后的下一次常规键入照常重新调度。
+    completionInputAllowed = false;
+    closeSuggestions();
+    return;
+  }
 
   const guard = canShowSuggestions(
     { alternateActive, lastCommand: lastTerminalCommand.value, typingChar, lineEmpty: lineBefore.length === 0 },
@@ -375,6 +386,8 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   suggestionQuery.value = query;
   suggestionItems.value = items;
   suggestionActiveIndex.value = 0;
+  // 候选随键入重算即回到「自动高亮」态：Tab 显式选中锁复位（issue #138）。
+  suggestionTabArmed = false;
   suggestionAnchor.value = readTerminalSuggestionAnchor();
   suggestionOpen.value = true;
 }
@@ -490,21 +503,34 @@ function sniffTerminalShell(): "powershell" | "cmd" | null {
   return terminalShellSniff.kind;
 }
 
-/** 浮层开启时的按键消费：↑↓ 选择、Tab 填充、Enter 执行、Esc 关闭。 */
+/** 浮层开启时的按键消费：↑↓ 选择（置 Tab 显式选中锁）、Tab 按 #138 语义
+ *  裁决（延伸/显式选中回填，其余放行 shell 补全）、Enter 执行当前行、Esc 关闭。 */
 function handleSuggestionKey(event: KeyboardEvent): boolean {
   if (event.type !== "keydown" || !suggestionOpen.value || !suggestionItems.value.length) return false;
   const items = suggestionItems.value;
   if (event.key === "ArrowDown") {
     suggestionActiveIndex.value = (suggestionActiveIndex.value + 1) % items.length;
+    suggestionTabArmed = true;
     return true;
   }
   if (event.key === "ArrowUp") {
     suggestionActiveIndex.value = (suggestionActiveIndex.value - 1 + items.length) % items.length;
+    suggestionTabArmed = true;
     return true;
   }
   if (event.key === "Tab") {
-    fillSuggestion(items[suggestionActiveIndex.value]);
-    return true;
+    // issue #138：Tab 默认归远端 shell（路径补全是 Tab 的本职）——仅当高亮
+    // 建议是当前行的严格延伸、或用户已 ↑↓ 显式选中（tabArmed）时才回填；
+    // 自动高亮的模糊命中不再被 Tab 默认选上。放行路径关闭浮层后 return
+    // false 不消费，Tab 字节照发 PTY；onData 的 "\t" 短路分支保证浮层不会
+    // 被同一按键立即重开。
+    const item = items[suggestionActiveIndex.value];
+    if (item && resolveSuggestionTabKey(item.command, getPendingTerminalInput(), suggestionTabArmed) === "fill") {
+      fillSuggestion(item);
+      return true;
+    }
+    closeSuggestions();
+    return false;
   }
   if (event.key === "Enter") {
     // 执行当前输入行（review #120：浮层自动出现 ≠ 接管 Enter）——关闭浮层
@@ -547,6 +573,8 @@ function fillSuggestion(item: CommandSuggestion) {
   } else {
     closeSuggestions();
   }
+  // 本次回填即接受动作：显式选中锁复位，下一次 Tab 回到延伸/重新选择裁决。
+  suggestionTabArmed = false;
   terminalGet()?.focus();
 }
 

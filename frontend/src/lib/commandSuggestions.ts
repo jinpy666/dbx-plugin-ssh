@@ -87,6 +87,20 @@ export function commandSuggestionQueryAcceptable(query: string, minLength: numbe
   return length >= minLength && length <= maxLength;
 }
 
+export type SuggestionTabAction = "fill" | "shell";
+
+/**
+ * 建议浮层的 Tab 键裁决（issue #138）：Tab 的默认语义是远端 shell 的路径补全，
+ * 浮层只在两种情形接管——① 高亮建议是当前输入行的严格延伸（更长且以当前行
+ * 开头，用户正在补打同一条历史命令）；② 用户已用 ↑↓ 显式选中候选（tabArmed）。
+ * 其余情形（自动高亮的模糊命中、整行已与建议一致）一律放行 shell，避免
+ * 「敲 cd /opt/bb 想让 shell 补全 bbb，却被历史里的 cd /opt/aaa 默认选中」。
+ */
+export function resolveSuggestionTabKey(command: string, line: string, tabArmed: boolean): SuggestionTabAction {
+  if (tabArmed) return "fill";
+  return command.length > line.length && command.startsWith(line) ? "fill" : "shell";
+}
+
 /**
  * Fuzzy-search commands across history and quick-command sources.
  * Rows are sorted by score (desc, stable — history rows win ties), deduped by

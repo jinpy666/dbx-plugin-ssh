@@ -1915,8 +1915,9 @@ function handleTerminalKey(event: KeyboardEvent) {
     acceptGhostSuggestion();
     return consume();
   }
-  // 命令建议浮层开启时优先消费导航/填充键（Tab 回车不落远端 shell）。
-  // 结构化补全浮层（线 2）优先级更高，按键语义相同（↑↓/Tab/Enter/Esc）。
+  // 命令建议浮层开启时优先消费导航/回填键；Tab 仅在延伸/显式选中时回填，
+  // 其余关闭浮层放行 shell 补全（issue #138）。结构化补全浮层（线 2）优先级
+  // 更高，按键语义相同（↑↓/Tab/Enter/Esc）。
   if (completionOpen.value && handleCompletionKey(event)) return consume();
   if (suggestionOpen.value && handleSuggestionKey(event)) return consume();
   // Warp 式 history 面板（↑ 唤起）：面板开启时优先消费导航/回填键（↑↓ 移动、

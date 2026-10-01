@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SEARCH_COMMANDS_DEFAULTS,
   commandSuggestionQueryAcceptable,
+  resolveSuggestionTabKey,
   searchCommands,
   scoreSubsequence,
 } from "./commandSuggestions";
@@ -118,5 +119,31 @@ describe("searchCommands", () => {
 
   it("keeps commands without a subsequence match out of the results", () => {
     expect(searchCommands("nginx", SOURCES)).toEqual([]);
+  });
+});
+
+describe("resolveSuggestionTabKey (issue #138 Tab semantics)", () => {
+  it("fills when the highlighted suggestion strictly extends the typed line", () => {
+    expect(resolveSuggestionTabKey("cd /opt/aaa", "cd /opt/", false)).toBe("fill");
+  });
+
+  it("passes through to the shell when the auto-highlighted suggestion is unrelated fuzzy history", () => {
+    expect(resolveSuggestionTabKey("cd /opt/aaa", "cd /opt/bb", false)).toBe("shell");
+  });
+
+  it("passes through when the line already equals the suggestion", () => {
+    expect(resolveSuggestionTabKey("cd /opt/aaa", "cd /opt/aaa", false)).toBe("shell");
+  });
+
+  it("passes through when the suggestion is shorter than the typed line", () => {
+    expect(resolveSuggestionTabKey("cd /opt", "cd /opt/aaa", false)).toBe("shell");
+  });
+
+  it("fills an unrelated suggestion only after explicit arrow-key selection", () => {
+    expect(resolveSuggestionTabKey("cd /opt/aaa", "cd /opt/bb", true)).toBe("fill");
+  });
+
+  it("prefers fill over the extension rule when armed", () => {
+    expect(resolveSuggestionTabKey("kubectl get pods", "git status", true)).toBe("fill");
   });
 });
