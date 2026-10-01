@@ -324,6 +324,65 @@ try {
   await historyPage.keyboard.press("Escape");
   const panelsAfterEsc = await historyPage.locator(".terminal-history-panel").count();
   check("Escape closes the panel", panelsAfterEsc === 0, `panels=${panelsAfterEsc}`);
+
+  // --- inline ghost (batch 2, P0-C): prefix hits go to ghost, not the -----
+  // --- fuzzy overlay; Ctrl+→ accepts one word, → accepts the remainder. ---
+  // 同页续用（历史已种子）。注意先回车清行：前段走查中 ↑ 同步进输入行的
+  // 命令还留在行缓冲里（Esc 取消恢复的是原行 "tail"），不清行的话再敲
+  // "ec" 拼成 "tailec"，ghost/浮层都无命中。
+  await historyPage.keyboard.press("Enter");
+  await sleep(600);
+  await historyPage.click(".terminal-host");
+  await historyPage.keyboard.type("ec");
+  let ghostText = "";
+  try {
+    await historyPage.waitForFunction(
+      () => {
+        const el = document.querySelector(".terminal-ghost");
+        return el && el.textContent && el.textContent.length > 0 ? el.textContent : false;
+      },
+      null,
+      { timeout: 10_000 },
+    );
+    ghostText = await historyPage.locator(".terminal-ghost").textContent() ?? "";
+  } catch {
+    ghostText = "";
+  }
+  check("ghost shows the remainder for a prefix of seeded history", ghostText.startsWith("ho ui-mock-history-a"), `ghost="${ghostText}"`);
+  const overlaysDuringGhost = await historyPage.locator(".command-suggestions").count();
+  check("fuzzy suggestion overlay yields to the inline ghost (data split)", overlaysDuringGhost === 0, `overlays=${overlaysDuringGhost}`);
+  await historyPage.screenshot({ path: `${SHOT_DIR}/04b-ghost-inline.png`, fullPage: false }).catch(() => undefined);
+  await historyPage.keyboard.press("Control+ArrowRight");
+  let ghostAfterWord = "";
+  try {
+    await historyPage.waitForFunction(
+      () => {
+        const el = document.querySelector(".terminal-ghost");
+        return el && el.textContent === " ui-mock-history-a";
+      },
+      null,
+      { timeout: 10_000 },
+    );
+    ghostAfterWord = await historyPage.locator(".terminal-ghost").textContent() ?? "";
+  } catch {
+    ghostAfterWord = await historyPage.locator(".terminal-ghost").textContent().catch(() => "") ?? "";
+  }
+  check("Ctrl+→ accepts one word (remainder shrinks)", ghostAfterWord === " ui-mock-history-a", `ghost="${ghostAfterWord}"`);
+  await historyPage.keyboard.press("ArrowRight");
+  await sleep(600);
+  const ghostAfterFull = await historyPage.locator(".terminal-ghost").count();
+  check("→ accepts the whole remainder (ghost disappears)", ghostAfterFull === 0, `ghost=${ghostAfterFull}`);
+  try {
+    await historyPage.waitForFunction(
+      () => document.querySelector(".terminal-host")?.textContent?.includes("echo ui-mock-history-a"),
+      null,
+      { timeout: 10_000 },
+    );
+    console.log('  ok  accepted ghost echoed into the input line ("echo …")');
+  } catch {
+    failures.push('accepted ghost not echoed ("echo ui-mock-history-a")');
+    console.log("  FAIL accepted ghost echo");
+  }
   await historyPage.close();
 
   // --- global quick commands: delete --------------------------------------

@@ -5,6 +5,7 @@ import {
   classifyGhostInput,
   createGhostState,
   evaluateGhost,
+  firstGhostWordChunk,
   ghostMenuSuppressed,
   isGhostPrefixMatch,
   nextGhostState,
@@ -219,17 +220,37 @@ describe("evaluateGhost (gates + search + accept bytes)", () => {
   });
 });
 
-// 菜单互斥（浮层建议 / 结构化补全打开时不出 ghost）：→ 键在补全菜单打开时
-// 必须归 handleCompletionKey 消费，不互斥会导致 ghost 抢走 →（历史缺陷只排除了
-// suggestionOpen，completionOpen 打开时旧 ghostMatch 仍被消费）。
+// 菜单互斥（#138 丝滑度批 2 收窄）：仅历史建议浮层抑制 ghost（数据分工后
+// 浮层开着 = 无前缀命中，此判是竞态兜底）；结构化补全菜单与 ghost 同屏共存
+// （对标 Warp：菜单只占用 ↑↓/Tab/Esc，→ 恒归 ghost 接受，空间上也不叠）。
 describe("ghostMenuSuppressed (menu mutual exclusion)", () => {
-  it("suppresses ghost when either suggestion or completion menu is open", () => {
-    expect(ghostMenuSuppressed(true, false)).toBe(true);
-    expect(ghostMenuSuppressed(false, true)).toBe(true);
-    expect(ghostMenuSuppressed(true, true)).toBe(true);
+  it("suppresses ghost while the history suggestion overlay is open", () => {
+    expect(ghostMenuSuppressed(true)).toBe(true);
   });
 
-  it("allows ghost only when both menus are closed", () => {
-    expect(ghostMenuSuppressed(false, false)).toBe(false);
+  it("allows ghost alongside the structured completion menu", () => {
+    expect(ghostMenuSuppressed(false)).toBe(false);
+  });
+});
+
+describe("firstGhostWordChunk (Ctrl+→ word-by-word accept, Warp 语义)", () => {
+  it("cuts the leading whitespace run plus the first word", () => {
+    expect(firstGhostWordChunk(" status --long")).toBe(" status");
+    expect(firstGhostWordChunk("ho ui-mock-history-a")).toBe("ho");
+  });
+
+  it("returns the whole remainder when it is a single word without separators", () => {
+    expect(firstGhostWordChunk("-lah")).toBe("-lah");
+  });
+
+  it("returns the whitespace-only tail whole (no word left to cut)", () => {
+    expect(firstGhostWordChunk("   ")).toBe("   ");
+    expect(firstGhostWordChunk("")).toBe("");
+  });
+
+  it("treats non-space delimiters as word characters (fish token 口径)", () => {
+    // 「词」= 非空白连续段（fish token / 默认 zsh WORDCHARS）：整条路径是
+    // 一个词，一次 Ctrl+→ 全收，不拦腰截断。
+    expect(firstGhostWordChunk(" /var/log/messages")).toBe(" /var/log/messages");
   });
 });

@@ -793,6 +793,10 @@ const {
   updateHistoryPanelFilter,
   pushTerminalCommandHistory,
   syncHistoryPanelAnchor: () => { historyPanelAnchor.value = readTerminalSuggestionAnchor(); },
+  // 数据分工（#138 批 2）：ghost 开启时前缀延伸命中让位行内 ghost，模糊
+  // 浮层不弹。ghostEnabled 在下方 useGhostSuggest 才创建，惰性求值闭包
+  // 仅在 onData 期调用，无初始化顺序问题。
+  inlineGhostActive: () => ghostEnabled.value,
 });
 
 // —— 快速命令数据面（M32-A3）：RPC 全部留在 App，编辑器/导入视图在
@@ -1898,17 +1902,30 @@ function handleTerminalKey(event: KeyboardEvent) {
   };
   // IME 组合中不出 ghost（组合文本尚未落行；提交后的 onData 会重算）。
   if (event.isComposing || event.keyCode === 229) hideGhostSuggestion();
-  // ghost 接受（→）：仅在无菜单态（浮层建议/结构化补全都未开）时消费一次，
-  // 避免与 handleSuggestionKey/handleCompletionKey 的菜单按键语义冲突；
-  // 补全菜单打开时 → 必须归 handleCompletionKey（其分支在本分支之后），
-  // 故此处显式排除 completionOpen（旧 ghostMatch 可能在 onData 重算前残留）。
-  // 无 ghost 的 → 原样放行给 shell。
+  // ghost 逐词接受（Ctrl+→，Windows/Linux 的 Ctrl+Shift+→ 同收；对标 Warp
+  // word-accept）：只注入剩余文本的首个「空白串 + 词」块。#138 批 2 起与
+  // 结构化补全菜单同屏共存——菜单只占用 ↑↓/Tab/Esc，带修饰的 → 归 ghost。
   // 复查 commandRunning/传输占用（与 evaluateGhost 同门）：update 与 accept
   // 之间远端可能已开跑（回车竞态），不能把剩余字节打进运行中的命令。
   if (
     ghostMatch.value &&
     !suggestionOpen.value &&
-    !completionOpen.value &&
+    event.key === "ArrowRight" &&
+    event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !(commandRunning.value || terminalTransferBusy.value)
+  ) {
+    acceptGhostSuggestionWord();
+    return consume();
+  }
+  // ghost 整段接受（→）：#138 批 2 起不再被结构化补全菜单抑制（菜单不占用
+  // 裸 →；ghost 是行内灰字、菜单在光标行上/下，同屏共存，对标 Warp）。历史
+  // 建议浮层开着时无 ghost（数据分工），此判保持。无 ghost 的 →（含菜单
+  // 态）原样放行给 shell。
+  if (
+    ghostMatch.value &&
+    !suggestionOpen.value &&
     event.key === "ArrowRight" &&
     !(event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) &&
     !(commandRunning.value || terminalTransferBusy.value)
@@ -2393,13 +2410,14 @@ const {
   resetGhostSuggestion,
   refreshGhostAfterInput,
   acceptGhostSuggestion,
+  acceptGhostSuggestionWord,
 } = useGhostSuggest({
   terminal: () => terminal,
   sendTerminalBytes,
   getPendingTerminalInput: () => pendingTerminalInput,
   appendToPendingTerminalInput: (data) => { pendingTerminalInput += data; },
   commandRunning, terminalTransferBusy, commandHistory, quickCommands,
-  suggestionOpen, completionOpen, historyPanelOpen, completionController,
+  suggestionOpen, historyPanelOpen, completionController,
   suggestionMinCharsState, suggestionMaxCharsState,
   readTerminalCellFrame,
 });
@@ -7388,8 +7406,9 @@ onBeforeUnmount(() => {
           @accept="acceptCompletionRow"
         />
         <!-- 终端行内 ghost 自动建议（对标 Warp/fish）：灰色剩余文本盖在光标右侧，
-             → 一次接受（handleTerminalKey 消费）。overlay DOM 而非 xterm
-             decoration 的理由见 ghost 函数块注释。 -->
+             → 整段接受 / Ctrl+→ 逐词接受（handleTerminalKey 消费；#138 批 2 起
+             与结构化补全菜单同屏共存）。overlay DOM 而非 xterm decoration 的
+             理由见 ghost 函数块注释。 -->
         <div
           v-if="ghostMatch && ghostAnchor"
           class="terminal-ghost mono"

@@ -196,10 +196,23 @@ export function evaluateGhost(input: GhostEvaluationInput): GhostEvaluation {
 }
 
 /**
- * 菜单互斥：任一建议浮层（历史建议 / 结构化补全）打开时抑制 ghost。菜单占用
- * →/Enter/Esc，「→ 仅在无菜单态下接受」；同屏叠两层建议也无法阅读。补全浮层
- * 与 ghost 走同一批键位（→），不互斥会导致打开补全后 → 键仍被 ghost 抢消费。
+ * 菜单互斥（#138 丝滑度批 2 收窄）：仅历史建议浮层打开时抑制 ghost——数据
+ * 分工后（前缀延伸命中归 ghost、纯模糊命中归浮层，见 useCommandSuggestions）
+ * 浮层开着就意味着无前缀命中，ghost 本来也不会有内容，此判只是竞态兜底。
+ * **结构化补全菜单不再抑制 ghost**（对标 Warp：行内 ghost 与补全菜单同屏共存
+ * ——ghost 是光标后的行内灰字，菜单是光标行上/下的浮层，空间不叠；键位也
+ * 不冲突：菜单只占用 ↑↓/Tab/Esc，→ 恒归 ghost 接受）。
  */
-export function ghostMenuSuppressed(suggestionOpen: boolean, completionOpen: boolean): boolean {
-  return suggestionOpen || completionOpen;
+export function ghostMenuSuppressed(suggestionOpen: boolean): boolean {
+  return suggestionOpen;
+}
+
+/**
+ * 逐词接受的切块（对标 Warp Ctrl+→ / fish word-accept）：取剩余文本的首个
+ * 「空白串 + 词」块（如 " status --long" → " status"）；剩余全空白时整段
+ * 返回（下一次再无词可取）。纯函数，注入语义与整段接受一致（等价键入）。
+ */
+export function firstGhostWordChunk(remainder: string): string {
+  const match = /^\s*\S+/.exec(remainder);
+  return match ? match[0] : remainder;
 }

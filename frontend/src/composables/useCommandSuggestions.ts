@@ -5,6 +5,7 @@ import type { SuggestionAnchor } from "../lib/overlayPlacement";
 import { onBeforeUnmount, ref, type Ref } from "vue";
 import { pushCommandHistory } from "../lib/commandHistory";
 import { searchCommands, commandSuggestionQueryAcceptable, resolveSuggestionTabKey, type CommandSuggestion } from "../lib/commandSuggestions";
+import { pickGhostMatch } from "../lib/terminalGhostSuggest";
 import { CompletionController, type CompletionGeneratorChannel } from "../lib/completion/CompletionController";
 import { applyEditToText } from "../lib/completion/core/edit";
 import { rankItems } from "../lib/completion/core/ranking";
@@ -47,8 +48,12 @@ export function useCommandSuggestions(options: {
   updateHistoryPanelFilter: () => void;
   /** 统一采集口：命令环 + 执行时间映射一并推进（回填后回车执行路径）。 */
   pushTerminalCommandHistory: (command: string) => void;
+  /** 行内 ghost 建议是否启用（数据分工：前缀延伸命中让位 ghost，#138 批 2）。
+   *  惰性求值——useGhostSuggest 在本 composable 之后初始化，闭包在 onData
+   *  期才调用，无 TDZ 风险。 */
+  inlineGhostActive: () => boolean;
 }) {
-  const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, persistCommandHistory, isHistoryPanelOpen, syncHistoryPanelAnchor, updateHistoryPanelFilter, pushTerminalCommandHistory } = options;
+  const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, persistCommandHistory, isHistoryPanelOpen, syncHistoryPanelAnchor, updateHistoryPanelFilter, pushTerminalCommandHistory, inlineGhostActive } = options;
 
 // 命令输入建议浮层（P1-1）运行时状态：条目/选中项/光标锚点与抑制门锁存。
 // 开关与长度上下限的权威值在上方 suggestions*State（sidecar 偏好）。
@@ -385,6 +390,15 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   }
   const items = runSuggestionSearch(query);
   if (!items.length) {
+    closeSuggestionsOnly();
+    return;
+  }
+  // 数据分工（#138 丝滑度批 2，P0-C——ghost 默认不可见的根因修复）：候选里
+  // 存在前缀延伸命中时让位给行内 ghost（Warp/fish 口径——ghost 是光标后的
+  // 灰字不遮输出，→/Ctrl+→ 接受；模糊浮层弹出会把它互斥掉）。同一份
+  // searchCommands 结果复用判定，零额外检索；ghost 开关关闭时分工不生效，
+  // 浮层照旧。结构化补全不受影响（上方 request 照发，与 ghost 同屏共存）。
+  if (inlineGhostActive() && pickGhostMatch(query, items)) {
     closeSuggestionsOnly();
     return;
   }

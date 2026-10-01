@@ -3,7 +3,7 @@ import type { QuickCommand } from "../lib/quickCommands";
 import { ref, type Ref } from "vue";
 import { pluginStore } from "../lib/pluginStore";
 import { cursorAbsoluteRow } from "../lib/terminalAnchor";
-import { classifyGhostInput, createGhostState, evaluateGhost, nextGhostState, ghostMenuSuppressed, type TerminalGhostState } from "../lib/terminalGhostSuggest";
+import { classifyGhostInput, createGhostState, evaluateGhost, firstGhostWordChunk, nextGhostState, ghostMenuSuppressed, type TerminalGhostState } from "../lib/terminalGhostSuggest";
 
 /** 终端行内 ghost 自动建议（对标 Warp/fish autosuggest）：状态机纯逻辑在
  * lib/terminalGhostSuggest.ts；数据源即 commandHistory/quickCommands refs
@@ -20,7 +20,6 @@ export function useGhostSuggest(options: {
   commandHistory: Ref<string[]>;
   quickCommands: Ref<QuickCommand[]>;
   suggestionOpen: Ref<boolean>;
-  completionOpen: Ref<boolean>;
   /** Warp 式 history 面板开启期间不出 ghost（面板打字即过滤，同屏不叠两层）。 */
   historyPanelOpen: Ref<boolean>;
   completionController: { lineChanged(): void };
@@ -28,7 +27,7 @@ export function useGhostSuggest(options: {
   suggestionMaxCharsState: Ref<number>;
   readTerminalCellFrame: () => { originLeft: number; originTop: number; cursorX: number; visibleRow: number; cellWidth: number; cellHeight: number } | null;
 }) {
-  const { terminal: terminalGet, sendTerminalBytes, getPendingTerminalInput, appendToPendingTerminalInput, commandRunning, terminalTransferBusy, commandHistory, quickCommands, suggestionOpen, completionOpen, historyPanelOpen, completionController, suggestionMinCharsState, suggestionMaxCharsState, readTerminalCellFrame } = options;
+  const { terminal: terminalGet, sendTerminalBytes, getPendingTerminalInput, appendToPendingTerminalInput, commandRunning, terminalTransferBusy, commandHistory, quickCommands, suggestionOpen, historyPanelOpen, completionController, suggestionMinCharsState, suggestionMaxCharsState, readTerminalCellFrame } = options;
 
 // —— 终端行内 ghost 自动建议（对标 Warp/fish autosuggest）——状态机纯逻辑在
 // lib/terminalGhostSuggest.ts；数据源即上方 commandHistory/quickCommands refs
@@ -110,10 +109,12 @@ function refreshGhostAfterInput(data: string) {
 }
 
 function updateGhostSuggestion() {
-  // 浮层建议/结构化补全菜单开着时不出 ghost：菜单占用 →/Enter/Esc，与
-  // 「→ 仅在无菜单态下接受」一致，同屏叠两层建议也无法阅读。
-  // history 面板同理：面板开启期间继续打字是过滤输入，不出 ghost。
-  if (ghostMenuSuppressed(suggestionOpen.value, completionOpen.value) || historyPanelOpen.value) {
+  // 历史建议浮层开着时不出 ghost（数据分工后浮层开着 = 无前缀命中，此判是
+  // 竞态兜底）；结构化补全菜单**不再抑制** ghost——同屏共存（对标 Warp：菜单
+  // 只占用 ↑↓/Tab/Esc，→ 恒归 ghost 接受，空间上菜单在光标行上/下、ghost 是
+  // 光标后的行内灰字，互不遮挡）。history 面板同理让位：面板开启期间继续
+  // 打字是过滤输入，不出 ghost。
+  if (ghostMenuSuppressed(suggestionOpen.value) || historyPanelOpen.value) {
     ghostMatch.value = null;
     return;
   }
@@ -150,6 +151,22 @@ function acceptGhostSuggestion() {
   updateGhostSuggestion();
 }
 
+/** Ctrl+→ 逐词接受（对标 Warp word-accept / zsh-autosuggestions）：只注入
+ *  剩余文本的首个「空白串 + 词」块，ghost 按缩短后的剩余继续展示——可连按
+ *  逐词推进，→ 仍一次整段接受。注入语义与整段接受一致（等价用户键入）。 */
+function acceptGhostSuggestionWord() {
+  const match = ghostMatch.value;
+  if (!match || !match.remainder) return;
+  const chunk = firstGhostWordChunk(match.remainder);
+  if (!chunk) return;
+  ghostMatch.value = null;
+  appendToPendingTerminalInput(chunk);
+  sendTerminalBytes(new TextEncoder().encode(chunk));
+  completionController.lineChanged();
+  // 新行仍是同一条历史的严格前缀：ghost 重算后剩余缩短，继续可逐词/整段接受。
+  updateGhostSuggestion();
+}
+
 
   return {
     ghostEnabled,
@@ -160,5 +177,6 @@ function acceptGhostSuggestion() {
     resetGhostSuggestion,
     refreshGhostAfterInput,
     acceptGhostSuggestion,
+    acceptGhostSuggestionWord,
   };
 }
