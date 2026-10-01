@@ -132,6 +132,7 @@ import {
 import { isPersistableCommand, mergeShellHistory, parseShellHistoryText, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
+import { loadGhostAcceptKey, matchesGhostAcceptKey, saveGhostAcceptKey, type GhostAcceptKey } from "./lib/ghostAcceptKey";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
@@ -543,6 +544,23 @@ const transferCompressThresholdState = ref(64);
 const suggestionsEnabledState = ref(true);
 const suggestionMinCharsState = ref(1);
 const suggestionMaxCharsState = ref(64);
+// ghost 接受键（批 4e，可配置）：权威值 pluginStore，内存态供按键分支与
+// 设置页键位胶囊回显；SettingsDialog 上抛改动即时生效。
+const ghostAcceptKey = ref(loadGhostAcceptKey());
+// 键位胶囊（Warp accept-autosuggestion-hint 同位）的下拉菜单与展示标签。
+const ghostKeycapMenuOpen = ref(false);
+const GHOST_ACCEPT_KEY_OPTIONS: ReadonlyArray<{ value: GhostAcceptKey; label: string }> = [
+  { value: "ArrowRight", label: "→" },
+  { value: "CtrlArrowRight", label: "Ctrl+→" },
+  { value: "ShiftArrowRight", label: "Shift+→" },
+  { value: "Tab", label: "Tab" },
+];
+const ghostAcceptKeyLabel = computed(() => GHOST_ACCEPT_KEY_OPTIONS.find((option) => option.value === ghostAcceptKey.value)?.label ?? "→");
+function setGhostAcceptKey(value: GhostAcceptKey) {
+  ghostAcceptKey.value = value;
+  ghostKeycapMenuOpen.value = false;
+  saveGhostAcceptKey(value);
+}
 
 function sanitizeConflictPolicy(value: unknown): DownloadConflictPolicy {
   return value === "ask" || value === "overwrite" ? value : "rename";
@@ -1910,6 +1928,7 @@ function handleTerminalKey(event: KeyboardEvent) {
   // ghost 逐词接受（Ctrl+→，Windows/Linux 的 Ctrl+Shift+→ 同收；对标 Warp
   // word-accept）：只注入剩余文本的首个「空白串 + 词」块。#138 批 2 起与
   // 结构化补全菜单同屏共存——菜单只占用 ↑↓/Tab/Esc，带修饰的 → 归 ghost。
+  // 配置接受键为 Ctrl+→ 时该键归整段接受，逐词让位（批 4e：一键一义）。
   // 复查 commandRunning/传输占用（与 evaluateGhost 同门）：update 与 accept
   // 之间远端可能已开跑（回车竞态），不能把剩余字节打进运行中的命令。
   if (
@@ -1919,20 +1938,21 @@ function handleTerminalKey(event: KeyboardEvent) {
     event.ctrlKey &&
     !event.metaKey &&
     !event.altKey &&
+    ghostAcceptKey.value !== "CtrlArrowRight" &&
     !(commandRunning.value || terminalTransferBusy.value)
   ) {
     acceptGhostSuggestionWord();
     return consume();
   }
-  // ghost 整段接受（→）：#138 批 2 起不再被结构化补全菜单抑制（菜单不占用
-  // 裸 →；ghost 是行内灰字、菜单在光标行上/下，同屏共存，对标 Warp）。历史
-  // 建议浮层开着时无 ghost（数据分工），此判保持。无 ghost 的 →（含菜单
-  // 态）原样放行给 shell。
+  // ghost 整段接受（键位可配置，批 4e——默认裸 →；Ctrl+→ / Shift+→ / Tab
+  // 可在设置换绑）：#138 批 2 起不再被结构化补全菜单抑制（菜单不占用裸 →；
+  // ghost 是行内灰字、菜单在光标行上/下，同屏共存，对标 Warp）。历史建议
+  // 浮层开着时无 ghost（数据分工），此判保持。未命中配置键的 →（含菜单态）
+  // 原样放行给 shell。
   if (
     ghostMatch.value &&
     !suggestionOpen.value &&
-    event.key === "ArrowRight" &&
-    !(event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) &&
+    matchesGhostAcceptKey(ghostAcceptKey.value, event.key, event) &&
     !(commandRunning.value || terminalTransferBusy.value)
   ) {
     acceptGhostSuggestion();
@@ -1971,6 +1991,11 @@ function handleTerminalKey(event: KeyboardEvent) {
   }
   if (event.key === "Escape" && searchOpen.value) {
     closeTerminalSearch();
+    return consume();
+  }
+  // ghost 键位胶囊菜单开着时 Esc 先收菜单，不落远端（批 4e）。
+  if (event.key === "Escape" && ghostKeycapMenuOpen.value) {
+    ghostKeycapMenuOpen.value = false;
     return consume();
   }
   // Quick Select 浮层按键（WT-1）：↑↓ 移动、Enter 复制当前项、Esc 关闭。
@@ -7418,15 +7443,29 @@ onBeforeUnmount(() => {
           @accept="acceptCompletionRow"
         />
         <!-- 终端行内 ghost 自动建议（对标 Warp/fish）：灰色剩余文本盖在光标右侧，
-             → 整段接受 / Ctrl+→ 逐词接受（handleTerminalKey 消费；#138 批 2 起
-             与结构化补全菜单同屏共存）。overlay DOM 而非 xterm decoration 的
-             理由见 ghost 函数块注释。 -->
+             接受键可配置（批 4e，默认 →；Ctrl+→ 逐词），handleTerminalKey 消费；
+             #138 批 2 起与结构化补全菜单同屏共存。overlay DOM 而非 xterm
+             decoration 的理由见 ghost 函数块注释。 -->
         <div
           v-if="ghostMatch && ghostAnchor"
           class="terminal-ghost mono"
           :style="{ left: `${ghostAnchor.x}px`, top: `${ghostAnchor.y}px` }"
-          aria-hidden="true"
-        >{{ ghostMatch.remainder }}</div>
+        >
+          <span aria-hidden="true">{{ ghostMatch.remainder }}</span>
+          <!-- 键位胶囊（Warp accept-autosuggestion-hint 同位）：pointer-events
+               独立放开供点击改绑菜单；ghost 容器其余区域仍不可交互。 -->
+          <button
+            v-if="!suggestionOpen"
+            type="button"
+            class="terminal-ghost-keycap"
+            :title="t('terminalGhost.changeKey')"
+            @click.stop.prevent="ghostKeycapMenuOpen = !ghostKeycapMenuOpen"
+            @mousedown.stop.prevent
+          >{{ ghostAcceptKeyLabel }}</button>
+          <div v-if="ghostKeycapMenuOpen" class="terminal-ghost-keymenu">
+            <button v-for="option in GHOST_ACCEPT_KEY_OPTIONS" :key="option.value" type="button" class="terminal-ghost-keyoption" :class="{ active: option.value === ghostAcceptKey }" @click.stop.prevent="setGhostAcceptKey(option.value)">{{ option.label }}</button>
+          </div>
+        </div>
         <div v-if="terminalDragActive || (dragActive && !sftpPaneOpen)" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
         <TerminalSearchPanel
           v-if="searchOpen"
@@ -9233,12 +9272,69 @@ body.resizing-col { cursor: col-resize !important; user-select: none; }
   position: absolute;
   z-index: 3;
   max-width: calc(100% - 16px);
-  overflow: hidden;
+  overflow: visible;
   white-space: pre;
   line-height: 1;
   color: var(--muted-foreground);
   opacity: 0.55;
   pointer-events: none;
+}
+/* 键位胶囊（批 4e，Warp accept-autosuggestion-hint 同位）：灰字尾巴上的
+   小键帽，pointer-events 独立放开；下拉菜单盖在其上方（z-index 高于浮层
+   互不干扰）。 */
+.terminal-ghost-keycap {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+  vertical-align: 1px;
+}
+
+.terminal-ghost-keycap:hover {
+  background: var(--accent);
+}
+
+.terminal-ghost-keymenu {
+  pointer-events: auto;
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 4px);
+  z-index: 31;
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  box-shadow: var(--shadow-popover);
+}
+
+.terminal-ghost-keyoption {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.terminal-ghost-keyoption.active,
+.terminal-ghost-keyoption:hover {
+  background: var(--accent);
 }
 /* RDP 证书确认弹窗：状态徽标 + 倒计时行（弹窗骨架复用 host-key-modal 的
    .remember/.fingerprint 全局类）。 */
