@@ -695,6 +695,9 @@ function resetSuggestionsForSession() {
     readTerminalCellFrame,
     readTerminalSuggestionAnchor,
     completionController,
+    /** 提示符采样判远端 shell（powershell/cmd/null）：AI 上下文的 shell 语义
+     *  来源（Warp AI 对齐批）——复用既有采样，不为 AI 另写探测。 */
+    sniffTerminalShell,
     lastTerminalCommand,
     resetSuggestionsForSession,
     ignoreSuggestion,

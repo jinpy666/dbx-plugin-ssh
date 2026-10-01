@@ -21,6 +21,16 @@ describe("buildAiSearchRequest", () => {
     const request = buildAiSearchRequest({ query: "q", context: {} });
     expect(request.context).toEqual({ kind: "ai-command-search", query: "q" });
   });
+
+  it("多语言 / 多 shell 上下文原样透传（locale/os/shell 由 App 组装）", () => {
+    const request = buildAiSearchRequest({
+      query: "list files by size",
+      context: { locale: "zh-CN", shell: "powershell", os: "windows", cwd: "C:\\demo", connectionId: "c1" },
+    });
+    expect(request.context).toMatchObject({ locale: "zh-CN", shell: "powershell", os: "windows", cwd: "C:\\demo", connectionId: "c1" });
+    // prompt 模板与 shell 上下文联动：非 POSIX 口径由 context 声明，模板不写死。
+    expect(request.prompt).toContain("shell context");
+  });
 });
 
 describe("buildAiFixRequest", () => {

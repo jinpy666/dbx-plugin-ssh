@@ -22,11 +22,9 @@ export interface AiTerminalContext {
 }
 
 function contextWithExtras(context: AiTerminalContext, extras: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...extras };
-  if (context.connectionId) out.connectionId = context.connectionId;
-  if (context.cwd) out.cwd = context.cwd;
-  if (context.shell) out.shell = context.shell;
-  return out;
+  // context 全量展开（App 的 aiContextExtras 已做 falsy 过滤；locale/os 等
+  // 多语言多系统位随之透传），extras 后铺——kind/query 等语义键不被覆盖。
+  return { ...context, ...extras };
 }
 
 // —— Feature A：# AI 命令搜索 ——

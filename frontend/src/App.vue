@@ -598,8 +598,25 @@ function resetAiFixConsent() {
   updateAiSettings({ fixConsent: false });
   showNotice(t("aiSettings.resetConsentDone"));
 }
+/** AI 上下文公共位（多语言 / 多系统 / 多 shell，Warp AI 对齐批）：locale 让
+ *  LLM 以终端用户语言回答；shell 语义是命令生成的关键——本地终端取 shell
+ *  偏好（basename）与平台口径，SSH 只在提示符采样判出 PowerShell/cmd 时带
+ *  （复用补全的采样，不为 AI 另写探测；远端 OS 刻意不发探测命令，AI 从输出
+ *  推断——诚实省略优于猜测）。 */
 function aiContextExtras() {
-  return { connectionId: connectionId.value || undefined, cwd: terminalCwd.value || undefined };
+  const extras: Record<string, unknown> = { locale: locale.value };
+  if (connectionId.value) extras.connectionId = connectionId.value;
+  if (terminalCwd.value) extras.cwd = terminalCwd.value;
+  if (isLocalMode.value) {
+    const shellProgram = localShellPref.value || localShells.value.find((entry) => entry.isDefault)?.program;
+    if (shellProgram) extras.shell = shellProgram.split(/[\\/]/).pop();
+    const platform = typeof navigator !== "undefined" ? navigator.platform.toLowerCase() : "";
+    extras.os = applePlatform ? "macos" : platform.includes("win") ? "windows" : "linux";
+  } else {
+    const sniffed = sniffTerminalShell();
+    if (sniffed) extras.shell = sniffed;
+  }
+  return extras;
 }
 
 function sanitizeConflictPolicy(value: unknown): DownloadConflictPolicy {
@@ -828,6 +845,7 @@ const {
   refreshSuggestionsAfterInput,
   refreshCompletionMenu,
   openCompletionsManually,
+  sniffTerminalShell,
   replaceTerminalLineWith,
   fillSuggestion,
   acceptCompletionRow,
