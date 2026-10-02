@@ -2515,7 +2515,9 @@ const aiSearchBarStyle = computed(() => {
   // TerminalPromptHints 同一放置语义，choosePromptHintsPlacement 共用）。
   const barHeight = aiSearchBarEl.value?.offsetHeight || PROMPT_HINTS_FALLBACK_BAR_HEIGHT;
   if (choosePromptHintsPlacement(anchor.y, containerHeight, barHeight) === "below") {
-    return { left: `${anchor.x}px`, top: `${overlayBelowTop(anchor.y, anchor.cellHeight ?? 0)}px` };
+    // bottom 显式置 auto：CSS 兜底位有 bottom:12px，内联只给 top 时两者同时
+    // 生效会把绝对定位元素拉伸成「通天框」（真机截图回归）。
+    return { left: `${anchor.x}px`, top: `${overlayBelowTop(anchor.y, anchor.cellHeight ?? 0)}px`, bottom: "auto" };
   }
   return { left: `${anchor.x}px`, bottom: `${flippedOverlayBottom(anchor.y, containerHeight)}px` };
 });

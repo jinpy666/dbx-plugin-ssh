@@ -45,7 +45,9 @@ const style = computed(() => {
   // 条高实测优先（挂载后随锚点刷新重算），首帧用常量回退。
   const barHeight = rootEl.value?.offsetHeight || PROMPT_HINTS_FALLBACK_BAR_HEIGHT;
   if (choosePromptHintsPlacement(anchor.y, containerHeight, barHeight) === "below") {
-    return { left: `${anchor.x}px`, top: `${overlayBelowTop(anchor.y, anchor.cellHeight ?? 0)}px` };
+    // bottom 显式 auto（防御：基类未来若加 CSS 兜底 bottom，与 top 并存会
+    // 拉伸元素——# 搜索条的真机回归教训）。
+    return { left: `${anchor.x}px`, top: `${overlayBelowTop(anchor.y, anchor.cellHeight ?? 0)}px`, bottom: "auto" };
   }
   return { left: `${anchor.x}px`, bottom: `${flippedOverlayBottom(anchor.y, containerHeight)}px` };
 });
