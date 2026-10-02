@@ -3,12 +3,15 @@
 // 引导 Warp 对齐批次的键位（↑ 历史 / Ctrl+R 搜索历史 / Ctrl+Space 补全 /
 // → 接受行内建议）。纯静态展示——点击不代操作（引导条要教的是按键本身），
 // 唯一交互是 ✗ 永久消散（上抛 App 持久化；设置页可重开）。
-// 定位复用 overlay 先例：底边贴光标行顶并留 gap（不遮输入行），锚点读不到
-// 时降级贴终端底部。样式沿用 --popover/--border/--muted 令牌随宿主主题。
+// 定位复用 overlay 先例：底边贴光标行顶并留 gap（不遮输入行）；光标在
+// 第一行/近顶时上方放不下，翻到光标行下方（choosePromptHintsPlacement，
+// 下方是空屏不遮内容）；锚点读不到时降级贴终端底部。样式沿用
+// --popover/--border/--muted 令牌随宿主主题。
 import { computed, ref } from "vue";
 import { X } from "@lucide/vue";
 import { workbenchMessage } from "../lib/i18n";
-import { flippedOverlayBottom, type SuggestionAnchor } from "../lib/overlayPlacement";
+import { flippedOverlayBottom, overlayBelowTop, type SuggestionAnchor } from "../lib/overlayPlacement";
+import { choosePromptHintsPlacement, PROMPT_HINTS_FALLBACK_BAR_HEIGHT } from "../lib/terminalPromptHints";
 
 interface Props {
   locale: string;
@@ -39,6 +42,11 @@ const style = computed(() => {
   if (!anchor) return undefined;
   const containerHeight = rootEl.value?.parentElement?.clientHeight || props.viewport?.height || 0;
   if (!(containerHeight > 0)) return undefined;
+  // 条高实测优先（挂载后随锚点刷新重算），首帧用常量回退。
+  const barHeight = rootEl.value?.offsetHeight || PROMPT_HINTS_FALLBACK_BAR_HEIGHT;
+  if (choosePromptHintsPlacement(anchor.y, containerHeight, barHeight) === "below") {
+    return { left: `${anchor.x}px`, top: `${overlayBelowTop(anchor.y, anchor.cellHeight ?? 0)}px` };
+  }
   return { left: `${anchor.x}px`, bottom: `${flippedOverlayBottom(anchor.y, containerHeight)}px` };
 });
 </script>

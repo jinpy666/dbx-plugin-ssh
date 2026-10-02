@@ -76,3 +76,22 @@ export function shouldShowPromptHints(gates: PromptHintsGates): boolean {
     !gates.overlayOpen
   );
 }
+
+
+// —— 放置侧（2026-10-02 体验反馈）：光标在第一行（刚登录/刚清屏）时上方
+// 放不下引导条，翻到光标行下方——下方是空屏，不遮内容。纯几何供单测。
+
+import { OVERLAY_GAP } from "./overlayPlacement";
+
+/** 引导条单行高度回退值：实测前（挂载前/首帧）用常量判定，实测后按真值。 */
+export const PROMPT_HINTS_FALLBACK_BAR_HEIGHT = 32;
+
+/**
+ * 引导条放置侧（纯几何）：默认「上方」（底边贴光标行顶，不遮输入行）；
+ * 光标行上方放不下（第一行/近顶）时翻「下方」（顶边贴光标行底，恰好盖住
+ * 空屏区）。视口不可测或条高不可测时保持上方（调用方 CSS fallback 兜底）。
+ */
+export function choosePromptHintsPlacement(anchorTopY: number, viewportHeight: number, barHeight: number, gap = OVERLAY_GAP): "above" | "below" {
+  if (!(viewportHeight > 0) || !(barHeight > 0)) return "above";
+  return anchorTopY - gap >= barHeight ? "above" : "below";
+}

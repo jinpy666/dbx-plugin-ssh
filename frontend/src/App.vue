@@ -175,7 +175,8 @@ import { sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy, type TransferTask,
 } from "./lib/transferQueue";
 import { filterQuickCommands, QUICK_COMMANDS_LIMIT } from "./lib/quickCommands";
-import { flippedOverlayBottom, type SuggestionAnchor } from "./lib/overlayPlacement";
+import { flippedOverlayBottom, overlayBelowTop, type SuggestionAnchor } from "./lib/overlayPlacement";
+import { choosePromptHintsPlacement, PROMPT_HINTS_FALLBACK_BAR_HEIGHT } from "./lib/terminalPromptHints";
 import { registerWatch } from "./lib/watchEdits";
 import { batchTargetLabel } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
@@ -2510,6 +2511,12 @@ const aiSearchBarStyle = computed(() => {
   if (!anchor) return undefined;
   const containerHeight = aiSearchBarEl.value?.parentElement?.clientHeight || suggestionViewport.value.height || 0;
   if (!(containerHeight > 0)) return undefined;
+  // 光标在第一行/近顶时上方放不下提示条，翻到光标行下方（与
+  // TerminalPromptHints 同一放置语义，choosePromptHintsPlacement 共用）。
+  const barHeight = aiSearchBarEl.value?.offsetHeight || PROMPT_HINTS_FALLBACK_BAR_HEIGHT;
+  if (choosePromptHintsPlacement(anchor.y, containerHeight, barHeight) === "below") {
+    return { left: `${anchor.x}px`, top: `${overlayBelowTop(anchor.y, anchor.cellHeight ?? 0)}px` };
+  }
   return { left: `${anchor.x}px`, bottom: `${flippedOverlayBottom(anchor.y, containerHeight)}px` };
 });
 

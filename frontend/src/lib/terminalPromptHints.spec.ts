@@ -2,6 +2,7 @@
 // alternate/命令运行/传输/浮层互斥）与 pluginStore 持久化回环。渲染与定位
 // 在 TerminalPromptHints.vue（smoke 走查覆盖）。
 import { afterEach, describe, expect, it } from "vitest";
+import { choosePromptHintsPlacement, PROMPT_HINTS_FALLBACK_BAR_HEIGHT } from "./terminalPromptHints";
 import { pluginStore } from "./pluginStore";
 import {
   loadPromptHintsDismissed,
@@ -63,5 +64,33 @@ describe("pluginStore 持久化回环", () => {
     expect(loadPromptHintsDismissed()).toBe(false);
     savePromptHintsDismissed(true);
     expect(loadPromptHintsDismissed()).toBe(true);
+  });
+});
+
+
+describe("choosePromptHintsPlacement", () => {
+  const bar = PROMPT_HINTS_FALLBACK_BAR_HEIGHT;
+  const vh = 900;
+
+  it("光标在第一行：上方放不下，翻到下方", () => {
+    expect(choosePromptHintsPlacement(0, vh, bar)).toBe("below");
+    expect(choosePromptHintsPlacement(bar / 2, vh, bar)).toBe("below");
+  });
+
+  it("上方恰好放得下（含 gap）保持上方", () => {
+    expect(choosePromptHintsPlacement(bar + 8, vh, bar)).toBe("above");
+  });
+
+  it("中部常规位置保持上方（底边贴光标行顶）", () => {
+    expect(choosePromptHintsPlacement(400, vh, bar)).toBe("above");
+  });
+
+  it("视口/条高不可测时保持上方（调用方 CSS fallback 兜底）", () => {
+    expect(choosePromptHintsPlacement(0, 0, bar)).toBe("above");
+    expect(choosePromptHintsPlacement(0, vh, 0)).toBe("above");
+  });
+
+  it("近顶且视口极矮：仍翻下方（翻转判定只看上方空间，下方不再二次校验）", () => {
+    expect(choosePromptHintsPlacement(10, 20, bar)).toBe("below");
   });
 });
