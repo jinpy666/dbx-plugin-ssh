@@ -39,16 +39,23 @@ function clampTitle(text: string, max = 120): string {
   return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 }
 
+/** `#` 搜索 prompt（v2 直连 generateText 与面板会话共用，抽出口径钉死）：
+ *  格式钉「首行 = 精确命令；随后一行 Why: 理由」，结果行由 aiResultParse 解析。 */
+export function buildAiSearchPrompt(input: { query: string }): string {
+  const query = input.query.trim();
+  return [
+    "Generate ONE shell command that fulfils the user's request.",
+    `User request: ${query}`,
+    "Reply format: first line = the exact command only (no markdown fence, no comments); then one short line starting with \"Why: \" explaining it.",
+    "Prefer portable POSIX syntax unless the shell context below says otherwise. Never include placeholders that must be asked interactively; if information is missing, state what is missing instead of guessing.",
+  ].join("\n");
+}
+
 export function buildAiSearchRequest(input: { query: string; context: AiTerminalContext }): AiConversationRequest {
   const query = input.query.trim();
   return {
     title: clampTitle(`AI command search: ${query}`),
-    prompt: [
-      "Generate ONE shell command that fulfils the user's request.",
-      `User request: ${query}`,
-      "Reply format: first line = the exact command only (no markdown fence, no comments); then one short line starting with \"Why: \" explaining it.",
-      "Prefer portable POSIX syntax unless the shell context below says otherwise. Never include placeholders that must be asked interactively; if information is missing, state what is missing instead of guessing.",
-    ].join("\n"),
+    prompt: buildAiSearchPrompt({ query }),
     context: contextWithExtras(input.context, { kind: "ai-command-search", query }),
     send: true,
     mode: "ask",

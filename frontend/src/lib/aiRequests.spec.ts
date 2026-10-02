@@ -1,6 +1,6 @@
 // AI 请求构造器单测（Warp AI 对齐批）：桥请求形状与上下文装配契约。
 import { describe, expect, it } from "vitest";
-import { buildAiAssistRequest, buildAiFixPrompt, buildAiFixRequest, buildAiSearchRequest } from "./aiRequests";
+import { buildAiAssistRequest, buildAiFixPrompt, buildAiFixRequest, buildAiSearchPrompt, buildAiSearchRequest } from "./aiRequests";
 
 describe("buildAiSearchRequest", () => {
   it("ask 模式 + send，query 同时进 prompt 与 context", () => {
@@ -30,6 +30,22 @@ describe("buildAiSearchRequest", () => {
     expect(request.context).toMatchObject({ locale: "zh-CN", shell: "powershell", os: "windows", cwd: "C:\\demo", connectionId: "c1" });
     // prompt 模板与 shell 上下文联动：非 POSIX 口径由 context 声明，模板不写死。
     expect(request.prompt).toContain("shell context");
+  });
+});
+
+describe("buildAiSearchPrompt（v2 直连与面板共用）", () => {
+  it("格式钉「首行 = 精确命令 + Why 行」，query 独立成 User request 行", () => {
+    const prompt = buildAiSearchPrompt({ query: " list files by size " });
+    expect(prompt).toContain("User request: list files by size");
+    expect(prompt).toContain("first line = the exact command");
+    expect(prompt).toContain("Why: ");
+    // mock 宿主按该标记分流罐头（smoke_ui_mock 依赖）：标记必须稳定在场。
+    expect(prompt).toContain("User request:");
+  });
+
+  it("面板会话与直连共用同一 prompt（buildAiSearchRequest 复用不漂移）", () => {
+    const request = buildAiSearchRequest({ query: "tail logs", context: {} });
+    expect(request.prompt).toBe(buildAiSearchPrompt({ query: "tail logs" }));
   });
 });
 
