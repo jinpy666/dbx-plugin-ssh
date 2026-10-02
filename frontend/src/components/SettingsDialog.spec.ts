@@ -73,7 +73,7 @@ function mountSettings(sessionId?: string) {
     props: {
       open: false,
       ghostTabAccept: false,
-      aiSettings: { search: true, fix: false, assist: true, fixConsent: false },
+      aiSettings: { search: true, fix: false, assist: true, agentMode: false, fixConsent: false },
       aiBridgeReady: false,
       promptHintsEnabled: true,
       profilesOpen: false,

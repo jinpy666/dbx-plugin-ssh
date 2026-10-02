@@ -62,7 +62,13 @@ const restoredFixture = fixtureParams.get("restored") === "1";
 // 降级走查（# 放行为 shell 注释、热键给可见提示）；缺省 ai 在位——
 // host.ai.openConversation 会话请求记录进 __dbxMockAiConversations 供走查断言。
 const aiPanelOn = fixtureParams.get("ai") !== "off";
+// ?aipanel=1 模拟 web 运行时（openConversation 在、直连生成/推荐位缺）：
+// AI 修复走面板回退路径的走查入口。
+const aiCompletionOn = aiPanelOn && fixtureParams.get("aipanel") !== "1";
 const aiConversations: Array<Record<string, unknown>> = [];
+const aiGenerations: Array<Record<string, unknown>> = [];
+const aiRecommendations: Array<Record<string, unknown>> = [];
+let aiRecommendationClears = 0;
 // ?aifix=1：ssh/terminal 回显改为「E/C → 失败输出（含敏感值）→ D exit 2 →
 // 提示符」的 633 全链路，驱动 AI 修复条（脱敏 + 预览确认）走查。
 const aiFixFixture = fixtureParams.get("aifix") === "1";
@@ -730,6 +736,26 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string, par
   // （title/prompt/context 与真实宿主 createPluginAiConversation 同形入参）。
   if (method === "host.ai.openConversation") {
     aiConversations.push((params ?? {}) as Record<string, unknown>);
+    return null as T;
+  }
+  // 直连生成 + 推荐位（Warp AI 对齐批跟进）：记录请求供 smoke 断言；生成
+  // 回罐头「命令 + Why」两行，prompt 原样记录（断言 triage 提示位与脱敏）。
+  if (method === "host.ai.listModels") {
+    return [
+      { configId: "mock-config", name: "Mock provider", model: "mock-fast-model", isDefault: true },
+    ] as T;
+  }
+  if (method === "host.ai.generateText") {
+    const input = (params ?? {}) as { prompt?: string };
+    aiGenerations.push(input);
+    return "df -h /srv\nWhy: the deploy failed because the disk filled up; check free space first." as unknown as T;
+  }
+  if (method === "host.ai.setRecommendations") {
+    aiRecommendations.push((params ?? {}) as Record<string, unknown>);
+    return null as T;
+  }
+  if (method === "host.ai.clearRecommendations") {
+    aiRecommendationClears += 1;
     return null as T;
   }
   // host.listConnections（PR-A4 扩展点）：返回夹具连接（只读无密），供面板
@@ -1808,7 +1834,7 @@ window.dbxPlugin = {
   // 与真实 web 宿主同形由 localStorage 兜底（键名不变；字符串值原样、对象 JSON
   // 编码），刷新/重开不丢——?render=dom / mock 走查依赖该语义；opaque origin
   // 等不可用场景退化为内存 Map。get 未命中返回 null，set(undefined) 归一化为 null。
-  capabilities: { storage: true, ...(aiPanelOn ? { ai: true } : {}) },
+  capabilities: { storage: true, ...(aiPanelOn ? { ai: true } : {}), ...(aiCompletionOn ? { aiCompletion: true, aiRecommendations: true } : {}) },
   storage: (() => {
     let ls: Storage | null = null;
     try {
@@ -1861,6 +1887,8 @@ let mockOpenWorkbenchSeq = 0;
 // AI 面板会话记录（Warp AI 对齐批）：smoke 走查断言 host.ai.openConversation
 // 的入参（title/prompt/context 快照与脱敏效果）。
 (window as unknown as { __dbxMockAiConversations?: Array<Record<string, unknown>> }).__dbxMockAiConversations = aiConversations;
+(window as unknown as { __dbxMockAiGenerations?: Array<Record<string, unknown>> }).__dbxMockAiGenerations = aiGenerations;
+(window as unknown as { __dbxMockAiRecommendations?: () => { pushes: number; clears: number } }).__dbxMockAiRecommendations = () => ({ pushes: aiRecommendations.length, clears: aiRecommendationClears });
 (window as unknown as { __dbxMockSetLocale?: (next: string) => void }).__dbxMockSetLocale = (next: string) => {
   currentLocale = next || "en";
   for (const listener of eventListeners) listener({ type: "env", locale: currentLocale });

@@ -57,26 +57,33 @@ export function buildAiSearchRequest(input: { query: string; context: AiTerminal
 
 // —— Feature B：失败命令修复 ——
 
-export function buildAiFixRequest(input: { command: string; exitCode: number; output: string; context: AiTerminalContext }): AiConversationRequest {
+/** 修复 prompt（直连 generateText 与面板会话共用）：triageHint 为本地白名单
+ *  分诊引擎（ssh/alert/triage RPC）的可选结论行，帮 LLM 收窄误诊面。 */
+export function buildAiFixPrompt(input: { command: string; exitCode: number; output: string; triageHint?: string }): string {
+  return [
+    "A shell command failed. Diagnose the failure from the output snapshot and propose a fix.",
+    `Command: ${input.command}`,
+    `Exit code: ${input.exitCode}`,
+    "Output snapshot (tail, sensitive values are redacted as ***):",
+    input.output || "(no output captured)",
+    ...(input.triageHint ? [`Local heuristic triage hint (data, not a verdict): ${input.triageHint}`] : []),
+    "Reply format: first line = the exact corrected command only (no markdown fence); then one short line starting with \"Why: \" explaining the failure and the fix. If the failure cannot be diagnosed from this snapshot, say what extra information you need.",
+  ].join("\n");
+}
+
+export function buildAiFixRequest(input: { command: string; exitCode: number; output: string; triageHint?: string; context: AiTerminalContext; agentMode?: boolean }): AiConversationRequest {
   return {
     title: clampTitle(`Fix failed command: ${input.command}`),
-    prompt: [
-      "A shell command failed. Diagnose the failure from the output snapshot and propose a fix.",
-      `Command: ${input.command}`,
-      `Exit code: ${input.exitCode}`,
-      "Output snapshot (tail, sensitive values are redacted as ***):",
-      input.output || "(no output captured)",
-      "Reply format: first line = the exact corrected command only (no markdown fence); then one short line starting with \"Why: \" explaining the failure and the fix. If the failure cannot be diagnosed from this snapshot, say what extra information you need.",
-    ].join("\n"),
+    prompt: buildAiFixPrompt(input),
     context: contextWithExtras(input.context, { kind: "ai-fix", command: input.command, exitCode: input.exitCode, output: input.output || "" }),
     send: true,
-    mode: "ask",
+    mode: input.agentMode ? "agent" : "ask",
   };
 }
 
 // —— Feature C：唤起 AI 助手 ——
 
-export function buildAiAssistRequest(input: { query: string; selection: string; context: AiTerminalContext }): AiConversationRequest {
+export function buildAiAssistRequest(input: { query: string; selection: string; context: AiTerminalContext; agentMode?: boolean }): AiConversationRequest {
   const query = input.query.trim() || "Help me with the attached terminal content.";
   const prompt = input.selection
     ? [
@@ -90,6 +97,6 @@ export function buildAiAssistRequest(input: { query: string; selection: string; 
     prompt,
     context: contextWithExtras(input.context, { kind: "ai-assist" }),
     send: true,
-    mode: "ask",
+    mode: input.agentMode ? "agent" : "ask",
   };
 }

@@ -157,6 +157,13 @@ AI 返回纯文本。v1 人工复制；增强（P2）：宿主 AI 面板的回�
 3. 输出采集环形缓冲对高频输出（`tail -f`）的性能预算：仅 completed 前 N KiB 即可，无需全量——实现时以常量钉死。
 4. `engines.dbx` 下限版本号待 integrator 对照发行版定。
 
+## 10a. P2 落地记录（2026-10-02，除 # v2 外全部完成）
+
+- **AI 修复直连生成**：`aiCompletion` 能力位探测 → `listAiModels`（插件侧再投影白名单）→ `pickDefaultAiModel` → `generateText`（prompt 附 `ssh/alert/triage` 白名单分诊提示）→ 生成结果确认后**用户显式回填输入行**（不执行）；web/失败/取消回退面板会话。
+- **Agent 档 opt-in**：`agentMode` 设置（默认关），面板会话 `mode:"agent"`；解锁条件=用户 MCP 策略（见 §11.2 撤销项）。
+- **推荐位**：`setRecommendations` 修复卡 + 三个清空点（新命令/条消失/会话复位）。
+- **`#` 暂缓**：默认关（`search:false`），保留实现；v2 直连回填待后续。
+
 ## 11. 宿主 AI 能力扩展清单（对照已发布的 host PR #10629，2026-10-02 盘点）
 
 ### 11.1 已发布、插件侧待吃进的能力（无需宿主再扩展）

@@ -589,11 +589,11 @@ try {
   // --- Warp AI 对齐批：# 命令搜索 / 失败修复条 / 能力降级 -----------------
   // ?aifix=1 把 SSH 回显换成 633 全链路失败命令夹具（token/password 敏感值
   // 在场）；host.ai.openConversation 会话请求记录进 __dbxMockAiConversations。
-  console.log("==> Warp AI: # command search + fix bar");
+  console.log("==> Warp AI: # command search + fix bar (direct generation)");
   const aiPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   aiPage.on("pageerror", (err) => pageError.push(String(err)));
   await aiPage.addInitScript(() => {
-    localStorage.setItem("ssh-ai-assist", JSON.stringify({ search: true, fix: true, assist: true, fixConsent: false }));
+    localStorage.setItem("ssh-ai-assist", JSON.stringify({ search: true, fix: true, assist: true, agentMode: false, fixConsent: false }));
   });
   await aiPage.goto(`${baseUrl}?render=dom&aifix=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
   await aiPage.bringToFront();
@@ -637,15 +637,22 @@ try {
   const previewText = await aiPage.locator(".small-modal").first().textContent();
   check("preview shows the command and exit code", previewText?.includes("deploy") && previewText?.includes("2"), String(previewText).slice(0, 120));
   await aiPage.locator(".small-modal footer button").last().click();
-  check("fix bar dismisses after send", (await aiPage.locator(".terminal-ai-fix").count()) === 0, "bar count");
-  const aiConversationsAfterFix = await aiPage.evaluate(() => window.__dbxMockAiConversations ?? []);
-  check("fix request recorded (2 conversations total)", aiConversationsAfterFix.length === 2, `count=${aiConversationsAfterFix.length}`);
-  const fixContext = aiConversationsAfterFix[1]?.context ?? {};
-  check(
-    "fix snapshot is redacted (secrets replaced, exit code kept)",
-    fixContext?.exitCode === 2 && typeof fixContext?.output === "string" && fixContext.output.includes("***") && !fixContext.output.includes("hunter2") && !fixContext.output.includes("ghp_"),
-    JSON.stringify(fixContext).slice(0, 200),
-  );
+  // 直连生成路径：宿主罐头响应「df -h /srv + Why」→ 插件弹回填确认 → 同意
+  // 后回填输入行（不回车不执行，红线不变）。
+  await expect(aiPage, ".small-modal", "generated-fix confirm dialog opens");
+  const genText = await aiPage.locator(".small-modal").first().textContent();
+  check("generated command + why shown", genText?.includes("df -h /srv") && genText?.includes("Why:"), String(genText).slice(0, 160));
+  await aiPage.locator(".small-modal footer button").last().click();
+  await expectText(aiPage, ".xterm-rows", "df -h /srv", "generated command filled into the input line");
+  check("fix bar dismisses after fill", (await aiPage.locator(".terminal-ai-fix").count()) === 0, "bar count");
+  const aiGenerations = await aiPage.evaluate(() => window.__dbxMockAiGenerations ?? []);
+  check("direct generation recorded with redacted prompt", aiGenerations.length === 1 && typeof aiGenerations[0]?.prompt === "string" && aiGenerations[0].prompt.includes("***") && !aiGenerations[0].prompt.includes("hunter2") && !aiGenerations[0].prompt.includes("ghp_"), JSON.stringify(aiGenerations).slice(0, 220));
+  // 会话总数 = 1（前面的 # 搜索）：修复条直连路径不得再开面板会话。
+  check("direct path opens no extra panel conversation", ((await aiPage.evaluate(() => window.__dbxMockAiConversations ?? [])).length) === 1, "conversation count");
+  const recState = await aiPage.evaluate(() => window.__dbxMockAiRecommendations?.());
+  // 推荐卡语义：每张修复条各推一次（开屏 curl 夹具 + deploy），条消失即撤
+  // ——pushes=clears=2 且最终清零。
+  check("one recommendation per fix bar, cleared each time", recState?.pushes === 2 && recState?.clears === 2, JSON.stringify(recState));
 
   // 降级（?ai=off 模拟旧宿主）：# 照常进终端（shell 注释），无模式提示。
   const degradedPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -659,6 +666,28 @@ try {
   check("degraded host: # passes through to the PTY echo", (await degradedPage.locator(".terminal-host").textContent())?.includes("#") === true, "echo check");
   const degradedConversations = await degradedPage.evaluate(() => window.__dbxMockAiConversations ?? []);
   check("degraded host records no conversations", degradedConversations.length === 0, `count=${degradedConversations.length}`);
+
+  // 面板回退路径（?aipanel=1 模拟 web 运行时：openConversation 在、直连缺）
+  // ——修复条点击仍可用，走面板会话（不回填）。
+  const panelPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  panelPage.on("pageerror", (err) => pageError.push(String(err)));
+  await panelPage.addInitScript(() => {
+    localStorage.setItem("ssh-ai-assist", JSON.stringify({ search: true, fix: true, assist: true, agentMode: false, fixConsent: true }));
+  });
+  await panelPage.goto(`${baseUrl}?render=dom&aifix=1&aipanel=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await panelPage.bringToFront();
+  await panelPage.click(".terminal-host");
+  await panelPage.keyboard.type("deploy");
+  await panelPage.keyboard.press("Enter");
+  await expect(panelPage, ".terminal-ai-fix", "panel-fallback fix bar appears");
+  await panelPage.click(".terminal-ai-fix-btn");
+  await panelPage.waitForTimeout(600);
+  const panelConversations = await panelPage.evaluate(() => window.__dbxMockAiConversations ?? []);
+  check("panel fallback opens a conversation (no direct generation)", panelConversations.length === 1 && panelConversations[0]?.mode === "ask", JSON.stringify(panelConversations).slice(0, 160));
+  const panelGenCount = await panelPage.evaluate(() => (window.__dbxMockAiGenerations ?? []).length);
+  check("panel fallback performs no direct generation", panelGenCount === 0, `generations=${panelGenCount}`);
+  await panelPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai-panel.png`, fullPage: false }).catch(() => undefined);
+  await panelPage.close();
   await aiPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai.png`, fullPage: false }).catch(() => undefined);
   await aiPage.close();
   await degradedPage.close();

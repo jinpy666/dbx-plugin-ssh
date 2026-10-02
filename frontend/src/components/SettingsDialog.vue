@@ -2174,6 +2174,11 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <span>{{ t("aiSettings.assistLabel") }}</span>
             </label>
             <p class="muted settings-note">{{ t("aiSettings.assistHint") }}</p>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="aiSettings.agentMode" size="sm" :disabled="!aiBridgeReady" @update:model-value="emit('update-ai-settings', { agentMode: Boolean($event) })" />
+              <span>{{ t("aiSettings.agentModeLabel") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("aiSettings.agentModeHint") }}</p>
             <button type="button" class="connect-card-ghost-button" :disabled="!aiSettings.fixConsent" @click="emit('reset-ai-consent')">{{ t("aiSettings.resetConsent") }}</button>
             </div>
 

@@ -1,6 +1,6 @@
 // AI 请求构造器单测（Warp AI 对齐批）：桥请求形状与上下文装配契约。
 import { describe, expect, it } from "vitest";
-import { buildAiAssistRequest, buildAiFixRequest, buildAiSearchRequest } from "./aiRequests";
+import { buildAiAssistRequest, buildAiFixPrompt, buildAiFixRequest, buildAiSearchRequest } from "./aiRequests";
 
 describe("buildAiSearchRequest", () => {
   it("ask 模式 + send，query 同时进 prompt 与 context", () => {
@@ -57,5 +57,23 @@ describe("buildAiAssistRequest", () => {
     const plain = buildAiAssistRequest({ query: "how to tail logs", selection: "", context: { cwd: "/tmp" } });
     expect(plain.prompt).toContain("how to tail logs");
     expect(plain.context).toMatchObject({ kind: "ai-assist", cwd: "/tmp" });
+  });
+});
+
+describe("直连 prompt 与 agentMode（面板会话档位）", () => {
+  it("buildAiFixPrompt：triage 提示位随缘出现，格式指令恒在", () => {
+    const base = buildAiFixPrompt({ command: "x", exitCode: 1, output: "boom" });
+    expect(base).toContain("first line = the exact corrected command");
+    expect(base).not.toContain("triage");
+    const withHint = buildAiFixPrompt({ command: "x", exitCode: 1, output: "boom", triageHint: "category=disk, whitelisted suggestions: df -h" });
+    expect(withHint).toContain("Local heuristic triage hint");
+    expect(withHint).toContain("category=disk");
+  });
+
+  it("buildAiFixRequest / buildAiAssistRequest 的 mode 随 agentMode 档位", () => {
+    expect(buildAiFixRequest({ command: "x", exitCode: 1, output: "", context: {} }).mode).toBe("ask");
+    expect(buildAiFixRequest({ command: "x", exitCode: 1, output: "", context: {}, agentMode: true }).mode).toBe("agent");
+    expect(buildAiAssistRequest({ query: "q", selection: "", context: {} }).mode).toBe("ask");
+    expect(buildAiAssistRequest({ query: "q", selection: "", context: {}, agentMode: true }).mode).toBe("agent");
   });
 });

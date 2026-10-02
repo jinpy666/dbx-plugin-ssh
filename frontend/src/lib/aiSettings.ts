@@ -13,13 +13,19 @@ import { pluginStore } from "./pluginStore";
 export const AI_SETTINGS_STORE_KEY = "ssh-ai-assist";
 
 export interface AiSettings {
+  /** `#` AI 命令搜索（Warp AI Command Search 同位）：**默认关（2026-10-02
+   *  决策暂缓）**——v1 为「回车发起面板会话」非 Warp 的逐字内联体感，默认
+   *  关避免空行 # 被截留的意外；直连生成 v2（生成即回填）待后续再启。 */
   search: boolean;
   fix: boolean;
   assist: boolean;
+  /** 面板会话 Agent 档 opt-in（openConversation mode:"agent"）：执行面为既有
+   *  MCP 工具 + 插件审批门，默认 ask。 */
+  agentMode: boolean;
   fixConsent: boolean;
 }
 
-export const AI_SETTINGS_DEFAULTS: AiSettings = { search: true, fix: false, assist: true, fixConsent: false };
+export const AI_SETTINGS_DEFAULTS: AiSettings = { search: false, fix: false, assist: true, agentMode: false, fixConsent: false };
 
 /** 解析持久化值：逐字段回退默认（旧版本/损坏值不整包失效）。 */
 export function sanitizeAiSettings(raw: unknown): AiSettings {
@@ -28,6 +34,7 @@ export function sanitizeAiSettings(raw: unknown): AiSettings {
     search: typeof source.search === "boolean" ? source.search : AI_SETTINGS_DEFAULTS.search,
     fix: typeof source.fix === "boolean" ? source.fix : AI_SETTINGS_DEFAULTS.fix,
     assist: typeof source.assist === "boolean" ? source.assist : AI_SETTINGS_DEFAULTS.assist,
+    agentMode: typeof source.agentMode === "boolean" ? source.agentMode : AI_SETTINGS_DEFAULTS.agentMode,
     fixConsent: source.fixConsent === true,
   };
 }
