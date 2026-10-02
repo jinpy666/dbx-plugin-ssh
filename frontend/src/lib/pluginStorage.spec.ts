@@ -48,6 +48,8 @@ describe("ssh pluginStore wiring", () => {
         // 「Tab 接受建议」开关 + 建议黑名单（ghost/suggestions 批次）。
         "ssh-ghost-tab-accept",
         "ssh-suggestion-blocklist",
+        // AI 助手三开关 + AI 修复「不再询问」授权位（Warp AI 对齐批）。
+        "ssh-ai-assist",
         // Docker/Podman 引擎连接设置（单键 JSON 映射，dockerEngine.ts 自治）。
         "ssh-docker-engine",
         "ssh-tunnel-profiles",

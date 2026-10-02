@@ -70,6 +70,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 建议黑名单（对标 Warp IgnoredSuggestionsModel，suggestionBlocklist.ts
   // 自治读写）：点 ✗ 屏蔽的单条建议不再提示。
   "ssh-suggestion-blocklist",
+  // AI 助手三开关 + AI 修复「不再询问」授权位（Warp AI 对齐批）：单键 JSON
+  // 映射（search/fix/assist/fixConsent），lib/aiSettings.ts 拆装。
+  "ssh-ai-assist",
   // Docker/Podman 引擎连接设置：单键 JSON 映射（connectionKey → settings）。
   // 按连接的动态键无法在创建期声明（宿主 storage 无列键），收进一个结构化
   // 值由 dockerEngine.ts 自行拆装；曾用 localStorage 动态键，在工作台

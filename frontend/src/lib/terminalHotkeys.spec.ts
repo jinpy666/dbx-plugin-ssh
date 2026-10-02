@@ -363,6 +363,33 @@ describe("completions 动作（Warp completions 手动唤起键）", () => {
   });
 });
 
+describe("ai-fix / ai-assist 动作（Warp AI 对齐批）", () => {
+  it("默认键位登记 ⌘⇧I·Ctrl+Shift+I 与 ⌘⇧Y·Ctrl+Shift+Y，默认表无冲突（Y 组避开 select-all 的 Ctrl+Shift+A）", () => {
+    expect(defaultTerminalHotkeys(true)["ai-fix"]).toEqual(["Meta+Shift+I"]);
+    expect(defaultTerminalHotkeys(false)["ai-fix"]).toEqual(["Ctrl+Shift+I"]);
+    expect(defaultTerminalHotkeys(true)["ai-assist"]).toEqual(["Meta+Shift+Y"]);
+    expect(defaultTerminalHotkeys(false)["ai-assist"]).toEqual(["Ctrl+Shift+Y"]);
+    expect(findHotkeyConflicts(defaultTerminalHotkeys(true))).toEqual([]);
+    expect(findHotkeyConflicts(defaultTerminalHotkeys(false))).toEqual([]);
+  });
+
+  it("键盘事件经 keyComboFromEvent → matchTerminalHotkey 派发到两动作", () => {
+    expect(keyComboFromEvent(event("KeyI", { metaKey: true, shiftKey: true }))).toBe("Meta+Shift+I");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("KeyI", { ctrlKey: true, shiftKey: true }))!)).toBe("ai-fix");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(true), keyComboFromEvent(event("KeyY", { metaKey: true, shiftKey: true }))!)).toBe("ai-assist");
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("KeyY", { ctrlKey: true, shiftKey: true }))!)).toBe("ai-assist");
+    // 修饰键缺一不派发（裸 I/Y 与单修饰都归远端）。
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("KeyI"))!)).toBeNull();
+    expect(matchTerminalHotkey(defaultTerminalHotkeys(false), keyComboFromEvent(event("KeyY", { ctrlKey: true }))!)).toBeNull();
+  });
+
+  it("存量键位数据缺新动作字段时回填平台默认（新增动作不失效）", () => {
+    const legacy = sanitizeTerminalHotkeys({ search: ["Ctrl+Shift+F"] }, false);
+    expect(legacy["ai-fix"]).toEqual(["Ctrl+Shift+I"]);
+    expect(legacy["ai-assist"]).toEqual(["Ctrl+Shift+Y"]);
+  });
+});
+
 describe("hotkeysEqual", () => {
   it("逐动作逐项比较", () => {
     const a = defaultTerminalHotkeys(true);

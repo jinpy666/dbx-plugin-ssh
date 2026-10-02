@@ -309,6 +309,21 @@ try {
   const rowsAfterLineTyping = await historyPage.locator(".terminal-history-hit").count();
   check("terminal typing goes to the input line (panel stays unfiltered)", rowsAfterLineTyping === unfilteredRows, `rows=${rowsAfterLineTyping}/${unfilteredRows}`);
   // 搜索框不再自动聚焦：点击聚焦后才过滤。
+  // 面板锚点经 rAF 合帧随回显 settle 收敛（高负载下构建刚结束的宿主上可达
+  // 秒级）：等面板整体落在视口内再点击，避免动画/重定位中的不可点击误报；
+  // 等待超时后照常点击——真偏离视口仍会以原生 actionability 失败暴露。
+  await historyPage
+    .waitForFunction(
+      () => {
+        const panel = document.querySelector(".terminal-history-panel");
+        if (!panel) return false;
+        const rect = panel.getBoundingClientRect();
+        return rect.top >= 0 && rect.left >= 0 && rect.bottom <= window.innerHeight && rect.right <= window.innerWidth;
+      },
+      null,
+      { timeout: 10_000 },
+    )
+    .catch(() => undefined);
   await historyPage.click(".terminal-history-search-input");
   const focusOnSearch = await historyPage.evaluate(() => document.activeElement?.classList?.contains("terminal-history-search-input") === true);
   check("clicking the search box focuses it", focusOnSearch, `active=${await historyPage.evaluate(() => document.activeElement?.className ?? "null")}`);
@@ -585,6 +600,112 @@ try {
   check("quick start has no modal overlay", await tunnelPage.locator('[data-slot="dialog-overlay"]').count() === 0);
   await tunnelPage.screenshot({ path: `${SHOT_DIR}/tunnel-manager.png`, fullPage: false });
   await tunnelPage.close();
+
+  // --- Warp AI 对齐批：# 命令搜索 / 失败修复条 / 能力降级 -----------------
+  // ?aifix=1 把 SSH 回显换成 633 全链路失败命令夹具（token/password 敏感值
+  // 在场）；host.ai.openConversation 会话请求记录进 __dbxMockAiConversations。
+  console.log("==> Warp AI: # command search + fix bar (direct generation)");
+  const aiPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  aiPage.on("pageerror", (err) => pageError.push(String(err)));
+  await aiPage.addInitScript(() => {
+    localStorage.setItem("ssh-ai-assist", JSON.stringify({ search: true, fix: true, assist: true, agentMode: false, fixConsent: false }));
+  });
+  await aiPage.goto(`${baseUrl}?render=dom&aifix=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await aiPage.bringToFront();
+  await aiPage.click(".terminal-host");
+
+  // # 模式：键入 # 即本地改道（字节不进 PTY），提示条出现且随打字更新。
+  await aiPage.keyboard.press("#");
+  await expect(aiPage, ".terminal-ai-search", "# mode hint appears");
+  await aiPage.keyboard.type("list files by size");
+  await expectText(aiPage, ".terminal-ai-search-query", "list files by size", "# mode shows the natural language query");
+  // Esc 退出：不发起会话。
+  await aiPage.keyboard.press("Escape");
+  check("Escape leaves # mode", (await aiPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  // 再次进入并发起：Enter 后提示条收起、宿主 AI 会话记录到位。
+  await aiPage.keyboard.press("#");
+  await aiPage.keyboard.type("list files by size");
+  await aiPage.keyboard.press("Enter");
+  check("Enter leaves # mode after submit", (await aiPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  await expect(aiPage, ".notice", "sent notice appears");
+  const aiConversations = await aiPage.evaluate(() => window.__dbxMockAiConversations ?? []);
+  check("host.ai.openConversation recorded the search request", aiConversations.length === 1, `count=${aiConversations.length}`);
+  check(
+    "search request carries query + kind + ask mode",
+    aiConversations[0]?.context?.kind === "ai-command-search" && aiConversations[0]?.context?.query === "list files by size" && aiConversations[0]?.mode === "ask" && aiConversations[0]?.send === true,
+    JSON.stringify(aiConversations[0] ?? {}).slice(0, 200),
+  );
+
+  // 失败命令 → 修复条：开屏 transcript 自带 curl D;28 夹具条，先关掉它，
+  // 再跑 deploy（633 D exit 2 夹具）；首次点击走快照预览确认。
+  await aiPage.click(".terminal-ai-fix-close");
+  // 关条点击会把焦点从 xterm textarea 挪走：重聚焦再键入（真实用户路径一致）。
+  await aiPage.click(".terminal-host");
+  await aiPage.waitForTimeout(300);
+  await aiPage.keyboard.type("deploy");
+  await aiPage.keyboard.press("Enter");
+  await expectText(aiPage, ".terminal-ai-fix-command", "deploy", "fix bar carries the deploy command");
+  await expect(aiPage, ".terminal-ai-fix", "fix bar appears for the failed command");
+  await expectText(aiPage, ".terminal-ai-fix-exit", "✗ 2", "fix bar shows the exit code");
+  await aiPage.click(".terminal-ai-fix-btn");
+  await expect(aiPage, ".small-modal", "snapshot preview confirm dialog opens");
+  const previewText = await aiPage.locator(".small-modal").first().textContent();
+  check("preview shows the command and exit code", previewText?.includes("deploy") && previewText?.includes("2"), String(previewText).slice(0, 120));
+  await aiPage.locator(".small-modal footer button").last().click();
+  // 直连生成路径：宿主罐头响应「df -h /srv + Why」→ 插件弹回填确认 → 同意
+  // 后回填输入行（不回车不执行，红线不变）。
+  await expect(aiPage, ".small-modal", "generated-fix confirm dialog opens");
+  const genText = await aiPage.locator(".small-modal").first().textContent();
+  check("generated command + why shown", genText?.includes("df -h /srv") && genText?.includes("Why:"), String(genText).slice(0, 160));
+  await aiPage.locator(".small-modal footer button").last().click();
+  await expectText(aiPage, ".xterm-rows", "df -h /srv", "generated command filled into the input line");
+  check("fix bar dismisses after fill", (await aiPage.locator(".terminal-ai-fix").count()) === 0, "bar count");
+  const aiGenerations = await aiPage.evaluate(() => window.__dbxMockAiGenerations ?? []);
+  check("direct generation recorded with redacted prompt", aiGenerations.length === 1 && typeof aiGenerations[0]?.prompt === "string" && aiGenerations[0].prompt.includes("***") && !aiGenerations[0].prompt.includes("hunter2") && !aiGenerations[0].prompt.includes("ghp_"), JSON.stringify(aiGenerations).slice(0, 220));
+  // 会话总数 = 1（前面的 # 搜索）：修复条直连路径不得再开面板会话。
+  check("direct path opens no extra panel conversation", ((await aiPage.evaluate(() => window.__dbxMockAiConversations ?? [])).length) === 1, "conversation count");
+  const recState = await aiPage.evaluate(() => window.__dbxMockAiRecommendations?.());
+  // 推荐卡语义：每张修复条各推一次（开屏 curl 夹具 + deploy），条消失即撤
+  // ——pushes=clears=2 且最终清零。
+  check("one recommendation per fix bar, cleared each time", recState?.pushes === 2 && recState?.clears === 2, JSON.stringify(recState));
+
+  // 降级（?ai=off 模拟旧宿主）：# 照常进终端（shell 注释），无模式提示。
+  const degradedPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  degradedPage.on("pageerror", (err) => pageError.push(String(err)));
+  await degradedPage.goto(`${baseUrl}?render=dom&ai=off`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await degradedPage.bringToFront();
+  await degradedPage.click(".terminal-host");
+  await degradedPage.keyboard.press("#");
+  await degradedPage.waitForTimeout(300);
+  check("degraded host: no # mode hint", (await degradedPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  check("degraded host: # passes through to the PTY echo", (await degradedPage.locator(".terminal-host").textContent())?.includes("#") === true, "echo check");
+  const degradedConversations = await degradedPage.evaluate(() => window.__dbxMockAiConversations ?? []);
+  check("degraded host records no conversations", degradedConversations.length === 0, `count=${degradedConversations.length}`);
+
+  // 面板回退路径（?aipanel=1 模拟 web 运行时：openConversation 在、直连缺）
+  // ——修复条点击仍可用，走面板会话（不回填）。
+  const panelPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  panelPage.on("pageerror", (err) => pageError.push(String(err)));
+  await panelPage.addInitScript(() => {
+    localStorage.setItem("ssh-ai-assist", JSON.stringify({ search: true, fix: true, assist: true, agentMode: false, fixConsent: true }));
+  });
+  await panelPage.goto(`${baseUrl}?render=dom&aifix=1&aipanel=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await panelPage.bringToFront();
+  await panelPage.click(".terminal-host");
+  await panelPage.keyboard.type("deploy");
+  await panelPage.keyboard.press("Enter");
+  await expect(panelPage, ".terminal-ai-fix", "panel-fallback fix bar appears");
+  await panelPage.click(".terminal-ai-fix-btn");
+  await panelPage.waitForTimeout(600);
+  const panelConversations = await panelPage.evaluate(() => window.__dbxMockAiConversations ?? []);
+  check("panel fallback opens a conversation (no direct generation)", panelConversations.length === 1 && panelConversations[0]?.mode === "ask", JSON.stringify(panelConversations).slice(0, 160));
+  const panelGenCount = await panelPage.evaluate(() => (window.__dbxMockAiGenerations ?? []).length);
+  check("panel fallback performs no direct generation", panelGenCount === 0, `generations=${panelGenCount}`);
+  await panelPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai-panel.png`, fullPage: false }).catch(() => undefined);
+  await panelPage.close();
+  await aiPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai.png`, fullPage: false }).catch(() => undefined);
+  await aiPage.close();
+  await degradedPage.close();
 
   if (pageError.length) {
     failures.push(`page errors: ${pageError.slice(0, 3).join(" | ")}`);

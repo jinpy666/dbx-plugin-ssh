@@ -73,6 +73,8 @@ function mountSettings(sessionId?: string) {
     props: {
       open: false,
       ghostTabAccept: false,
+      aiSettings: { search: true, fix: false, assist: true, agentMode: false, fixConsent: false },
+      aiBridgeReady: false,
       promptHintsEnabled: true,
       profilesOpen: false,
       sessionId,
@@ -179,7 +181,8 @@ describe("SettingsDialog 会话级门控", () => {
 
     const nav = navLabels();
     // 2026-10 反馈迭代：命令建议（suggestions）从终端分栏拆出独立成栏。
-    expect(nav).toHaveLength(10);
+    // AI 助手（Warp AI 对齐批）为全局分类后本地导航 11 项。
+    expect(nav).toHaveLength(11);
     // 命令建议是全局分类（本地终端同样可用）；sudo/智能体才是会话级隐藏。
     expect(nav).toContain(workbenchMessage("zh-CN", "settingsNav.suggestions"));
     for (const labelKey of ["settingsNav.sudo", "agentTerminalSection"]) {
@@ -188,7 +191,7 @@ describe("SettingsDialog 会话级门控", () => {
     wrapper.unmount();
   });
 
-  it("SSH 会话：携带 sessionId + revealSecrets 拉取，导航 11 项含 sudo/智能体", async () => {
+  it("SSH 会话：携带 sessionId + revealSecrets 拉取，导航 13 项含 sudo/智能体", async () => {
     const invoke = installInvoke(SSH_SETTINGS_META);
     const wrapper = mountSettings("sess-1");
     await openDialog(wrapper);
@@ -198,8 +201,8 @@ describe("SettingsDialog 会话级门控", () => {
     expect(getCalls[0]![1]).toMatchObject({ sessionId: "sess-1", revealSecrets: true });
 
     const nav = navLabels();
-    // 同上：命令建议独立成栏后 SSH 会话导航 12 项。
-    expect(nav).toHaveLength(12);
+    // 同上：命令建议独立成栏 + AI 助手（Warp AI 对齐批）后 SSH 会话导航 13 项。
+    expect(nav).toHaveLength(13);
     for (const labelKey of ["settingsNav.suggestions", "settingsNav.sudo", "agentTerminalSection"]) {
       expect(nav).toContain(workbenchMessage("zh-CN", labelKey));
     }

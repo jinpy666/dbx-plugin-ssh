@@ -155,6 +155,16 @@ import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, sav
 import { loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
+// AI 助手（Warp AI 对齐批，IMPL_PLAN_WARP_AI_TERMINAL）：宿主 AI 通道封装 +
+// `#` 命令搜索状态机 + 失败修复（输出采集/脱敏）+ 请求构造。插件零密钥，
+// provider/模型全在宿主 Settings → AI；能力缺失全链路降级。
+import { aiBridgeAvailable, aiCompletionAvailable, aiRecommendationsAvailable, clearAiRecommendations, generateAiText, listAiModels, openAiConversation, pickDefaultAiModel, setAiRecommendations } from "./lib/aiBridge";
+import { TailCapture } from "./lib/aiCapture";
+import { buildAiAssistRequest, buildAiFixPrompt, buildAiFixRequest, buildAiSearchRequest } from "./lib/aiRequests";
+import { canActivateAiSearch, classifyAiSearchInput, createAiSearchState, nextAiSearchState, type AiSearchState } from "./lib/aiSearchMode";
+import { loadAiSettings, saveAiSettings, sanitizeAiSettings, type AiSettings } from "./lib/aiSettings";
+import { isExpectedNonZeroExit, shouldOfferAiFix } from "./lib/aiFix";
+import { prepareAiOutputSnapshot, stripAnsiEscapes } from "./lib/outputRedaction";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
 // （vendored amazon-q parser + 全量语料，经冻结接缝 FigCompletionSource 注入
 // CompletionController）；legacy 补全目录已退役，无命中即
@@ -583,6 +593,52 @@ function setGhostTabAccept(value: boolean) {
 
 // 存储迁移批 3：传输/下载/建议偏好消毒器已下沉 lib/preferencesMirror
 // （镜像 schema 同处、可单测），App 统一从那里导入。
+// —— AI 助手（Warp AI 对齐批，IMPL_PLAN_WARP_AI_TERMINAL）——
+// 设置权威值 pluginStore（单键 JSON），内存态供门控与设置页回显；bridge 能力
+// 位挂载后再探一次（桥 bootstrap 与 UI 挂载同批完成），运行时调用点各做新鲜
+// 探测（aiBridgeOk），不受挂载时序影响。
+const aiSettingsState = ref<AiSettings>(loadAiSettings());
+const aiBridgeReady = ref(false);
+const aiSearchState = ref<AiSearchState>(createAiSearchState());
+const aiSearchAnchor = ref<SuggestionAnchor | null>(null);
+// 修复条状态：command/exitCode/output 已是脱敏后快照（触发时一次成型），
+// anchorY 为触发光标行顶（相对 terminal-host），bottom 样式按它落位。
+const aiFixBar = ref<{ command: string; exitCode: number; output: string; anchorY: number } | null>(null);
+// 执行期输出采集（仅 fix 开启时有意义；采集与解码器随会话复位）。
+const aiOutputCapture = new TailCapture();
+let aiOutputDecoder = new TextDecoder("utf-8", { fatal: false });
+function aiBridgeOk(): boolean {
+  return aiBridgeAvailable(window.dbxPlugin);
+}
+function updateAiSettings(patch: Partial<AiSettings>) {
+  aiSettingsState.value = sanitizeAiSettings({ ...aiSettingsState.value, ...patch });
+  saveAiSettings(aiSettingsState.value);
+}
+function resetAiFixConsent() {
+  updateAiSettings({ fixConsent: false });
+  showNotice(t("aiSettings.resetConsentDone"));
+}
+/** AI 上下文公共位（多语言 / 多系统 / 多 shell，Warp AI 对齐批）：locale 让
+ *  LLM 以终端用户语言回答；shell 语义是命令生成的关键——本地终端取 shell
+ *  偏好（basename）与平台口径，SSH 只在提示符采样判出 PowerShell/cmd 时带
+ *  （复用补全的采样，不为 AI 另写探测；远端 OS 刻意不发探测命令，AI 从输出
+ *  推断——诚实省略优于猜测）。 */
+function aiContextExtras() {
+  const extras: Record<string, unknown> = { locale: locale.value };
+  if (connectionId.value) extras.connectionId = connectionId.value;
+  if (terminalCwd.value) extras.cwd = terminalCwd.value;
+  if (isLocalMode.value) {
+    const shellProgram = localShellPref.value || localShells.value.find((entry) => entry.isDefault)?.program;
+    if (shellProgram) extras.shell = shellProgram.split(/[\\/]/).pop();
+    const platform = typeof navigator !== "undefined" ? navigator.platform.toLowerCase() : "";
+    extras.os = applePlatform ? "macos" : platform.includes("win") ? "windows" : "linux";
+  } else {
+    const sniffed = sniffTerminalShell();
+    if (sniffed) extras.shell = sniffed;
+  }
+  return extras;
+}
+
 // Apple 平台判定（Cmd 为主修饰键）：既有的全选语义与新增的快捷键默认键位都要用，
 // 因此在此单点声明，供后面的偏好初始值与终端选项复用。
 const applePlatform = isApplePlatform();
@@ -794,6 +850,7 @@ const {
   refreshSuggestionsAfterInput,
   refreshCompletionMenu,
   openCompletionsManually,
+  sniffTerminalShell,
   replaceTerminalLineWith,
   fillSuggestion,
   acceptCompletionRow,
@@ -1849,6 +1906,41 @@ function createTerminal() {
       terminalDiag.swallowed += 1;
       return;
     }
+    // # AI 命令搜索模式（Warp AI Command Search 同位）：激活后 onData 全部
+    // 改道本地状态机，字节不进 PTY（退出无需擦远端）；回车发起宿主 AI 会话。
+    if (aiSearchState.value.active) {
+      const previous = aiSearchState.value;
+      const next = nextAiSearchState(aiSearchState.value, classifyAiSearchInput(data));
+      aiSearchState.value = next.state;
+      if (next.action === "submit") void submitAiSearch(previous.query);
+      else if (next.action === "cancel") closeAiSearch();
+      else syncAiSearchAnchor();
+      terminalDiag.swallowed += 1;
+      return;
+    }
+    // 激活判定：空行键入 #、能力+开关就绪、所有浮层/执行态门干净——# 字节
+    // 不发远端（能力缺失时 # 照常放行，shell 注释语义天然兜底）。
+    if (
+      data === "#" &&
+      pendingTerminalInput === "" &&
+      aiBridgeOk() &&
+      aiSettingsState.value.search &&
+      canActivateAiSearch({
+        alternateActive: terminal?.buffer.active.type === "alternate",
+        commandRunning: commandRunning.value,
+        transferBusy: terminalTransferBusy.value,
+        suggestionOpen: suggestionOpen.value,
+        completionOpen: completionOpen.value,
+        historyPanelOpen: historyPanelOpen.value,
+        quickSelectOpen: quickSelectOpen.value,
+        searchOpen: searchOpen.value,
+      })
+    ) {
+      aiSearchState.value = { active: true, query: "" };
+      syncAiSearchAnchor();
+      terminalDiag.swallowed += 1;
+      return;
+    }
     // 首帧优化：键入字节先发送，输入记录随后同步完成，bookkeeping 不阻塞发送路径。
     // 命令建议（P1-1）：行快照先于 trackPendingInput 取（\r 会清空行缓冲），
     // 之后按输入事件推进抑制门并刷新浮层。快速命令/粘贴/自动应答不走路由，
@@ -2041,6 +2133,21 @@ function handleTerminalKey(event: KeyboardEvent) {
       // 用过即散：手动补全命中引导条教的键位（Ctrl+Space），此后不再教。
       dismissPromptHints();
       openCompletionsManually();
+      return consume();
+    case "ai-fix":
+      // 失败命令 AI 修复（Warp Fix-with-AI 同位）：修复条在场才动作；缺席时
+      // 放行远端（键位未占用任何远端常用语义，放行最诚实）。
+      if (!aiFixBar.value) return true;
+      void aiFixFromBar();
+      return consume();
+    case "ai-assist":
+      // 唤起 AI 助手（Warp Agent Mode 入口同位）：开关关闭/能力缺失给可见
+      // 降级提示并消费；就绪则选中文本/屏幕尾部快照发起 ask 会话。
+      if (!aiBridgeOk() || !aiSettingsState.value.assist) {
+        showNotice(t("aiAssist.unavailable"));
+        return consume();
+      }
+      void aiAssistFromTerminal();
       return consume();
     case "copy":
       // 无选区时不消费：裸 Ctrl+C 仍要作为 SIGINT 发给远端。
@@ -2343,6 +2450,151 @@ function handleHistoryPanelPanelKey(event: KeyboardEvent) {
     event.stopPropagation();
   }
 }
+
+// ---------------------------------------------------------------------------
+// AI 助手（Warp AI 对齐批，IMPL_PLAN_WARP_AI_TERMINAL）：# 命令搜索 / 失败
+// 修复 / 唤起助手。三条体验都只「发送快照到宿主 AI 面板」——AI 生成内容一律
+// 不回写 PTY、不代执行（执行权在人，红线见方案 §0）；插件零密钥，能力缺失
+// 全链路可见降级（aiBridgeOk 各调用点新鲜探测）。
+// ---------------------------------------------------------------------------
+
+function syncAiSearchAnchor() {
+  aiSearchAnchor.value = readTerminalSuggestionAnchor();
+}
+
+function closeAiSearch() {
+  aiSearchState.value = createAiSearchState();
+  aiSearchAnchor.value = null;
+}
+
+/** `#` 发起：拼请求 → host.ai.openConversation（ask）。发送与失败都给可见
+ *  提示；生成的命令由用户在 AI 面板复制回填，插件不代填不代跑。 */
+async function submitAiSearch(query: string) {
+  const trimmed = query.trim();
+  closeAiSearch();
+  if (!trimmed) return;
+  const sent = await openAiConversation(window.dbxPlugin, buildAiSearchRequest({ query: trimmed, context: aiContextExtras() })).catch(() => false);
+  showNotice(t(sent ? "aiSearch.sentNotice" : "aiSearch.unavailable"));
+}
+
+// —— 推荐位（P2，host.ai.setRecommendations）：修复条在场时向宿主 AI 面板
+// 推一张「修复上次失败命令」卡（≤5 张、随工作台存续）；清空点与新命令开始/
+// 条消失/会话复位对齐，best-effort 不阻塞主链路。
+let fixRecommendationPushed = false;
+function pushFixRecommendation() {
+  const bar = aiFixBar.value;
+  const api = window.dbxPlugin;
+  if (!bar || fixRecommendationPushed || !aiRecommendationsAvailable(api)) return;
+  fixRecommendationPushed = true;
+  void setAiRecommendations(api, {
+    context: { ...aiContextExtras(), command: bar.command, exitCode: bar.exitCode, kind: "ai-fix" },
+    items: [{ id: "ssh-ai-fix", label: t("aiFix.recommendation"), prompt: `Fix this failed command: ${bar.command} (exit code ${bar.exitCode})`, order: 0 }],
+  }).catch(() => undefined);
+}
+function clearFixRecommendation() {
+  if (!fixRecommendationPushed) return;
+  fixRecommendationPushed = false;
+  void clearAiRecommendations(window.dbxPlugin).catch(() => undefined);
+}
+
+/** 本地白名单分诊（ssh/alert/triage 既有 RPC，best-effort）：category +
+ *  白名单建议命令作 prompt 提示位，帮 LLM 收窄误诊面；失败静默跳过。 */
+async function aiFixTriageHint(output: string): Promise<string | undefined> {
+  if (!output.trim()) return undefined;
+  try {
+    const view = await window.dbxPlugin.invoke<{ category?: string; suggestions?: Array<{ command?: string }> }>("ssh/alert/triage", { payload: output });
+    const commands = (view?.suggestions ?? []).map((item) => item?.command).filter((c): c is string => typeof c === "string" && c.length > 0).slice(0, 3);
+    if (!view?.category && !commands.length) return undefined;
+    return [`category=${view?.category ?? "unknown"}`, ...(commands.length ? [`whitelisted suggestions: ${commands.join("; ")}`] : [])].join(", ");
+  } catch {
+    return undefined;
+  }
+}
+
+/** 修复条发起：优先直连生成（aiCompletion 能力位，桌面运行时）——列模型 →
+ *  挑默认 → generateText → 弹生成结果确认 → **用户显式确认后回填输入行**
+ *  （不回车不执行，红线不变）；直连不可用/失败/取消回退面板会话（ask/agent
+ *  由设置 opt-in）。首次发送过快照预览确认（记「不再询问」）。 */
+async function aiFixFromBar() {
+  const bar = aiFixBar.value;
+  if (!bar) return;
+  const api = window.dbxPlugin;
+  if (!aiBridgeOk()) {
+    showNotice(t("aiFix.unavailable"));
+    return;
+  }
+  if (!aiSettingsState.value.fixConsent) {
+    const message = `${t("aiFix.confirmBody", { command: bar.command, code: String(bar.exitCode) })}\n\n${bar.output}`;
+    const accepted = await confirmDialog(message);
+    if (!accepted) return;
+    updateAiSettings({ fixConsent: true });
+  }
+  if (aiCompletionAvailable(api)) {
+    try {
+      const model = pickDefaultAiModel(await listAiModels(api));
+      if (!model) throw new Error("no configured ai model");
+      const triageHint = await aiFixTriageHint(bar.output);
+      const prompt = buildAiFixPrompt({ command: bar.command, exitCode: bar.exitCode, output: bar.output, triageHint });
+      const result = (await generateAiText(api, { configId: model.configId, model: model.model, prompt })).trim();
+      const command = result.split("\n")[0]?.trim();
+      if (!command) throw new Error("empty ai response");
+      const accepted = await confirmDialog(`${result}\n\n${t("aiFix.fillConfirm")}`);
+      if (accepted) {
+        aiFixBar.value = null;
+        clearFixRecommendation();
+        replaceTerminalLineWith(command, false);
+        terminal?.focus();
+        showNotice(t("aiFix.filledNotice"));
+      }
+      return;
+    } catch {
+      // 直连失败（无模型/宿主确认取消/供应商错误已泛化）→ 回退面板会话。
+    }
+  }
+  const sent = await openAiConversation(api, buildAiFixRequest({ command: bar.command, exitCode: bar.exitCode, output: bar.output, context: aiContextExtras(), agentMode: aiSettingsState.value.agentMode })).catch(() => false);
+  if (sent) {
+    aiFixBar.value = null;
+    clearFixRecommendation();
+  }
+  showNotice(t(sent ? "aiFix.sentNotice" : "aiFix.unavailable"));
+}
+
+/** 无选区时取 buffer 尾部 n 行（可读文本；发送前统一过脱敏管线）。 */
+function readTerminalTailLines(lines: number): string {
+  const term = terminal;
+  if (!term) return "";
+  try {
+    const buffer = term.buffer.active;
+    const start = Math.max(0, buffer.length - lines);
+    const rows: string[] = [];
+    for (let y = start; y < buffer.length; y += 1) rows.push(buffer.getLine(y)?.translateToString(true) ?? "");
+    return rows.join("\n").replace(/\s+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+/** ai-assist 热键：选中文本优先，无选区取屏幕尾部 40 行；快照过脱敏管线后
+ *  发起 ask 会话。空上下文也可发（通用协助）。 */
+async function aiAssistFromTerminal() {
+  if (!aiBridgeOk()) {
+    showNotice(t("aiAssist.unavailable"));
+    return;
+  }
+  const selection = terminal?.hasSelection() ? (terminal.getSelection() ?? "") : "";
+  const raw = selection || readTerminalTailLines(40);
+  const sent = await openAiConversation(window.dbxPlugin, buildAiAssistRequest({ query: "", selection: prepareAiOutputSnapshot(raw), context: aiContextExtras(), agentMode: aiSettingsState.value.agentMode })).catch(() => false);
+  showNotice(t(sent ? "aiAssist.sentNotice" : "aiAssist.unavailable"));
+}
+
+/** 修复条样式：底边贴触发光标行顶（宿主净高/锚点不可测时回退 40px，clamp ≥2px）。 */
+const aiFixBarStyle = computed(() => {
+  const bar = aiFixBar.value;
+  if (!bar) return undefined;
+  const hostHeight = suggestionViewport.value.height || 0;
+  const bottom = hostHeight > 0 && bar.anchorY >= 0 ? Math.max(2, hostHeight - bar.anchorY + 2) : 40;
+  return { bottom: `${bottom}px` };
+});
 
 function runTerminalSearch(query: string, options: { caseSensitive: boolean; regex: boolean; wholeWord: boolean }, direction: "next" | "prev") {
   if (!searchAddon || !query) return;
@@ -2647,6 +2899,13 @@ function resetCommandMarker() {
   resetSuggestionsForSession();
   closeHistoryPanel();
   resetGhostSuggestion();
+  // AI 助手状态随会话复位（Warp AI 对齐批）：# 模式/修复条/推荐卡/输出采集
+  // 缓冲（解码器重建，避免跨会话的多字节残态）。
+  closeAiSearch();
+  aiFixBar.value = null;
+  clearFixRecommendation();
+  aiOutputCapture.reset();
+  aiOutputDecoder = new TextDecoder("utf-8", { fatal: false });
 }
 
 function applyCommandMarker(updates: Osc633StreamUpdates) {
@@ -2674,6 +2933,12 @@ function applyCommandMarker(updates: Osc633StreamUpdates) {
     // 命令开始执行：history 面板一并收起（面板开启时 ↑↓/Enter 均被吞键，
     // 正常到不了这里；E 帧旁路（粘贴多行/快速命令）执行时兜底关闭）。
     closeHistoryPanel();
+    // AI 修复（Warp AI 对齐批）：E 帧 = 新命令边界——快进快出命令的
+    // commandActive 合并终值是 false（E/C/D 同 chunk），清零不能挂在它上。
+    // 采集缓冲清零 + 旧修复条让位 + 推荐卡撤下。
+    aiOutputCapture.reset();
+    aiFixBar.value = null;
+    clearFixRecommendation();
   }
   if (updates.commandActive === true) {
     commandMarker.exitCode = null;
@@ -2718,6 +2983,32 @@ function applyCommandMarker(updates: Osc633StreamUpdates) {
   }
 }
 
+/** AI 修复条触发（Warp Fix-with-AI 同位，在 writeTerminalOutput 的采集之后
+ *  调用——快进快出命令 E/C/D 同 chunk，快照必须含同 chunk 正文）：非零退出 +
+ *  门干净 + 非预期非零命令（test/grep 豁免，lib/aiFix）→ 以当前快照出条；
+ *  anchorY 取当前光标行顶。 */
+function maybeOfferAiFix(updates: Osc633StreamUpdates) {
+  const exitCode = updates.lastExitCode;
+  const command = commandMarker.command;
+  if (typeof exitCode !== "number" || exitCode === 0 || !command) return;
+  if (
+    !shouldOfferAiFix(
+      { bridgeAvailable: aiBridgeOk(), fixEnabled: aiSettingsState.value.fix, alternateActive: terminal?.buffer.active.type === "alternate" },
+      exitCode,
+      command,
+    )
+  ) {
+    return;
+  }
+  aiFixBar.value = {
+    command,
+    exitCode,
+    output: prepareAiOutputSnapshot(aiOutputCapture.raw()),
+    anchorY: readTerminalSuggestionAnchor()?.y ?? -1,
+  };
+  pushFixRecommendation();
+}
+
 function writeTerminalOutput(data: Uint8Array) {
   const now = Date.now();
   for (const path of directoryParser.push(data)) {
@@ -2727,7 +3018,17 @@ function writeTerminalOutput(data: Uint8Array) {
     terminalCwd.value = path;
     if (followDirectory.value) void loadDirectory(path, true);
   }
-  applyCommandMarker(commandMarkerParser.push(data));
+  // AI 修复输出采集（Warp AI 对齐批）：解码与 OSC 解析同流，命令执行期
+  // （active）的输出文本进尾部环形缓冲；快进快出的命令（E/C/D 同一 chunk）
+  // 由 D 帧判定一并采集——wasActive 覆盖长输出的中间 chunk，D 帧 chunk 覆盖
+  // 尾段正文。剥 ANSI 后入缓冲——633 帧噪声不进 AI 快照。
+  const aiChunkWasActive = commandMarker.active;
+  const aiChunkUpdates = commandMarkerParser.push(data);
+  applyCommandMarker(aiChunkUpdates);
+  // AI 修复输出采集（Warp AI 对齐批）：解析（E 帧清零缓冲）之后的同 chunk
+  // 正文照采——执行期 chunk 靠 active 判定，快进快出命令靠 D 帧 chunk 判定。
+  if (aiChunkWasActive || commandMarker.active || aiChunkUpdates.lastExitCode != null) aiOutputCapture.append(stripAnsiEscapes(aiOutputDecoder.decode(data, { stream: true })));
+  maybeOfferAiFix(aiChunkUpdates);
   terminalWriteThrottle.write(data);
 }
 
@@ -7034,6 +7335,9 @@ async function syncMcpSettingsMirror() {
 
 onMounted(() => {
   document.addEventListener("click", onDocumentClickCloseMenus);
+  // AI 桥能力位（Warp AI 对齐批）：桥 bootstrap 与 UI 挂载同批完成，挂载后
+  // 探一次供设置页横幅展示；运行时调用点各做新鲜探测（aiBridgeOk）。
+  aiBridgeReady.value = aiBridgeOk();
   // 文件夹上传能力探测（issue #78）：webkitdirectory 非标准属性，缺失环境
   // （老 webview）隐藏入口，文件级上传不受影响。
   const folderProbe = document.createElement("input");
@@ -7659,6 +7963,28 @@ function dismissPromptHints() {
             <button type="button" class="terminal-ghost-keyoption" :class="{ active: ghostTabAccept }" @click.stop.prevent="setGhostTabAccept(true)">Tab</button>
             <div class="terminal-ghost-keymenu-note">{{ t("terminalGhost.keysSummary") }}</div>
           </div>
+        </div>
+        <!-- # AI 命令搜索模式提示（Warp AI Command Search 同位）：激活后 onData
+             全部改道本地状态机、字节不进 PTY，提示条锚在光标格展示 query 与键位；
+             回车发起宿主 AI 会话（ask），结果由用户复制回填，插件不代执行。 -->
+        <div
+          v-if="aiSearchState.active && aiSearchAnchor"
+          class="terminal-ai-search mono"
+          :style="{ left: `${aiSearchAnchor.x}px`, top: `${aiSearchAnchor.y}px` }"
+          role="status"
+        >
+          <span class="terminal-ai-search-badge" aria-hidden="true">#</span>
+          <span class="terminal-ai-search-query" :class="{ placeholder: !aiSearchState.query }">{{ aiSearchState.query || t("aiSearch.hintPlaceholder") }}</span>
+          <span class="terminal-ai-search-keys"><kbd>Enter</kbd> {{ t("aiSearch.hintSubmit") }}<span aria-hidden="true"> · </span><kbd>Esc</kbd> {{ t("aiSearch.hintCancel") }}</span>
+        </div>
+        <!-- 失败命令修复条（Warp Fix-with-AI 同位）：非弹窗不抢焦点，贴触发光标
+             行顶；新命令开始/Esc 关闭/会话切换即消失。「用 AI 修复」首次发送过
+             快照预览确认，输出已截断+脱敏（prepareAiOutputSnapshot）。 -->
+        <div v-if="aiFixBar" class="terminal-ai-fix mono" :style="aiFixBarStyle" role="status">
+          <span class="terminal-ai-fix-exit">✗ {{ aiFixBar.exitCode }}</span>
+          <span class="terminal-ai-fix-command">{{ aiFixBar.command }}</span>
+          <button type="button" class="terminal-ai-fix-btn" @click="aiFixFromBar">{{ t("aiFix.barAction") }}</button>
+          <button type="button" class="terminal-ai-fix-close" :title="t('aiFix.barClose')" :aria-label="t('aiFix.barClose')" @click="aiFixBar = null; clearFixRecommendation()">✕</button>
         </div>
         <div v-if="terminalDragActive || (dragActive && !sftpPaneOpen)" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
         <TerminalSearchPanel
@@ -8852,6 +9178,10 @@ function dismissPromptHints() {
       @update:ghost-suggest="setGhostEnabled"
       :ghost-tab-accept="ghostTabAccept"
       @update:ghost-tab-accept="setGhostTabAccept"
+      :ai-settings="aiSettingsState"
+      :ai-bridge-ready="aiBridgeReady"
+      @update-ai-settings="updateAiSettings"
+      @reset-ai-consent="resetAiFixConsent"
       :prompt-hints-enabled="promptHintsEnabled"
       @update:prompt-hints-enabled="setPromptHintsEnabled"
       @update:wallpaper-enabled="updateWallpaperEnabled"
@@ -9540,6 +9870,119 @@ body.resizing-col { cursor: col-resize !important; user-select: none; }
   color: var(--muted-foreground);
   font-size: 10px;
   white-space: nowrap;
+}
+/* # AI 命令搜索模式提示（Warp AI 对齐批）：锚在光标格的行内提示条，令牌
+   缺失 fallback 保可见（与 ghost 键位胶囊同策略）。 */
+.terminal-ai-search {
+  position: absolute;
+  z-index: 7;
+  display: flex;
+  max-width: calc(100% - 16px);
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border, rgb(128 128 132 / 28%));
+  border-radius: var(--radius);
+  background: var(--popover);
+  box-shadow: var(--shadow-popover);
+  padding: 3px 8px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.terminal-ai-search-badge {
+  display: inline-grid;
+  min-width: 16px;
+  place-items: center;
+  border-radius: 4px;
+  background: var(--accent, rgb(255 255 255 / 10%));
+  color: var(--accent-foreground, inherit);
+  font-weight: 700;
+  line-height: 16px;
+}
+.terminal-ai-search-query {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--popover-foreground);
+  text-overflow: ellipsis;
+}
+.terminal-ai-search-query.placeholder {
+  color: var(--muted-foreground);
+}
+.terminal-ai-search-keys {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+.terminal-ai-search-keys kbd {
+  display: inline-grid;
+  min-width: 14px;
+  place-items: center;
+  border: 1px solid var(--border, rgb(128 128 132 / 28%));
+  border-radius: 4px;
+  background: var(--muted, rgb(255 255 255 / 6%));
+  padding: 0 3px;
+  font-family: var(--ui-font-family);
+  font-size: 9.5px;
+  line-height: 14px;
+}
+/* 失败命令修复条（Warp Fix-with-AI 同位）：单行非弹窗，贴触发光标行顶。 */
+.terminal-ai-fix {
+  position: absolute;
+  right: 8px;
+  left: 8px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border, rgb(128 128 132 / 28%));
+  border-radius: var(--radius);
+  background: var(--popover);
+  box-shadow: var(--shadow-popover);
+  padding: 4px 8px;
+  font-size: 11.5px;
+}
+.terminal-ai-fix-exit {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgb(239 68 68 / 16%);
+  color: rgb(239 68 68 / 90%);
+  padding: 0 6px;
+  font-size: 10.5px;
+  line-height: 17px;
+}
+.terminal-ai-fix-command {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--popover-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-ai-fix-btn {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 4px;
+  background: var(--accent, rgb(255 255 255 / 10%));
+  color: var(--accent-foreground, inherit);
+  cursor: pointer;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.terminal-ai-fix-btn:hover {
+  filter: brightness(1.1);
+}
+.terminal-ai-fix-close {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  padding: 0 2px;
+}
+.terminal-ai-fix-close:hover {
+  color: var(--popover-foreground);
 }
 /* RDP 证书确认弹窗：状态徽标 + 倒计时行（弹窗骨架复用 host-key-modal 的
    .remember/.fingerprint 全局类）。 */

@@ -1249,3 +1249,24 @@ FIG 补全引擎的专用执行通道（wave-1 lane B）：把一条 generator �
 - 错误统一字符串 Err 惯例并带 **`completion:` 前缀** 分类（如 `completion: mode not allowed`、`completion: invalid command`、`completion: too many args (max 32)`）。
 
 wave-1 不做 `completion/listDirectory`、`completion/environment`（wave 2+）。端到端冒烟：`scripts/smoke_completion.py`（方法未注册时 SKIP 而非 FAIL）。
+
+## 宿主 AI 通道（Warp AI 对齐批，前端桥）
+
+本插件自 2026-10-02 起经**宿主桥 JS 能力**接入 DBX AI 面板，sidecar 无新增方法、协议帧无变化：
+
+- 桥方法 `host.ai.openConversation`（manifest 需声明 `permissions: ["host.ai"]`）：参数
+  `{ title, prompt, context, send?, mode? }`，由宿主归一化并快照化（`snapshotPluginWorkbenchContext`）。
+  插件侧封装在 `frontend/src/lib/aiBridge.ts`，能力位 `capabilities.ai`（旧宿主缺省 = 不支持）。
+- **上下文契约**：`context.connectionId`（DBX 连接 id，AI 面板据此绑定连接）、`context.cwd`
+  （OSC 7/633 跟踪值）、终端输出快照——快照必须经 `lib/outputRedaction.ts`
+  （截断 + 脱敏）后方可出境；`#` 命令搜索只发自然语言与元数据。
+- **执行红线**：AI 生成内容不回写 PTY、不代执行；Agent 档（opt-in）的执行面为既有
+  MCP 工具 + `execPermissionMode` 审批 + `ssh/agent/prompt` 终端挑战，本插件不新增执行路径。
+- **直连文本生成（宿主 t8y2/dbx#10629 已发布）**：`host.ai.listProviders`/
+  `discoverModels`/`listModels`/`generateText`（能力位 `aiModelDiscovery`/
+  `aiCompletion`，桌面 Tauri 运行时独有；web 面板仅快照对话）。每次发送宿主
+  原生确认（插件名+模型）；输出 ≤16k 纯文本、预算 2048 token；systemPrompt
+  宿主钉死。Agent 档工具面（最新 main 实测）：scoped CLI/AI 会话按全局 MCP
+  策略（`dbx_plugin_tools`/`dbx_plugin_call`）+ 会话 scope 触达插件工具——
+  旧「Scoped AI 会话禁用 dbx_call_plugin_tool」记载过时，工具名已演进为
+  `dbx_plugin_list`/`dbx_plugin_tools`/`dbx_plugin_call`。

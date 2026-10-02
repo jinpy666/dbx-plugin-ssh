@@ -55,6 +55,7 @@ import {
   type TerminalRightClickMode,
 } from "../lib/terminalBehavior";
 import type { TerminalHotkeyBindings } from "../lib/terminalHotkeys";
+import type { AiSettings } from "../lib/aiSettings";
 import { type ActionLinkMatcherToggles, type ActionLinksSettings } from "../lib/actionLinksMatcher";
 import { rdpExperimentalEnabled as parseRdpExperimentalEnabled } from "../lib/rdpExperimental";
 import { GUTTER_TIMESTAMP_DEFAULT_FORMAT, type GutterSettings } from "../lib/terminalGutter";
@@ -394,6 +395,10 @@ const props = defineProps<{
   terminalBehavior: TerminalBehaviorSettings;
   /** ghost 接受键（批 4e/反馈迭代）：权威态在 App，本组件只读 + 上抛改动。 */
   ghostTabAccept: boolean;
+  /** AI 助手设置（Warp AI 对齐批）：权威态在 App（pluginStore 单键 JSON），
+   *  本组件只读 + 上抛增量；bridgeReady 决定能力缺失横幅。 */
+  aiSettings: AiSettings;
+  aiBridgeReady: boolean;
   /** 空提示符快捷键引导条开关（权威态在 App）：只读 + 上抛改动。 */
   promptHintsEnabled: boolean;
   /** 终端快捷键绑定（对标 Tabby「Hotkeys」页）：权威态在 App。 */
@@ -481,6 +486,10 @@ const emit = defineEmits<{
   /** 行内 ghost 自动建议开关（组件自治持久化 pluginStore，App 只同步内存态）。 */
   (e: "update:ghostSuggest", value: boolean): void;
   (e: "update:ghostTabAccept", value: boolean): void;
+  /** AI 助手设置增量（Warp AI 对齐批）：App 归一化 + pluginStore 持久化。 */
+  (e: "update-ai-settings", patch: Partial<AiSettings>): void;
+  /** 清空 AI 修复「不再询问」记忆位。 */
+  (e: "reset-ai-consent"): void;
   /** 空提示符快捷键引导条开关（权威态在 App；App 侧重开时会顺带清消散旗标）。 */
   (e: "update:promptHintsEnabled", value: boolean): void;
   /** 行为设置局部增量：App 侧会归一化 + 持久化 + 即时落地到 xterm 选项。 */
@@ -532,6 +541,9 @@ const SETTINGS_CATEGORIES = [
   // 管理器、快速命令是片段管理器，各自独立成栏，导航标签复用现有键。
   { id: "highlight", labelKey: "highlightRules.title" },
   { id: "commands", labelKey: "quickCommands" },
+  // AI 助手（Warp AI 对齐批）：# 命令搜索 / 失败修复 / 唤起助手三开关 +
+  // 能力缺失横幅 + 「不再询问」重置；权威态在 App（pluginStore 单键 JSON）。
+  { id: "ai", labelKey: "settingsNav.ai" },
   { id: "hotkeys", labelKey: "settingsNav.hotkeys" },
   { id: "sudo", labelKey: "settingsNav.sudo" },
   { id: "agent", labelKey: "agentTerminalSection" },
@@ -2250,6 +2262,36 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <span>{{ t("terminalHints.settingsLabel") }}</span>
             </label>
             <p class="muted settings-note">{{ t("terminalHints.settingsHint") }}</p>
+            </div>
+
+
+            <!-- AI 助手独立分栏（Warp AI 对齐批）：三条体验开关 + 能力缺失横幅
+                 + AI 修复「不再询问」重置。权威态在 App（pluginStore 单键 JSON），
+                 本组件只读 + 上抛增量；能力位来自宿主桥 capabilities.ai。 -->
+            <div v-show="settingsCategory === 'ai'" class="settings-pane">
+            <h3 class="settings-section-title">{{ t("aiSettings.sectionTitle") }}</h3>
+            <p v-if="!aiBridgeReady" class="muted settings-note" role="note">{{ t("aiSettings.capabilityMissing") }}</p>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="aiSettings.search" size="sm" :disabled="!aiBridgeReady" @update:model-value="emit('update-ai-settings', { search: Boolean($event) })" />
+              <span>{{ t("aiSettings.searchLabel") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("aiSettings.searchHint") }}</p>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="aiSettings.fix" size="sm" :disabled="!aiBridgeReady" @update:model-value="emit('update-ai-settings', { fix: Boolean($event) })" />
+              <span>{{ t("aiSettings.fixLabel") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("aiSettings.fixHint") }}</p>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="aiSettings.assist" size="sm" :disabled="!aiBridgeReady" @update:model-value="emit('update-ai-settings', { assist: Boolean($event) })" />
+              <span>{{ t("aiSettings.assistLabel") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("aiSettings.assistHint") }}</p>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="aiSettings.agentMode" size="sm" :disabled="!aiBridgeReady" @update:model-value="emit('update-ai-settings', { agentMode: Boolean($event) })" />
+              <span>{{ t("aiSettings.agentModeLabel") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("aiSettings.agentModeHint") }}</p>
+            <button type="button" class="connect-card-ghost-button" :disabled="!aiSettings.fixConsent" @click="emit('reset-ai-consent')">{{ t("aiSettings.resetConsent") }}</button>
             </div>
 
 

@@ -58,6 +58,20 @@ const localOnlyContext = fixtureParams.get("local") === "1";
 // ?local=1&restored=1 simulates a host-restored local-terminal tab: restore semantics (spec §7.6/§8.4)
 // requires restore-without-replay — no automatic shell, just the exit shell until the user explicitly starts one.
 const restoredFixture = fixtureParams.get("restored") === "1";
+// ?ai=off 模拟旧宿主（无 AI 面板桥，capabilities.ai 缺省）：AI 助手全链路
+// 降级走查（# 放行为 shell 注释、热键给可见提示）；缺省 ai 在位——
+// host.ai.openConversation 会话请求记录进 __dbxMockAiConversations 供走查断言。
+const aiPanelOn = fixtureParams.get("ai") !== "off";
+// ?aipanel=1 模拟 web 运行时（openConversation 在、直连生成/推荐位缺）：
+// AI 修复走面板回退路径的走查入口。
+const aiCompletionOn = aiPanelOn && fixtureParams.get("aipanel") !== "1";
+const aiConversations: Array<Record<string, unknown>> = [];
+const aiGenerations: Array<Record<string, unknown>> = [];
+const aiRecommendations: Array<Record<string, unknown>> = [];
+let aiRecommendationClears = 0;
+// ?aifix=1：ssh/terminal 回显改为「E/C → 失败输出（含敏感值）→ D exit 2 →
+// 提示符」的 633 全链路，驱动 AI 修复条（脱敏 + 预览确认）走查。
+const aiFixFixture = fixtureParams.get("aifix") === "1";
 // ?surface=panel simulates the host opening this webview as the bottom dock panel
 // (host §8.3 surface=panel)：dock 走查（紧凑工具条/配色快切）与跨表面外观同步
 // 的截图/联动验证入口；缺省仍为 tab。bridge openWorkbench 只开 tab，不受影响。
@@ -713,8 +727,37 @@ function scheduleDisconnect() {
   }, disconnectAfterMs);
 }
 
-const request: DbxPluginApi["request"] = async <T = unknown>(method: string) => {
+// ?aifix=1 的逐键行缓冲（模块级：跨多次 sendBinary 调用累计当前输入行）。
+let sshTypedLine = "";
+
+const request: DbxPluginApi["request"] = async <T = unknown>(method: string, params?: unknown) => {
   if (method === "host.getContext") return context as T;
+  // host.ai.openConversation（Warp AI 对齐批）：记录请求供 smoke 断言
+  // （title/prompt/context 与真实宿主 createPluginAiConversation 同形入参）。
+  if (method === "host.ai.openConversation") {
+    aiConversations.push((params ?? {}) as Record<string, unknown>);
+    return null as T;
+  }
+  // 直连生成 + 推荐位（Warp AI 对齐批跟进）：记录请求供 smoke 断言；生成
+  // 回罐头「命令 + Why」两行，prompt 原样记录（断言 triage 提示位与脱敏）。
+  if (method === "host.ai.listModels") {
+    return [
+      { configId: "mock-config", name: "Mock provider", model: "mock-fast-model", isDefault: true },
+    ] as T;
+  }
+  if (method === "host.ai.generateText") {
+    const input = (params ?? {}) as { prompt?: string };
+    aiGenerations.push(input);
+    return "df -h /srv\nWhy: the deploy failed because the disk filled up; check free space first." as unknown as T;
+  }
+  if (method === "host.ai.setRecommendations") {
+    aiRecommendations.push((params ?? {}) as Record<string, unknown>);
+    return null as T;
+  }
+  if (method === "host.ai.clearRecommendations") {
+    aiRecommendationClears += 1;
+    return null as T;
+  }
   // host.listConnections（PR-A4 扩展点）：返回夹具连接（只读无密），供面板
   // connection-switching walkthrough; on legacy host semantics unknown methods still resolve to null (caller degrades).
   if (method === "host.listConnections") {
@@ -1737,6 +1780,22 @@ window.dbxPlugin = {
       // 真实 PTY 的 onlcr 会把 \r 转成 \r\n；夹具直发 \r 只会让光标回到行首、
       // 后续回显互相覆盖（建议命令/批量发送走查时表现为"命令消失"）。
       const display = echoed.endsWith("\r") ? `${echoed.slice(0, -1)}\r\n` : echoed;
+      // ?aifix=1（Warp AI 对齐批）：逐键回显进行缓冲，回车整行改道「E/C →
+      // 失败输出（含敏感值）→ D exit 2 → 提示符」633 全链路——E 帧必须带完整
+      // 命令行，否则 App 侧 commandMarker 残留上一条命令、D 码张冠李戴。
+      if (aiFixFixture) {
+        if (echoed.endsWith("\r")) {
+          const command = sshTypedLine.trim();
+          sshTypedLine = "";
+          if (command) {
+            setTimeout(() => emitTerminal(`${command}\r\n\u001b]633;E;${command}\u0007\u001b]633;C\u0007deploy failed\ntoken: ghp_${"a".repeat(36)}\nDB_PASSWORD=hunter2\r\n\u001b]633;D;2\u0007\u001b]133;D;2\u0007\u001b]633;A\u0007user@demo:~$ `), 12);
+          }
+          return;
+        }
+        sshTypedLine += echoed;
+        setTimeout(() => emitTerminal(display), 12);
+        return;
+      }
       setTimeout(() => emitTerminal(display), 12);
     }
   },
@@ -1775,7 +1834,7 @@ window.dbxPlugin = {
   // 与真实 web 宿主同形由 localStorage 兜底（键名不变；字符串值原样、对象 JSON
   // 编码），刷新/重开不丢——?render=dom / mock 走查依赖该语义；opaque origin
   // 等不可用场景退化为内存 Map。get 未命中返回 null，set(undefined) 归一化为 null。
-  capabilities: { storage: true },
+  capabilities: { storage: true, ...(aiPanelOn ? { ai: true } : {}), ...(aiCompletionOn ? { aiCompletion: true, aiRecommendations: true } : {}) },
   storage: (() => {
     let ls: Storage | null = null;
     try {
@@ -1825,6 +1884,11 @@ queueMicrotask(() => document.dispatchEvent(new CustomEvent("dbx-plugin-init", {
 // 模拟范围）。
 // Sequence number of mock host instances injected by openWorkbench (host-authority simulation, spec §11).
 let mockOpenWorkbenchSeq = 0;
+// AI 面板会话记录（Warp AI 对齐批）：smoke 走查断言 host.ai.openConversation
+// 的入参（title/prompt/context 快照与脱敏效果）。
+(window as unknown as { __dbxMockAiConversations?: Array<Record<string, unknown>> }).__dbxMockAiConversations = aiConversations;
+(window as unknown as { __dbxMockAiGenerations?: Array<Record<string, unknown>> }).__dbxMockAiGenerations = aiGenerations;
+(window as unknown as { __dbxMockAiRecommendations?: () => { pushes: number; clears: number } }).__dbxMockAiRecommendations = () => ({ pushes: aiRecommendations.length, clears: aiRecommendationClears });
 (window as unknown as { __dbxMockSetLocale?: (next: string) => void }).__dbxMockSetLocale = (next: string) => {
   currentLocale = next || "en";
   for (const listener of eventListeners) listener({ type: "env", locale: currentLocale });
