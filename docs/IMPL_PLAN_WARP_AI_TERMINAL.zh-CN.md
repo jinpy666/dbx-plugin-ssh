@@ -156,3 +156,48 @@ AI 返回纯文本。v1 人工复制；增强（P2）：宿主 AI 面板的回�
 2. 修复条的非零退出豁免表覆盖面（`grep`/`test`/`diff`/`ssh` 端错误等）需实机调参。
 3. 输出采集环形缓冲对高频输出（`tail -f`）的性能预算：仅 completed 前 N KiB 即可，无需全量——实现时以常量钉死。
 4. `engines.dbx` 下限版本号待 integrator 对照发行版定。
+
+## 11. 宿主 AI 能力扩展清单（对照已发布的 host PR #10629，2026-10-02 盘点）
+
+### 11.1 已发布、插件侧待吃进的能力（无需宿主再扩展）
+
+t8y2/dbx#10629（合并于 2026-09-29）给插件桥新增**直连文本生成**面，SDK 注入
+`api.ai.{listProviders, discoverModels, listModels, generateText}`：
+
+| 能力 | 桥方法 | 能力位 | 限制 |
+| --- | --- | --- | --- |
+| 供应商列表 | `host.ai.listProviders` | `capabilities.aiModelDiscovery` | 仅 API 供应商（CLI Agent 排除） |
+| 模型发现 | `host.ai.discoverModels(configId)` | `capabilities.aiModelDiscovery` | ≤2000 个；凭据宿主持有 |
+| 已配模型列表 | `host.ai.listModels` | `capabilities.aiCompletion` | 仅 `{configId,name,model,isDefault}` |
+| **文本生成** | `host.ai.generateText({configId,model,prompt})` | `capabilities.aiCompletion` | prompt ≤100k、输出 ≤16k 纯文本；**每次发送原生对话框确认**（插件名+模型）；systemPrompt 宿主钉死（数据非指令/无工具）；单工作台单并发；供应商错误泛化 |
+
+对本插件的意义：原 P3 前提（「`#` 直出命令需宿主新桥」）**已失效**——`#` 模式
+v2（免面板、生成即回填输入行）与 AI 修复直出都可落在 `generateText` 上，
+仅需 `aiCompletion` 能力位探测。插件零新增权限（`host.ai` 已声明）。
+
+### 11.2 仍需宿主扩展的 AI 能力（按优先级）
+
+1. **生成取消 / 流式**（中优先）：`generateText` 为单轮阻塞、无 abort 桥。
+   `#` 打字即建议（Warp 完全体）与长输出场景需要 `host.ai.generateTextStream`
+   （onChunk + 取消）或至少 `host.ai.cancelGeneration(requestId)`。
+2. **发送确认的会话内记忆**（高优先，体验）：每次 `generateText` 都弹原生
+   确认框，对「失败修复条」这类高频入口过重。请宿主提供工作台级「本次会话
+   记住该插件/模型的授权」（等价插件侧 fixConsent 的宿主原生版），保持
+   「插件名 + 模型」首次明示。
+3. **受限 system-prompt 附加段或任务类型枚举**（中低优先）：systemPrompt
+   现被宿主钉死，格式指令只能塞 user prompt（可用但次优）。希望开放
+   「插件附加指令段」（宿主限长/审白名单）或提供任务类型枚举
+   （如 `command-generation` / `rewrite` / `classify`）让输出格式更稳。
+4. **口径确认（非新能力）**：Agent 档对插件连接的工具面——`mode:"agent"`
+   文档写「uses live tools … when available」，但 MCP.zh-CN 记载 Scoped AI
+   会话禁用 `dbx_call_plugin_tool`。宿主给出准确口径后，插件侧 Agent 档
+   （P2）即可接线。
+
+### 11.3 明确不需要宿主扩展的（避免过度索取）
+
+- **多轮对话回读**：`openConversation` 不回传模型输出是刻意设计；本插件
+  三条体验均为单轮任务，`generateText` 已覆盖「结果回填」诉求。
+- **凭据/供应商管理**：宿主已全权管理，插件侧永不接触（红线保持）。
+- **模型发现**：已发布（见 11.1）。
+- **推荐位**：`host.ai.setRecommendations`/`clearRecommendations` 桥已在，
+  属插件侧 P2 待接线。
