@@ -309,6 +309,21 @@ try {
   const rowsAfterLineTyping = await historyPage.locator(".terminal-history-hit").count();
   check("terminal typing goes to the input line (panel stays unfiltered)", rowsAfterLineTyping === unfilteredRows, `rows=${rowsAfterLineTyping}/${unfilteredRows}`);
   // 搜索框不再自动聚焦：点击聚焦后才过滤。
+  // 面板锚点经 rAF 合帧随回显 settle 收敛（高负载下构建刚结束的宿主上可达
+  // 秒级）：等面板整体落在视口内再点击，避免动画/重定位中的不可点击误报；
+  // 等待超时后照常点击——真偏离视口仍会以原生 actionability 失败暴露。
+  await historyPage
+    .waitForFunction(
+      () => {
+        const panel = document.querySelector(".terminal-history-panel");
+        if (!panel) return false;
+        const rect = panel.getBoundingClientRect();
+        return rect.top >= 0 && rect.left >= 0 && rect.bottom <= window.innerHeight && rect.right <= window.innerWidth;
+      },
+      null,
+      { timeout: 10_000 },
+    )
+    .catch(() => undefined);
   await historyPage.click(".terminal-history-search-input");
   const focusOnSearch = await historyPage.evaluate(() => document.activeElement?.classList?.contains("terminal-history-search-input") === true);
   check("clicking the search box focuses it", focusOnSearch, `active=${await historyPage.evaluate(() => document.activeElement?.className ?? "null")}`);
