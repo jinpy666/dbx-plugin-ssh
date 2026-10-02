@@ -10,7 +10,7 @@
   "homepage": "https://github.com/jinpy666/dbx-plugin-ssh",
   "icon": "assets/plugin.svg",
   "engines": {
-    "dbx": ">=0.6.30",
+    "dbx": ">=0.6.31",
     "host_api": ">=1.0.0"
   },
   "permissions": [
