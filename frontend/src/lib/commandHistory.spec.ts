@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commandInputAction, mergeShellHistory, parseShellHistoryText, pushCommandHistory } from "./commandHistory";
+import { commandInputAction, mergeShellHistory, parseShellHistoryText, persistableCommandHistoryBuckets, pushCommandHistory, sanitizeCommandHistoryBuckets } from "./commandHistory";
 
 describe("command input keyboard behavior", () => {
   const base = {
@@ -83,5 +83,37 @@ describe("mergeShellHistory", () => {
     expect(merged[0]).toBe("a");
     // 远端补充按新旧插在环尾:最旧的被截掉(122 条截到 100,丢 r0..r21)。
     expect(merged[99]).toBe("remote-22");
+  });
+});
+
+describe("sanitizeCommandHistoryBuckets", () => {
+  it("migrates the legacy global ring into the legacy scope", () => {
+    expect(sanitizeCommandHistoryBuckets(["echo a", "echo b"], { legacyScope: "local" })).toEqual({ local: ["echo a", "echo b"] });
+  });
+
+  it("drops junk and empty legacy rings", () => {
+    expect(sanitizeCommandHistoryBuckets(null, { legacyScope: "local" })).toEqual({});
+    expect(sanitizeCommandHistoryBuckets("not an array", { legacyScope: "local" })).toEqual({});
+    expect(sanitizeCommandHistoryBuckets(["", "   "], { legacyScope: "local" })).toEqual({});
+  });
+
+  it("sanitizes each scope bucket independently", () => {
+    const raw = {
+      "conn-1": ["kubectl get pods", "x".repeat(250)],
+      "conn-2": "junk",
+      "": ["dropped-empty-scope"],
+    };
+    expect(sanitizeCommandHistoryBuckets(raw, { legacyScope: "local" })).toEqual({ "conn-1": ["kubectl get pods"] });
+  });
+});
+
+describe("persistableCommandHistoryBuckets", () => {
+  it("filters secret-like and over-long commands per bucket and drops empty buckets", () => {
+    const secret = "mysql -u root --password=hunter2";
+    const buckets = {
+      "conn-1": ["keep-me", secret, "x".repeat(250)],
+      "conn-2": [secret],
+    };
+    expect(persistableCommandHistoryBuckets(buckets)).toEqual({ "conn-1": ["keep-me"] });
   });
 });
