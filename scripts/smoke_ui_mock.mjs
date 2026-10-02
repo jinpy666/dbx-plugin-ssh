@@ -604,7 +604,52 @@ try {
   // --- Warp AI 对齐批：# 命令搜索 / 失败修复条 / 能力降级 -----------------
   // ?aifix=1 把 SSH 回显换成 633 全链路失败命令夹具（token/password 敏感值
   // 在场）；host.ai.openConversation 会话请求记录进 __dbxMockAiConversations。
-  console.log("==> Warp AI: # command search + fix bar (direct generation)");
+  // `#` v2 与修复条分开两页走查：直连回填会把命令留在输入行，aifix 夹具的
+  // 逐键缓冲不吃退格——同页续跑会让后续命令带上残留，拆页各自从空行起步。
+  console.log("==> Warp AI: # command search (v2 direct generation + fill)");
+  const aiSearchPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  aiSearchPage.on("pageerror", (err) => pageError.push(String(err)));
+  await aiSearchPage.addInitScript(() => {
+    localStorage.setItem("ssh-ai-assist", JSON.stringify({ search: true, fix: true, assist: true, agentMode: false, fixConsent: false }));
+  });
+  await aiSearchPage.goto(`${baseUrl}?render=dom&aifix=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await aiSearchPage.bringToFront();
+  await aiSearchPage.click(".terminal-host");
+
+  // # 模式：键入 # 即本地改道（字节不进 PTY），提示条出现且随打字更新。
+  await aiSearchPage.keyboard.press("#");
+  await expect(aiSearchPage, ".terminal-ai-search", "# mode hint appears");
+  await aiSearchPage.keyboard.type("list files by size");
+  await expectText(aiSearchPage, ".terminal-ai-search-query", "list files by size", "# mode shows the natural language query");
+  // Esc 退出：不发起任何请求。
+  await aiSearchPage.keyboard.press("Escape");
+  check("Escape leaves # mode", (await aiSearchPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  check("Escape triggers no generation", (await aiSearchPage.evaluate(() => (window.__dbxMockAiGenerations ?? []).length)) === 0, "generation count");
+
+  // 再次进入并发起（v2 直连路径）：Enter 收起提示条 → 列模型/挑默认/
+  // generateText → 确认弹窗（首行命令 + Why 说明 + 七语「不执行」确认）。
+  await aiSearchPage.keyboard.press("#");
+  await aiSearchPage.keyboard.type("list files by size");
+  await aiSearchPage.keyboard.press("Enter");
+  check("Enter leaves # mode after submit", (await aiSearchPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  await expect(aiSearchPage, ".small-modal", "direct search confirm dialog opens");
+  const searchGenText = await aiSearchPage.locator(".small-modal").first().textContent();
+  check("search result shows command + why + fill confirm", searchGenText?.includes("ls -S") && searchGenText?.includes("Why:") && searchGenText?.includes("press Enter"), String(searchGenText).slice(0, 180));
+  await aiSearchPage.locator(".small-modal footer button").last().click();
+  await expect(aiSearchPage, ".notice", "filled notice appears");
+  await expectText(aiSearchPage, ".xterm-rows", "ls -S", "generated command filled into the input line");
+  // 红线：只回填不执行——命令回显恰好一次（无回车回显/无执行输出），全程
+  // 零面板会话；生成请求带「User request:」标记（mock 按它分流罐头）。
+  await aiSearchPage.waitForTimeout(400);
+  check("filled command is not executed", ((await aiSearchPage.locator(".xterm-rows").textContent())?.match(/ls -S/g) ?? []).length === 1, "echo count");
+  check("direct fill opens no panel conversation", (await aiSearchPage.evaluate(() => (window.__dbxMockAiConversations ?? []).length)) === 0, "conversation count");
+  const searchGenerations = await aiSearchPage.evaluate(() => window.__dbxMockAiGenerations ?? []);
+  check("direct search generation carries the query prompt", searchGenerations.length === 1 && typeof searchGenerations[0]?.prompt === "string" && searchGenerations[0].prompt.includes("User request:") && searchGenerations[0].prompt.includes("list files by size"), JSON.stringify(searchGenerations).slice(0, 220));
+  await aiSearchPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai-search.png`, fullPage: false }).catch(() => undefined);
+  await aiSearchPage.close();
+
+  // 修复条走查（独立一页，空行起步）。
+  console.log("==> Warp AI: fix bar (direct generation)");
   const aiPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   aiPage.on("pageerror", (err) => pageError.push(String(err)));
   await aiPage.addInitScript(() => {
@@ -613,28 +658,6 @@ try {
   await aiPage.goto(`${baseUrl}?render=dom&aifix=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
   await aiPage.bringToFront();
   await aiPage.click(".terminal-host");
-
-  // # 模式：键入 # 即本地改道（字节不进 PTY），提示条出现且随打字更新。
-  await aiPage.keyboard.press("#");
-  await expect(aiPage, ".terminal-ai-search", "# mode hint appears");
-  await aiPage.keyboard.type("list files by size");
-  await expectText(aiPage, ".terminal-ai-search-query", "list files by size", "# mode shows the natural language query");
-  // Esc 退出：不发起会话。
-  await aiPage.keyboard.press("Escape");
-  check("Escape leaves # mode", (await aiPage.locator(".terminal-ai-search").count()) === 0, "hint count");
-  // 再次进入并发起：Enter 后提示条收起、宿主 AI 会话记录到位。
-  await aiPage.keyboard.press("#");
-  await aiPage.keyboard.type("list files by size");
-  await aiPage.keyboard.press("Enter");
-  check("Enter leaves # mode after submit", (await aiPage.locator(".terminal-ai-search").count()) === 0, "hint count");
-  await expect(aiPage, ".notice", "sent notice appears");
-  const aiConversations = await aiPage.evaluate(() => window.__dbxMockAiConversations ?? []);
-  check("host.ai.openConversation recorded the search request", aiConversations.length === 1, `count=${aiConversations.length}`);
-  check(
-    "search request carries query + kind + ask mode",
-    aiConversations[0]?.context?.kind === "ai-command-search" && aiConversations[0]?.context?.query === "list files by size" && aiConversations[0]?.mode === "ask" && aiConversations[0]?.send === true,
-    JSON.stringify(aiConversations[0] ?? {}).slice(0, 200),
-  );
 
   // 失败命令 → 修复条：开屏 transcript 自带 curl D;28 夹具条，先关掉它，
   // 再跑 deploy（633 D exit 2 夹具）；首次点击走快照预览确认。
@@ -652,22 +675,24 @@ try {
   const previewText = await aiPage.locator(".small-modal").first().textContent();
   check("preview shows the command and exit code", previewText?.includes("deploy") && previewText?.includes("2"), String(previewText).slice(0, 120));
   await aiPage.locator(".small-modal footer button").last().click();
-  // 直连生成路径：宿主罐头响应「df -h /srv + Why」→ 插件弹回填确认 → 同意
-  // 后回填输入行（不回车不执行，红线不变）。
+  // 直连生成路径：宿主罐头响应「df -h /srv + Why」→ 插件弹结构化回填确认
+  // （命令行前置标签 + Why 次行 + 七语不执行确认）→ 同意后回填输入行。
   await expect(aiPage, ".small-modal", "generated-fix confirm dialog opens");
   const genText = await aiPage.locator(".small-modal").first().textContent();
-  check("generated command + why shown", genText?.includes("df -h /srv") && genText?.includes("Why:"), String(genText).slice(0, 160));
+  check("generated command labeled + why shown", genText?.includes("Command: df -h /srv") && genText?.includes("Why:"), String(genText).slice(0, 180));
   await aiPage.locator(".small-modal footer button").last().click();
   await expectText(aiPage, ".xterm-rows", "df -h /srv", "generated command filled into the input line");
   check("fix bar dismisses after fill", (await aiPage.locator(".terminal-ai-fix").count()) === 0, "bar count");
   const aiGenerations = await aiPage.evaluate(() => window.__dbxMockAiGenerations ?? []);
   check("direct generation recorded with redacted prompt", aiGenerations.length === 1 && typeof aiGenerations[0]?.prompt === "string" && aiGenerations[0].prompt.includes("***") && !aiGenerations[0].prompt.includes("hunter2") && !aiGenerations[0].prompt.includes("ghp_"), JSON.stringify(aiGenerations).slice(0, 220));
-  // 会话总数 = 1（前面的 # 搜索）：修复条直连路径不得再开面板会话。
-  check("direct path opens no extra panel conversation", ((await aiPage.evaluate(() => window.__dbxMockAiConversations ?? [])).length) === 1, "conversation count");
+  // 直连路径不开面板会话（`#` 已拆到独立页，这里全程会话数为 0）。
+  check("direct path opens no panel conversation", ((await aiPage.evaluate(() => window.__dbxMockAiConversations ?? [])).length) === 0, "conversation count");
   const recState = await aiPage.evaluate(() => window.__dbxMockAiRecommendations?.());
   // 推荐卡语义：每张修复条各推一次（开屏 curl 夹具 + deploy），条消失即撤
   // ——pushes=clears=2 且最终清零。
   check("one recommendation per fix bar, cleared each time", recState?.pushes === 2 && recState?.clears === 2, JSON.stringify(recState));
+  await aiPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai.png`, fullPage: false }).catch(() => undefined);
+  await aiPage.close();
 
   // 降级（?ai=off 模拟旧宿主）：# 照常进终端（shell 注释），无模式提示。
   const degradedPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -683,7 +708,7 @@ try {
   check("degraded host records no conversations", degradedConversations.length === 0, `count=${degradedConversations.length}`);
 
   // 面板回退路径（?aipanel=1 模拟 web 运行时：openConversation 在、直连缺）
-  // ——修复条点击仍可用，走面板会话（不回填）。
+  // ——`#` 回车保留 v1 面板会话路径；修复条点击同样走面板会话（不回填）。
   const panelPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   panelPage.on("pageerror", (err) => pageError.push(String(err)));
   await panelPage.addInitScript(() => {
@@ -692,19 +717,39 @@ try {
   await panelPage.goto(`${baseUrl}?render=dom&aifix=1&aipanel=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
   await panelPage.bringToFront();
   await panelPage.click(".terminal-host");
+  // `#` 搜索（直连缺 → 面板回退）：发起落 openConversation，零直连生成、零回填。
+  await panelPage.keyboard.press("#");
+  await expect(panelPage, ".terminal-ai-search", "panel fallback # mode hint appears");
+  await panelPage.keyboard.type("find large files");
+  await panelPage.keyboard.press("Enter");
+  check("panel fallback Enter leaves # mode", (await panelPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  await panelPage.waitForTimeout(600);
+  const panelSearchConversations = await panelPage.evaluate(() => window.__dbxMockAiConversations ?? []);
+  check(
+    "panel fallback: # search opens a conversation",
+    panelSearchConversations.length === 1 && panelSearchConversations[0]?.context?.kind === "ai-command-search" && panelSearchConversations[0]?.context?.query === "find large files" && panelSearchConversations[0]?.mode === "ask" && panelSearchConversations[0]?.send === true,
+    JSON.stringify(panelSearchConversations).slice(0, 200),
+  );
+  check("panel fallback: # search performs no direct generation", (await panelPage.evaluate(() => (window.__dbxMockAiGenerations ?? []).length)) === 0, "generation count");
+  check("panel fallback: # search fills nothing into the input line", !((await panelPage.locator(".xterm-rows").textContent())?.includes("find large files")), "line check");
+
+  // 修复条（面板回退）：点击走面板会话；`#` 回填为空行，deploy 直接起跑。
+  await panelPage.click(".terminal-host");
   await panelPage.keyboard.type("deploy");
   await panelPage.keyboard.press("Enter");
   await expect(panelPage, ".terminal-ai-fix", "panel-fallback fix bar appears");
   await panelPage.click(".terminal-ai-fix-btn");
   await panelPage.waitForTimeout(600);
   const panelConversations = await panelPage.evaluate(() => window.__dbxMockAiConversations ?? []);
-  check("panel fallback opens a conversation (no direct generation)", panelConversations.length === 1 && panelConversations[0]?.mode === "ask", JSON.stringify(panelConversations).slice(0, 160));
+  check(
+    "panel fallback fix opens a conversation (no direct generation)",
+    panelConversations.length === 2 && panelConversations[1]?.mode === "ask" && panelConversations[1]?.context?.kind === "ai-fix",
+    JSON.stringify(panelConversations).slice(0, 200),
+  );
   const panelGenCount = await panelPage.evaluate(() => (window.__dbxMockAiGenerations ?? []).length);
   check("panel fallback performs no direct generation", panelGenCount === 0, `generations=${panelGenCount}`);
   await panelPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai-panel.png`, fullPage: false }).catch(() => undefined);
   await panelPage.close();
-  await aiPage.screenshot({ path: `${SHOT_DIR}/07-warp-ai.png`, fullPage: false }).catch(() => undefined);
-  await aiPage.close();
   await degradedPage.close();
 
   if (pageError.length) {

@@ -748,7 +748,14 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string, par
   if (method === "host.ai.generateText") {
     const input = (params ?? {}) as { prompt?: string };
     aiGenerations.push(input);
-    return "df -h /srv\nWhy: the deploy failed because the disk filled up; check free space first." as unknown as T;
+    // 按任务分流罐头（AI 体验改造 v2）：# 搜索 prompt 带「User request:」标记
+    // → 回 ls -S；失败修复 prompt 带「Diagnose the failure」标记 → 回 df -h
+    // （既有修复走查断言依赖）。两罐头同守「首行命令 + Why 行」输出契约。
+    const prompt = typeof input.prompt === "string" ? input.prompt : "";
+    const can = prompt.includes("User request:")
+      ? "ls -S\nWhy: sorts by size, largest first."
+      : "df -h /srv\nWhy: the deploy failed because the disk filled up; check free space first.";
+    return can as unknown as T;
   }
   if (method === "host.ai.setRecommendations") {
     aiRecommendations.push((params ?? {}) as Record<string, unknown>);
