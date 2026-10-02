@@ -160,7 +160,7 @@ import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // provider/模型全在宿主 Settings → AI；能力缺失全链路降级。
 import { aiBridgeAvailable, aiCompletionAvailable, aiRecommendationsAvailable, clearAiRecommendations, generateAiText, listAiModels, openAiConversation, pickDefaultAiModel, setAiRecommendations } from "./lib/aiBridge";
 import { TailCapture } from "./lib/aiCapture";
-import { formatAiResultConfirmation, parseAiResultText } from "./lib/aiResultParse";
+import { parseAiResultText } from "./lib/aiResultParse";
 import { buildAiAssistRequest, buildAiFixPrompt, buildAiFixRequest, buildAiSearchPrompt, buildAiSearchRequest } from "./lib/aiRequests";
 import { canActivateAiSearch, classifyAiSearchInput, createAiSearchState, nextAiSearchState, type AiSearchState } from "./lib/aiSearchMode";
 import { loadAiSettings, saveAiSettings, sanitizeAiSettings, type AiSettings } from "./lib/aiSettings";
@@ -2519,10 +2519,10 @@ function closeAiSearch() {
 }
 
 /** `#` 发起：优先直连生成（aiCompletion 能力位，桌面运行时）——列模型 →
- *  挑默认 → generateText（prompt 与面板会话共用 buildAiSearchPrompt）→ 确认
- *  弹窗（命令行突出 + Why 说明 + 七语「不执行」确认）→ **用户显式同意后回填
- *  输入行**（不回车不执行，红线不变）；首行为空/异常/直连能力缺失回退既有
- *  面板会话路径。发送与失败都给可见提示。 */
+ *  挑默认 → generateText（prompt 与面板会话共用 buildAiSearchPrompt）→
+ *  **生成即回填光标处（Warp 同款默认插入，2026-10-02 体验反馈：回填确认层
+ *  拆除）**——回填不等于执行，回车权仍在用户（红线不变）；Why 行走通知提示。
+ *  首行为空/异常/直连能力缺失回退既有面板会话路径。 */
 async function submitAiSearch(query: string) {
   const trimmed = query.trim();
   closeAiSearch();
@@ -2535,12 +2535,9 @@ async function submitAiSearch(query: string) {
       const result = (await generateAiText(api, { configId: model.configId, model: model.model, prompt: buildAiSearchPrompt({ query: trimmed }) })).trim();
       const parsed = parseAiResultText(result);
       if (!parsed) throw new Error("empty ai response");
-      const accepted = await confirmDialog(formatAiResultConfirmation(parsed, { fillConfirm: t("aiSearch.fillConfirm") }));
-      if (accepted) {
-        replaceTerminalLineWith(parsed.command, false);
-        terminal?.focus();
-        showNotice(t("aiSearch.filledNotice"));
-      }
+      replaceTerminalLineWith(parsed.command, false);
+      terminal?.focus();
+      showNotice(parsed.why || t("aiSearch.filledNotice"));
       return;
     } catch {
       // 直连失败（无模型/宿主确认取消/供应商错误已泛化）→ 回退面板会话。
@@ -2609,18 +2606,15 @@ async function aiFixFromBar() {
       const triageHint = await aiFixTriageHint(bar.output);
       const prompt = buildAiFixPrompt({ command: bar.command, exitCode: bar.exitCode, output: bar.output, triageHint });
       const result = (await generateAiText(api, { configId: model.configId, model: model.model, prompt })).trim();
-      // 结果结构化（AI 体验改造 v2）：「命令行（前置标签）+ Why 行」分行排版，
-      // 解析失败（首行为空）按异常回退面板会话；无 Why 行时展示退化为仅命令。
+      // Warp 同款默认插入（2026-10-02 体验反馈，与 `#` 路径一致）：生成即回填
+      // 光标处，不弹回填确认——回填不等于执行，回车权仍在用户；Why 行走通知。
       const parsed = parseAiResultText(result);
       if (!parsed) throw new Error("empty ai response");
-      const accepted = await confirmDialog(formatAiResultConfirmation(parsed, { commandLabel: t("aiFix.commandLabel"), fillConfirm: t("aiFix.fillConfirm") }));
-      if (accepted) {
-        aiFixBar.value = null;
-        clearFixRecommendation();
-        replaceTerminalLineWith(parsed.command, false);
-        terminal?.focus();
-        showNotice(t("aiFix.filledNotice"));
-      }
+      aiFixBar.value = null;
+      clearFixRecommendation();
+      replaceTerminalLineWith(parsed.command, false);
+      terminal?.focus();
+      showNotice(parsed.why || t("aiFix.filledNotice"));
       return;
     } catch {
       // 直连失败（无模型/宿主确认取消/供应商错误已泛化）→ 回退面板会话。

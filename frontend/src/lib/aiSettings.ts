@@ -14,9 +14,12 @@ export const AI_SETTINGS_STORE_KEY = "ssh-ai-assist";
 
 export interface AiSettings {
   /** `#` AI 命令搜索（Warp AI Command Search 同位）：**默认关（2026-10-02
-   *  决策暂缓）**——v1 为「回车发起面板会话」非 Warp 的逐字内联体感，默认
-   *  关避免空行 # 被截留的意外；直连生成 v2（生成即回填）待后续再启。 */
+   *  决策暂缓）**——空行 # 被本地截留仍是行为变化；直连 v2（生成即回填，
+   *  Warp 同款默认插入）已实现，开启即得。 */
   search: boolean;
+  /** 失败命令 AI 修复：**默认开（2026-10-02 体验反馈，对齐 Warp 自动出现）**
+   *  ——修复条仅本地展示，发送仍过首次快照预览确认（记「不再询问」）+ 宿主
+   *  逐次授权。 */
   fix: boolean;
   assist: boolean;
   /** 面板会话 Agent 档 opt-in（openConversation mode:"agent"）：执行面为既有
@@ -25,7 +28,7 @@ export interface AiSettings {
   fixConsent: boolean;
 }
 
-export const AI_SETTINGS_DEFAULTS: AiSettings = { search: false, fix: false, assist: true, agentMode: false, fixConsent: false };
+export const AI_SETTINGS_DEFAULTS: AiSettings = { search: false, fix: true, assist: true, agentMode: false, fixConsent: false };
 
 /** 解析持久化值：逐字段回退默认（旧版本/损坏值不整包失效）。 */
 export function sanitizeAiSettings(raw: unknown): AiSettings {

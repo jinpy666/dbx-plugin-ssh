@@ -314,20 +314,9 @@ try {
   check("terminal typing goes to the input line (panel stays unfiltered)", rowsAfterLineTyping === unfilteredRows, `rows=${rowsAfterLineTyping}/${unfilteredRows}`);
   // 搜索框不再自动聚焦：点击聚焦后才过滤。
   // 面板锚点经 rAF 合帧随回显 settle 收敛（高负载下构建刚结束的宿主上可达
-  // 秒级）：等面板整体落在视口内再点击，避免动画/重定位中的不可点击误报；
-  // 等待超时后照常点击——真偏离视口仍会以原生 actionability 失败暴露。
-  await historyPage
-    .waitForFunction(
-      () => {
-        const panel = document.querySelector(".terminal-history-panel");
-        if (!panel) return false;
-        const rect = panel.getBoundingClientRect();
-        return rect.top >= 0 && rect.left >= 0 && rect.bottom <= window.innerHeight && rect.right <= window.innerWidth;
-      },
-      null,
-      { timeout: 10_000 },
-    )
-    .catch(() => undefined);
+  // 秒级），且面板可能落在可滚动区边缘：点击前先 scrollIntoViewIfNeeded，
+  // 消除「可见但瞬时不稳定/差一格视口」的误报；scroll 不可达的面板仍会以
+  // 原生 actionability 失败暴露，不掩盖真实定位缺陷。
   await historyPage.click(".terminal-history-search-input");
   const focusOnSearch = await historyPage.evaluate(() => document.activeElement?.classList?.contains("terminal-history-search-input") === true);
   check("clicking the search box focuses it", focusOnSearch, `active=${await historyPage.evaluate(() => document.activeElement?.className ?? "null")}`);
@@ -636,11 +625,8 @@ try {
   await aiSearchPage.keyboard.type("list files by size");
   await aiSearchPage.keyboard.press("Enter");
   check("Enter leaves # mode after submit", (await aiSearchPage.locator(".terminal-ai-search").count()) === 0, "hint count");
-  await expect(aiSearchPage, ".small-modal", "direct search confirm dialog opens");
-  const searchGenText = await aiSearchPage.locator(".small-modal").first().textContent();
-  check("search result shows command + why + fill confirm", searchGenText?.includes("ls -S") && searchGenText?.includes("Why:") && searchGenText?.includes("press Enter"), String(searchGenText).slice(0, 180));
-  await aiSearchPage.locator(".small-modal footer button").last().click();
-  await expect(aiSearchPage, ".notice", "filled notice appears");
+  // 生成即回填（Warp 同款默认插入，无插件层回填确认）：Why 行走通知。
+  await expect(aiSearchPage, ".notice", "why/filled notice appears");
   await expectText(aiSearchPage, ".xterm-rows", "ls -S", "generated command filled into the input line");
   // 红线：只回填不执行——命令回显恰好一次（无回车回显/无执行输出），全程
   // 零面板会话；生成请求带「User request:」标记（mock 按它分流罐头）。
@@ -679,12 +665,9 @@ try {
   const previewText = await aiPage.locator(".small-modal").first().textContent();
   check("preview shows the command and exit code", previewText?.includes("deploy") && previewText?.includes("2"), String(previewText).slice(0, 120));
   await aiPage.locator(".small-modal footer button").last().click();
-  // 直连生成路径：宿主罐头响应「df -h /srv + Why」→ 插件弹结构化回填确认
-  // （命令行前置标签 + Why 次行 + 七语不执行确认）→ 同意后回填输入行。
-  await expect(aiPage, ".small-modal", "generated-fix confirm dialog opens");
-  const genText = await aiPage.locator(".small-modal").first().textContent();
-  check("generated command labeled + why shown", genText?.includes("Command: df -h /srv") && genText?.includes("Why:"), String(genText).slice(0, 180));
-  await aiPage.locator(".small-modal footer button").last().click();
+  // 直连生成路径：宿主罐头响应「df -h /srv + Why」→ 生成即回填（Warp 同款，
+  // 无插件层回填确认），Why 行走通知。
+  await expect(aiPage, ".notice", "why/filled notice appears");
   await expectText(aiPage, ".xterm-rows", "df -h /srv", "generated command filled into the input line");
   check("fix bar dismisses after fill", (await aiPage.locator(".terminal-ai-fix").count()) === 0, "bar count");
   const aiGenerations = await aiPage.evaluate(() => window.__dbxMockAiGenerations ?? []);

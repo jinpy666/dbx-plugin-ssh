@@ -86,7 +86,15 @@ const style = computed(() => {
   const placement = chooseHistoryPanelPlacement(anchor.y, cellHeight, spaceViewport);
   const available = overlayMaxHeight(placement, anchor.y, cellHeight, spaceViewport);
   const maxHeight = available > 0 && naturalHeight > 0 && available < naturalHeight ? { maxHeight: `${available}px` } : undefined;
-  if (placement === "above") return { bottom: `${flippedOverlayBottom(anchor.y, containerHeight)}px`, ...maxHeight };
+  if (placement === "above") {
+    // 视口钳制（体验回归修复）：锚点可能取自布局未稳的瞬间（回显尚未 settle
+    // 时 y 偏大），bottom 会把整块面板推出视口顶且在下一次锚点刷新前不可点。
+    // 以「容器高 − 面板自然高」为 bottom 上限，保证面板至少完整落在容器内、
+    // 可点击；锚点 settle 后按新值自然收敛回贴行位置。
+    let bottom = flippedOverlayBottom(anchor.y, containerHeight);
+    if (naturalHeight > 0) bottom = Math.min(bottom, Math.max(0, containerHeight - naturalHeight));
+    return { bottom: `${bottom}px`, ...maxHeight };
+  }
   return { top: `${overlayBelowTop(anchor.y, cellHeight)}px`, ...maxHeight };
 });
 

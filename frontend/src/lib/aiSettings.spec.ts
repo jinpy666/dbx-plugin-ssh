@@ -5,7 +5,7 @@ import { pluginStore } from "./pluginStore";
 import { AI_SETTINGS_STORE_KEY, AI_SETTINGS_DEFAULTS, loadAiSettings, sanitizeAiSettings } from "./aiSettings";
 
 describe("sanitizeAiSettings", () => {
-  it("缺省回默认：assist 开；search（# 暂缓）/fix/agentMode 关、未授权", () => {
+  it("缺省回默认：assist/fix 开（fix 对齐 Warp 自动出现）；search（# 暂缓）/agentMode 关、未授权", () => {
     expect(sanitizeAiSettings(undefined)).toEqual(AI_SETTINGS_DEFAULTS);
     expect(sanitizeAiSettings({})).toEqual(AI_SETTINGS_DEFAULTS);
   });

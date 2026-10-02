@@ -1,7 +1,7 @@
-// aiResultParse 单测（AI 体验改造 v2）：直连生成的「命令 + Why」契约解析与
-// 确认弹窗排版，`#` 搜索与失败修复共用。三态钉死：标准两行 / 只有一行 / 空串。
+// aiResultParse 单测（AI 体验改造 v2）：直连生成的「命令 + Why」契约解析，
+// `#` 搜索与失败修复共用。三态钉死：标准两行 / 只有一行 / 空串。
 import { describe, expect, it } from "vitest";
-import { AI_RESULT_WHY_PREFIX, formatAiResultConfirmation, parseAiResultText } from "./aiResultParse";
+import { AI_RESULT_WHY_PREFIX, parseAiResultText } from "./aiResultParse";
 
 describe("parseAiResultText", () => {
   it("标准两行：首行命令 + Why 行", () => {
@@ -33,23 +33,5 @@ describe("parseAiResultText", () => {
   it("Why 标记大小写按 prompt 契约精确匹配（小写 why 不算 Why 行）", () => {
     expect(parseAiResultText("ls -S\nwhy: lowercase")).toEqual({ command: "ls -S", why: "" });
     expect(AI_RESULT_WHY_PREFIX).toBe("Why:");
-  });
-});
-
-describe("formatAiResultConfirmation", () => {
-  const parsed = { command: "df -h /srv", why: "Why: the disk filled up." };
-
-  it("带标签：命令行前置标签，Why 次行（空行分隔），确认问题收尾", () => {
-    expect(formatAiResultConfirmation(parsed, { commandLabel: "命令：", fillConfirm: "插入？" })).toBe(
-      "命令： df -h /srv\n\nWhy: the disk filled up.\n\n插入？",
-    );
-  });
-
-  it("无标签：命令裸排首行（# 搜索确认弹窗形态）", () => {
-    expect(formatAiResultConfirmation(parsed, { fillConfirm: "insert?" })).toBe("df -h /srv\n\nWhy: the disk filled up.\n\ninsert?");
-  });
-
-  it("无 Why 行：只剩命令与确认问题，不排空占位", () => {
-    expect(formatAiResultConfirmation({ command: "ls -S", why: "" }, { fillConfirm: "insert?" })).toBe("ls -S\n\ninsert?");
   });
 });
