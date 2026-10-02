@@ -121,7 +121,7 @@ function confirmImport() {
   <div class="quick-commands-section">
     <template v-if="importOpen">
       <header class="quick-editor-head">
-        <button class="icon-button compact" :title="t('cancel')" @click="closeImport"><ArrowLeft /></button>
+        <button class="icon-button compact" :title="t('cancel')" :aria-label="t('cancel')" @click="closeImport"><ArrowLeft /></button>
         <h3>{{ t("quickCommandsImport") }}</h3>
       </header>
       <div class="quick-command-editor">
@@ -144,7 +144,7 @@ function confirmImport() {
     </template>
     <template v-else-if="editorOpen">
       <header class="quick-editor-head">
-        <button class="icon-button compact" :title="t('cancel')" @click="closeEditor"><ArrowLeft /></button>
+        <button class="icon-button compact" :title="t('cancel')" :aria-label="t('cancel')" @click="closeEditor"><ArrowLeft /></button>
         <h3>{{ draft.id ? t("quickCommandsEdit") : t("quickCommandsNew") }}</h3>
       </header>
       <footer class="quick-command-editor">
@@ -165,8 +165,8 @@ function confirmImport() {
             <span class="mono" :title="item.command">{{ item.command }}</span>
           </span>
           <span class="settings-list-actions">
-            <button class="icon-button" :title="t('quickCommandsEdit')" @click="openEditor(item)"><Pencil /></button>
-            <button class="icon-button" :title="t('delete')" @click="deleteCommand(item.id)"><Trash2 /></button>
+            <button class="icon-button" :title="t('quickCommandsEdit')" :aria-label="t('quickCommandsEdit')" @click="openEditor(item)"><Pencil /></button>
+            <button class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="deleteCommand(item.id)"><Trash2 /></button>
           </span>
         </li>
       </ul>

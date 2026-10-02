@@ -421,25 +421,25 @@ const running = (container: DockerContainer): boolean => container.state === "ru
       <span v-if="mode === 'local'" class="docker-source-badge">{{ props.t("docker.localSource") }}</span>
       <span v-if="available && containers.length" class="docker-count">{{ containers.length }}</span>
       <span class="docker-header-spacer" />
-      <button v-if="engineSettings.cli" type="button" class="docker-engine-badge" :title="props.t('docker.engineBadge', { cli: engineSettings.cli })" @click="toggleEngineSettings">
+      <button v-if="engineSettings.cli" type="button" class="docker-engine-badge" :title="props.t('docker.engineBadge', { cli: engineSettings.cli })" :aria-label="props.t('docker.engineBadge', { cli: engineSettings.cli })" @click="toggleEngineSettings">
         {{ engineSettings.cli }}
       </button>
       <button
         v-if="pollPaused"
         type="button"
         class="docker-link-button"
-        :title="props.t('docker.pollStopped')"
+        :title="props.t('docker.pollStopped')" :aria-label="props.t('docker.pollStopped')"
         @click="retryPolling"
       >
         {{ props.t("docker.refresh") }}
       </button>
-      <button v-else type="button" class="icon-button" :title="props.t('docker.refresh')" @click="refresh">
+      <button v-else type="button" class="icon-button" :title="props.t('docker.refresh')" :aria-label="props.t('docker.refresh')" @click="refresh">
         <Loader2 v-if="loading" class="spinning" />
         <RefreshCw v-else />
       </button>
       <Popover :open="engineOpen" @update:open="(open: boolean) => { if (!open) engineOpen = false; }">
         <PopoverAnchor as-child>
-          <button type="button" class="icon-button" :class="{ 'is-active': engineOpen }" :title="props.t('docker.engineSettings')" @click="toggleEngineSettings">
+          <button type="button" class="icon-button" :class="{ 'is-active': engineOpen }" :title="props.t('docker.engineSettings')" :aria-label="props.t('docker.engineSettings')" @click="toggleEngineSettings">
             <Settings />
           </button>
         </PopoverAnchor>
@@ -596,7 +596,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
           <DialogTitle>
             {{ confirmTarget ? props.t("docker.confirmTitle", { action: props.t(ACTION_LABEL_KEYS[confirmTarget.action]) }) : "" }}
           </DialogTitle>
-          <button type="button" class="icon-button" :title="props.t('docker.cancel')" @click="confirmAction(false)"><X /></button>
+          <button type="button" class="icon-button" :title="props.t('docker.cancel')" :aria-label="props.t('docker.cancel')" @click="confirmAction(false)"><X /></button>
         </div>
         <p class="docker-confirm-body mono">
           {{ confirmTarget ? props.t("docker.confirmBody", { cli: engineSettings.cli || "docker", action: confirmTarget.action, name: confirmTarget.name }) : "" }}
@@ -619,7 +619,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
           <DialogTitle>
             {{ logsTarget ? props.t("docker.logsTitle", { name: logsTarget.name || logsTarget.id.slice(0, 12) }) : "" }}
           </DialogTitle>
-          <button type="button" class="icon-button" :title="props.t('docker.close')" @click="logsOpen = false"><X /></button>
+          <button type="button" class="icon-button" :title="props.t('docker.close')" :aria-label="props.t('docker.close')" @click="logsOpen = false"><X /></button>
         </div>
         <div class="docker-logs-bar">
           <label class="docker-tail-label">
@@ -634,7 +634,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
               </SelectContent>
             </Select>
           </label>
-          <button type="button" class="icon-button" :title="props.t('docker.logsRefresh')" @click="loadLogs">
+          <button type="button" class="icon-button" :title="props.t('docker.logsRefresh')" :aria-label="props.t('docker.logsRefresh')" @click="loadLogs">
             <Loader2 v-if="logsBusy" class="spinning" />
             <RefreshCw v-else />
           </button>

@@ -6742,9 +6742,14 @@ const panelNetRates = computed<{ rx: number; tx: number } | null>(() => {
 
 async function refreshDiskUsage() {
   if (!session.value) return;
-  diskUsage.value = await window.dbxPlugin
-    .invoke<DiskUsage>("sftp/diskUsage", { sessionId: session.value.sessionId, path: currentPath.value }, { timeoutMs: 30_000 })
+  const path = currentPath.value;
+  const usage = await window.dbxPlugin
+    .invoke<DiskUsage>("sftp/diskUsage", { sessionId: session.value.sessionId, path }, { timeoutMs: 30_000 })
     .catch(() => undefined);
+  // fire-and-forget 无 epoch 守卫：慢响应/失败落回时目录可能已切换，
+  // 按发起时的 path 口径校验，过期快照不回写页脚。
+  if (path !== currentPath.value) return;
+  diskUsage.value = usage;
 }
 
 // 权限矩阵（所有者/属组/其他人 × 读/写/执行）与八进制草稿双向换算：
@@ -7505,6 +7510,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(reconnectTimer.value);
   window.clearInterval(reconnectCountdownTimer.value);
   window.clearInterval(terminalDiagTimer);
+  window.clearTimeout(promptHintsQuietTimer);
   stopCommandMarkerTick();
   stopAgentPromptTimer();
   resolvePasteConfirm(false);
@@ -7646,7 +7652,7 @@ watch(historyScope, () => {
 <template>
   <main class="workbench" :class="{ 'panel-surface': panelSurface }">
     <!-- dock 工具条隐藏后：右上角低透明度微钮还原（偏好落 pluginStore）。 -->
-    <button v-if="panelSurface && panelToolbarHidden" type="button" class="panel-toolbar-reveal" :title="t('panel.showToolbar')" @click="togglePanelToolbar"><ChevronDown /></button>
+    <button v-if="panelSurface && panelToolbarHidden" type="button" class="panel-toolbar-reveal" :title="t('panel.showToolbar')" :aria-label="t('panel.showToolbar')" @click="togglePanelToolbar"><ChevronDown /></button>
     <header v-if="!panelSurface || !panelToolbarHidden" class="toolbar" :style="toolbarStyle">
       <!-- 连接信息入口：Info 图标按钮紧跟标识区（状态徽章右侧），弹层左对齐锚定。
            Dock 面板表面整体换用下方 panel-actions 精简组（宿主 chrome 已有标题/关闭）。 -->
@@ -7661,7 +7667,7 @@ watch(historyScope, () => {
         </div>
         <Popover :open="connectionInfoOpen" @update:open="(open) => { if (!open) connectionInfoOpen = false; }">
           <PopoverAnchor as-child>
-            <button type="button" class="icon-button icon-neutral" :title="t('connectionInfo')" :aria-expanded="connectionInfoOpen" @click.stop="toggleConnectionInfo"><Info /></button>
+            <button type="button" class="icon-button icon-neutral" :title="t('connectionInfo')" :aria-label="t('connectionInfo')" :aria-expanded="connectionInfoOpen" @click.stop="toggleConnectionInfo"><Info /></button>
           </PopoverAnchor>
           <PopoverContent class="popover connection-info-popover" align="start" :side-offset="5">
           <h3>{{ t("connectionInfo") }}</h3>
@@ -7682,12 +7688,12 @@ watch(historyScope, () => {
         </Popover>
       </div>
       <div v-if="!panelSurface" class="toolbar-actions">
-        <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
+        <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :aria-label="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
         <!-- Local terminal UI hides SSH-only actions outright (not disabled): the local
              shell has no SSH session to act on. -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
-        <button class="icon-button" :title="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
-        <button class="icon-button" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
+        <button class="icon-button" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
+        <button class="icon-button" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
         <!-- 工具条语义分组：视图 / 会话 / 运维 / 命令 / 记录与设置 / SFTP 工具（分隔线避开 local 模式两侧皆隐藏的位置） -->
         <span class="toolbar-separator" aria-hidden="true" />
         <!-- 会话下拉：新建 / 复制 / 命令会话 / 本地终端 / Shell 选项收敛为单入口，
@@ -7696,7 +7702,7 @@ watch(historyScope, () => {
         <div>
           <Popover :open="sessionMenuOpen" @update:open="(open) => { if (!open) sessionMenuOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-emerald" :class="{ 'is-active': sessionMenuOpen }" :title="t('sessionMenu.title')" :aria-expanded="sessionMenuOpen" @click.stop="toggleSessionMenu"><SquarePlus /></button>
+              <button class="icon-button icon-emerald" :class="{ 'is-active': sessionMenuOpen }" :title="t('sessionMenu.title')" :aria-label="t('sessionMenu.title')" :aria-expanded="sessionMenuOpen" @click.stop="toggleSessionMenu"><SquarePlus /></button>
             </PopoverAnchor>
             <PopoverContent class="popover session-menu-popover" :class="{ 'session-menu-shell': sessionMenuShellOpen }" align="start" :side-offset="5">
               <template v-if="!sessionMenuShellOpen">
@@ -7713,7 +7719,7 @@ watch(historyScope, () => {
               </template>
               <template v-else>
                 <header class="session-shell-head">
-                  <button class="icon-button compact" :title="t('cancel')" @click="sessionMenuShellOpen = false"><ArrowLeft /></button>
+                  <button class="icon-button compact" :title="t('cancel')" :aria-label="t('cancel')" @click="sessionMenuShellOpen = false"><ArrowLeft /></button>
                   <h3>{{ t("localTerminal.settings") }}</h3>
                 </header>
                 <p class="muted local-shell-hint">{{ t("localTerminal.settingsHint") }}</p>
@@ -7740,7 +7746,7 @@ watch(historyScope, () => {
                   <button
                     v-if="canOpenLocalTab"
                     class="local-tab-button"
-                    :title="t('localTerminal.openInNewTab')"
+                    :title="t('localTerminal.openInNewTab')" :aria-label="t('localTerminal.openInNewTab')"
                     @click="openLocalTerminalTab"
                   ><SquarePlus /></button>
                   <Popover :open="localShellSurfaceOpen" @update:open="(open) => (localShellSurfaceOpen = open)">
@@ -7748,7 +7754,7 @@ watch(historyScope, () => {
                       <button
                         v-if="canOpenLocalTab"
                         class="local-tab-button"
-                        :title="t('localTerminal.openShellSurface')"
+                        :title="t('localTerminal.openShellSurface')" :aria-label="t('localTerminal.openShellSurface')"
                         @click="openLocalShellSurfaceMenu"
                       ><ListPlus /></button>
                     </PopoverAnchor>
@@ -7776,31 +7782,31 @@ watch(historyScope, () => {
           </Popover>
         </div>
         <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
-        <button v-if="isSerialMode" class="icon-button icon-emerald" :title="t('serial.upload.open')" :disabled="serialUploadBusy" @click="serialUploadDialogOpen = true"><FileUp /></button>
-        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('reconnect')" :disabled="terminalState === 'connecting' && !reconnectPending" @click="reconnectNow"><PlugZap /></button>
+        <button v-if="isSerialMode" class="icon-button icon-emerald" :title="t('serial.upload.open')" :aria-label="t('serial.upload.open')" :disabled="serialUploadBusy" @click="serialUploadDialogOpen = true"><FileUp /></button>
+        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('reconnect')" :aria-label="t('reconnect')" :disabled="terminalState === 'connecting' && !reconnectPending" @click="reconnectNow"><PlugZap /></button>
         <!-- 一键 sudo -v：向当前 PTY 写入命令刷新 sudo 凭据缓存；quick sudo 自动应答
              是否启用由连接设置决定（设置弹窗），工作台不再提供开关。 -->
-        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('sudoRefresh.title')" :disabled="!connected" @click="sendSudoRefresh"><ShieldCheck /></button>
+        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('sudoRefresh.title')" :aria-label="t('sudoRefresh.title')" :disabled="!connected" @click="sendSudoRefresh"><ShieldCheck /></button>
         <!-- quick sudo profiles 管理入口（M32-A）已归位设置·sudo：工具条不再放
              管理类按钮，sudoRefresh 保留为会话内即时动作。 -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
         <!-- Docker 浮层（鲸鱼 logo 独立入口，metrics-float 同款右上浮层）：
              SFTP 面板关闭时也可达；local 模式保留——本机 daemon（Docker
              Desktop/OrbStack）场景照常可用。面板自治，关闭即卸载停轮询。 -->
-        <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
+        <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
         <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
           <Switch size="sm" :model-value="followDirectory" :disabled="!connected || panelSurface" @update:model-value="setDirectoryTracking" />
           <span>{{ t("followTerminal") }}</span>
         </label>
         <span class="toolbar-separator" aria-hidden="true" />
-        <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('commandTitle')" :disabled="!connected" @click="openCommandDialog"><SquareTerminal /></button>
-        <button v-if="!localUiMode && !panelSurface" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
+        <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('commandTitle')" :aria-label="t('commandTitle')" :disabled="!connected" @click="openCommandDialog"><SquareTerminal /></button>
+        <button v-if="!localUiMode && !panelSurface" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
         <div v-if="!localUiMode">
           <Popover :open="quickMenuOpen" @update:open="(open) => { if (!open) quickMenuOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-amber" :title="t('quickCommands')" :disabled="!connected" @click.stop="toggleQuickMenu"><Zap /></button>
+              <button class="icon-button icon-amber" :title="t('quickCommands')" :aria-label="t('quickCommands')" :disabled="!connected" @click.stop="toggleQuickMenu"><Zap /></button>
             </PopoverAnchor>
             <PopoverContent class="popover quick-commands-popover" align="end" :side-offset="5">
             <!-- M32-A3 后工具条只留"列表 + 搜索 + 执行"（Termius Snippets 式）：
@@ -7814,7 +7820,7 @@ watch(historyScope, () => {
             <div v-if="!quickCommands.length" class="empty compact">{{ t("quickCommandsEmpty") }}</div>
             <div v-else-if="!filteredQuickCommands.length" class="empty compact">{{ t("quickCommandsNoMatch") }}</div>
             <div v-for="item in filteredQuickCommands" :key="item.id" class="quick-command-row quick-card" :class="{ expanded: quickExpandedId === item.id }">
-              <button class="quick-card-main" :title="item.command" @click="toggleQuickExpand(item.id)">
+              <button class="quick-card-main" :title="item.command" :aria-label="item.command" @click="toggleQuickExpand(item.id)">
                 <Braces class="quick-card-icon" />
                 <span class="quick-card-text">
                   <strong>{{ item.name }}</strong>
@@ -7837,7 +7843,7 @@ watch(historyScope, () => {
         <div>
           <Popover :open="agentModeOpen" @update:open="(open) => { if (!open) agentModeOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button" :class="agentMode === 'off' ? 'icon-neutral' : 'icon-emerald is-active'" :title="t('agentTerminalQuickHint')" :aria-pressed="agentMode !== 'off'" :disabled="!connected" @click.stop="toggleAgentModeMenu"><Bot /></button>
+              <button class="icon-button" :class="agentMode === 'off' ? 'icon-neutral' : 'icon-emerald is-active'" :title="t('agentTerminalQuickHint')" :aria-label="t('agentTerminalQuickHint')" :aria-pressed="agentMode !== 'off'" :disabled="!connected" @click.stop="toggleAgentModeMenu"><Bot /></button>
             </PopoverAnchor>
             <PopoverContent class="popover agent-mode-popover" align="end" :side-offset="5">
             <h3>{{ t("agentTerminalSection") }}</h3>
@@ -7852,16 +7858,16 @@ watch(historyScope, () => {
         <!-- 高亮规则管理（M32-A2）已归位设置·终端（HighlightRulesSection）：
              工具条不再放配置编辑器，渲染扫描（compiledHighlightRules）仍在。 -->
         <span class="toolbar-separator" aria-hidden="true" />
-        <button class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
-        <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
-        <button class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
-        <button class="icon-button icon-violet" :title="t('settings')" @click="openSettings"><Settings /></button>
-        <button class="icon-button icon-amber" :title="t('auditLog.title')" @click="openAuditLog"><FileText /></button>
+        <button class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-label="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
+        <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
+        <button class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-label="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
+        <button class="icon-button icon-violet" :title="t('settings')" :aria-label="t('settings')" @click="openSettings"><Settings /></button>
+        <button class="icon-button icon-amber" :title="t('auditLog.title')" :aria-label="t('auditLog.title')" @click="openAuditLog"><FileText /></button>
         <span class="toolbar-separator" aria-hidden="true" />
         <div>
           <Popover :open="columnsOpen" @update:open="(open) => { if (!open) columnsOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-violet" :title="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
+              <button class="icon-button icon-violet" :title="t('customizeColumns')" :aria-label="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
             </PopoverAnchor>
             <PopoverContent class="popover columns-popover" align="end" :side-offset="5">
             <label v-for="column in (['size', 'modified', 'owner', 'group', 'permissions'] as SftpColumn[])" :key="column"><input type="checkbox" :checked="visibleColumns.includes(column)" @change="toggleColumn(column)" />{{ t(column) }}</label>
@@ -7874,7 +7880,7 @@ watch(historyScope, () => {
           <!-- 历史卡右键菜单（ContextMenu）打开时忽略弹层的外点关闭请求：
                菜单项 pointerdown 相对弹层是"外部"，不加守卫会在 select 前把宿主弹层
                连同菜单一起卸载，动作丢失。 -->
-          <button class="icon-button icon-blue" :title="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
+          <button class="icon-button icon-blue" :title="t('transfers')" :aria-label="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
 
         </div>
       </div>
@@ -7896,16 +7902,16 @@ watch(historyScope, () => {
            设置与工具条收起，密度对齐底部栏（紧凑 30px 工具条 + 透明 ghost 按钮）。 -->
       <div v-if="panelSurface" class="toolbar-actions panel-actions">
         <!-- 在 tab 打开当前连接（宿主 openWorkbench → 新 tab，panel 自己保持轻量）。 -->
-        <button v-if="!localUiMode" class="icon-button compact" :title="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><ExternalLink /></button>
+        <button v-if="!localUiMode" class="icon-button compact" :title="t('newSessionTab')" :aria-label="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><ExternalLink /></button>
         <!-- SFTP 文件面板开关：dock 默认不开，手动开合（连接后列表已就绪）。 -->
-        <button v-if="!localUiMode" class="icon-button compact" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
-        <button class="icon-button compact" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
-        <button class="icon-button compact" :title="t('transfers')" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
-        <button class="icon-button compact" :title="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
-        <button class="icon-button compact" :title="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
+        <button v-if="!localUiMode" class="icon-button compact" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
+        <button class="icon-button compact" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
+        <button class="icon-button compact" :title="t('transfers')" :aria-label="t('transfers')" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
+        <button class="icon-button compact" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
+        <button class="icon-button compact" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
         <Popover :open="panelPaletteOpen" @update:open="(open) => { if (!open) panelPaletteOpen = false; }">
           <PopoverAnchor as-child>
-            <button class="icon-button compact icon-violet" :class="{ 'is-active': panelPaletteOpen }" :title="t('terminalAppearance.schemeSection')" :aria-expanded="panelPaletteOpen" @click.stop="panelPaletteOpen = !panelPaletteOpen"><Palette /></button>
+            <button class="icon-button compact icon-violet" :class="{ 'is-active': panelPaletteOpen }" :title="t('terminalAppearance.schemeSection')" :aria-label="t('terminalAppearance.schemeSection')" :aria-expanded="panelPaletteOpen" @click.stop="panelPaletteOpen = !panelPaletteOpen"><Palette /></button>
           </PopoverAnchor>
           <PopoverContent class="popover panel-palette-popover" align="end" :side-offset="4">
             <h3>{{ t("terminalAppearance.schemeSection") }}</h3>
@@ -7916,7 +7922,7 @@ watch(historyScope, () => {
                 </button>
               </li>
               <li v-for="scheme in panelSchemeChoices" :key="scheme.id">
-                <button type="button" class="panel-palette-row" :class="{ selected: panelActiveSchemeId === scheme.id }" role="option" :aria-selected="panelActiveSchemeId === scheme.id" :title="scheme.name" @click="pickPanelScheme(scheme.id)">
+                <button type="button" class="panel-palette-row" :class="{ selected: panelActiveSchemeId === scheme.id }" role="option" :aria-selected="panelActiveSchemeId === scheme.id" :title="scheme.name" :aria-label="scheme.name" @click="pickPanelScheme(scheme.id)">
                   <span class="panel-palette-name">{{ scheme.name }}</span>
                   <span class="panel-palette-swatch" aria-hidden="true"><i v-for="(color, index) in scheme.colors.slice(0, 6)" :key="index" :style="{ background: color }" /></span>
                 </button>
@@ -7927,8 +7933,8 @@ watch(historyScope, () => {
             </footer>
           </PopoverContent>
         </Popover>
-        <button class="icon-button compact" :title="t('settings')" @click="openSettings"><Settings /></button>
-        <button class="icon-button compact" :title="t('panel.hideToolbar')" :aria-pressed="panelToolbarHidden" @click="togglePanelToolbar"><ChevronUp /></button>
+        <button class="icon-button compact" :title="t('settings')" :aria-label="t('settings')" @click="openSettings"><Settings /></button>
+        <button class="icon-button compact" :title="t('panel.hideToolbar')" :aria-label="t('panel.hideToolbar')" :aria-pressed="panelToolbarHidden" @click="togglePanelToolbar"><ChevronUp /></button>
       </div>
       <!-- 传输弹层单实例（tab/panel 两表面共用）：Popover 挂在 header 层，锚点是
            工具条右缘下的隐形定位点（.transfer-popover-anchor，固定定位不随表面
@@ -7982,8 +7988,8 @@ watch(historyScope, () => {
             <div class="transfer-history-head">
               <h3 class="transfer-history-title">{{ t("transfersHistory.title") }}</h3>
               <span class="transfer-history-actions">
-                <button type="button" class="icon-button" :title="t('refresh')" :disabled="transferHistoryLoading || resumableLoading" @click.stop="refreshTransferPanel"><RefreshCw :class="{ spinning: transferHistoryLoading || resumableLoading }" /></button>
-                <button type="button" class="icon-button" :title="t('transfersHistory.clear')" :disabled="!transferHistory.length" @click.stop="transferHistoryClearOpen = true"><Trash2 /></button>
+                <button type="button" class="icon-button" :title="t('refresh')" :aria-label="t('refresh')" :disabled="transferHistoryLoading || resumableLoading" @click.stop="refreshTransferPanel"><RefreshCw :class="{ spinning: transferHistoryLoading || resumableLoading }" /></button>
+                <button type="button" class="icon-button" :title="t('transfersHistory.clear')" :aria-label="t('transfersHistory.clear')" :disabled="!transferHistory.length" @click.stop="transferHistoryClearOpen = true"><Trash2 /></button>
               </span>
             </div>
             <div v-if="transferHistoryFailed" class="empty compact">
@@ -8115,7 +8121,7 @@ watch(historyScope, () => {
             v-if="!suggestionOpen"
             type="button"
             class="terminal-ghost-keycap"
-            :title="t('terminalGhost.changeKey')"
+            :title="t('terminalGhost.changeKey')" :aria-label="t('terminalGhost.changeKey')"
             @click.stop.prevent="ghostKeycapMenuOpen = !ghostKeycapMenuOpen"
             @mousedown.stop.prevent
           >{{ ghostAcceptKeyLabel }}</button>
@@ -8349,7 +8355,7 @@ watch(historyScope, () => {
           <progress v-if="trzszPhase === 'transferring'" :value="trzszPercent" max="100" />
           <span v-if="trzszPhase === 'transferring' && trzszFileCount > 1" class="trzsz-count mono">{{ trzszFileIndex }}/{{ trzszFileCount }}</span>
           <span v-if="trzszPhase === 'transferring' && trzszSpeed" class="trzsz-speed">{{ formatBytes(trzszSpeed) }}/s</span>
-          <button v-if="trzszBusy" class="trzsz-cancel" :title="t('cancel')" @click="cancelTrzszTransfer"><X /></button>
+          <button v-if="trzszBusy" class="trzsz-cancel" :title="t('cancel')" :aria-label="t('cancel')" @click="cancelTrzszTransfer"><X /></button>
         </div>
         <!-- 串口文件上传进度（NyaTerm 对齐 P0-3）：running 吞键入 + 可取消；
              complete/failed 保留展示，由用户点 × 收起。 -->
@@ -8359,13 +8365,13 @@ watch(historyScope, () => {
           <span class="trzsz-label">{{ serialUploadStatusLabel }}</span>
           <progress v-if="serialUploadBusy" :value="serialUploadPercentValue" max="100" />
           <span class="trzsz-count mono">{{ serialUpload.protocol.toUpperCase() }}</span>
-          <button v-if="serialUploadBusy" class="trzsz-cancel" :title="t('cancel')" @click="cancelSerialUpload"><X /></button>
-          <button v-else class="trzsz-cancel" :title="t('close')" @click="serialUpload = initialSerialUploadState()"><X /></button>
+          <button v-if="serialUploadBusy" class="trzsz-cancel" :title="t('cancel')" :aria-label="t('cancel')" @click="cancelSerialUpload"><X /></button>
+          <button v-else class="trzsz-cancel" :title="t('close')" :aria-label="t('close')" @click="serialUpload = initialSerialUploadState()"><X /></button>
         </div>
         <section v-if="metricsOpen" class="metrics-float">
           <header>
             <h2>{{ t("metrics") }}<span v-if="metricsDistroBadge" class="distro-badge" :style="{ backgroundColor: metricsDistroBadge.color }" :title="metricsDistroBadge.name">{{ metricsDistroBadge.label }}</span><span v-if="metrics?.hostname" class="metrics-host" :title="metrics.hostname"> · {{ metrics.hostname }}</span></h2>
-            <button :title="t('close')" class="icon-button" @click="closeMetrics"><X /></button>
+            <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="closeMetrics"><X /></button>
           </header>
           <div class="metrics-float-body">
             <div v-if="metricsLoading && !metrics" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
@@ -8490,13 +8496,13 @@ watch(historyScope, () => {
         <section v-if="recordingsOpen" class="metrics-float recordings-float">
           <header>
             <h2>{{ t("recordingsTitle") }}</h2>
-            <button v-if="recordings.length" class="icon-button recording-delete" :title="t('recordingsClear')" :disabled="recordingClearAllSubmitting" @click="recordingClearAllOpen = true"><Trash2 /></button>
-            <button :title="t('close')" class="icon-button" @click="toggleRecordings"><X /></button>
+            <button v-if="recordings.length" class="icon-button recording-delete" :title="t('recordingsClear')" :aria-label="t('recordingsClear')" :disabled="recordingClearAllSubmitting" @click="recordingClearAllOpen = true"><Trash2 /></button>
+            <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="toggleRecordings"><X /></button>
           </header>
           <div class="recordings-search-row" v-if="recordings.length">
             <Search class="recordings-search-icon" />
             <input v-model="recordingsQuery" class="recordings-search" type="search" :placeholder="t('recordingsSearchPlaceholder')" :aria-label="t('recordingsSearchPlaceholder')" />
-            <button v-if="recordingsQuery" class="icon-button compact" :title="t('close')" @click="clearRecordingsSearch"><X /></button>
+            <button v-if="recordingsQuery" class="icon-button compact" :title="t('close')" :aria-label="t('close')" @click="clearRecordingsSearch"><X /></button>
           </div>
           <div class="metrics-float-body">
             <div v-if="recordingsLoading && !recordings.length" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
@@ -8512,11 +8518,11 @@ watch(historyScope, () => {
                 </div>
                 <span class="recording-duration mono">{{ formatDuration(item.durationSecs ?? 0) }}</span>
                 <div class="recording-actions">
-                  <button class="icon-button compact" :title="t('replayOpen')" @click="openReplay(item)"><Play /></button>
-                  <button class="icon-button compact" :title="t('replayExportGif')" :disabled="replayExporting" @click="exportRecordingFromList(item)"><Loader2 v-if="recordingExportingId === item.recordingId" class="spinning" /><ImagePlay v-else /></button>
+                  <button class="icon-button compact" :title="t('replayOpen')" :aria-label="t('replayOpen')" @click="openReplay(item)"><Play /></button>
+                  <button class="icon-button compact" :title="t('replayExportGif')" :aria-label="t('replayExportGif')" :disabled="replayExporting" @click="exportRecordingFromList(item)"><Loader2 v-if="recordingExportingId === item.recordingId" class="spinning" /><ImagePlay v-else /></button>
                   <button class="icon-button compact" :title="t('recordingExportTranscript')" :aria-label="t('recordingExportTranscript')" :disabled="replayExporting" @click="exportRecordingTranscript(item)"><FileText /></button>
                   <button v-if="localCanSave" class="icon-button compact" :title="t('revealInFolder')" :aria-label="t('revealInFolder')" @click="revealRecording(item)"><FolderOpen /></button>
-                  <button class="icon-button compact recording-delete" :title="t('recordingDelete')" @click="deleteRecording(item)"><Trash2 /></button>
+                  <button class="icon-button compact recording-delete" :title="t('recordingDelete')" :aria-label="t('recordingDelete')" @click="deleteRecording(item)"><Trash2 /></button>
                 </div>
               </article>
             </template>
@@ -8530,7 +8536,7 @@ watch(historyScope, () => {
         <section v-if="dockerPanelOpen" class="docker-float">
           <header>
             <h2>{{ t("docker.toolbarTitle") }}</h2>
-            <button class="icon-button" :title="t('close')" @click="dockerPanelOpen = false"><X /></button>
+            <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="dockerPanelOpen = false"><X /></button>
           </header>
           <DockerPanel :t="t" />
         </section>
@@ -8539,14 +8545,14 @@ watch(historyScope, () => {
           <section class="replay-modal">
             <header>
               <h2>{{ t("replayTitle") }}<span class="metrics-host"> · {{ replayState.summary.host || replayState.summary.recordingId }}</span></h2>
-              <button class="icon-button" :title="t('replayClose')" @click="closeReplay"><X /></button>
+              <button class="icon-button" :title="t('replayClose')" :aria-label="t('replayClose')" @click="closeReplay"><X /></button>
             </header>
             <div class="replay-terminal-wrap">
               <div ref="replayHost" class="replay-terminal"></div>
               <div v-if="replayDurationMs <= 0" class="replay-empty">{{ t("replayEmpty") }}</div>
             </div>
             <div class="replay-controls">
-              <button class="icon-button" :title="t(replayPlaying ? 'replayPause' : 'replayPlay')" @click="toggleReplayPlay"><Pause v-if="replayPlaying" /><Play v-else /></button>
+              <button class="icon-button" :title="t(replayPlaying ? 'replayPause' : 'replayPlay')" :aria-label="t(replayPlaying ? 'replayPause' : 'replayPlay')" @click="toggleReplayPlay"><Pause v-if="replayPlaying" /><Play v-else /></button>
               <Select :model-value="String(replaySpeed)" @update:model-value="(v) => (replaySpeed = Number(v))">
                 <SelectTrigger size="xs" class="replay-speed" :title="t('replaySpeed')">
                   <SelectValue />
@@ -8577,7 +8583,7 @@ watch(historyScope, () => {
             </div>
           </template>
           <p v-else class="task-error">{{ batchError }}</p>
-          <button class="icon-button" :title="t('close')" @click="dismissBatchResult"><X /></button>
+          <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="dismissBatchResult"><X /></button>
         </div>
         <!-- 批量发送命令条（Electerm quick-command bar）：贴终端底部，回车即发送；
              目标选择/快速命令切换/保存为快速命令均在条上完成。 -->
@@ -8586,7 +8592,7 @@ watch(historyScope, () => {
             <!-- 底部条上的 popover 向上展开（reka side="top"，旧绝对定位会被裁切）。 -->
             <Popover :open="batchTargetsOpen" @update:open="(open) => { if (!open) batchTargetsOpen = false; }">
               <PopoverAnchor as-child>
-                <button class="batch-bar-targets" :title="t('batchSendTitle')" @click.stop="toggleBatchTargetsPopover"><ListChecks /><span>{{ t("batchSendTargets", { count: batchSelected.length, total: batchTargets.length }) }}</span></button>
+                <button class="batch-bar-targets" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" @click.stop="toggleBatchTargetsPopover"><ListChecks /><span>{{ t("batchSendTargets", { count: batchSelected.length, total: batchTargets.length }) }}</span></button>
               </PopoverAnchor>
               <PopoverContent class="popover batch-targets-popover" side="top" align="start" :side-offset="6">
               <p class="muted batch-send-hint">{{ t("batchSendHint") }}</p>
@@ -8643,17 +8649,17 @@ watch(historyScope, () => {
             @keydown.enter="sendBatchCommand"
           />
           <template v-if="batchSaveMode">
-            <button class="icon-button icon-emerald" :title="t('save')" :disabled="batchSaving" @click="confirmBatchBarSave"><Save /></button>
-            <button class="icon-button" :title="t('cancel')" :disabled="batchSaving" @click="cancelBatchBarSave"><X /></button>
+            <button class="icon-button icon-emerald" :title="t('save')" :aria-label="t('save')" :disabled="batchSaving" @click="confirmBatchBarSave"><Save /></button>
+            <button class="icon-button" :title="t('cancel')" :aria-label="t('cancel')" :disabled="batchSaving" @click="cancelBatchBarSave"><X /></button>
           </template>
           <button
             v-else
             class="icon-button"
-            :title="quickCommands.length >= QUICK_COMMANDS_LIMIT ? t('quickCommandsLimit', { count: quickCommands.length, limit: QUICK_COMMANDS_LIMIT }) : t('batchBarSave')"
+            :title="quickCommands.length >= QUICK_COMMANDS_LIMIT ? t('quickCommandsLimit', { count: quickCommands.length, limit: QUICK_COMMANDS_LIMIT }) : t('batchBarSave')" :aria-label="quickCommands.length >= QUICK_COMMANDS_LIMIT ? t('quickCommandsLimit', { count: quickCommands.length, limit: QUICK_COMMANDS_LIMIT }) : t('batchBarSave')"
             :disabled="!batchDraft.trim() || quickCommands.length >= QUICK_COMMANDS_LIMIT"
             @click="openBatchBarSave"
           ><Save /></button>
-          <button class="icon-button icon-emerald batch-bar-send" :title="t('batchSendSend')" :disabled="batchSending || !batchDraft.trim() || !batchSelected.length" @click="sendBatchCommand">
+          <button class="icon-button icon-emerald batch-bar-send" :title="t('batchSendSend')" :aria-label="t('batchSendSend')" :disabled="batchSending || !batchDraft.trim() || !batchSelected.length" @click="sendBatchCommand">
             <Loader2 v-if="batchSending" class="spinning" />
             <Send v-else />
           </button>
@@ -8706,9 +8712,9 @@ watch(historyScope, () => {
 
       <section v-if="sftpPaneOpen" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave.self="dragActive = false" @drop.prevent="onDrop">
         <div class="path-toolbar">
-          <button class="icon-button" :title="t('parentFolder')" :disabled="currentPath === '/'" @click="goParent"><ArrowUp /></button>
-          <button class="icon-button icon-amber" :title="t('home')" :disabled="!connected" @click="loadHome"><Home /></button>
-          <button class="icon-button icon-cyan" :title="t('refresh')" :disabled="!connected || loadingFiles" @click="loadDirectory()"><RefreshCw :class="{ spinning: loadingFiles }" /></button>
+          <button class="icon-button" :title="t('parentFolder')" :aria-label="t('parentFolder')" :disabled="currentPath === '/'" @click="goParent"><ArrowUp /></button>
+          <button class="icon-button icon-amber" :title="t('home')" :aria-label="t('home')" :disabled="!connected" @click="loadHome"><Home /></button>
+          <button class="icon-button icon-cyan" :title="t('refresh')" :aria-label="t('refresh')" :disabled="!connected || loadingFiles" @click="loadDirectory()"><RefreshCw :class="{ spinning: loadingFiles }" /></button>
           <!-- #54 路径栏双态：非编辑态把当前路径渲染成可点击分段（末段为当前位置），
                点击分段直接回跳、点击分段外区域进入编辑；编辑态是原先的完整输入框，
                提交后回到分段展示。分段切分走 remotePathInput（有单测）。 -->
@@ -8734,7 +8740,7 @@ watch(historyScope, () => {
           <div>
             <Popover :open="bookmarkSaveOpen" @update:open="(open) => { if (!open) bookmarkSaveOpen = false; }">
               <PopoverAnchor as-child>
-                <button class="icon-button icon-amber" :title="t('sftpBookmark.add')" :disabled="!connected" @click.stop="toggleBookmarkSave"><Star /></button>
+                <button class="icon-button icon-amber" :title="t('sftpBookmark.add')" :aria-label="t('sftpBookmark.add')" :disabled="!connected" @click.stop="toggleBookmarkSave"><Star /></button>
               </PopoverAnchor>
               <!-- 星标收藏弹层：label 默认取路径末段，可编辑后保存（前端先行校验 + 后端错误回显） -->
               <PopoverContent class="popover bookmark-save-popover" align="end" :side-offset="5">
@@ -8742,8 +8748,8 @@ watch(historyScope, () => {
               <span class="bookmark-save-path mono" :title="currentPath">{{ currentPath }}</span>
               <input v-model="bookmarkLabelDraft" class="bookmark-label-input mono" :maxlength="SFTP_BOOKMARK_LABEL_MAX_LENGTH" spellcheck="false" :placeholder="t('sftpBookmark.namePlaceholder')" :disabled="bookmarkSaving" autofocus @keydown.enter="confirmBookmarkSave" />
               <div class="bookmark-save-actions">
-                <button class="icon-button icon-emerald" :title="t('save')" :disabled="bookmarkSaving" @click="confirmBookmarkSave"><Save /></button>
-                <button class="icon-button" :title="t('cancel')" :disabled="bookmarkSaving" @click="bookmarkSaveOpen = false"><X /></button>
+                <button class="icon-button icon-emerald" :title="t('save')" :aria-label="t('save')" :disabled="bookmarkSaving" @click="confirmBookmarkSave"><Save /></button>
+                <button class="icon-button" :title="t('cancel')" :aria-label="t('cancel')" :disabled="bookmarkSaving" @click="bookmarkSaveOpen = false"><X /></button>
               </div>
               </PopoverContent>
             </Popover>
@@ -8751,31 +8757,31 @@ watch(historyScope, () => {
           <div>
             <Popover :open="pathHistoryOpen" @update:open="(open) => { if (!open) pathHistoryOpen = false; }">
               <PopoverAnchor as-child>
-                <button class="icon-button" :title="t('sftpPathHistory.title')" :disabled="!connected" @click.stop="togglePathHistoryMenu"><History /></button>
+                <button class="icon-button" :title="t('sftpPathHistory.title')" :aria-label="t('sftpPathHistory.title')" :disabled="!connected" @click.stop="togglePathHistoryMenu"><History /></button>
               </PopoverAnchor>
               <PopoverContent class="popover path-history-popover" align="end" :side-offset="5">
               <strong class="path-history-title">{{ t("sftpPathHistory.title") }}</strong>
-              <button v-for="item in currentPathHistory" :key="item" class="path-item mono" :title="item" @click="goToPath(item)">{{ item }}</button>
+              <button v-for="item in currentPathHistory" :key="item" class="path-item mono" :title="item" :aria-label="item" @click="goToPath(item)">{{ item }}</button>
               <div v-if="!currentPathHistory.length" class="empty compact">{{ t("sftpPathHistory.empty") }}</div>
               <!-- 书签区：点击跳转，行尾悬浮删除；全局清单（跨连接共享） -->
               <strong class="path-history-title">{{ t("sftpBookmark.title") }}</strong>
               <template v-if="sftpBookmarks.length">
                 <div v-for="bookmark in sftpBookmarks" :key="bookmark.id" class="bookmark-row">
-                  <button class="path-item mono" :title="`${bookmark.label} · ${bookmark.path}`" @click="goToPath(bookmark.path)">{{ bookmark.label }}</button>
-                  <button class="bookmark-delete" :title="t('delete')" @click.stop="removeBookmark(bookmark)"><Trash2 /></button>
+                  <button class="path-item mono" :title="`${bookmark.label} · ${bookmark.path}`" :aria-label="`${bookmark.label} · ${bookmark.path}`" @click="goToPath(bookmark.path)">{{ bookmark.label }}</button>
+                  <button class="bookmark-delete" :title="t('delete')" :aria-label="t('delete')" @click.stop="removeBookmark(bookmark)"><Trash2 /></button>
                 </div>
               </template>
               <div v-else class="empty compact">{{ t("sftpBookmark.empty") }}</div>
               <strong class="path-history-title">{{ t("sftpQuickPath.title") }}</strong>
-              <button v-for="item in SFTP_QUICK_PATHS" :key="item" class="path-item mono" :title="item" @click="goToPath(item)">{{ item }}</button>
+              <button v-for="item in SFTP_QUICK_PATHS" :key="item" class="path-item mono" :title="item" :aria-label="item" @click="goToPath(item)">{{ item }}</button>
               </PopoverContent>
             </Popover>
           </div>
-          <button class="icon-button" :title="t('sftpPaste.action')" :disabled="!connected || !canWrite || !sftpClipboard || pasteBusy" @click="pasteClipboard"><ClipboardPaste /></button>
-          <button class="icon-button icon-teal" :title="`${t('upload')} · Ctrl/Cmd+V`" :disabled="!connected || !canWrite" @click.stop="chooseUpload"><FileUp /></button>
+          <button class="icon-button" :title="t('sftpPaste.action')" :aria-label="t('sftpPaste.action')" :disabled="!connected || !canWrite || !sftpClipboard || pasteBusy" @click="pasteClipboard"><ClipboardPaste /></button>
+          <button class="icon-button icon-teal" :title="`${t('upload')} · Ctrl/Cmd+V`" :aria-label="`${t('upload')} · Ctrl/Cmd+V`" :disabled="!connected || !canWrite" @click.stop="chooseUpload"><FileUp /></button>
           <button v-if="folderUploadSupported" class="icon-button icon-teal" :title="t('folderUpload.title')" :aria-label="t('folderUpload.action')" :disabled="!connected || !canWrite" @click.stop="chooseFolderUpload"><FolderUp /></button>
-          <button class="icon-button icon-amber" :title="t('newFolder')" :disabled="!connected || !canWrite" @click="operationDraft = ''; operationDialog = 'mkdir'"><FolderPlus /></button>
-          <button class="icon-button icon-amber" :title="t('sftpNewFile.action')" :disabled="!connected || !canWrite" @click="openNewFileDialog"><FilePlus /></button>
+          <button class="icon-button icon-amber" :title="t('newFolder')" :aria-label="t('newFolder')" :disabled="!connected || !canWrite" @click="operationDraft = ''; operationDialog = 'mkdir'"><FolderPlus /></button>
+          <button class="icon-button icon-amber" :title="t('sftpNewFile.action')" :aria-label="t('sftpNewFile.action')" :disabled="!connected || !canWrite" @click="openNewFileDialog"><FilePlus /></button>
           <label class="follow-directory-control sudo-label" :title="!canWrite ? t('readOnly') : t('sudo.modeHint')">
             <Switch size="sm" :model-value="sudoMode" :disabled="!connected || !canWrite" @update:model-value="toggleSudoMode" />
             <span>{{ t("sudo.mode") }}</span>
@@ -8814,7 +8820,7 @@ watch(historyScope, () => {
             <label class="sftp-search-input">
               <Search />
               <input v-model="sftpSearchDraft" type="search" :placeholder="t('sftpSearch.placeholder')" spellcheck="false" />
-              <button v-if="sftpSearchDraft" class="sftp-search-clear" :title="t('cancel')" @click.prevent="clearSftpSearch"><X /></button>
+              <button v-if="sftpSearchDraft" class="sftp-search-clear" :title="t('cancel')" :aria-label="t('cancel')" @click.prevent="clearSftpSearch"><X /></button>
             </label>
             <Select :model-value="sftpTypeFilter" @update:model-value="(v) => (sftpTypeFilter = v as SftpTypeFilter)">
               <SelectTrigger size="xs" class="sftp-type-filter" :title="t('sftpFilter.all')">
@@ -8829,7 +8835,7 @@ watch(historyScope, () => {
             <button
               class="icon-button sftp-hidden-toggle"
               :class="{ 'is-active': sftpShowHidden }"
-              :title="sftpShowHidden ? t('sftpFilter.hideHidden') : t('sftpFilter.showHidden')"
+              :title="sftpShowHidden ? t('sftpFilter.hideHidden') : t('sftpFilter.showHidden')" :aria-label="sftpShowHidden ? t('sftpFilter.hideHidden') : t('sftpFilter.showHidden')"
               :aria-pressed="sftpShowHidden"
               @click="sftpShowHidden = !sftpShowHidden"
             >
@@ -8980,14 +8986,14 @@ watch(historyScope, () => {
           </DialogTitle>
           <div v-if="previewEditableAllowed" class="preview-actions">
             <template v-if="!previewEditable">
-              <button :title="t('editSave.edit')" @click="beginPreviewEdit"><Pencil />{{ t("editSave.edit") }}</button>
+              <button :title="t('editSave.edit')" :aria-label="t('editSave.edit')" @click="beginPreviewEdit"><Pencil />{{ t("editSave.edit") }}</button>
             </template>
             <template v-else>
-              <button :title="t('cancel')" @click="cancelPreviewEdit">{{ t("cancel") }}</button>
-              <button :title="t('editSave.save')" :disabled="previewSaving" @click="savePreview"><Loader2 v-if="previewSaving" class="spinning" /><Save v-else />{{ t("editSave.save") }}</button>
+              <button :title="t('cancel')" :aria-label="t('cancel')" @click="cancelPreviewEdit">{{ t("cancel") }}</button>
+              <button :title="t('editSave.save')" :aria-label="t('editSave.save')" :disabled="previewSaving" @click="savePreview"><Loader2 v-if="previewSaving" class="spinning" /><Save v-else />{{ t("editSave.save") }}</button>
             </template>
           </div>
-          <button :title="t('close')" class="icon-button" @click="closePreview"><X /></button>
+          <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="closePreview"><X /></button>
         </header>
         <div v-if="previewLoading" class="empty"><Loader2 class="spinning" />{{ t("loading") }}</div>
         <div v-else-if="previewMode === 'image'" class="preview-image-stage">
@@ -9014,7 +9020,7 @@ watch(historyScope, () => {
 
     <Dialog :open="operationDialog === 'mkdir'" @update:open="(open) => { if (!open) operationDialog = null; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("newFolder") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="operationDialog = null"><X /></button></header>
+        <header><DialogTitle>{{ t("newFolder") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="operationDialog = null"><X /></button></header>
         <input v-model="operationDraft" autofocus @keydown.enter="createDirectory" />
         <footer><button @click="operationDialog = null">{{ t("cancel") }}</button><button class="primary-button" :disabled="!operationDraft.trim()" @click="createDirectory">{{ t("confirm") }}</button></footer>      </DialogContent>
     </Dialog>
@@ -9024,7 +9030,7 @@ watch(historyScope, () => {
     <Dialog :open="symlinkDialog !== null" @update:open="(open) => { if (!open) symlinkDialog = null; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="symlinkDialog">
-        <header><DialogTitle>{{ symlinkDialog.mode === "edit" ? t("symlink.editTitle", { name: symlinkDialog.name }) : t("symlink.createTitle") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="symlinkDialog = null"><X /></button></header>
+        <header><DialogTitle>{{ symlinkDialog.mode === "edit" ? t("symlink.editTitle", { name: symlinkDialog.name }) : t("symlink.createTitle") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="symlinkDialog = null"><X /></button></header>
         <p v-if="symlinkDialog.mode === 'edit'" class="muted mono">{{ symlinkDialog.linkPath }}</p>
         <input v-if="symlinkDialog.mode === 'create'" v-model="symlinkDraft" autofocus :placeholder="t('symlink.namePlaceholder')" @keydown.enter="commitSymlink" />
         <input v-if="symlinkDialog.mode === 'create'" v-model="symlinkTargetDraft" class="mono" spellcheck="false" :placeholder="t('symlink.targetPlaceholder')" @keydown.enter="commitSymlink" />
@@ -9039,7 +9045,7 @@ watch(historyScope, () => {
     决议（上传一次 / 总是上传（记住 watchId）/ 取消）才出队，多文件互不顶替。 -->
     <Dialog :open="watchModifiedQueue.length > 0" @update:open="(open) => { if (!open) dismissWatchModified(); }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("sftpEdit.modifiedTitle") }}</DialogTitle><Loader2 v-if="externalEditBusy" class="spinning" /><button :title="t('close')" class="icon-button" @click="dismissWatchModified"><X /></button></header>
+        <header><DialogTitle>{{ t("sftpEdit.modifiedTitle") }}</DialogTitle><Loader2 v-if="externalEditBusy" class="spinning" /><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="dismissWatchModified"><X /></button></header>
         <p class="sftp-dialog-hint">{{ t("sftpEdit.modifiedMessage", { name: watchModifiedPrompt?.name || "" }) }}</p>
         <footer>
           <button @click="dismissWatchModified">{{ t("cancel") }}</button>
@@ -9051,7 +9057,7 @@ watch(historyScope, () => {
 
     <Dialog :open="commandOpen" @update:open="(open) => { if (!open) commandOpen = false; }">
       <DialogContent class="modal command-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("commandTitle") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="commandOpen = false"><X /></button></header>
+        <header><DialogTitle>{{ t("commandTitle") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="commandOpen = false"><X /></button></header>
         <textarea
           v-model="commandDraft"
           class="mono"
@@ -9072,7 +9078,7 @@ watch(historyScope, () => {
               v-for="item in commandHistory"
               :key="item"
               class="command-history-item mono"
-              :title="t('commandHistoryResend')"
+              :title="t('commandHistoryResend')" :aria-label="t('commandHistoryResend')"
               @click="rerunHistoryCommand(item)"
             >{{ item }}</button>
           </div>
@@ -9099,7 +9105,7 @@ watch(historyScope, () => {
     <Dialog :open="!!chmodTarget" @update:open="(open) => { if (!open) chmodTarget = undefined; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="chmodTarget">
-        <header><DialogTitle>{{ t("permissionsEdit") }} · {{ chmodTarget.name }}</DialogTitle><button :title="t('close')" class="icon-button" @click="chmodTarget = undefined"><X /></button></header>
+        <header><DialogTitle>{{ t("permissionsEdit") }} · {{ chmodTarget.name }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="chmodTarget = undefined"><X /></button></header>
         <div class="perm-matrix" role="group" :aria-label="t('permissionsEdit')">
           <span></span>
           <span v-for="column in PERM_COLUMNS" :key="column.bit" class="perm-matrix-head">{{ t(column.key) }}</span>
@@ -9120,7 +9126,7 @@ watch(historyScope, () => {
     <Dialog :open="!!deleteTarget" @update:open="(open) => { if (!open) deleteTarget = undefined; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="deleteTarget">
-        <header><DialogTitle>{{ t("deleteTitle") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="deleteTarget = undefined"><X /></button></header>
+        <header><DialogTitle>{{ t("deleteTitle") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="deleteTarget = undefined"><X /></button></header>
         <div class="destructive-copy"><div><strong>{{ deleteTarget.name }}</strong><p class="muted">{{ t("deleteMessage") }}</p></div></div>
         <footer><button @click="deleteTarget = undefined">{{ t("cancel") }}</button><button class="danger-button" :disabled="deleteSubmitting" @click="confirmDelete"><Trash2 />{{ t("delete") }}</button></footer>
         </template>
@@ -9129,7 +9135,7 @@ watch(historyScope, () => {
 
     <Dialog :open="batchDeleteOpen" @update:open="(open) => { if (!open) batchDeleteOpen = false; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("sftpBatch.deleteTitle") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="batchDeleteOpen = false"><X /></button></header>
+        <header><DialogTitle>{{ t("sftpBatch.deleteTitle") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="batchDeleteOpen = false"><X /></button></header>
         <div class="destructive-copy"><div><strong>{{ t("sftpBatch.selected", { count: selectedEntries.length }) }}</strong><p class="muted">{{ t("sftpBatch.deleteMessage") }}</p></div></div>
         <div v-if="batchProgress" class="batch-progress-row"><progress class="batch-progress-bar" :value="batchProgressPercent(batchProgress)" max="100" /><span class="batch-progress mono">{{ t("sftpBatch.progress", { done: batchProgress.done, total: batchProgress.total }) }}</span></div>
         <footer><button @click="batchDeleteOpen = false" :disabled="batchDeleteSubmitting">{{ t("cancel") }}</button><button class="danger-button" :disabled="batchDeleteSubmitting" @click="confirmBatchDelete"><Loader2 v-if="batchDeleteSubmitting" class="spinning" /><Trash2 v-else />{{ t("delete") }}</button></footer>
@@ -9141,7 +9147,7 @@ watch(historyScope, () => {
     <Dialog :open="!!downloadPrompt" @update:open="(open) => { if (!open) resolveDownloadPrompt(undefined); }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="downloadPrompt">
-        <header><DialogTitle>{{ t("downloadSettings.askTitle") }}</DialogTitle><button class="icon-button" :title="t('close')" @click="resolveDownloadPrompt(undefined)"><X /></button></header>
+        <header><DialogTitle>{{ t("downloadSettings.askTitle") }}</DialogTitle><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="resolveDownloadPrompt(undefined)"><X /></button></header>
         <p class="muted mono">{{ downloadPrompt.fileName }}</p>
         <label class="settings-field">
           <span>{{ t("downloadSettings.directory") }}</span>
@@ -9167,7 +9173,7 @@ watch(historyScope, () => {
     <Dialog :open="!!downloadConflictPrompt" @update:open="(open) => { if (!open) resolveDownloadConflict(undefined); }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="downloadConflictPrompt">
-        <header><DialogTitle>{{ t("downloadConflict.title") }}</DialogTitle><button class="icon-button" :title="t('close')" @click="resolveDownloadConflict(undefined)"><X /></button></header>
+        <header><DialogTitle>{{ t("downloadConflict.title") }}</DialogTitle><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="resolveDownloadConflict(undefined)"><X /></button></header>
         <p>{{ t("downloadConflict.message", { name: downloadConflictPrompt.fileName }) }}</p>
         <p class="muted mono">{{ downloadConflictPrompt.path }}</p>
         <footer>
@@ -9182,7 +9188,7 @@ watch(historyScope, () => {
     <!-- 命令会话（WT-4，WezTerm spawn 对标）：输入命令后在已认证 transport 的新 channel 上执行 -->
     <Dialog :open="spawnSessionDialogOpen" @update:open="(open) => { if (!open) spawnSessionDialogOpen = false; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("spawnSessionDialog.title") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="spawnSessionDialogOpen = false"><X /></button></header>
+        <header><DialogTitle>{{ t("spawnSessionDialog.title") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="spawnSessionDialogOpen = false"><X /></button></header>
         <p class="muted">{{ t("spawnSessionDialog.hint") }}</p>
         <input
           v-model="spawnSessionCommand"
@@ -9202,7 +9208,7 @@ watch(historyScope, () => {
     <!-- 上传重复目标「询问我」（P1-5）：重命名 / 覆盖 / 取消，支持应用到本批次 -->
     <Dialog :open="!!uploadDuplicatePrompt" @update:open="(open) => { if (!open) resolveUploadDuplicate(undefined); }">      <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="uploadDuplicatePrompt">
-        <header><DialogTitle>{{ t("transferCfg.duplicateTitle") }}</DialogTitle><button class="icon-button" :title="t('close')" @click="resolveUploadDuplicate(undefined)"><X /></button></header>
+        <header><DialogTitle>{{ t("transferCfg.duplicateTitle") }}</DialogTitle><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="resolveUploadDuplicate(undefined)"><X /></button></header>
         <p>{{ t("transferCfg.duplicateMessage", { name: uploadDuplicatePrompt.fileName }) }}</p>
         <p class="muted mono">{{ uploadDuplicatePrompt.path }}</p>
         <label class="settings-field settings-switch-row">
@@ -9221,7 +9227,7 @@ watch(historyScope, () => {
     <Dialog :open="!!recordingDeleteTarget" @update:open="(open) => { if (!open) recordingDeleteTarget = null; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="recordingDeleteTarget">
-        <header><DialogTitle>{{ t("recordingDelete") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="recordingDeleteTarget = null"><X /></button></header>
+        <header><DialogTitle>{{ t("recordingDelete") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="recordingDeleteTarget = null"><X /></button></header>
         <div class="destructive-copy"><div><strong>{{ t("recordingDeleteConfirm", { host: recordingDeleteTarget.host || recordingDeleteTarget.recordingId }) }}</strong><p class="muted">{{ formatRecordedAt(recordingDeleteTarget.startedAt) }} · {{ formatDuration(recordingDeleteTarget.durationSecs ?? 0) }}</p></div></div>
         <footer><button @click="recordingDeleteTarget = null" :disabled="recordingDeleteSubmitting">{{ t("cancel") }}</button><button class="danger-button" :disabled="recordingDeleteSubmitting" @click="confirmRecordingDelete"><Loader2 v-if="recordingDeleteSubmitting" class="spinning" /><Trash2 v-else />{{ t("delete") }}</button></footer>
         </template>
@@ -9231,7 +9237,7 @@ watch(historyScope, () => {
     <!-- 录制一键清空确认：应用内弹窗（沙箱 iframe confirm 恒 false） -->
     <Dialog :open="recordingClearAllOpen" @update:open="(open) => { if (!open) recordingClearAllOpen = false; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("recordingsClear") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="recordingClearAllOpen = false"><X /></button></header>
+        <header><DialogTitle>{{ t("recordingsClear") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="recordingClearAllOpen = false"><X /></button></header>
         <div class="destructive-copy"><div><strong>{{ t("recordingsClearConfirm", { count: recordings.length }) }}</strong></div></div>
         <footer><button @click="recordingClearAllOpen = false" :disabled="recordingClearAllSubmitting">{{ t("cancel") }}</button><button class="danger-button" :disabled="recordingClearAllSubmitting" @click="confirmRecordingClearAll"><Loader2 v-if="recordingClearAllSubmitting" class="spinning" /><Trash2 v-else />{{ t("delete") }}</button></footer>
       </DialogContent>
@@ -9240,7 +9246,7 @@ watch(historyScope, () => {
     <!-- 传输历史清空确认：应用内弹窗（沙箱 iframe confirm 恒 false） -->
     <Dialog :open="transferHistoryClearOpen" @update:open="(open) => { if (!open) transferHistoryClearOpen = false; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("transfersHistory.clear") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="transferHistoryClearOpen = false"><X /></button></header>
+        <header><DialogTitle>{{ t("transfersHistory.clear") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="transferHistoryClearOpen = false"><X /></button></header>
         <div class="destructive-copy"><div><strong>{{ t("transfersHistory.clearConfirm") }}</strong></div></div>
         <footer><button @click="transferHistoryClearOpen = false">{{ t("cancel") }}</button><button class="danger-button" @click="confirmTransferHistoryClear"><Trash2 />{{ t("delete") }}</button></footer>
       </DialogContent>
@@ -9248,7 +9254,7 @@ watch(historyScope, () => {
 
     <Dialog :open="newFileDialog" @update:open="(open) => { if (!open) newFileDialog = false; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("sftpNewFile.title") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="newFileDialog = false"><X /></button></header>
+        <header><DialogTitle>{{ t("sftpNewFile.title") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="newFileDialog = false"><X /></button></header>
         <input v-model="newFileDraft" autofocus spellcheck="false" :placeholder="t('sftpNewFile.placeholder')" @keydown.enter="createNewFile" />
         <footer><button @click="newFileDialog = false">{{ t("cancel") }}</button><button class="primary-button" :disabled="!newFileDraft.trim() || newFileSubmitting" @click="createNewFile"><Loader2 v-if="newFileSubmitting" class="spinning" />{{ t("confirm") }}</button></footer>
       </DialogContent>
@@ -9257,7 +9263,7 @@ watch(historyScope, () => {
     <Dialog :open="!!attrsTarget" @update:open="(open) => { if (!open) closeAttributes(); }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="attrsTarget">
-        <header><DialogTitle>{{ t("sftpAttrs.title") }} · {{ attrsTarget.name }}</DialogTitle><button :title="t('close')" class="icon-button" @click="closeAttributes"><X /></button></header>
+        <header><DialogTitle>{{ t("sftpAttrs.title") }} · {{ attrsTarget.name }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="closeAttributes"><X /></button></header>
         <div v-if="attrsLoading" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
         <template v-else-if="attrsInfo">
           <dl class="attrs-grid">
@@ -9369,7 +9375,7 @@ watch(historyScope, () => {
 
     <Dialog :open="auditOpen" @update:open="(open) => { if (!open) auditOpen = false; }">
       <DialogContent class="modal audit-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("auditLog.title") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="auditOpen = false"><X /></button></header>
+        <header><DialogTitle>{{ t("auditLog.title") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="auditOpen = false"><X /></button></header>
         <div class="settings-body">
           <div class="audit-toolbar">
             <Select :model-value="auditKindFilter || SELECT_EMPTY_SENTINEL" @update:model-value="(v) => (auditKindFilter = v === SELECT_EMPTY_SENTINEL ? '' : String(v))">
@@ -9382,8 +9388,8 @@ watch(historyScope, () => {
               </SelectContent>
             </Select>
             <div class="audit-actions">
-              <button class="icon-button" :title="t('refresh')" :disabled="auditLoading" @click="loadAuditEntries"><RefreshCw :class="{ spinning: auditLoading }" /></button>
-              <button class="icon-button" :title="t('auditLog.clear')" :disabled="!auditEntries.length" @click="auditClearOpen = true"><Trash2 /></button>
+              <button class="icon-button" :title="t('refresh')" :aria-label="t('refresh')" :disabled="auditLoading" @click="loadAuditEntries"><RefreshCw :class="{ spinning: auditLoading }" /></button>
+              <button class="icon-button" :title="t('auditLog.clear')" :aria-label="t('auditLog.clear')" :disabled="!auditEntries.length" @click="auditClearOpen = true"><Trash2 /></button>
             </div>
           </div>
           <div v-if="auditLoading && !auditEntries.length" class="empty compact audit-empty"><Loader2 class="spinning" />{{ t("loading") }}</div>
@@ -9415,7 +9421,7 @@ watch(historyScope, () => {
     <!-- 审计日志清空确认：应用内弹窗（沙箱 iframe confirm 恒 false） -->
     <Dialog :open="auditClearOpen" @update:open="(open) => { if (!open) auditClearOpen = false; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("auditLog.clear") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="auditClearOpen = false"><X /></button></header>
+        <header><DialogTitle>{{ t("auditLog.clear") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="auditClearOpen = false"><X /></button></header>
         <div class="destructive-copy"><div><strong>{{ t("auditLog.clearConfirm") }}</strong></div></div>
         <footer><button @click="auditClearOpen = false" :disabled="auditClearSubmitting">{{ t("cancel") }}</button><button class="danger-button" :disabled="auditClearSubmitting" @click="confirmAuditClear"><Loader2 v-if="auditClearSubmitting" class="spinning" /><Trash2 v-else />{{ t("delete") }}</button></footer>
       </DialogContent>
@@ -9484,7 +9490,7 @@ watch(historyScope, () => {
       <DialogContent class="modal alert-triage-modal" @escape-key-down.prevent>
         <header>
           <DialogTitle>{{ t("alertTriage.title") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="alertTriageOpen = false"><X /></button>
+          <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="alertTriageOpen = false"><X /></button>
         </header>
         <p class="muted alert-triage-hint">{{ t("alertTriage.hint") }}</p>
         <textarea v-model="alertTriagePayload" class="mono alert-triage-payload" rows="6" :placeholder="t('alertTriage.placeholder')" :disabled="alertTriageBusy" spellcheck="false" autofocus />
@@ -9506,7 +9512,7 @@ watch(historyScope, () => {
             <li v-for="suggestion in alertTriageResult.suggestions" :key="suggestion.command" class="alert-suggestion-row">
               <code class="mono alert-suggestion-command">{{ suggestion.command }}</code>
               <span class="alert-purpose muted">{{ purposeKeyLabel(suggestion.purposeKey, t) }}</span>
-              <button :disabled="!session" :title="!session ? t('alertTriage.noSession') : ''" @click="sendSuggestionToTerminal(suggestion.command)">{{ t("alertTriage.sendToTerminal") }}</button>
+              <button :disabled="!session" :title="!session ? t('alertTriage.noSession') : ''" :aria-label="!session ? t('alertTriage.noSession') : ''" @click="sendSuggestionToTerminal(suggestion.command)">{{ t("alertTriage.sendToTerminal") }}</button>
             </li>
           </ul>
           <footer v-if="alertTriageResult.suggestions.length" class="alert-triage-actions">
@@ -9521,7 +9527,7 @@ watch(historyScope, () => {
         <template v-if="pasteConfirm">
         <header>
           <DialogTitle>{{ pasteConfirm.danger ? t("terminalDanger.title") : t("terminalPasteConfirm.title") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="resolvePasteConfirm(false)"><X /></button>
+          <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="resolvePasteConfirm(false)"><X /></button>
         </header>
         <div v-if="pasteConfirm.danger" class="destructive-copy warning">
           <span class="destructive-icon"><TriangleAlert /></span>
@@ -9550,7 +9556,7 @@ watch(historyScope, () => {
         <template v-if="pendingConfirmDialog">
         <header>
           <DialogTitle>{{ t("confirm") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="resolvePendingConfirmDialog(false)"><X /></button>
+          <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="resolvePendingConfirmDialog(false)"><X /></button>
         </header>
         <p class="muted confirm-message">{{ pendingConfirmDialog.message }}</p>
         <footer>
@@ -9566,7 +9572,7 @@ watch(historyScope, () => {
         <template v-if="dropUploadPrompt">
         <header>
           <DialogTitle>{{ t("terminalDropPrompt.title") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="resolveDropUpload('cancel')"><X /></button>
+          <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="resolveDropUpload('cancel')"><X /></button>
         </header>
         <p class="muted">{{ t("terminalDropPrompt.summary", { count: dropUploadPrompt.files.length }) }}</p>
         <pre class="command-output mono drop-file-list">{{ dropUploadPrompt.files.map((file) => file.name).join("\n") }}</pre>
@@ -9628,7 +9634,7 @@ watch(historyScope, () => {
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <header>
           <DialogTitle>{{ t("localTerminal.openConfirmTitle") }}</DialogTitle>
-          <button :title="t('close')" class="icon-button" @click="localOpenConfirmOpen = false"><X /></button>
+          <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="localOpenConfirmOpen = false"><X /></button>
         </header>
         <p class="muted">{{ t("localTerminal.openConfirm") }}</p>
         <footer>

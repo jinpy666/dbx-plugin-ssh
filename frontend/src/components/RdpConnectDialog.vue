@@ -142,7 +142,7 @@ function submit() {
     <DialogContent class="modal small-modal" @escape-key-down.prevent>
       <header>
         <DialogTitle>{{ t("rdp.dialogTitle") }}</DialogTitle>
-        <button :title="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
+        <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
       </header>
       <p class="muted vnc-security-note"><TriangleAlert class="h-3.5 w-3.5" />{{ t("rdp.security") }}</p>
       <div class="vnc-form-grid">

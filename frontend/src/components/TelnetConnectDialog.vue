@@ -155,7 +155,7 @@ function submit() {
     <DialogContent class="modal small-modal" @escape-key-down.prevent>
       <header>
         <DialogTitle>{{ t("telnet.dialogTitle") }}</DialogTitle>
-        <button :title="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
+        <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
       </header>
       <p class="muted telnet-security-note"><TriangleAlert class="h-3.5 w-3.5" />{{ t("telnet.security") }}</p>
       <div class="telnet-form-grid">

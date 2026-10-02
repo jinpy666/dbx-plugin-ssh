@@ -67,7 +67,7 @@ function submit() {
     <DialogContent class="modal small-modal" @escape-key-down.prevent>
       <header>
         <DialogTitle>{{ t("serial.upload.title") }}</DialogTitle>
-        <button :title="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
+        <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
       </header>
       <div class="serial-form-grid">
         <label class="settings-field serial-port-field">

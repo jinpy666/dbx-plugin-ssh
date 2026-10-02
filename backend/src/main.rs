@@ -1859,17 +1859,7 @@ impl Plugin {
                                     .to_string(),
                             );
                         }
-                        match local_fs::pick_file()? {
-                            None => Ok(json!({ "message": "", "fieldValues": null })),
-                            Some(path) => {
-                                let content =
-                                    keys::read_private_key_file(std::path::Path::new(&path))?;
-                                Ok(json!({
-                                    "message": format!("Imported private key from {path}"),
-                                    "fieldValues": { "private_key": content },
-                                }))
-                            }
-                        }
+                        action_import_private_key(&mut || local_fs::pick_file())
                     }
                     // 「从终端会话文件导入」：桌面端弹系统文件选择框，按扩展名/
                     // JSON 形态嗅探来源后复用导入预览的解析器，把首条会话回填
@@ -1885,57 +1875,7 @@ impl Plugin {
                                     .to_string(),
                             );
                         }
-                        let (kind, bytes) = match params
-                            .get("path")
-                            .and_then(Value::as_str)
-                            .filter(|value| !value.is_empty())
-                        {
-                            Some(path) => {
-                                connection_import::read_session_file(std::path::Path::new(path))?
-                            }
-                            None => {
-                                let Some(path) = local_fs::pick_file()? else {
-                                    return Ok(json!({ "message": "", "fieldValues": null }));
-                                };
-                                connection_import::read_session_file(std::path::Path::new(&path))?
-                            }
-                        };
-                        let sessions = match connection_import::parse_uploaded(
-                            kind, &bytes, None, None,
-                        ) {
-                            Ok(sessions) => sessions,
-                            Err(error)
-                                if error
-                                    == connection_import::WINDTERM_MASTER_PASSWORD_REQUIRED =>
-                            {
-                                return Err(format!(
-                                    "{error} — use the import wizard in the workbench, which can ask for it"
-                                ));
-                            }
-                            Err(error) => return Err(error),
-                        };
-                        let Some(session) = sessions.first() else {
-                            return Err(
-                                "No SSH sessions were found in the selected file — expected a MobaXterm/Xshell/WindTerm/SecureCRT/FinalShell/Electerm/Termius export or an OpenSSH config"
-                                    .to_string(),
-                            );
-                        };
-                        let total = sessions.len();
-                        let name = session.name.trim();
-                        let name = if name.is_empty() {
-                            session.host.as_str()
-                        } else {
-                            name
-                        };
-                        let message = if total > 1 {
-                            format!("Imported '{name}' (1 of {total} sessions); use the workbench import wizard for the rest")
-                        } else {
-                            format!("Imported '{name}'")
-                        };
-                        Ok(json!({
-                            "message": message,
-                            "fieldValues": connection_import::session_field_values(session),
-                        }))
+                        action_import_sessions(&params, &mut || local_fs::pick_file())
                     }
                     other => Err(format!("Unknown connection action: {other}")),
                 }
@@ -2638,6 +2578,80 @@ fn connection_action_id(params: &Value) -> Result<&str, String> {
         .ok_or_else(|| "Missing action id".to_string())
 }
 
+/// 「从文件导入私钥」动作核心：`pick` 抽象系统文件框（生产传
+/// `local_fs::pick_file`，单测注入固定返回），让取消臂的「整体 null 安静
+/// 返回」契约可脱离真实对话框单测。桌面门禁留在分派臂边界。
+fn action_import_private_key(
+    pick: &mut dyn FnMut() -> Result<Option<String>, String>,
+) -> Result<Value, String> {
+    match pick()? {
+        // 取消选文件：宿主契约 fieldValues 拒绝 null，
+        // 整体返回 null（安静无操作）而不是空回填对象。
+        None => Ok(json!(null)),
+        Some(path) => {
+            let content = keys::read_private_key_file(std::path::Path::new(&path))?;
+            Ok(json!({
+                "message": format!("Imported private key from {path}"),
+                "fieldValues": { "private_key": content },
+            }))
+        }
+    }
+}
+
+/// 「从终端会话文件导入」动作核心（picker 注入理由同上）；`path` 参数跳过
+/// 系统对话框，供冒烟/自测注入固定文件（宿主从不携带；载荷仍只有脱敏
+/// 字段，与预览同边界）。
+fn action_import_sessions(
+    params: &Value,
+    pick: &mut dyn FnMut() -> Result<Option<String>, String>,
+) -> Result<Value, String> {
+    let (kind, bytes) = match params
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        Some(path) => connection_import::read_session_file(std::path::Path::new(path))?,
+        None => {
+            let Some(path) = pick()? else {
+                // 取消选文件：同 import-private-key，整体 null 安静返回。
+                return Ok(json!(null));
+            };
+            connection_import::read_session_file(std::path::Path::new(&path))?
+        }
+    };
+    let sessions = match connection_import::parse_uploaded(kind, &bytes, None, None) {
+        Ok(sessions) => sessions,
+        Err(error) if error == connection_import::WINDTERM_MASTER_PASSWORD_REQUIRED => {
+            return Err(format!(
+                "{error} — use the import wizard in the workbench, which can ask for it"
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(session) = sessions.first() else {
+        return Err(
+            "No SSH sessions were found in the selected file — expected a MobaXterm/Xshell/WindTerm/SecureCRT/FinalShell/Electerm/Termius export or an OpenSSH config"
+                .to_string(),
+        );
+    };
+    let total = sessions.len();
+    let name = session.name.trim();
+    let name = if name.is_empty() {
+        session.host.as_str()
+    } else {
+        name
+    };
+    let message = if total > 1 {
+        format!("Imported '{name}' (1 of {total} sessions); use the workbench import wizard for the rest")
+    } else {
+        format!("Imported '{name}'")
+    };
+    Ok(json!({
+        "message": message,
+        "fieldValues": connection_import::session_field_values(session),
+    }))
+}
+
 /// Host API 1.1 passes `operationId` to correlate connection lifecycle calls;
 /// on Host API 1.0 it is absent, so a locally generated id is used instead.
 /// The id only needs to stay stable between a challenge prompt and its resolve.
@@ -2929,6 +2943,47 @@ mod tests {
         )
         .expect("enable experimental RDP");
         assert!(rdp_start_gate(data_dir.path()).is_ok());
+    }
+
+    /// 宿主对 connection/action 响应的契约（与 ssh.rs 摘要臂测试同源）：
+    /// 取消选文件 = 整体 null（安静无操作）——不能回归成
+    /// `{message, fieldValues: null}`（宿主以 must be an object 拒掉）。
+    #[test]
+    fn connection_action_cancel_returns_plain_null() {
+        let mut cancelled = || -> Result<Option<String>, String> { Ok(None) };
+        let value = action_import_private_key(&mut cancelled).expect("cancel is not an error");
+        assert!(value.is_null(), "private-key cancel: {value}");
+        let value =
+            action_import_sessions(&json!({}), &mut cancelled).expect("cancel is not an error");
+        assert!(value.is_null(), "session cancel: {value}");
+    }
+
+    /// 契约另一半：fieldValues 一旦出现必须是 object，且只含 manifest 已声明
+    /// 字段、永不携带密码（凭据红线）。`path` 参数注入固定文件，picker 不得
+    /// 被触发。
+    #[test]
+    fn connection_action_import_sessions_fills_object_field_values_without_secrets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("demo.conf");
+        std::fs::write(
+            &file,
+            "Host demo\n  HostName demo.internal\n  User root\n  Port 2222\n",
+        )
+        .expect("write fixture");
+        let params = json!({ "path": file.to_string_lossy() });
+        let mut picker =
+            || -> Result<Option<String>, String> { panic!("path param must skip the picker") };
+        let value = action_import_sessions(&params, &mut picker).expect("sshconfig import");
+        let field_values = value
+            .get("fieldValues")
+            .and_then(Value::as_object)
+            .expect("fieldValues must be an object for the host");
+        assert_eq!(field_values["host"], "demo.internal");
+        assert_eq!(field_values["username"], "root");
+        assert!(
+            !field_values.contains_key("password"),
+            "password must never be backfilled: {field_values:?}"
+        );
     }
 
     #[test]

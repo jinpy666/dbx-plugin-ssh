@@ -907,7 +907,10 @@ impl client::Handler for SshClient {
         // which the server surfaces as a closed connection to its client.
         match TcpStream::connect((target.host.as_str(), target.port)).await {
             Ok(tcp) => {
-                tokio::spawn(forward::relay_remote(target.entry, channel, tcp));
+                // 计数与句柄登记走 forward 侧统一入口：relay 进 entry.relays，
+                // stop/会话关闭才能中止它（此前 detach 的 relay 会躲过 abort，
+                // 挂死连接一直存活到通道自然终结）。
+                forward::spawn_remote_relay(target.entry, channel, tcp);
             }
             Err(error) => {
                 eprintln!(
@@ -1562,6 +1565,13 @@ struct DownloadState {
     /// 置 None 即完成关闭，无需显式清理链。树下载不使用（逐文件换目标，
     /// 收益另计）；句柄错误时置 None 由下一片惰性重建。
     read_handle: Arc<AsyncMutex<Option<russh_sftp::client::fs::File>>>,
+    /// 裸包车道（latin-1 转义名）复用的裸包客户端：此前逐片新开一条 SFTP
+    /// 子系统通道（open session + request_subsystem + INIT 握手，多付数个
+    /// RTT），同一理由缓存在任务槽——单文件与树下载共用（客户端与路径
+    /// 无关，逐文件的 open/close 仍按 read_chunk 语义进行）。RawSftp 的
+    /// poisoned 语义本就是一次性报废：任何错误置 None 由下一片惰性重建，
+    /// 重建只是多一次握手。
+    raw_client: Arc<AsyncMutex<Option<RawSftpClient>>>,
 }
 
 /// Live state of one recursive folder download. Files stream through the same
@@ -4922,6 +4932,49 @@ impl SshRuntime {
     /// 口径——M24-R3 拉齐；`%2E%2E` 这类转义名还原出字面 `..` 的场景不受
     /// 影响，归一只作用于还原前的 wire 字符串组件），再还原为服务器原始
     /// 字节交给 SFTP READ。requested=0 直接回空（EOF 语义）。
+    /// 客户端走 `DownloadState.raw_client` 任务槽复用（字段注释）：此前逐片
+    /// 新开一条 SFTP 子系统通道，多付数个 RTT。任何错误整槽报废由下一片
+    /// 惰性重建（RawSftp poisoned 一次性语义，重建只是多一次握手）；通道级
+    /// 错误连带失效整个 SFTP 客户端缓存——死通道被原样复用会把该会话 SFTP
+    /// 打到永久报错。客户端与路径无关：树下载逐文件换路径仍复用同一通道。
+    async fn raw_read_chunk_cached(
+        &self,
+        session_id: &str,
+        raw_client: &AsyncMutex<Option<RawSftpClient>>,
+        remote_path: &str,
+        offset: u64,
+        requested: u32,
+    ) -> Result<Vec<u8>, String> {
+        if requested == 0 {
+            return Ok(Vec::new());
+        }
+        let normalized = normalize_remote_path(remote_path)?;
+        let raw_path = sftp_name::unescape_wire(&normalized);
+        let read = async {
+            let mut slot = raw_client.lock().await;
+            if slot.is_none() {
+                *slot = Some(self.raw_sftp_client(session_id).await?);
+            }
+            slot.as_mut()
+                .expect("raw client just ensured")
+                .read_chunk(&raw_path, offset, requested)
+                .await
+        };
+        match read.await {
+            Ok(chunk) => Ok(chunk),
+            Err(error) => {
+                *raw_client.lock().await = None;
+                if is_channel_level_sftp_error(&error) {
+                    self.invalidate_sftp_cache(session_id).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// 一次性裸包读（`sftp/read` 的 latin-1 车道）：无任务槽可挂，每调用
+    /// 自开一条 SFTP 子系统通道用完即弃——预览读是小载荷低频路径，简单优先；
+    /// 下载分片的热路径走 `raw_read_chunk_cached`。
     pub(crate) async fn raw_read_chunk(
         &self,
         session_id: &str,
@@ -5737,10 +5790,11 @@ impl SshRuntime {
     /// discoverable stub for global Quick Sudo management (the manager UI
     /// itself lives in the workbench, which the message points to).
     pub fn profiles_action_summary(&self, connection_id: Option<&str>) -> Value {
+        // 宿主契约：fieldValues 允许缺省但拒绝 null（"must be an object"）。
+        // 摘要动作没有字段要回填，直接不带该键。
         let store = sudo_profiles::load_store(&self.data_dir);
         json!({
             "message": sudo_profiles::action_summary(&store, connection_id),
-            "fieldValues": null,
         })
     }
 
@@ -7028,6 +7082,7 @@ impl SshRuntime {
                     final_dir: None,
                     overwrite: false,
                     read_handle: Arc::new(AsyncMutex::new(None)),
+                    raw_client: Arc::new(AsyncMutex::new(None)),
                 },
             );
         emitter
@@ -7232,6 +7287,7 @@ impl SshRuntime {
                     final_dir,
                     overwrite: matches!(conflict, Some("overwrite")),
                     read_handle: Arc::new(AsyncMutex::new(None)),
+                    raw_client: Arc::new(AsyncMutex::new(None)),
                 },
             );
         if compression == CompressionMode::Gzip {
@@ -7955,6 +8011,7 @@ impl SshRuntime {
                     final_dir: (compression == CompressionMode::Gzip).then(|| base_dir.clone()),
                     overwrite: false,
                     read_handle: Arc::new(AsyncMutex::new(None)),
+                    raw_client: Arc::new(AsyncMutex::new(None)),
                 },
             );
         if compression == CompressionMode::Gzip {
@@ -8435,8 +8492,9 @@ impl SshRuntime {
                 // UTF-8 找不到字节名文件——走裸包 READ（download 分片的
                 // raw_read_chunk 同款：整条 unescape 后裸包 OPEN/READ）。
                 match self
-                    .raw_read_chunk(
+                    .raw_read_chunk_cached(
                         &download.session_id,
+                        &download.raw_client,
                         &file.remote_path,
                         tree.current_offset,
                         requested as u32,
@@ -8671,8 +8729,9 @@ impl SshRuntime {
         // 每 chunk 独立 open/close：转义名是极少数派，简单性优先。raw EOF
         // 回空 chunk，与高层路径的 eof 语义一致。
         let chunk = if download.latin1 && sftp_name::has_wire_escapes(&download.remote_path) {
-            self.raw_read_chunk(
+            self.raw_read_chunk_cached(
                 &download.session_id,
+                &download.raw_client,
                 &download.remote_path,
                 offset,
                 requested as u32,
@@ -11736,21 +11795,41 @@ fn directory_tracking_marker(session_id: &str) -> Vec<u8> {
 /// Decodes one terminal output frame for the text observers, carrying an
 /// incomplete multi-byte UTF-8 tail over to the next call. Returns the lossy
 /// decoding of the longest decodable prefix; the tail bytes wait in `carry`.
-/// A carry longer than the max UTF-8 sequence length means the stream is not
-/// valid UTF-8 there — flush it lossily instead of stalling forever.
+/// `error_len() == None` only happens with ≤3 bytes left, so the carry stays
+/// bounded by construction; invalid sequences are flushed lossily right away
+/// (one U+FFFD per maximal invalid subsequence, same output as a whole-buffer
+/// `from_utf8_lossy`) so a non-UTF-8 stream keeps flowing instead of stalling.
+/// 不设长度阈值：大帧（现实 SSH 数据帧普遍远超 8 字节）尾部残缺字符同样
+/// 跨帧拼装，否则逐帧独立 lossy 会把字符劈成双 U+FFFD（见读循环处注释）。
 fn decode_stream_text(carry: &mut Vec<u8>, data: &[u8]) -> String {
     carry.extend_from_slice(data);
-    if carry.len() > 8 {
-        let text = String::from_utf8_lossy(carry).into_owned();
-        carry.clear();
-        return text;
+    let mut text = String::new();
+    loop {
+        match std::str::from_utf8(carry) {
+            Ok(valid) => {
+                text.push_str(valid);
+                carry.clear();
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    text.push_str(std::str::from_utf8(&carry[..valid]).expect("validated prefix"));
+                    carry.drain(..valid);
+                    continue;
+                }
+                match error.error_len() {
+                    // 残缺尾部：等下一帧拼字。
+                    None => break,
+                    // 非法序列：按最大子序列立即冲刷，残量不滞留。
+                    Some(invalid_len) => {
+                        text.push('\u{FFFD}');
+                        carry.drain(..invalid_len);
+                    }
+                }
+            }
+        }
     }
-    let valid = match std::str::from_utf8(carry) {
-        Ok(_) => carry.len(),
-        Err(error) => error.valid_up_to(),
-    };
-    let text = String::from_utf8_lossy(&carry[..valid]).into_owned();
-    carry.drain(..valid);
     text
 }
 
@@ -13234,6 +13313,27 @@ matrix-ed25519";
         assert!(effective_sudo_profile(&ghost, &store).is_none());
     }
 
+    /// 宿主对 connection/action 响应的校验：整体可为 null / 字符串 / 对象，
+    /// 但对象里的 `fieldValues` 一旦出现就必须是 object——显式置 null 会被
+    /// 宿主以 "Plugin connection action fieldValues must be an object" 拒掉，
+    /// 表单按钮直接报错。摘要动作没有字段要回填，只能省略该键。
+    #[test]
+    fn connection_action_summary_omits_field_values_instead_of_null() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let runtime = SshRuntime::new(data_dir.path().to_path_buf());
+        let summary = runtime.profiles_action_summary(None);
+        assert!(
+            summary["message"].is_string(),
+            "host requires a string message: {summary}"
+        );
+        if let Some(field_values) = summary.get("fieldValues") {
+            assert!(
+                field_values.is_object(),
+                "host rejects a null fieldValues: {summary}"
+            );
+        }
+    }
+
     /// Stress test: 5 MiB of continuous terminal output through the 2 MiB
     /// ring buffer. The buffer must stay pinned at the cap, keep sequence
     /// addressing contiguous (so replay `complete` stays exact), and hand
@@ -13565,7 +13665,20 @@ matrix-ed25519";
         let part2 = decode_stream_text(&mut carry, &bytes[1..]);
         assert_eq!(part2, "中");
         assert!(carry.is_empty());
-        // 非法字节流不能永久滞留：超上限按 lossy 冲刷。
+        // 大帧（>8 字节，现实 SSH 数据帧形态）尾部残缺字符同样跨帧拼装：
+        // 旧实现对 >8 的 carry 整体 lossy 清仓，会把这里劈成双 U+FFFD。
+        let mut carry: Vec<u8> = Vec::new();
+        let filler = "a".repeat(16);
+        let mut frame = filler.clone().into_bytes();
+        let han = "中".as_bytes();
+        frame.extend_from_slice(&han[..1]);
+        let part1 = decode_stream_text(&mut carry, &frame);
+        assert_eq!(part1, filler);
+        assert_eq!(carry, &han[..1]);
+        let part2 = decode_stream_text(&mut carry, &han[1..]);
+        assert_eq!(part2, "中");
+        assert!(carry.is_empty());
+        // 非法字节流不能永久滞留：按最大非法子序列立即 lossy 冲刷。
         let mut carry: Vec<u8> = Vec::new();
         let flushed = decode_stream_text(
             &mut carry,
@@ -13573,6 +13686,11 @@ matrix-ed25519";
         );
         assert!(flushed.contains('\u{FFFD}'));
         assert!(flushed.ends_with('A'));
+        assert!(carry.is_empty());
+        // 非法字节大帧同样不滞留：逐子序列冲刷后 carry 为空。
+        let mut carry: Vec<u8> = Vec::new();
+        let flushed = decode_stream_text(&mut carry, &[0xFF; 16]);
+        assert_eq!(flushed, "\u{FFFD}".repeat(16));
         assert!(carry.is_empty());
     }
 
@@ -14105,6 +14223,7 @@ matrix-ed25519";
                 final_dir: None,
                 overwrite: false,
                 read_handle: Arc::new(AsyncMutex::new(None)),
+                raw_client: Arc::new(AsyncMutex::new(None)),
             },
         );
         let no_connection = |_: &str| String::new();
@@ -14214,6 +14333,7 @@ matrix-ed25519";
                     final_dir: None,
                     overwrite: false,
                     read_handle: Arc::new(AsyncMutex::new(None)),
+                    raw_client: Arc::new(AsyncMutex::new(None)),
                 },
             );
         }

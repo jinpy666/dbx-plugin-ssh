@@ -266,7 +266,7 @@ watch(
     <component :is="props.standalone ? 'section' : DialogContent" class="modal forwards-modal" :class="{ 'forwards-modal--standalone': props.standalone, 'forwards-modal--manager': props.independent }" @escape-key-down.prevent>
       <header>
         <component :is="props.standalone ? 'h1' : DialogTitle">{{ t("forwards.title") }}</component>
-        <button v-if="!props.standalone" :title="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
+        <button v-if="!props.standalone" :title="t('close')" :aria-label="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button>
       </header>
       <div class="forwards-body">
         <section v-if="props.independent" class="forward-profiles">
@@ -277,7 +277,7 @@ watch(
               <span class="forward-kind" :class="`forward-kind--${profile.kind}`">{{ t(`forwards.${profile.kind}`) }}</span>
               <span class="forward-route">{{ profileRoute(profile) }}</span>
               <button type="button" class="primary-button" :disabled="startingSaved || !!forwardsBusyId" @click="toggleProfile(profile)">{{ t(runningForward(profile) ? "forwards.stop" : "forwards.startSaved") }}</button>
-              <button type="button" class="forward-stop" :title="t('forwards.deleteSaved')" @click="removeProfile(profile.id)"><X /></button>
+              <button type="button" class="forward-stop" :title="t('forwards.deleteSaved')" :aria-label="t('forwards.deleteSaved')" @click="removeProfile(profile.id)"><X /></button>
             </li>
           </ul>
           <p v-if="savedMessage" class="forward-form-hint" role="status">{{ savedMessage }}</p>
@@ -293,7 +293,7 @@ watch(
             <span class="forward-stats" :title="t('forwards.statsTitle')">
               {{ row.connectionsActive }}/{{ row.connectionsTotal }} · ↑{{ formatForwardBytes(row.bytesUp) }} ↓{{ formatForwardBytes(row.bytesDown) }}
             </span>
-            <button class="forward-stop" :title="t('forwards.stop')" :disabled="forwardsBusyId !== null" @click="stopForward(row.id)"><Square v-if="forwardsBusyId === row.id" /><X v-else /></button>
+            <button class="forward-stop" :title="t('forwards.stop')" :aria-label="t('forwards.stop')" :disabled="forwardsBusyId !== null" @click="stopForward(row.id)"><Square v-if="forwardsBusyId === row.id" /><X v-else /></button>
           </li>
         </ul>
         <form class="forward-form" @submit.prevent="submitForward">

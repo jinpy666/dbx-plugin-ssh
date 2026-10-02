@@ -496,7 +496,10 @@ pub async fn write_file(
     if data.is_empty() {
         // `chunks` yields nothing for empty input; create the empty file once.
         let command = format!(": > {part_quoted} && {keep_mode} && {finalize}");
-        sudo_exec(runtime, session_id, &command, TIMEOUT_WRITE_SECS).await?;
+        if let Err(error) = sudo_exec(runtime, session_id, &command, TIMEOUT_WRITE_SECS).await {
+            cleanup_part(runtime, session_id, &part_quoted).await;
+            return Err(error);
+        }
         return Ok(());
     }
     for (index, chunk) in data.chunks(WRITE_CHUNK_BYTES).enumerate() {
@@ -509,19 +512,29 @@ pub async fn write_file(
         );
         if let Err(error) = sudo_exec(runtime, session_id, &command, TIMEOUT_WRITE_SECS).await {
             // 清理暂存；目标文件保持原样。
-            let _ = sudo_exec(
-                runtime,
-                session_id,
-                &format!("rm -f -- {part_quoted}"),
-                TIMEOUT_QUICK_SECS,
-            )
-            .await;
+            cleanup_part(runtime, session_id, &part_quoted).await;
             return Err(error);
         }
     }
     let command = format!("{keep_mode} && {finalize}");
-    sudo_exec(runtime, session_id, &command, TIMEOUT_WRITE_SECS).await?;
+    if let Err(error) = sudo_exec(runtime, session_id, &command, TIMEOUT_WRITE_SECS).await {
+        // finalize 失败（sudo 时间戳过期、连接断开）同样清理暂存：与分块
+        // 错误路径对称，不在远端残留 uuid 命名的 part 文件。
+        cleanup_part(runtime, session_id, &part_quoted).await;
+        return Err(error);
+    }
     Ok(())
+}
+
+/// Best-effort 清理 sudo 写入的远端暂存件（清理失败静默——错误主线优先）。
+async fn cleanup_part(runtime: &SshRuntime, session_id: &str, part_quoted: &str) {
+    let _ = sudo_exec(
+        runtime,
+        session_id,
+        &format!("rm -f -- {part_quoted}"),
+        TIMEOUT_QUICK_SECS,
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------

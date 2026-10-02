@@ -104,8 +104,8 @@ function deleteRule(id: string) {
           <label class="highlight-switch-control" :title="t('highlightRules.enabled')">
             <input type="checkbox" :checked="item.enabled" @change="emit('toggle', item)" />
           </label>
-          <button class="icon-button" :title="t('quickCommandsEdit')" @click="editRule(item)"><Pencil /></button>
-          <button class="icon-button" :title="t('delete')" @click="deleteRule(item.id)"><Trash2 /></button>
+          <button class="icon-button" :title="t('quickCommandsEdit')" :aria-label="t('quickCommandsEdit')" @click="editRule(item)"><Pencil /></button>
+          <button class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="deleteRule(item.id)"><Trash2 /></button>
         </span>
       </div>
     </div>

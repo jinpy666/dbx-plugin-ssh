@@ -190,7 +190,7 @@ watch(recording, (value, _previous, onCleanup) => {
               type="button"
               class="hotkey-chip"
               :class="{ recording: isRecording(action.id, index), conflict: conflictTitle(combo, action.id) !== '' }"
-              :title="isRecording(action.id, index) ? t('terminalHotkeys.hint') : conflictTitle(combo, action.id)"
+              :title="isRecording(action.id, index) ? t('terminalHotkeys.hint') : conflictTitle(combo, action.id)" :aria-label="isRecording(action.id, index) ? t('terminalHotkeys.hint') : conflictTitle(combo, action.id)"
               @click="startRecording(action.id, index)"
             >
               {{ isRecording(action.id, index) ? t("terminalHotkeys.record") : formatHotkeyDisplay(combo, applePlatform) }}

@@ -105,7 +105,7 @@ onBeforeUnmount(() => window.clearTimeout(copiedTimer));
         <input v-model="search" type="text" spellcheck="false" :placeholder="t('jsonPreview.searchPlaceholder')" :aria-label="t('jsonPreview.searchPlaceholder')" />
         <span class="json-preview-count">{{ fieldCountText }}</span>
       </label>
-      <button type="button" class="json-preview-copy-all" :title="t('jsonPreview.copyAll')" @click="copyAll">
+      <button type="button" class="json-preview-copy-all" :title="t('jsonPreview.copyAll')" :aria-label="t('jsonPreview.copyAll')" @click="copyAll">
         <Check v-if="copiedKey === 'all'" class="json-preview-copied" />
         <Copy v-else />
         {{ failedKey === "all" ? t("jsonPreview.copyFailed") : copiedKey === "all" ? t("jsonPreview.copied") : t("jsonPreview.copyAll") }}
@@ -118,7 +118,7 @@ onBeforeUnmount(() => window.clearTimeout(copiedTimer));
         <div v-for="field in filteredFields" :key="field.path" class="json-field-row" role="listitem">
           <div class="json-field-line">
             <span class="json-field-path" :title="field.path">{{ field.path }}</span>
-            <button type="button" class="json-field-copy" :title="copiedKey === `path:${field.path}` ? t('jsonPreview.copied') : t('jsonPreview.copyPath')" @click="copyFieldPath(field)">
+            <button type="button" class="json-field-copy" :title="copiedKey === `path:${field.path}` ? t('jsonPreview.copied') : t('jsonPreview.copyPath')" :aria-label="copiedKey === `path:${field.path}` ? t('jsonPreview.copied') : t('jsonPreview.copyPath')" @click="copyFieldPath(field)">
               <Check v-if="copiedKey === `path:${field.path}`" class="json-preview-copied" />
               <Copy v-else />
             </button>
@@ -126,7 +126,7 @@ onBeforeUnmount(() => window.clearTimeout(copiedTimer));
           <div class="json-field-line">
             <span class="json-field-value" :title="field.value">{{ field.value }}</span>
             <span class="json-field-type" :data-type="field.type">{{ field.type }}</span>
-            <button type="button" class="json-field-copy" :title="copiedKey === `value:${field.path}` ? t('jsonPreview.copied') : t('jsonPreview.copyValue')" @click="copyField(field)">
+            <button type="button" class="json-field-copy" :title="copiedKey === `value:${field.path}` ? t('jsonPreview.copied') : t('jsonPreview.copyValue')" :aria-label="copiedKey === `value:${field.path}` ? t('jsonPreview.copied') : t('jsonPreview.copyValue')" @click="copyField(field)">
               <Check v-if="copiedKey === `value:${field.path}`" class="json-preview-copied" />
               <Copy v-else />
             </button>

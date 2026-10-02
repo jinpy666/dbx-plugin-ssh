@@ -62,11 +62,34 @@ for (const source of collectFrontendSources(join(root, "frontend/src"))) {
   }
 }
 
-// docs/PROTOCOL.zh-CN.md 的方法条目（列表项反引号开头的 RPC 名）。
+// docs/PROTOCOL.zh-CN.md 的方法条目，两种形态都要认：
+//   ① RPC 总表已改为表格行，方法在第一列（`、` 分隔同族多方法，后续条目
+//      可省略域名前缀——`ssh/recording/start`、`stop` = ssh/recording/stop）。
+//      只取第一列，描述单元格里内嵌提及的方法名不计为已记载。
+//   ② 详情小节仍是列表项 `- \`method\``。
+// 旧版只匹配 ②，表格改版后恒报 160 条 report-only 误报，护栏失效。
 const docsSrc = readFileSync(join(root, "docs/PROTOCOL.zh-CN.md"), "utf8");
 const docMethods = new Set();
-for (const m of docsSrc.matchAll(new RegExp(`^- \\\`(${METHOD_PATTERN})\\\``, "gm"))) {
-  docMethods.add(m[1]);
+const FULL_METHOD_RE = new RegExp(`^${METHOD_PATTERN}$`);
+const TOKEN_RE = /`([^`]+)`/g;
+for (const line of docsSrc.split("\n")) {
+  if (line.startsWith("|")) {
+    const methodCell = line.split("|")[1] ?? "";
+    let familyPrefix = "";
+    for (const m of methodCell.matchAll(TOKEN_RE)) {
+      const token = m[1].trim();
+      if (FULL_METHOD_RE.test(token)) {
+        docMethods.add(token);
+        familyPrefix = token.slice(0, token.lastIndexOf("/") + 1);
+      } else if (familyPrefix && /^[a-z0-9_-]+$/.test(token)) {
+        docMethods.add(familyPrefix + token);
+      }
+    }
+  } else if (line.startsWith("- ")) {
+    for (const m of line.matchAll(new RegExp(`^- \\\`(${METHOD_PATTERN})\\\``, "gm"))) {
+      docMethods.add(m[1]);
+    }
+  }
 }
 
 // mock 未实现、但调用方依赖默认成功语义的方法（默认分支已改为 throw）。

@@ -88,7 +88,7 @@ const atDriveRoot = computed(() => !!current.value && !current.value.parent);
     <DialogContent class="modal folder-picker-modal" @escape-key-down.prevent>
       <header>
         <DialogTitle>{{ t("folderPicker.title") }}</DialogTitle>
-        <button :title="t('close')" class="icon-button" @click="emit('close')"><X /></button>
+        <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="emit('close')"><X /></button>
       </header>
       <div class="folder-picker-path">
         <input

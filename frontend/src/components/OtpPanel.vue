@@ -379,10 +379,10 @@ onBeforeUnmount(() => {
   <div class="otp-panel">
     <div class="otp-toolbar">
       <button type="button" class="otp-add" @click="openCreate"><Plus />{{ t("otpPanel.add") }}</button>
-      <button type="button" class="icon-button" :title="t('otpPanel.scanQr')" :disabled="qrBusy" @click="qrInput?.click()">
+      <button type="button" class="icon-button" :title="t('otpPanel.scanQr')" :aria-label="t('otpPanel.scanQr')" :disabled="qrBusy" @click="qrInput?.click()">
         <Loader2 v-if="qrBusy" class="spinning" /><QrCode v-else />
       </button>
-      <button type="button" class="icon-button" :title="t('otpPanel.refresh')" :disabled="loading" @click="() => { void refresh().then(() => generateAllTotp()); }">
+      <button type="button" class="icon-button" :title="t('otpPanel.refresh')" :aria-label="t('otpPanel.refresh')" :disabled="loading" @click="() => { void refresh().then(() => generateAllTotp()); }">
         <RefreshCw />
       </button>
       <input ref="qrInput" type="file" accept="image/*" class="otp-file-input" @change="onQrFileChange" />
@@ -418,25 +418,25 @@ onBeforeUnmount(() => {
         </template>
 
         <div class="otp-actions">
-          <button type="button" class="icon-button" :title="copiedId === entry.id ? t('otpPanel.copied') : t('otpPanel.copy')" :disabled="!codes[entry.id]?.code" @click="() => void copyCode(entry)">
+          <button type="button" class="icon-button" :title="copiedId === entry.id ? t('otpPanel.copied') : t('otpPanel.copy')" :aria-label="copiedId === entry.id ? t('otpPanel.copied') : t('otpPanel.copy')" :disabled="!codes[entry.id]?.code" @click="() => void copyCode(entry)">
             <Check v-if="copiedId === entry.id" /><Copy v-else />
           </button>
-          <button type="button" class="icon-button" :title="sentId === entry.id ? t('otpPanel.sent') : t('otpPanel.send')" :disabled="!codes[entry.id]?.code" @click="() => void sendCode(entry)">
+          <button type="button" class="icon-button" :title="sentId === entry.id ? t('otpPanel.sent') : t('otpPanel.send')" :aria-label="sentId === entry.id ? t('otpPanel.sent') : t('otpPanel.send')" :disabled="!codes[entry.id]?.code" @click="() => void sendCode(entry)">
             <Send />
           </button>
-          <button type="button" class="icon-button" :title="t('otpPanel.bind')" @click="bindOpen[entry.id] = !bindOpen[entry.id]">
+          <button type="button" class="icon-button" :title="t('otpPanel.bind')" :aria-label="t('otpPanel.bind')" @click="bindOpen[entry.id] = !bindOpen[entry.id]">
             <Link2 />
           </button>
           <span class="otp-actions-spacer" />
-          <button type="button" class="icon-button" :title="t('otpPanel.edit')" @click="openEdit(entry)"><Pencil /></button>
-          <button type="button" class="icon-button" :title="t('otpPanel.delete')" @click="deleteTarget = entry"><Trash2 /></button>
+          <button type="button" class="icon-button" :title="t('otpPanel.edit')" :aria-label="t('otpPanel.edit')" @click="openEdit(entry)"><Pencil /></button>
+          <button type="button" class="icon-button" :title="t('otpPanel.delete')" :aria-label="t('otpPanel.delete')" @click="deleteTarget = entry"><Trash2 /></button>
         </div>
 
         <div v-if="bindOpen[entry.id]" class="otp-bind">
           <p v-if="!boundConnectionsOf(bindings, entry.id).length" class="otp-bind-none">{{ t("otpPanel.bindNone") }}</p>
           <div v-for="connectionId in boundConnectionsOf(bindings, entry.id)" :key="connectionId" class="otp-bind-row">
             <span class="otp-bind-target" :title="connectionId">{{ connectionName(connectionId) }}</span>
-            <button type="button" class="icon-button" :title="t('otpPanel.unbind')" @click="() => void unbindConnection(connectionId)"><Unlink /></button>
+            <button type="button" class="icon-button" :title="t('otpPanel.unbind')" :aria-label="t('otpPanel.unbind')" @click="() => void unbindConnection(connectionId)"><Unlink /></button>
           </div>
           <div v-if="connections.length" class="otp-bind-pick">
             <Select :model-value="bindPick[entry.id] || undefined" @update:model-value="(value) => { bindPick[entry.id] = typeof value === 'string' ? value : ''; }">
@@ -466,7 +466,7 @@ onBeforeUnmount(() => {
       <DialogContent class="modal otp-editor-modal" @escape-key-down.prevent>
         <header>
           <DialogTitle>{{ editor.draft.id ? t("otpPanel.editor.edit") : t("otpPanel.editor.add") }}</DialogTitle>
-          <button type="button" class="icon-button" :title="t('otpPanel.editor.cancel')" @click="editor.open = false"><X /></button>
+          <button type="button" class="icon-button" :title="t('otpPanel.editor.cancel')" :aria-label="t('otpPanel.editor.cancel')" @click="editor.open = false"><X /></button>
         </header>
         <form class="otp-editor" @submit.prevent="() => void saveDraft()">
           <div class="otp-editor-row">
@@ -484,7 +484,7 @@ onBeforeUnmount(() => {
           <label class="otp-editor-field">
             <span class="otp-editor-secret-label">
               {{ t("otpPanel.editor.secret") }}
-              <button type="button" class="icon-button" :title="editor.showSecret ? t('otpPanel.editor.hide') : t('otpPanel.editor.show')" @click="editor.showSecret = !editor.showSecret">
+              <button type="button" class="icon-button" :title="editor.showSecret ? t('otpPanel.editor.hide') : t('otpPanel.editor.show')" :aria-label="editor.showSecret ? t('otpPanel.editor.hide') : t('otpPanel.editor.show')" @click="editor.showSecret = !editor.showSecret">
                 <EyeOff v-if="editor.showSecret" /><Eye v-else />
               </button>
             </span>

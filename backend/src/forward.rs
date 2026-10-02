@@ -437,22 +437,9 @@ async fn accept_loop(
                 } else {
                     tokio::spawn(relay_local(entry.clone(), handle.clone(), tcp, peer))
                 };
-                retain_live_relays(&entry);
-                let mut relays = entry
-                    .relays
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
-                if entry.stopping.load(Ordering::Relaxed) {
-                    // stop 已 drain 过 relays：这个句柄再 push 也无人 abort，
-                    // 该连接会躲过停止继续搬运流量。锁内复查关闭竞态窗口，
-                    // 自行 abort 并回冲计数（被 abort 的任务不会再走
-                    // note_relay_end）。
-                    drop(relays);
-                    relay.abort();
-                    note_relay_end(&entry);
+                if track_relay(&entry, relay) {
                     return;
                 }
-                relays.push(relay.abort_handle());
             }
             Err(error) => {
                 set_state(
@@ -478,20 +465,39 @@ async fn relay_local(
     mut tcp: TcpStream,
     peer: SocketAddr,
 ) {
-    let channel_result = handle
-        .channel_open_direct_tcpip(
+    // 拨号也要限时（与 SOCKS5 路径同一理由）：transport 半死（TCP 活着但不
+    // 回包）时，无超时的 channel_open 会让客户端停在"连接中"，且
+    // connections_active 虚高。
+    let channel_result = tokio::time::timeout(
+        CHANNEL_OPEN_TIMEOUT,
+        handle.channel_open_direct_tcpip(
             entry.target_host.clone(),
             u32::from(entry.target_port),
             peer.ip().to_string(),
             u32::from(peer.port()),
-        )
-        .await;
+        ),
+    )
+    .await;
     let mut channel = match channel_result {
-        Ok(channel) => channel.into_stream(),
-        Err(error) => {
+        Ok(Ok(channel)) => channel.into_stream(),
+        Ok(Err(error)) => {
             note_relay_end(&entry);
             eprintln!(
                 "[ssh-forward] {} channel open failed: {error}",
+                describe(
+                    entry.kind,
+                    &entry.listen_host,
+                    bound_display(&entry),
+                    &entry.target_host,
+                    entry.target_port
+                )
+            );
+            return;
+        }
+        Err(_) => {
+            note_relay_end(&entry);
+            eprintln!(
+                "[ssh-forward] {} channel open timed out",
                 describe(
                     entry.kind,
                     &entry.listen_host,
@@ -516,6 +522,11 @@ async fn relay_local(
 }
 
 const SOCKS5_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// direct-tcpip 通道打开（拨号）限时：transport 半死（TCP 活着但不回包）时，
+/// 无超时的 channel_open 会让客户端停在"连接中"，且 connections_active 虚高。
+/// -L 与 SOCKS5(-D) 两条车道共用同一上限。
+const CHANNEL_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Negotiate the SOCKS5 no-auth CONNECT subset. The host string is passed to
 /// direct-tcpip unchanged so domain names are resolved by the SSH server.
@@ -620,7 +631,7 @@ async fn relay_dynamic(
     // 拨号也要限时：transport 半死（TCP 活着但不回包）时，无超时的
     // channel_open 会让客户端停在"连接中"，且 connections_active 虚高。
     let channel = tokio::time::timeout(
-        SOCKS5_HANDSHAKE_TIMEOUT,
+        CHANNEL_OPEN_TIMEOUT,
         handle.channel_open_direct_tcpip(
             host,
             u32::from(port),
@@ -658,14 +669,15 @@ async fn relay_dynamic(
 
 /// Relay one remote (-R) mapping connection handed over by the SSH client
 /// handler: forwarded-tcpip channel <-> TCP stream dialed from the client
-/// machine. Counters land on the same mapping row as local relays.
-pub(crate) async fn relay_remote(
+/// machine. Counters land on the same mapping row as local relays; they are
+/// taken by [`spawn_remote_relay`] before the task starts, so an abort on the
+/// stopping path can unwind them via `note_relay_end` exactly like the
+/// accept loop's relays.
+async fn relay_remote(
     entry: Arc<ForwardEntry>,
     channel: russh::Channel<russh::client::Msg>,
     mut tcp: TcpStream,
 ) {
-    entry.connections_total.fetch_add(1, Ordering::Relaxed);
-    entry.connections_active.fetch_add(1, Ordering::Relaxed);
     let mut channel = channel.into_stream();
     let (up, down) = match copy_bidirectional(&mut tcp, &mut channel).await {
         Ok((up, down)) => (up, down),
@@ -677,6 +689,41 @@ pub(crate) async fn relay_remote(
     entry.bytes_up.fetch_add(up, Ordering::Relaxed);
     entry.bytes_down.fetch_add(down, Ordering::Relaxed);
     note_relay_end(&entry);
+}
+
+/// -R 入站 relay 由 SSH 事件处理器直接 spawn（没有 accept_loop 外层）：
+/// 计数先行、句柄登记复用 [`track_relay`]，保持与 accept_loop 同一关闭竞态
+/// 语义（stop 已 drain 时自行 abort 并回冲计数）。
+pub(crate) fn spawn_remote_relay(
+    entry: Arc<ForwardEntry>,
+    channel: russh::Channel<russh::client::Msg>,
+    tcp: TcpStream,
+) {
+    entry.connections_total.fetch_add(1, Ordering::Relaxed);
+    entry.connections_active.fetch_add(1, Ordering::Relaxed);
+    let handle = tokio::spawn(relay_remote(entry.clone(), channel, tcp));
+    track_relay(&entry, handle);
+}
+
+/// spawn 后登记 relay 句柄：锁内复查 stopping——stop 已 drain 过 relays 时，
+/// 这个句柄再 push 也无人 abort，该连接会躲过停止继续搬运流量。锁内判定后
+/// 自行 abort 并回冲计数（被 abort 的任务不会再走 note_relay_end）。
+/// 返回 true 表示走了 stopping-abort 分支，调用方（accept_loop）据此终止
+/// 接受循环，让监听口随停止语义尽早关闭。
+fn track_relay(entry: &Arc<ForwardEntry>, relay: tokio::task::JoinHandle<()>) -> bool {
+    retain_live_relays(entry);
+    let mut relays = entry
+        .relays
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if entry.stopping.load(Ordering::Relaxed) {
+        drop(relays);
+        relay.abort();
+        note_relay_end(entry);
+        return true;
+    }
+    relays.push(relay.abort_handle());
+    false
 }
 
 fn note_relay_end(entry: &ForwardEntry) {

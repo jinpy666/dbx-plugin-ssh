@@ -59,9 +59,14 @@ function selectFile(entry: ListingEntry, event?: MouseEvent) {
     }
   }
   if (event?.ctrlKey || event?.metaKey) {
-    selectedUris.value = selectedUris.value.includes(entry.uri)
+    const deselecting = selectedUris.value.includes(entry.uri);
+    selectedUris.value = deselecting
       ? selectedUris.value.filter((uri) => uri !== entry.uri)
       : [...selectedUris.value, entry.uri];
+    // 取消选中的行若恰是当前行锚点，同步清掉——模板高亮是
+    // selectedPath || selectedUriSet 双条件，锚点不清会让该行在
+    // 多选计数已减一后仍保持选中样式。
+    if (deselecting && selectedPath.value === entry.uri) selectedPath.value = "";
   } else {
     selectedUris.value = [entry.uri];
   }

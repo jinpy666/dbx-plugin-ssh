@@ -754,6 +754,9 @@ def main() -> None:
         def case_connection_action_profiles():
             result = req("connection/action",
                          {"action": {"id": "quick-sudo-profiles"}, "id": connection_id})
+            # 宿主契约：fieldValues 缺省=不回填，但拒绝 null（must be an object）。
+            if "fieldValues" in result:
+                raise AssertionError(f"summary action must omit fieldValues: {json.dumps(result)[:200]}")
             message = result.get("message") or ""
             if "smoke-ops" not in message:
                 raise AssertionError(f"action message missing profile: {message[:200]}")

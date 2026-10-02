@@ -1461,7 +1461,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
     <!-- 设置主弹窗 -->
     <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
       <DialogContent class="modal settings-modal settings-nav-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("settings") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button></header>
+        <header><DialogTitle>{{ t("settings") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="emit('update:open', false)"><X /></button></header>
         <div class="settings-body">
           <div v-if="settingsLoading" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
           <div v-else-if="settingsLoadFailed" class="task-error" role="alert">
@@ -1595,7 +1595,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                   <strong>{{ scheme.name }}</strong>
                   <span class="scheme-mini-swatch" aria-hidden="true"><i v-for="(color, index) in scheme.colors.slice(0, 16)" :key="index" :style="{ background: color }" /></span>
                 </div>
-                <button class="icon-button" :title="t('terminalAppearance.importRemove')" @click="removeCustomScheme(scheme)"><Trash2 /></button>
+                <button class="icon-button" :title="t('terminalAppearance.importRemove')" :aria-label="t('terminalAppearance.importRemove')" @click="removeCustomScheme(scheme)"><Trash2 /></button>
               </li>
             </ul>
             <p class="muted">{{ t("profilesLimit", { count: appearance.customSchemes.length, limit: CUSTOM_SCHEME_LIMIT }) }}</p>
@@ -1770,8 +1770,8 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                     <span class="muted">{{ profileSummary(profile) }}</span>
                   </div>
                   <span class="settings-list-actions">
-                    <button class="icon-button" :title="t('profilesEdit')" @click="startProfileEdit(profile)"><Pencil /></button>
-                    <button class="icon-button" :title="t('profilesDelete')" @click="removeProfile(profile)"><Trash2 /></button>
+                    <button class="icon-button" :title="t('profilesEdit')" :aria-label="t('profilesEdit')" @click="startProfileEdit(profile)"><Pencil /></button>
+                    <button class="icon-button" :title="t('profilesDelete')" :aria-label="t('profilesDelete')" @click="removeProfile(profile)"><Trash2 /></button>
                   </span>
                 </li>
               </ul>
@@ -2175,9 +2175,9 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                     @change="updateStartupEntry(index, { delayMs: clampStartupDelayInput(($event.target as HTMLInputElement).value) })"
                   />
                   <span class="settings-list-actions">
-                    <button class="icon-button" :disabled="index === 0" :title="t('startupCommands.moveUp')" @click="moveStartupEntry(index, -1)"><ArrowUp /></button>
-                    <button class="icon-button" :disabled="index === startupCommands.length - 1" :title="t('startupCommands.moveDown')" @click="moveStartupEntry(index, 1)"><ArrowDown /></button>
-                    <button class="icon-button" :title="t('startupCommands.remove')" @click="removeStartupEntry(index)"><Trash2 /></button>
+                    <button class="icon-button" :disabled="index === 0" :title="t('startupCommands.moveUp')" :aria-label="t('startupCommands.moveUp')" @click="moveStartupEntry(index, -1)"><ArrowUp /></button>
+                    <button class="icon-button" :disabled="index === startupCommands.length - 1" :title="t('startupCommands.moveDown')" :aria-label="t('startupCommands.moveDown')" @click="moveStartupEntry(index, 1)"><ArrowDown /></button>
+                    <button class="icon-button" :title="t('startupCommands.remove')" :aria-label="t('startupCommands.remove')" @click="removeStartupEntry(index)"><Trash2 /></button>
                   </span>
                 </li>
               </ul>
@@ -2344,7 +2344,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                 <strong class="mono">{{ entry.host }}:{{ entry.port }}</strong>
                 <span class="muted">{{ entry.keyType }} · <span class="mono" :title="entry.fingerprint">{{ shortFingerprint(entry.fingerprint) }}</span></span>
               </div>
-              <button class="icon-button" :title="t('delete')" @click="removeKnownHost(entry)"><Trash2 /></button>
+              <button class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="removeKnownHost(entry)"><Trash2 /></button>
             </li>
           </ul>
 
@@ -2421,7 +2421,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
     <!-- quick sudo 配置档管理弹窗（工具栏 KeyRound 入口；与内联 section 共用草稿状态） -->
     <Dialog :open="profilesOpen" @update:open="(value) => emit('update:profilesOpen', value)">
       <DialogContent class="modal settings-modal profiles-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("profilesTitle") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="emit('update:profilesOpen', false)"><X /></button></header>
+        <header><DialogTitle>{{ t("profilesTitle") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="emit('update:profilesOpen', false)"><X /></button></header>
         <div class="settings-body">
           <p class="muted">{{ t("profilesHint") }}</p>
           <div class="profiles-toolbar">
@@ -2438,8 +2438,8 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                   <span class="muted">{{ profileSummary(profile) }}</span>
                 </div>
                 <span class="settings-list-actions">
-                  <button class="icon-button" :title="t('profilesEdit')" @click="startProfileEdit(profile)"><Pencil /></button>
-                  <button class="icon-button" :title="t('profilesDelete')" @click="removeProfile(profile)"><Trash2 /></button>
+                  <button class="icon-button" :title="t('profilesEdit')" :aria-label="t('profilesEdit')" @click="startProfileEdit(profile)"><Pencil /></button>
+                  <button class="icon-button" :title="t('profilesDelete')" :aria-label="t('profilesDelete')" @click="removeProfile(profile)"><Trash2 /></button>
                 </span>
               </li>
             </ul>

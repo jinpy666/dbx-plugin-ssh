@@ -81,10 +81,10 @@ function onTabChange(value: string | number) {
         </TabsTrigger>
       </TabsList>
       <span class="sftp-side-spacer" />
-      <button v-if="activeTab === 'tree'" type="button" :title="t('refresh')" @click="emit('refresh-tree')">
+      <button v-if="activeTab === 'tree'" type="button" :title="t('refresh')" :aria-label="t('refresh')" @click="emit('refresh-tree')">
         <RefreshCw />
       </button>
-      <button type="button" :title="t('sftpSide.collapse')" @click="emit('update:collapsed', true)">
+      <button type="button" :title="t('sftpSide.collapse')" :aria-label="t('sftpSide.collapse')" @click="emit('update:collapsed', true)">
         <ChevronsLeft />
       </button>
     </Tabs>
@@ -107,7 +107,7 @@ function onTabChange(value: string | number) {
           :key="qp.path"
           type="button"
           :class="{ 'is-current': qp.path === currentPath }"
-          :title="qp.path"
+          :title="qp.path" :aria-label="qp.path"
           @click="emit('navigate', qp.path)"
           @contextmenu="emit('node-context', { path: qp.path })"
         >
@@ -119,7 +119,7 @@ function onTabChange(value: string | number) {
     </div>
   </div>
   <div v-else class="sftp-side-rail">
-    <button type="button" :title="t('sftpSide.expand')" @click="emit('update:collapsed', false)">
+    <button type="button" :title="t('sftpSide.expand')" :aria-label="t('sftpSide.expand')" @click="emit('update:collapsed', false)">
       <ChevronsRight />
     </button>
   </div>

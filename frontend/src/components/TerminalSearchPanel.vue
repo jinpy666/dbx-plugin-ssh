@@ -102,9 +102,9 @@ onMounted(() => {
         :placeholder="t('terminalSearch.placeholder')"
         @input="emitSearch('next')"
       />
-      <button type="button" class="terminal-search-btn" :title="t('terminalSearch.prev')" @click="emitSearch('prev')"><ChevronUp /></button>
-      <button type="button" class="terminal-search-btn" :title="t('terminalSearch.next')" @click="emitSearch('next')"><ChevronDown /></button>
-      <button type="button" class="terminal-search-btn" :title="t('terminalSearch.close')" @click="emit('close')"><X /></button>
+      <button type="button" class="terminal-search-btn" :title="t('terminalSearch.prev')" :aria-label="t('terminalSearch.prev')" @click="emitSearch('prev')"><ChevronUp /></button>
+      <button type="button" class="terminal-search-btn" :title="t('terminalSearch.next')" :aria-label="t('terminalSearch.next')" @click="emitSearch('next')"><ChevronDown /></button>
+      <button type="button" class="terminal-search-btn" :title="t('terminalSearch.close')" :aria-label="t('terminalSearch.close')" @click="emit('close')"><X /></button>
     </div>
     <div class="terminal-search-options">
       <ToggleGroup v-model="toggleValues" type="multiple" class="terminal-search-toggles" :aria-label="t('terminalSearch.open')">
