@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { pluginStore } from "./pluginStore";
 import {
   compileRules,
   highlightFillStyle,
+  loadHighlightRulesFromStore,
   matchesInLine,
   normalizeHighlightRules,
+  persistHighlightRules,
   sanitizeHighlightRuleInput,
   shouldRebuildHighlightRow,
   toAbsoluteRowRange,
+  upsertHighlightRule,
   HIGHLIGHT_COLOR_DEFAULT,
   HIGHLIGHT_RULE_PATTERN_MAX,
+  HIGHLIGHT_RULES_STORE_KEY,
   type HighlightRuleView,
 } from "./keywordHighlight";
 
@@ -220,5 +225,52 @@ describe("keyword highlight row rebuild policy", () => {
   it("keeps dirty rows that were not repainted in this frame", () => {
     // 只有本帧真正重绘的行才按文本比对，否则击键时的光标行重绘会牵动全屏。
     expect(shouldRebuildHighlightRow({ ...base, dirty: false, currentText: "plain text" })).toBe(false);
+  });
+});
+
+describe("upsertHighlightRule + store-backed authority (存储迁移批 1)", () => {
+  // 本文件的 store 断言依赖顺序：未落键 → null 的断言必须在首个 persist 之前
+  // （pluginStore 模块缓存在同文件内跨用例存活，load 走缓存不回源）。
+  it("loadHighlightRulesFromStore returns null while the key is absent (seed not yet applied)", () => {
+    expect(loadHighlightRulesFromStore()).toBeNull();
+  });
+
+  it("upsert creates with a generated id/timestamps and enabled default on", () => {
+    const list = upsertHighlightRule([], { pattern: "ERROR", color: "#ff0000", isRegex: false, caseSensitive: false }, 1000);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toEqual({
+      id: expect.any(String),
+      pattern: "ERROR",
+      color: "#ff0000",
+      isRegex: false,
+      caseSensitive: false,
+      enabled: true,
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+  });
+
+  it("upsert update keeps id/createdAt, bumps updatedAt, preserves enabled unless given", () => {
+    const seed: HighlightRuleView[] = [
+      { id: "r1", pattern: "old", color: HIGHLIGHT_COLOR_DEFAULT, isRegex: false, caseSensitive: false, enabled: false, createdAt: 5, updatedAt: 5 },
+    ];
+    const edited = upsertHighlightRule(seed, { id: "r1", pattern: "new", color: "#00ff00", isRegex: true, caseSensitive: true }, 2000);
+    expect(edited[0]).toMatchObject({ id: "r1", pattern: "new", color: "#00ff00", isRegex: true, caseSensitive: true, enabled: false, createdAt: 5, updatedAt: 2000 });
+    // toggle 路径显式带 enabled。
+    const toggled = upsertHighlightRule(edited, { id: "r1", pattern: "new", color: "#00ff00", isRegex: true, caseSensitive: true, enabled: true }, 3000);
+    expect(toggled[0]?.enabled).toBe(true);
+  });
+
+  it("invalid color falls back to the default via the normalizer", () => {
+    const list = upsertHighlightRule([], { pattern: "x", color: "red", isRegex: false, caseSensitive: false }, 1);
+    expect(list[0]?.color).toBe(HIGHLIGHT_COLOR_DEFAULT);
+  });
+
+  it("persist then load round-trips and tolerates corrupt JSON as an empty list", () => {
+    const stored = persistHighlightRules(upsertHighlightRule([], { pattern: "WARN", color: HIGHLIGHT_COLOR_DEFAULT, isRegex: false, caseSensitive: false }, 1));
+    expect(loadHighlightRulesFromStore()).toEqual(stored);
+    pluginStore.setItem(HIGHLIGHT_RULES_STORE_KEY, "{broken");
+    // 键已存在（已迁移）时坏 JSON 不回退种子。
+    expect(loadHighlightRulesFromStore()).toEqual([]);
   });
 });

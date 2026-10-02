@@ -7,7 +7,14 @@
  * 解析优先级（连接覆盖 > 全局 > 缺省 auto）由 sidecar
  * `preferences::resolve_sftp_name_encoding` 权威执行，这里同名归一化仅
  * 服务于 UI 状态推导。
+ *
+ * 存储迁移批 2（IMPL_PLAN_STORAGE_SYNC）：镜像进 pluginStore（键
+ * `NAME_ENCODING_OVERRIDES_STORE_KEY`，条目值与 sidecar 同形——未覆盖存
+ * null 而非控件态 "follow"，垃圾条目归一为 null 不会误删 sidecar 覆盖）。
  */
+
+/** 镜像键：`Record<connectionId, NameEncodingOverride | null>`（null = 跟随全局）。 */
+export const NAME_ENCODING_OVERRIDES_STORE_KEY = "ssh-name-encoding-overrides";
 
 /** 覆盖桶上限（与 sidecar `SFTP_NAME_ENCODING_OVERRIDES_MAX_CONNECTIONS` 一致）。 */
 export const SFTP_NAME_ENCODING_OVERRIDES_MAX = 512;

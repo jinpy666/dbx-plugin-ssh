@@ -1,9 +1,14 @@
 // 终端关键词高亮（terminal keyword highlight）前端契约：类型 + 纯函数，零 xterm 依赖。
 // 协议来源：ssh/docs/IMPL_PLAN_NETCATTY_PARITY.zh-CN.md §1.1 / §3-B1。
-// sidecar `ssh/highlightRules/*` 负责存储与形状校验（regex 合法性明确不在后端
-// 校验），本模块负责：规则 → 正则编译（plain 元字符转义、非法 regex 静默丢弃、
-// 长词优先排序）、单行命中计算（重叠先到先得、单行上限）、保存前输入校验
-// （返回 i18n error key）。装饰注册（xterm decorations）留在 App.vue 接线层。
+// 权威存储 pluginStore（宿主 ui-storage.json，随 DBX secrets 同步加密上云；
+// IMPL_PLAN_STORAGE_SYNC 批 1），sidecar `ssh/highlightRules/*` 仅作一次性
+// 迁移种子。本模块负责：权威清单存取与 upsert、规则 → 正则编译（plain
+// 元字符转义、非法 regex 静默丢弃、长词优先排序）、单行命中计算（重叠先到
+// 先得、单行上限）、保存前输入校验（返回 i18n error key）。装饰注册（xterm
+// decorations）留在 App.vue 接线层。
+
+import { pluginStore } from "./pluginStore";
+import { randomUUID } from "./uuid";
 
 /** `ssh/highlightRules/*` 下发的规则视图字段（§1.1 契约，全 camelCase）。 */
 export interface HighlightRuleView {
@@ -141,6 +146,75 @@ export function normalizeHighlightRules(raw: unknown, limit = HIGHLIGHT_RULES_LI
     if (out.length >= limit) break;
   }
   return out;
+}
+
+/** pluginStore 权威键（IMPL_PLAN_STORAGE_SYNC 批 1）。 */
+export const HIGHLIGHT_RULES_STORE_KEY = "ssh-highlight-rules";
+
+/**
+ * 从 pluginStore 读权威清单；返回 null 表示键尚不存在（未迁移，调用方应走
+ * sidecar 种子搬迁）。存在但为空数组是合法用户态（已清空），不触发搬迁。
+ */
+export function loadHighlightRulesFromStore(): HighlightRuleView[] | null {
+  try {
+    const raw = pluginStore.getItem(HIGHLIGHT_RULES_STORE_KEY);
+    if (raw === null) return null;
+    return normalizeHighlightRules(JSON.parse(raw));
+  } catch {
+    // 坏 JSON 视为空清单：不回退种子（键已存在 = 已迁移，避免复活旧数据）。
+    return [];
+  }
+}
+
+/** 全量写穿 pluginStore（空数组同样落键，标记"已迁移"）。 */
+export function persistHighlightRules(list: readonly HighlightRuleView[]): HighlightRuleView[] {
+  const normalized = normalizeHighlightRules(list);
+  try {
+    pluginStore.setItem(HIGHLIGHT_RULES_STORE_KEY, JSON.stringify(normalized));
+  } catch {
+    // 持久化失败不阻断：本次会话内存态仍生效。
+  }
+  return normalized;
+}
+
+/** upsert 入参：id 空缺表示新建（生成 id/时间戳）；enabled 缺省沿用旧值（新建为开）。 */
+export interface HighlightRuleUpsertInput {
+  id?: string;
+  pattern: string;
+  color: string;
+  isRegex: boolean;
+  caseSensitive: boolean;
+  enabled?: boolean;
+}
+
+/**
+ * 新建或按 id 更新：更新保留原 id/createdAt、刷新 updatedAt；enabled 未显式
+ * 给出时沿用现值（编辑不动启停位，toggle 才显式传）。经 normalizeHighlightRules
+ * 收紧字段（颜色容错、去重、上限）。
+ */
+export function upsertHighlightRule(
+  list: readonly HighlightRuleView[],
+  input: HighlightRuleUpsertInput,
+  now = Date.now(),
+): HighlightRuleView[] {
+  const existing = input.id ? list.find((rule) => rule.id === input.id) : undefined;
+  const row = {
+    id: existing?.id ?? input.id ?? randomUUID(),
+    pattern: input.pattern,
+    color: input.color,
+    isRegex: input.isRegex === true,
+    caseSensitive: input.caseSensitive === true,
+    enabled: input.enabled ?? existing?.enabled ?? true,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+  const entry = normalizeHighlightRules([row])[0];
+  if (!entry) return [...list];
+  const index = list.findIndex((rule) => rule.id === entry.id);
+  if (index < 0) return normalizeHighlightRules([...list, entry]);
+  const next = [...list];
+  next[index] = entry;
+  return normalizeHighlightRules(next);
 }
 
 /**

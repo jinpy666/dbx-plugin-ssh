@@ -1,10 +1,20 @@
 import { ref, type Ref } from "vue";
 import type { Terminal } from "@xterm/xterm";
-import { normalizeQuickCommands, quickCommandText, type QuickCommand } from "../lib/quickCommands";
+import {
+  loadQuickCommandsFromStore,
+  normalizeQuickCommands,
+  persistQuickCommands,
+  quickCommandText,
+  upsertQuickCommand,
+  type QuickCommand,
+} from "../lib/quickCommands";
+import { randomUUID } from "../lib/uuid";
 
-/** 快速命令数据面（M32-A3）：全局存储（sidecar 数据目录）CRUD + PTY 一键发送语义。
- * localStorage 旧键仅作为一次性迁移种子；编辑器/导入视图在 QuickCommandsSection
- * （设置·终端），经 SettingsDialog 上抛意图；工具栏下拉状态仍在 App.vue。 */
+/** 快速命令数据面（M32-A3 → 存储迁移批 1）：权威在 pluginStore（宿主
+ * ui-storage.json，随 DBX secrets 同步加密上云）；sidecar
+ * ssh/quickCommands/* 仅作首次运行的一次性搬迁种子（键缺失才搬，避免复活
+ * 已清空清单）。编辑器/导入视图在 QuickCommandsSection（设置·终端），经
+ * SettingsDialog 上抛意图；工具栏下拉状态仍在 App.vue。 */
 export function useQuickCommands(options: {
   t: (key: string, values?: Record<string, string | number>) => string;
   showNotice: (message: string) => void;
@@ -16,63 +26,33 @@ export function useQuickCommands(options: {
   trackPendingInput: (data: string) => void;
   sendTerminalBytes: (data: Uint8Array) => void;
 }) {
-  const { t, showNotice, showError, session, commandRunning, terminalTransferBusy, terminal: terminalGet, trackPendingInput, sendTerminalBytes } = options;
-
-// 快速命令旧键：迁移到 sidecar 全局存储后仅作一次性迁移种子。
-const QUICK_COMMANDS_KEY = "ssh-quick-commands";
-
+  const { t, showNotice, session, commandRunning, terminalTransferBusy, terminal: terminalGet, trackPendingInput, sendTerminalBytes } = options;
 
 // 快速命令：用户自定义片段（≤20 条）。
-const quickCommands = ref<QuickCommand[]>(loadQuickCommands());
+const quickCommands = ref<QuickCommand[]>([]);
 // 管理视图在途态（saving/importing 作为在途态传给设置节）。
 const quickSaving = ref(false);
 const quickImportBusy = ref(false);
 
-// localStorage 旧键仅作为一次性迁移种子：宿主 webview 存储按工作台分区，
-// 旧数据表现为"和连接绑定"，迁移到 sidecar 后才真正全局共享。
-function loadQuickCommands(): QuickCommand[] {
-  try {
-    return normalizeQuickCommands(JSON.parse(window.localStorage.getItem(QUICK_COMMANDS_KEY) || "null"));
-  } catch {
-    return [];
-  }
-}
-
-// 挂载时从后端拉取全局清单；后端为空且本工作台有旧 localStorage 数据时一次性
-// 迁移（逐条 save 后清除本地键）。后端不可用时保留本地/内存值兜底。
+// 水合顺序：pluginStore 权威值（host 档存量，含适配器从同名 localStorage 旧键
+// 惰性搬家的值）→ 键缺失时从 sidecar 一次性搬迁（含空清单也要落键，标记
+// "已迁移"）→ sidecar 不可用（旧版/降级）保留内存态兜底。
 async function hydrateQuickCommands() {
+  const stored = loadQuickCommandsFromStore();
+  if (stored !== null) {
+    quickCommands.value = stored;
+    return;
+  }
   try {
-    let response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/list");
-    let commands = normalizeQuickCommands(response.commands);
-    if (!commands.length) {
-      const legacy = loadQuickCommands();
-      for (const item of legacy) {
-        await window.dbxPlugin.invoke("ssh/quickCommands/save", { id: "", name: item.name, command: item.command }).catch(() => undefined);
-      }
-      if (legacy.length) {
-        response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/list");
-        commands = normalizeQuickCommands(response.commands);
-        try {
-          window.localStorage.removeItem(QUICK_COMMANDS_KEY);
-        } catch {
-          // 清理失败只影响下次空跑迁移，不影响功能。
-        }
-      }
-    }
-    quickCommands.value = commands;
+    const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/list");
+    quickCommands.value = persistQuickCommands(normalizeQuickCommands(response.commands));
   } catch {
-    // 后端不可用（如旧版 sidecar）：保留 localStorage/内存值，行为回到旧语义。
+    // 后端不可用（如旧版 sidecar）：键未落，下次启动重试搬迁；内存态兜底。
   }
 }
 
 async function deleteQuickCommand(id: string) {
-  // 删除确认在 QuickCommandsSection 内完成（管理视图专属交互）。
-  try {
-    const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/delete", { id });
-    quickCommands.value = normalizeQuickCommands(response.commands);
-  } catch (cause) {
-    showError(cause, "terminal");
-  }
+  quickCommands.value = persistQuickCommands(quickCommands.value.filter((item) => item.id !== id));
 }
 
 // 发送语义：快速命令是"在当前交互 shell 中执行"的片段（对齐 tiny-rdm），
@@ -107,41 +87,34 @@ function sendSudoRefresh() {
   terminalGet()?.focus();
 }
 
-/** 单条保存（新建/编辑共用）：id 为空串表示新建（后端按此区分）。 */
+/** 单条保存（新建/编辑共用）：id 缺省表示新建（前端生成 id）；名称兜底、
+ * 截断与 20 条超限丢弃最旧由 upsertQuickCommand 维持（与原后端语义一致）。 */
 async function saveQuickCommand(command: { id?: string; name: string; command: string }) {
   if (quickSaving.value) return;
   quickSaving.value = true;
   try {
-    const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/save", {
-      id: command.id ?? "",
+    const entry: QuickCommand = {
+      id: command.id ?? randomUUID(),
       name: command.name,
       command: command.command,
-    });
-    quickCommands.value = normalizeQuickCommands(response.commands);
-  } catch (cause) {
-    showError(cause, "terminal");
+    };
+    quickCommands.value = persistQuickCommands(upsertQuickCommand(quickCommands.value, entry));
   } finally {
     quickSaving.value = false;
   }
 }
 
-/** 批量导入：预览 accepted 条目逐条走既有 ssh/quickCommands/save
- *  （沿用后端 20 条上限校验），任一条失败即中止并提示已导入进度。 */
+/** 批量导入：本地逐条 upsert（超限丢最旧，与单条保存同语义）后一次性落盘。 */
 async function importQuickCommands(items: Array<{ name: string; command: string }>) {
   if (!items.length || quickImportBusy.value) return;
   quickImportBusy.value = true;
   try {
+    let next = [...quickCommands.value];
     for (const item of items) {
-      const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/save", {
-        id: "",
-        name: item.name,
-        command: item.command,
-      });
-      quickCommands.value = normalizeQuickCommands(response.commands);
+      next = upsertQuickCommand(next, { id: randomUUID(), name: item.name, command: item.command });
     }
+    quickCommands.value = persistQuickCommands(next);
     showNotice(t("quickCommandsImportDone", { count: items.length }));
-  } catch (cause) {
-    showError(cause);
   } finally {
     quickImportBusy.value = false;
   }

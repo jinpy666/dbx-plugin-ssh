@@ -120,15 +120,34 @@ import { isCountdownActive } from "./lib/recordingCountdown";
 import { type SftpTypeFilter } from "./lib/sftpFileFilters";
 import {
   defaultBookmarkLabel,
-  deleteBookmark,
   listBookmarks,
+  loadSftpBookmarksFromStore,
+  persistSftpBookmarks,
+  removeBookmark as removeBookmarkFromList,
   SFTP_BOOKMARKS_LIMIT,
   SFTP_BOOKMARK_LABEL_MAX_LENGTH,
-  saveBookmark,
-  sortBookmarksByLabel,
+  upsertBookmark,
   validateBookmarkInput,
   type SftpBookmark,
 } from "./lib/sftpBookmarks";
+import {
+  extractMcpSettingsMirror,
+  loadMcpSettingsMirror,
+  mcpSettingsMirrorEquals,
+  persistMcpSettingsMirror,
+} from "./lib/settingsModel";
+import {
+  clampSuggestionMaxChars,
+  clampSuggestionMinChars,
+  extractPreferencesMirror,
+  loadPreferencesMirror,
+  persistPreferencesMirror,
+  preferencesMirrorEquals,
+  sanitizeConflictPolicy,
+  sanitizeTransferCompressMode,
+  sanitizeTransferCompressThresholdMib,
+  type SftpCompressMode,
+} from "./lib/preferencesMirror";
 import { isPersistableCommand, mergeShellHistory, parseShellHistoryText, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
 import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
@@ -545,7 +564,6 @@ const downloadConflictState = ref<DownloadConflictPolicy>("rename");
 const sftpCompatModeState = ref(false);
 const sftpNameEncodingState = ref<SftpNameEncoding>("auto");
 // 压缩传输（M33）：策略默认 auto、阈值默认 64 MiB（0=不限下限，上限 65536）。
-type SftpCompressMode = "auto" | "on" | "off";
 const transferCompressModeState = ref<SftpCompressMode>("auto");
 const transferCompressThresholdState = ref(64);
 const suggestionsEnabledState = ref(true);
@@ -563,21 +581,8 @@ function setGhostTabAccept(value: boolean) {
   saveGhostTabAccept(value);
 }
 
-function sanitizeConflictPolicy(value: unknown): DownloadConflictPolicy {
-  return value === "ask" || value === "overwrite" ? value : "rename";
-}
-
-/** 压缩阈值 MiB 钳制（M33）：0..=65536，非法回落默认 64（与后端白名单同向）。 */
-function sanitizeTransferCompressThresholdMib(value: unknown): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 64;
-  return Math.min(65536, Math.max(0, Math.floor(parsed)));
-}
-
-/** 压缩策略三态白名单（M33）：非法回落 auto（与后端 CompressPolicy 同向）。 */
-function sanitizeTransferCompressMode(value: unknown): SftpCompressMode {
-  return value === "on" || value === "off" ? value : "auto";
-}
+// 存储迁移批 3：传输/下载/建议偏好消毒器已下沉 lib/preferencesMirror
+// （镜像 schema 同处、可单测），App 统一从那里导入。
 // Apple 平台判定（Cmd 为主修饰键）：既有的全选语义与新增的快捷键默认键位都要用，
 // 因此在此单点声明，供后面的偏好初始值与终端选项复用。
 const applePlatform = isApplePlatform();
@@ -4036,7 +4041,7 @@ const {
   toggleAgentModeMenu,
   refreshAgentMode,
   applyAgentMode,
-} = useAgentTerminalMode({ t, showError, session, sendTerminalBytes, closeToolbarPopovers });
+} = useAgentTerminalMode({ t, showError, session, connectionId: () => connectionId.value, sendTerminalBytes, closeToolbarPopovers });
 
 // 告警排查：状态与分诊交互收口在 composables/useAlertTriage。
 const {
@@ -4947,8 +4952,26 @@ async function syncPrefs() {
       history_suggestion_min_chars: suggestionMinCharsState.value,
       history_suggestion_max_chars: suggestionMaxCharsState.value,
     });
+    // 存储迁移批 3：RPC 成功即镜像同一份 14 键子集（云同步载荷；本键无设备
+    // 本地字段，localShell 等不在内）。
+    persistPreferencesMirror({
+      downloadDir: downloadDirState.value,
+      downloadUseDefaultDir: downloadUseDefaultState.value,
+      downloadConflictPolicy: downloadConflictState.value,
+      transfer_concurrency: transferConcurrencyState.value,
+      transfer_duplicate_policy: transferDuplicateState.value,
+      transfer_max_active: transferMaxActiveState.value,
+      transfer_download_limit_kib: transferDownloadLimitState.value,
+      sftp_compat_mode: sftpCompatModeState.value,
+      sftp_name_encoding: sftpNameEncodingState.value,
+      transfer_compress_mode: transferCompressModeState.value,
+      transfer_compress_threshold_mib: transferCompressThresholdState.value,
+      history_suggestions_enabled: suggestionsEnabledState.value,
+      history_suggestion_min_chars: suggestionMinCharsState.value,
+      history_suggestion_max_chars: suggestionMaxCharsState.value,
+    });
   } catch {
-    // 旧 sidecar 无此方法：本次会话内存态兜底。
+    // 旧 sidecar 无此方法：本次会话内存态兜底（镜像不写，等下次成功）。
   }
 }
 
@@ -5040,25 +5063,37 @@ async function hydratePrefsOnce() {
     // 背景图偏好：键缺省保持内存默认（关 / 45%）。
     if (typeof prefs.wallpaper_enabled === "boolean") wallpaperEnabled.value = prefs.wallpaper_enabled;
     if (prefs.wallpaper_opacity !== undefined) wallpaperOpacity.value = Math.min(90, Math.max(10, Math.round(Number(prefs.wallpaper_opacity) || 45)));
+    // 存储迁移批 3（IMPL_PLAN_STORAGE_SYNC）：14 个传输/下载偏好键的镜像——
+    // store 缺失从 sidecar 播种；漂移（云同步恢复后）则 store 赢：采纳镜像到
+    // 状态并推回 sidecar（syncPrefs）。
+    const mirrored = loadPreferencesMirror();
+    const sidecarView = extractPreferencesMirror(prefs);
+    if (mirrored === null) {
+      persistPreferencesMirror(sidecarView);
+    } else if (!preferencesMirrorEquals(mirrored, sidecarView)) {
+      downloadDirState.value = mirrored.downloadDir;
+      downloadUseDefaultState.value = mirrored.downloadUseDefaultDir;
+      downloadConflictState.value = mirrored.downloadConflictPolicy;
+      transferConcurrencyState.value = mirrored.transfer_concurrency;
+      transferDuplicateState.value = mirrored.transfer_duplicate_policy;
+      transferMaxActiveState.value = mirrored.transfer_max_active;
+      transferDownloadLimitState.value = mirrored.transfer_download_limit_kib;
+      sftpCompatModeState.value = mirrored.sftp_compat_mode;
+      sftpNameEncodingState.value = mirrored.sftp_name_encoding;
+      transferCompressModeState.value = mirrored.transfer_compress_mode;
+      transferCompressThresholdState.value = mirrored.transfer_compress_threshold_mib;
+      suggestionsEnabledState.value = mirrored.history_suggestions_enabled;
+      suggestionMinCharsState.value = mirrored.history_suggestion_min_chars;
+      suggestionMaxCharsState.value = mirrored.history_suggestion_max_chars;
+      void syncPrefs();
+    }
     cachePrefs();
   } catch {
     // 旧 sidecar：保留 localStorage 种子或默认。
   }
 }
 
-// 建议长度上下限钳制：min 1..=16（默认 2），max 8..=512（默认 64），且 max 不低于 min。
-function clampSuggestionMinChars(value: unknown): number {
-  const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(parsed)) return 2;
-  return Math.min(16, Math.max(1, Math.floor(parsed)));
-}
-
-function clampSuggestionMaxChars(value: unknown): number {
-  const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(parsed)) return 64;
-  return Math.min(512, Math.max(8, Math.floor(parsed)));
-}
-
+// 建议长度上下限钳制已下沉 lib/preferencesMirror（存储迁移批 3）。
 // 「使用默认地址」关闭时，下载/导出前弹出目录选择小窗。resolve 语义：
 // { dir, setDefault } = 用户确认（dir 空串 = 默认下载目录；setDefault =
 // 勾选了「将此次目录设为默认地址」）；undefined = 取消本次下载。
@@ -5311,12 +5346,20 @@ const {
 } = useSftpPathHistory({ connectionId, closeToolbarPopovers });
 
 // ---------------------------------------------------------------------------
-// SFTP 路径书签（全局清单）：星标收藏 + 路径弹层跳转/删除（sftp/bookmarks/*）
+// SFTP 路径书签（存储迁移批 1）：权威在 pluginStore（宿主 ui-storage.json，随
+// DBX secrets 同步加密上云）；sidecar sftp/bookmarks/list 仅作首次拉取的一次性
+// 搬迁种子。星标收藏 + 路径弹层跳转/删除。
 // ---------------------------------------------------------------------------
 
 async function refreshBookmarks() {
+  const stored = loadSftpBookmarksFromStore();
+  if (stored !== null) {
+    sftpBookmarks.value = stored;
+    return;
+  }
   try {
-    sftpBookmarks.value = sortBookmarksByLabel(await listBookmarks());
+    // 键缺失 = 未迁移：sidecar 清单（含空表）一次性搬入并落键。
+    sftpBookmarks.value = persistSftpBookmarks(await listBookmarks());
   } catch {
     // 后端未升级/读取失败时保留既有列表（optional 特性静默降级，不阻塞路径栏）。
   }
@@ -5344,13 +5387,10 @@ async function confirmBookmarkSave() {
   }
   bookmarkSaving.value = true;
   try {
-    const result = await saveBookmark(input);
-    sftpBookmarks.value = sortBookmarksByLabel([
-      ...sftpBookmarks.value.filter((item) => item.id !== result.bookmark.id),
-      result.bookmark,
-    ]);
+    const { bookmarks, bookmark } = upsertBookmark(sftpBookmarks.value, input);
+    sftpBookmarks.value = persistSftpBookmarks(bookmarks);
     bookmarkSaveOpen.value = false;
-    showNotice(t("sftpBookmark.saved", { label: result.bookmark.label }));
+    showNotice(t("sftpBookmark.saved", { label: bookmark.label }));
   } catch (cause) {
     showError(cause);
   } finally {
@@ -5359,13 +5399,8 @@ async function confirmBookmarkSave() {
 }
 
 async function removeBookmark(bookmark: SftpBookmark) {
-  try {
-    await deleteBookmark(bookmark.id);
-    sftpBookmarks.value = sftpBookmarks.value.filter((item) => item.id !== bookmark.id);
-    showNotice(t("sftpBookmark.deleted"));
-  } catch (cause) {
-    showError(cause);
-  }
+  sftpBookmarks.value = persistSftpBookmarks(removeBookmarkFromList(sftpBookmarks.value, bookmark.id));
+  showNotice(t("sftpBookmark.deleted"));
 }
 
 // 连接建立后拉取书签（全局共享，不随会话清空）；打开路径弹层时刷新兜底。
@@ -6967,6 +7002,36 @@ async function reattachProtocolSession(): Promise<boolean> {
 
 watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
 
+// ---------------------------------------------------------------------------
+// MCP 设置镜像（存储迁移批 1，IMPL_PLAN_STORAGE_SYNC）：sidecar 在 MCP serve
+// 时直接消费 mcp-settings.json，pluginStore 里只存「云同步载荷」。启动时：
+// store 缺失 → 从 sidecar persisted 值播种；存在但与 sidecar 不一致（云同步
+// 恢复后）→ 把 store 推回 sidecar。set 是部分更新，localTransferRoot 由
+// sidecar 保留，不进镜像。保存侧的双写在 SettingsDialog.saveMcpSettings。
+// ---------------------------------------------------------------------------
+
+async function syncMcpSettingsMirror() {
+  const stored = loadMcpSettingsMirror();
+  try {
+    const remote = extractMcpSettingsMirror(await window.dbxPlugin.invoke<unknown>("mcp/settings/get", {}));
+    if (stored === null) {
+      persistMcpSettingsMirror(remote);
+      return;
+    }
+    if (!mcpSettingsMirrorEquals(stored, remote)) {
+      await window.dbxPlugin.invoke("mcp/settings/set", {
+        maxReadBytes: stored.maxReadBytes,
+        maxUploadBytes: stored.maxUploadBytes,
+        maxDownloadBytes: stored.maxDownloadBytes,
+        execPermissionMode: stored.execPermissionMode,
+        connectionScope: stored.connectionScope,
+      });
+    }
+  } catch {
+    // sidecar 不可用（旧版/降级）：跳过，下次启动重试。
+  }
+}
+
 onMounted(() => {
   document.addEventListener("click", onDocumentClickCloseMenus);
   // 文件夹上传能力探测（issue #78）：webkitdirectory 非标准属性，缺失环境
@@ -6988,6 +7053,7 @@ onMounted(() => {
   hostFontObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
   void hydrateQuickCommands();
   void hydrateHighlightRules();
+  void syncMcpSettingsMirror();
   void hydratePrefs();
   void initialize().catch((cause) => {
     terminalState.value = "error";

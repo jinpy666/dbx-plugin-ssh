@@ -14,7 +14,7 @@ import {
   type BatchSendSummary,
   type BatchSendTarget,
 } from "../lib/batchSend";
-import { normalizeQuickCommands, QUICK_COMMANDS_LIMIT, type QuickCommand } from "../lib/quickCommands";
+import { persistQuickCommands, QUICK_COMMANDS_LIMIT, type QuickCommand } from "../lib/quickCommands";
 
 /** 批量发送命令条（Electerm quick-command bar 风格）：常驻贴在终端底部，回车
  * 即发送。目标来自 ssh/sessions/list（跨连接全部活跃会话），命令写入各会话
@@ -266,7 +266,8 @@ function dismissBatchResult() {
   batchError.value = "";
 }
 
-// ---- 命令条内联保存为快速命令（与工具栏 Zap 弹层同一后端，全局共享）----
+// ---- 命令条内联保存为快速命令（存储迁移批 1：本地 upsert 落 pluginStore，
+// 与工具栏 Zap 弹层同源，全局共享）----
 
 function openBatchBarSave() {
   const command = batchDraft.value.trim();
@@ -280,17 +281,12 @@ async function confirmBatchBarSave() {
   if (!command || batchSaving.value || quickCommands.value.length >= QUICK_COMMANDS_LIMIT) return;
   batchSaving.value = true;
   try {
-    const response = await window.dbxPlugin.invoke<{ commands: unknown }>("ssh/quickCommands/save", {
-      id: "",
-      name: batchSaveName.value.trim(),
-      command,
-    });
-    quickCommands.value = normalizeQuickCommands(response.commands);
+    const entry: QuickCommand = { id: randomUUID(), name: batchSaveName.value.trim(), command };
+    // 名称兜底/截断由 persist 内的 normalize 收紧；上限已由入口守卫拦截。
+    quickCommands.value = persistQuickCommands([...quickCommands.value, entry]);
     batchSaveMode.value = false;
     batchSaveName.value = "";
     batchQuickPickId.value = quickCommands.value.find((item) => item.command === command)?.id ?? "";
-  } catch (cause) {
-    showError(cause, "terminal");
   } finally {
     batchSaving.value = false;
   }

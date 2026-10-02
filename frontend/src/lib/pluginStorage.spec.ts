@@ -9,15 +9,18 @@ import { PLUGIN_STORE_KEYS, pluginStore } from "./pluginStore";
 describe("ssh pluginStore wiring", () => {
   it("declares every migrated UI-state key (sidecar-backed keys stay out)", () => {
     // 迁移键 = 活的前端 UI 偏好（键名与迁移前 localStorage 一致）。
-    // 不在此列：ssh-download-*（sidecar preferences.json 权威的 web 缓存）、
-    // ssh-transfer-* / ssh-history-suggestion-*（同 download-*：sidecar 权威
-    // 的同步缓存）、ssh-quick-commands（已迁 sidecar，旧键仅作一次性迁移种子）。
+    // 不在此列：ssh-download-* / ssh-transfer-* / ssh-sftp-compat-mode /
+    // ssh-sftp-name-encoding / ssh-history-suggestion-*（sidecar preferences.json
+    // 权威的 web 同步缓存）。注意宿主 storage 水合只拉本清单键：新走 pluginStore
+    // 的键必须登记，否则真机写入能落盘但重启永远读不回。
     expect([...PLUGIN_STORE_KEYS].sort()).toEqual(
       [
         "sftp-path-history",
         "ssh-command-history",
         // 命令 → 最近执行时刻（Warp 式 history 面板相对时间），与命令环同采集口。
         "ssh-command-history-times",
+        // history 面板富元数据（时长 + 退出码，随命令环修剪）。
+        "ssh-command-history-meta",
         "ssh-follow-directory",
         "ssh-sftp-pane-open",
         "ssh-sftp-side-tab",
@@ -42,9 +45,26 @@ describe("ssh pluginStore wiring", () => {
         // 即禁止任何退役键回流，故此处不写字面量，避免命中退役 grep 门禁）。
         "ssh-completion-engine",
         "ssh-terminal-ghost-suggest",
+        // 「Tab 接受建议」开关 + 建议黑名单（ghost/suggestions 批次）。
+        "ssh-ghost-tab-accept",
+        "ssh-suggestion-blocklist",
         // Docker/Podman 引擎连接设置（单键 JSON 映射，dockerEngine.ts 自治）。
         "ssh-docker-engine",
         "ssh-tunnel-profiles",
+        // 存储迁移批 1（IMPL_PLAN_STORAGE_SYNC）：全局偏好三域权威键，
+        // sidecar JSON 降级为一次性搬迁种子。
+        "ssh-quick-commands",
+        "ssh-highlight-rules",
+        "ssh-sftp-bookmarks",
+        // MCP 设置镜像（批 1 收尾）：sidecar 即时权威 + 镜像作云同步载荷。
+        "ssh-mcp-settings",
+        // 存储迁移批 2：连接级四域镜像键（值内按 connectionId 分桶）。
+        "ssh-startup-commands",
+        "ssh-name-encoding-overrides",
+        "ssh-agent-modes",
+        "ssh-agent-approved-commands",
+        // 存储迁移批 3：传输/下载 14 键合并单镜像（wire 键名同形）。
+        "ssh-preferences-mirror",
       ].sort(),
     );
     for (const banned of [
@@ -56,7 +76,6 @@ describe("ssh pluginStore wiring", () => {
       "ssh-history-suggestions-enabled",
       "ssh-history-suggestion-min-chars",
       "ssh-history-suggestion-max-chars",
-      "ssh-quick-commands",
       // FIG wave-1 legacy 退役：旧结构化补全开关键被引擎键取代；字面量按
       // 退役 grep 门禁要求省略（"ssh-completion" + "-spec" 拼接）。
       ["ssh-completion", "-spec"].join(""),

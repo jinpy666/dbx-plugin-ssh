@@ -1,6 +1,10 @@
 // 快速命令栏：用户自定义常用命令片段（对标 tiny-rdm 快速命令）。
-// localStorage CRUD，上限 20 条；纯函数，localStorage 读写留在调用方。
+// 权威存储 pluginStore（宿主 ui-storage.json，随 DBX secrets 同步加密上云；
+// IMPL_PLAN_STORAGE_SYNC 批 1）：同名 localStorage 旧数据由适配器惰性搬家
+// 接住，sidecar quick_commands.json 经 RPC 仅作一次性迁移种子。纯函数 +
+// 显式存取，上限 20 条。
 
+import { pluginStore } from "./pluginStore";
 import { normalizeTerminalInputText } from "./terminalInput";
 
 export interface QuickCommand {
@@ -12,6 +16,35 @@ export interface QuickCommand {
 export const QUICK_COMMANDS_LIMIT = 20;
 export const QUICK_COMMAND_NAME_MAX_LENGTH = 60;
 export const QUICK_COMMAND_TEXT_MAX_LENGTH = 500;
+
+/** pluginStore 键：与 localStorage 时代同名（适配器惰性搬家依赖同名接力）。 */
+export const QUICK_COMMANDS_STORE_KEY = "ssh-quick-commands";
+
+/**
+ * 从 pluginStore 读权威清单；返回 null 表示键尚不存在（未迁移，调用方应走
+ * sidecar 种子搬迁）。存在但为空数组是合法用户态（已清空），不触发搬迁。
+ */
+export function loadQuickCommandsFromStore(): QuickCommand[] | null {
+  try {
+    const raw = pluginStore.getItem(QUICK_COMMANDS_STORE_KEY);
+    if (raw === null) return null;
+    return normalizeQuickCommands(JSON.parse(raw));
+  } catch {
+    // 坏 JSON 视为空清单：不回退种子（键已存在 = 已迁移，避免复活旧数据）。
+    return [];
+  }
+}
+
+/** 全量写穿 pluginStore（空数组同样落键，标记"已迁移"）。 */
+export function persistQuickCommands(list: readonly QuickCommand[]): QuickCommand[] {
+  const normalized = normalizeQuickCommands(list);
+  try {
+    pluginStore.setItem(QUICK_COMMANDS_STORE_KEY, JSON.stringify(normalized));
+  } catch {
+    // 持久化失败不阻断：本次会话内存态仍生效。
+  }
+  return normalized;
+}
 
 function nonEmptyString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";

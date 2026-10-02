@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // ghost 接受键单测（Warp 多键模型）：Tab 开关持久化 + 整段/逐词匹配矩阵。
 import { beforeEach, describe, expect, it } from "vitest";
+import { PLUGIN_STORE_KEYS } from "./pluginStore";
 import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, saveGhostTabAccept } from "./ghostAcceptKey";
 
 const NO_MOD = { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
@@ -8,6 +9,12 @@ const NO_MOD = { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false 
 describe("ghostAcceptKey (Warp Autosuggestions 键位模型)", () => {
   beforeEach(() => {
     window.localStorage.clear();
+  });
+
+  it("registers its key in PLUGIN_STORE_KEYS (host hydration whitelist)", () => {
+    // 宿主 storage 无列键方法，水合只拉白名单键：漏注册 = 写穿能落盘、
+    // 重启永远读不回（开关每次启动静默重置）。
+    expect(PLUGIN_STORE_KEYS).toContain("ssh-ghost-tab-accept");
   });
 
   it("Tab accept defaults off and round-trips", () => {

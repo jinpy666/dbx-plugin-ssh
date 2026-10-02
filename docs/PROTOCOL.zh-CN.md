@@ -52,7 +52,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `ssh/host-key/check` | 连接维度主机密钥预检（探针三态：已知 / 变更 / 未知，不发认证） |
 | `ssh/settings/get`、`ssh/settings/set` | 读取/运行时更新 Quick Sudo 编排设置 |
 | `mcp/tools`、`mcp/call` | MCP 工具发现与执行（供 DBX MCP 桥 `dbx_call_plugin_tool` 调用；连接凭据以标准 lifecycle payload 转发，按 `connectionId` 池化，payload 新增 `name` 字段携带连接名）。连接类工具新增可选 `connectionName`（与 `connectionId` 二选一，注册表按名匹配，重名报错并列出候选）；stdio 独立模式对未注册 `connectionId` 的调用自动经宿主桥 `POST /list-plugin-connections` 转发到运行中的 DBX 应用执行——请求 `{"plugin_id":"io.dbx.ssh"}`、响应 `{"connections":[{id,name,host,port,username,authentication,readOnly}]}`（仅元数据，密钥只出布尔标志位），桥不可用回落内联凭据；新增 `ssh_list_connections` 工具即消费该路由，降级时仅回本会话注册表并附 `note`。`mcp/tools` 与 stdio `tools/list` 返回的每个工具附 `annotations`（`title` + `readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`，与内部门禁分类同源，见 docs/MCP.zh-CN.md「工具 annotations」） |
-| `mcp/settings/get`、`mcp/settings/set` | MCP SFTP 尺寸限制策略（maxRead/maxUpload/maxDownload，持久化，`--mcp` 同源生效）；`localTransferRoot` 配置 `sftp_upload`/`sftp_download` 本地传输根（绝对路径或空串回落默认根=临时目录+插件数据目录；敏感路径黑名单任何模式叠加生效） |
+| `mcp/settings/get`、`mcp/settings/set` | MCP SFTP 尺寸限制策略（maxRead/maxUpload/maxDownload，持久化，`--mcp` 同源生效）；`localTransferRoot` 配置 `sftp_upload`/`sftp_download` 本地传输根（绝对路径或空串回落默认根=临时目录+插件数据目录；敏感路径黑名单任何模式叠加生效）。**消费模式注**（存储迁移批 1）：`set` 为部分更新（未指定字段含 `localTransferRoot` 保留）；工作台把可同步子集（maxRead/maxUpload/maxDownload + persisted 权限档）镜像进宿主 `host.storage` 作云同步载荷，sidecar 文件仍是 serve 时即时权威（见 `IMPL_PLAN_STORAGE_SYNC.zh-CN.md`） |
 | `sftp/chmod` | 修改远端路径权限位（八进制）；`sftp_name_encoding` 为 `latin-1` 时路径整条按 wire 还原走裸包 SETSTAT（M17） |
 | `sftp/diskUsage` | 路径所在挂载的磁盘用量 |
 | `sftp/home`、`sftp/list`、`sftp/read` | 浏览、预览远端文件（`sftp/list` 支持可选 `includeOwner` 附加属主/属组；`sftp/read` 支持可选 `offset` 分片续读，见下文）。`sftp/home` 走高层客户端 `canonicalize(".")`（`ssh.rs:3505`；MCP `sftp_pwd` 同源，`mcp.rs:2473`）——**编码边界（登记，M28-A）**：家目录名非 UTF-8 时返回串已含 U+FFFD（高层 lossy 解码，原始字节不可恢复），以其为基准拼接的后续路径无法命中，与 `sftp/list` 节 M17 段登记的 shell cwd 回读同类不可恢复边界 |
@@ -64,7 +64,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `sftp/stat`、`sftp/exists`、`sftp/touch`、`sftp/write` | 扩展文件操作：元信息单查、存在性检查、空文件创建、小文件直写；latin-1 下 `sftp/stat` 整条 wire 还原走裸包 LSTAT，`sftp/exists` 按 `form` 参数分工还原（缺省「wire 前缀 + 显示末段」、`form: "wire"` 整条），均走裸包 LSTAT（M17，见 `sftp/exists` 节） |
 | `sftp/archive`、`sftp/extract` | 远端 tar.gz 打包与解压；extract 可选 `sudo: true`（文件夹整包上传车道：列档/解包经 sudo 编排、跳过撞名预检恒覆盖），见「文件夹整包上传（folderArchive）」节 |
 | `sftp/copy`、`sftp/move` | 服务器内复制 / 剪切（逐项执行，目标存在需 `overwrite`）；latin-1 下覆盖预检与同目录 move rename 快路径走裸包字节保真（M17，shell 执行层边界见 `sftp/list` 节） |
-| `sftp/bookmarks/list`、`sftp/bookmarks/save`、`sftp/bookmarks/delete` | SFTP 路径书签管理（全局命名清单，插件数据目录持久化，见下文） |
+| `sftp/bookmarks/list`、`sftp/bookmarks/save`、`sftp/bookmarks/delete` | SFTP 路径书签管理（**legacy**：权威已迁宿主 `host.storage`，仅 `list` 作一次性搬迁种子，见下文） |
 | `sftp/transfer/cancel` | 取消并清理临时状态（可选 `reason` slug 落入账本，见「上传两阶段计数与收尾语义」） |
 | `sftp/transfer/list`、`sftp/transfer/status` | 查询会话传输任务列表 / 单任务状态（含历史，会话维度过滤）。status 对压缩任务附 `compression`/`ready`（下载）与 prep 进行中的 `phase`（M33，ready 等待的兜底轮询面） |
 | `sftp/transfer/history` | 跨重启传输历史查询（持久化 + 内存 live 合并，见下文） |
@@ -82,7 +82,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `keys/discover` | 本地 SSH 私钥发现（不返回私钥内容） |
 | `ssh/knownHosts/list`、`ssh/knownHosts/remove` | known_hosts 条目管理（含 `@cert-authority` / `@revoked` 标记条目） |
 | `ssh/sessions/list` | 只读会话清单：sidecar 当前跟踪的活跃会话 |
-| `ssh/quickCommands/list`、`ssh/quickCommands/save`、`ssh/quickCommands/delete` | 全局快速命令管理（用户自定义常用命令片段，插件数据目录持久化，所有连接/工作台共享） |
+| `ssh/quickCommands/list`、`ssh/quickCommands/save`、`ssh/quickCommands/delete` | 全局快速命令管理（**legacy**：权威已迁宿主 `host.storage`，仅 `list` 作一次性搬迁种子，见下文） |
 | `ssh/terminal/batchInput` | 批量发送：把同一条命令写入多个已打开会话的交互终端（PTY 键盘语义），返回逐会话发送结果 |
 | `ssh/batchBar/state`（notify） | 批量发送命令条的跨工作台状态同步：工作台把 `{ source, draft, quickPickId, open }` 以通知送达 sidecar，sidecar 原样以同名事件广播给所有插件 webview，各端按 `source` 过滤自己的回声；纯转发不落存储，旧版 sidecar 未注册时调用方静默降级 |
 | `local/terminal/start`、`local/terminal/resize`、`local/terminal/replay` | 本地终端：sidecar 所在机器的交互式登录 shell（工作台显式入口触发，见「本地终端」节；`start` 支持显式 `shell` 与继承用的 `cwd`） |
@@ -91,7 +91,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `local/session/list`、`local/session/close` | 本地终端会话清单（webview 重载后接回）与关闭 |
 | `local/recording/start`、`local/recording/stop` | 本地终端录制（dock 本地终端录制按钮的数据面）：与 `ssh/recording` 同形——`start`（参数 `{ sessionId }`）给本地 PTY 会话挂同一 asciicast 录制器（PTY 输出发布前观察、State 帧不录），`stop` 返回同一形状摘要；`.cast` 落同一 recordings 目录（`meta.host` 为 `"local"`），`ssh/recording/list|get|search|delete` 全家族照常可用。shell 退出随会话槽位释放录制器（缓冲即落盘）；重复 start / 无录制 stop 报错文案与 SSH 家族一致 |
 | `local/metrics` | 本机系统快照（dock 面板左上角系统信息带，本地终端场景）：与 `ssh/metrics` 同一采集脚本走 sidecar 宿主机自身 shell（POSIX sh；macOS 走 sysctl/vm_stat/netstat 兜底分支），返回同形状文档（hostname/kernel/cpu/memory/disks/network/processes…），GPU/NPU 两段保持 SSH-only、本地文档缺省。无会话参数；Windows 无捆绑 sh 时返回结构化错误（`local metrics unavailable`），前端整条隐藏不占位 |
-| `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。`transfer_concurrency`（u64，1..=10，默认 3）、`transfer_duplicate_policy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`transfer_max_active`（M14-B 会话级并发传输深度，u64，1..=8，默认 3；sidecar 每次任务启动现读现用——改动即时生效，新任务按新深度启动，进行中任务按旧深度自然完成）、`transfer_download_limit_kib`（M31-B 下载限速，issue #66：SFTP 下载速度上限，u64，0..=1048576 KiB/s，0=不限速（缺省）；超界钳制、非法回落 0。sidecar 在下载任务启动（`sftp/download/start`、`sftp/download/tree/start`）时对现值快照一次并整个任务沿用——改动对下一个下载任务生效，进行中任务按原节奏完成）、`transfer_compress_mode`（M33 压缩传输策略，`auto`/`on`/`off` 白名单，默认 `auto`，非法值报错。`auto`=智能综合判断：大小/类型/远端工具/只读/latin-1 之外再计本机 CPU——并行度 ≤2 核直接跳过，上传压缩预压另有运行时吞吐守卫（实测速率 <20 MiB/s 中止回退，对所有策略生效）；`on`=始终尝试（豁免 CPU 门槛，其余回退条件与吞吐守卫不变）；`off`=关闭。语义见「压缩传输（gzip 混合方案）」节——任务 start 时现读现决，改动对下一个任务生效）、`transfer_compress_threshold_mib`（M33 压缩生效阈值，u64，0..=65536 MiB，默认 64，0=不限下限；超界钳制、非法回落默认）、`sftp_compat_mode`（M14-B 老旧服务器兼容模式，bool，默认 false；开启后 SFTP 会话不做流水线并发（读写各 1 路）并把并发深度强制 1，对新建 SFTP 会话生效（重连后应用）；SFTP 探测失败时 sidecar 对该会话一次性在错误信息中附带建议开启的提示）、`sftp_name_encoding`（M14-B 文件名显示编码，`auto`/`latin-1`，默认 `auto`，语义见 `sftp/list` 节）、`sftp_name_encoding_overrides`（M16 连接级文件名编码覆盖，对象按 connectionId 分桶 `{ <connectionId>: "auto"|"latin-1" }`；整体非对象报错，桶内非法值/空 connectionId 清洗丢弃，桶数上限 512；缺省语义为「跟随全局」——桶内无本连接条目即回退全局 `sftp_name_encoding`，再缺省 `auto`；判定优先级 连接覆盖 > 全局偏好 > 缺省 auto，覆盖值非法（白名单外）同样按未覆盖回退；判定点现读现用（`sftp/list`、`sftp/rename`、`sftp/delete`、`sftp/createDirectory`、`sftp/download/tree/start`），改动对下一次调用即时生效；sessionId 无法映射到连接（已断开）时按未覆盖处理）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理 |
+| `local/preferences/get`、`local/preferences/set` | 工作台级 UI 偏好（`<plugin_data_dir>/preferences.json`，固定键白名单、原子写入，非法类型报错、非白名单键丢弃）：`downloadDir`（string，≤512 字符）、`downloadUseDefaultDir`（bool，默认 true）、`downloadConflictPolicy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`startup_commands`（连接级启动命令存储，对象按 connectionId 分桶 `{ enabled: bool（默认 false）, commands: [{command, delayMs, enabled}] }`；整体非对象报错，桶/行级非法形状清洗丢弃；上限每连接 20 条、单条 4KiB、延迟 0..=30000ms 缺省 300，见「启动命令（Login scripts 对标）」节）。`transfer_concurrency`（u64，1..=10，默认 3）、`transfer_duplicate_policy`（`rename`/`ask`/`overwrite`，默认 `rename`）、`transfer_max_active`（M14-B 会话级并发传输深度，u64，1..=8，默认 3；sidecar 每次任务启动现读现用——改动即时生效，新任务按新深度启动，进行中任务按旧深度自然完成）、`transfer_download_limit_kib`（M31-B 下载限速，issue #66：SFTP 下载速度上限，u64，0..=1048576 KiB/s，0=不限速（缺省）；超界钳制、非法回落 0。sidecar 在下载任务启动（`sftp/download/start`、`sftp/download/tree/start`）时对现值快照一次并整个任务沿用——改动对下一个下载任务生效，进行中任务按原节奏完成）、`transfer_compress_mode`（M33 压缩传输策略，`auto`/`on`/`off` 白名单，默认 `auto`，非法值报错。`auto`=智能综合判断：大小/类型/远端工具/只读/latin-1 之外再计本机 CPU——并行度 ≤2 核直接跳过，上传压缩预压另有运行时吞吐守卫（实测速率 <20 MiB/s 中止回退，对所有策略生效）；`on`=始终尝试（豁免 CPU 门槛，其余回退条件与吞吐守卫不变）；`off`=关闭。语义见「压缩传输（gzip 混合方案）」节——任务 start 时现读现决，改动对下一个任务生效）、`transfer_compress_threshold_mib`（M33 压缩生效阈值，u64，0..=65536 MiB，默认 64，0=不限下限；超界钳制、非法回落默认）、`sftp_compat_mode`（M14-B 老旧服务器兼容模式，bool，默认 false；开启后 SFTP 会话不做流水线并发（读写各 1 路）并把并发深度强制 1，对新建 SFTP 会话生效（重连后应用）；SFTP 探测失败时 sidecar 对该会话一次性在错误信息中附带建议开启的提示）、`sftp_name_encoding`（M14-B 文件名显示编码，`auto`/`latin-1`，默认 `auto`，语义见 `sftp/list` 节）、`sftp_name_encoding_overrides`（M16 连接级文件名编码覆盖，对象按 connectionId 分桶 `{ <connectionId>: "auto"|"latin-1" }`；整体非对象报错，桶内非法值/空 connectionId 清洗丢弃，桶数上限 512；缺省语义为「跟随全局」——桶内无本连接条目即回退全局 `sftp_name_encoding`，再缺省 `auto`；判定优先级 连接覆盖 > 全局偏好 > 缺省 auto，覆盖值非法（白名单外）同样按未覆盖回退；判定点现读现用（`sftp/list`、`sftp/rename`、`sftp/delete`、`sftp/createDirectory`、`sftp/download/tree/start`），改动对下一次调用即时生效；sessionId 无法映射到连接（已断开）时按未覆盖处理）。兼容：set 为部分合并，缺省键不变；旧 sidecar 缺少的键前端按缺省处理。**消费模式注**（存储迁移批 2/3）：`startup_commands` / `sftp_name_encoding_overrides`（批 2）与 `downloadDir`、`downloadUseDefaultDir`、`downloadConflictPolicy`、`transfer_*`、`sftp_compat_mode`、`sftp_name_encoding`、`history_suggestions_enabled`、`history_suggestion_min_chars`、`history_suggestion_max_chars` 共 14 个全局偏好键（批 3，合并单镜像 `ssh-preferences-mirror`，wire 键名同形）已镜像进宿主 `host.storage` 作云同步载荷，sidecar 仍即时权威，见 `IMPL_PLAN_STORAGE_SYNC.zh-CN.md` |
 | `serial/upload/start`、`serial/upload/data`、`serial/upload/cancel` | 串口文件上传（XMODEM/YMODEM/ZMODEM，NyaTerm 对齐）：协议状态机在 sidecar（`backend/src/serial_xmodem.rs` 纯状态机，由串口读线程喂数据/取输出），文件字节由前端 File API 分块（≤64KiB）经 `data` 送入，sidecar 不落盘；单次上传总量上限 256 MiB；进度事件 `serial/upload/progress`（`sent`/`total`，不含文件内容）；同一会话同一时刻至多一个上传（并发第二次 `start` 报错），见「串口文件上传（X/Y/ZMODEM）」节 |
 | `serial/ports/list` | 本机串口清单（连接弹窗端口下拉数据源）：`{ports: [path], portDetails: [{path, description}]}`，按路径排序；枚举失败回落空清单，USB/PCI/Bluetooth 描述尽力标注 |
 | `local/wallpaper/get`、`local/wallpaper/set`、`local/wallpaper/clear` | 工作台背景图（桌面形态）：`get` 返回 `{dataUrl: "data:image/<png|jpeg|webp>;base64,…"}`，无背景时返回 `{}`；`set` 接受 `{imageBase64}`，≤8 MiB 且仅 png/jpeg/webp 魔数，原子落盘 `<plugin_data_dir>/wallpaper`，返回与 `get` 相同的 data URL 载荷；`clear` 幂等删除，返回 `{}` |
@@ -112,7 +112,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 
 ## 运行时设置
 
-`ssh/settings/get` 返回当前编排配置（密钥仅以布尔标记呈现，绝不下发明文；传 `revealSecrets: true` 时额外回显本连接配置的 `sudoPassword` / `totpSecret` 原始串（多密钥原文），供工作台设置弹窗预填已存原值——该参数仅工作台使用，MCP 通道不暴露，缺省响应与此前完全一致；另附 `quickSudoProfileId` / `quickSudoProfileName` 报告生效的全局配置绑定（`sudo_source=global` 时含连接表单引用解析结果），未绑定为空串，`sudoSource`（`custom` / `global` / `off`，生效来源），以及 `agentTerminalMode`（`off` / `auto` / `strict`，AI 终端同步模式，见下节））；`ssh/settings/set` 另接受可选 `rememberedCommands`（字符串数组全量替换连接级免审批清单，校验规则见「审批记忆」节，破坏性行拒绝且错误信息带行号，缺省不改变）；`ssh/settings/get` 响应含 `rememberedCommands`。`ssh/settings/set` 接受 `quickSudo`、`sudoUsePty`、`sudoPassword`（空串=清除回退登录密码）、`totpSecret`、`authFlowMode`、`passwordPromptHint`、`totpPromptHint`、可选 `agentTerminalMode`（非法值报错，缺省不改变），以及可选 `quickSudoProfileId`（非空须引用存在的全局配置并持久化绑定，空串解除绑定，缺省不改变；挑选配置会将连接的 `sudo_source` 切到 `global`，解除时 `global` 回落 `custom`）。更新通过共享编排锁立即作用于该连接的**所有存活会话**——终端自动应答与命令弹窗在下一次提示时即用新值（对齐每次输出动态 resolve 的语义）；终端侧监视器随每次设置/配置更新按当前连接状态**重新挂载**：连接时未配置凭据（如密钥认证连接）或 Quick Sudo 处于关闭的会话，在运行时配置密码/TOTP 或重新打开开关后立即开始自动应答，无需重连。`sudoPassword` 等字段级覆盖是 sidecar 本地值，sidecar 重启或重开连接后恢复宿主下发的配置，而 `quickSudoProfileId` 绑定与 `agentTerminalMode` 持久化在插件数据目录、重启保留（0.4.49 起，见「AI 终端同步执行」）。工作台工具栏提供设置弹窗；宿主连接表单通过 manifest 字段提供持久化配置入口：`sudo_source`（三选一 `custom` 本连接 / `global` 全局配置 / `off` 停用；旧连接缺省时按 `quick_sudo` 布尔映射）、`sudo_profile`（仅 `global` 时显示，声明 `options_action: sudo/profiles/options` 由宿主渲染为动态下拉，无该扩展能力的宿主保留文本回退）、`sudo_password`、`sudo_use_pty`（仅 `custom` 时显示）、2FA 编排四件套 `totp_secret`、`auth_flow_mode`、`password_prompt_hint`、`totp_prompt_hint`（`global` 时隐藏——凭据来源整体由全局配置接管；`custom`/`off` 时 `auth_flow_mode` 常显以服务登录期 keyboard-interactive，`totp_secret`/`totp_prompt_hint` 仅在自动回码的两种 OTP 模式（`password_then_otp`/`password_plus_otp`）下出现，`password_prompt_hint` 与 TOTP 字段同集并紧随其后——2FA 关闭时整组折叠，不再残留孤立的密码提示词行）、超时与 keepalive、`set_env`（会话环境变量）、`remote_command`（会话命令，两者详见「会话环境与会话命令（SetEnv / RemoteCommand）」）、`triggers`（自动交互触发器）与 `password_command` / `passphrase_command`（外部密码管理器，三者详见「自动交互触发器（Expect）与外部密码管理器」）。注意：跳板链 `jump_hosts` **没有 manifest 表单字段**——它仅经会话导入写入连接的 `external_config.jump_hosts`（见「会话导入：流式预览与脱敏规范化导出」节），隧道/代理/跳板转发一律走 DBX 宿主传输层（不重复宿主能力），表单层无跳板配置入口。
+`ssh/settings/get` 返回当前编排配置（密钥仅以布尔标记呈现，绝不下发明文；传 `revealSecrets: true` 时额外回显本连接配置的 `sudoPassword` / `totpSecret` 原始串（多密钥原文），供工作台设置弹窗预填已存原值——该参数仅工作台使用，MCP 通道不暴露，缺省响应与此前完全一致；另附 `quickSudoProfileId` / `quickSudoProfileName` 报告生效的全局配置绑定（`sudo_source=global` 时含连接表单引用解析结果），未绑定为空串，`sudoSource`（`custom` / `global` / `off`，生效来源），以及 `agentTerminalMode`（`off` / `auto` / `strict`，AI 终端同步模式，见下节））；`ssh/settings/set` 另接受可选 `rememberedCommands`（字符串数组全量替换连接级免审批清单，校验规则见「审批记忆」节，破坏性行拒绝且错误信息带行号，缺省不改变）；`ssh/settings/get` 响应含 `rememberedCommands`。`ssh/settings/set` 接受 `quickSudo`、`sudoUsePty`、`sudoPassword`（空串=清除回退登录密码）、`totpSecret`、`authFlowMode`、`passwordPromptHint`、`totpPromptHint`、可选 `agentTerminalMode`（非法值报错，缺省不改变），以及可选 `quickSudoProfileId`（非空须引用存在的全局配置并持久化绑定，空串解除绑定，缺省不改变；挑选配置会将连接的 `sudo_source` 切到 `global`，解除时 `global` 回落 `custom`）。更新通过共享编排锁立即作用于该连接的**所有存活会话**——终端自动应答与命令弹窗在下一次提示时即用新值（对齐每次输出动态 resolve 的语义）；终端侧监视器随每次设置/配置更新按当前连接状态**重新挂载**：连接时未配置凭据（如密钥认证连接）或 Quick Sudo 处于关闭的会话，在运行时配置密码/TOTP 或重新打开开关后立即开始自动应答，无需重连。`sudoPassword` 等字段级覆盖是 sidecar 本地值，sidecar 重启或重开连接后恢复宿主下发的配置，而 `quickSudoProfileId` 绑定与 `agentTerminalMode` 持久化在插件数据目录、重启保留（0.4.49 起，见「AI 终端同步执行」）。工作台工具栏提供设置弹窗；`agentTerminalMode` 与 `rememberedCommands` 已镜像进宿主 `host.storage` 作云同步载荷（存储迁移批 2，sidecar 仍即时权威，见 `IMPL_PLAN_STORAGE_SYNC.zh-CN.md`）。宿主连接表单通过 manifest 字段提供持久化配置入口：`sudo_source`（三选一 `custom` 本连接 / `global` 全局配置 / `off` 停用；旧连接缺省时按 `quick_sudo` 布尔映射）、`sudo_profile`（仅 `global` 时显示，声明 `options_action: sudo/profiles/options` 由宿主渲染为动态下拉，无该扩展能力的宿主保留文本回退）、`sudo_password`、`sudo_use_pty`（仅 `custom` 时显示）、2FA 编排四件套 `totp_secret`、`auth_flow_mode`、`password_prompt_hint`、`totp_prompt_hint`（`global` 时隐藏——凭据来源整体由全局配置接管；`custom`/`off` 时 `auth_flow_mode` 常显以服务登录期 keyboard-interactive，`totp_secret`/`totp_prompt_hint` 仅在自动回码的两种 OTP 模式（`password_then_otp`/`password_plus_otp`）下出现，`password_prompt_hint` 与 TOTP 字段同集并紧随其后——2FA 关闭时整组折叠，不再残留孤立的密码提示词行）、超时与 keepalive、`set_env`（会话环境变量）、`remote_command`（会话命令，两者详见「会话环境与会话命令（SetEnv / RemoteCommand）」）、`triggers`（自动交互触发器）与 `password_command` / `passphrase_command`（外部密码管理器，三者详见「自动交互触发器（Expect）与外部密码管理器」）。注意：跳板链 `jump_hosts` **没有 manifest 表单字段**——它仅经会话导入写入连接的 `external_config.jump_hosts`（见「会话导入：流式预览与脱敏规范化导出」节），隧道/代理/跳板转发一律走 DBX 宿主传输层（不重复宿主能力），表单层无跳板配置入口。
 
 ## AI 终端同步执行（agent terminal mode）
 
@@ -846,6 +846,12 @@ RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRD
 
 ### ssh/quickCommands/list、ssh/quickCommands/save、ssh/quickCommands/delete
 
+> **⚠️ legacy（存储迁移批 1，`IMPL_PLAN_STORAGE_SYNC.zh-CN.md`）**：工作台权威
+> 已迁宿主 `host.storage`（`ui-storage.json` 的 `ssh-quick-commands` 键，随 DBX
+> secrets 同步加密上云）。本组方法降级为兼容面：仅作旧档一次性搬迁种子（工作台
+> 启动时只在权威键缺失时调 `list`），`save`/`delete` 不再被工作台调用；
+> `quick-commands.json` 自搬迁后冻结为只读旧档。
+
 全局快速命令：用户自定义的常用命令片段（名称 + 命令原文），持久化在
 `DBX_PLUGIN_DATA_DIR/quick-commands.json`（原子写、Unix 0600、坏文件降级为空清单），
 **所有连接与工作台共享一份**（全局共享语义；此前存工作台
@@ -861,6 +867,11 @@ localStorage 会因宿主 webview 存储分区表现为"绑连接"，已废弃�
 
 ### sftp/bookmarks/list、sftp/bookmarks/save、sftp/bookmarks/delete
 
+> **⚠️ legacy（存储迁移批 1，`IMPL_PLAN_STORAGE_SYNC.zh-CN.md`）**：工作台权威
+> 已迁宿主 `host.storage`（`ui-storage.json` 的 `ssh-sftp-bookmarks` 键）。仅
+> `list` 保留为一次性搬迁种子；`save`/`delete` 不再被工作台调用，
+> `sftp-bookmarks.json` 自搬迁后冻结为只读旧档。
+
 SFTP 路径书签：用户收藏的命名远端路径（label + path），持久化在
 `DBX_PLUGIN_DATA_DIR/sftp-bookmarks.json`（原子写、Unix 0600、坏文件降级为空清单），
 **全局共享一份**（不按连接分组），模式与 `ssh/quickCommands/*` 同构。上限 20 条
@@ -872,6 +883,19 @@ SFTP 路径书签：用户收藏的命名远端路径（label + path），持久
 `sftp/bookmarks/save`：参数 `id?`（有=更新须存在，无=新建）、`label`、`path`。返回 `{ bookmark: {…}, created: bool }`。错误：`label` 为空/超长/重复（大小写不敏感）、`path` 为空/超长、`id` 不存在、超出上限。
 
 `sftp/bookmarks/delete`：参数 `id`。返回 `{ success, removed }`；未知 id 报错。工作台方法，不进 MCP 工具面。
+
+### ssh/highlightRules/list、ssh/highlightRules/save、ssh/highlightRules/delete（legacy）
+
+> **⚠️ legacy（存储迁移批 1）**：关键词高亮规则的权威已迁宿主 `host.storage`
+> （`ui-storage.json` 的 `ssh-highlight-rules` 键）；本组此前未入协议文档，
+> 现补记并直接标注 legacy——工作台启动时仅在权威键缺失时调 `list` 搬迁旧档，
+> `save`/`delete` 不再被工作台调用，`highlight-rules.json` 冻结为只读旧档。
+
+形状与 `ssh/quickCommands/*` 同构：`list` 返回 `{ rules: [{ id, pattern, color,
+isRegex, caseSensitive, enabled, createdAt, updatedAt }] }`（`createdAt` 升序，
+上限 30 条）；`save` 参数 `id?`（空/缺省=新建）、`pattern`、`color`（缺省
+`#f59e0b`）、`isRegex`、`caseSensitive`、`enabled`（缺省 true）；`delete` 参数
+`id`。regex 合法性明确不在后端校验（前端编译时静默丢弃非法项）。
 
 ### ssh/terminal/batchInput
 

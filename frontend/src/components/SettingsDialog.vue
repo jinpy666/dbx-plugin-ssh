@@ -20,11 +20,12 @@ import HighlightRulesSection from "./HighlightRulesSection.vue";
 import QuickCommandsSection from "./QuickCommandsSection.vue";
 import { HIGHLIGHT_RULES_LIMIT, type HighlightRuleView } from "../lib/keywordHighlight";
 import { QUICK_COMMANDS_LIMIT, type QuickCommand } from "../lib/quickCommands";
-import { AGENT_MODES, sanitizeRememberedCommands } from "../lib/agentTerminal";
+import { AGENT_MODES, SSH_AGENT_APPROVED_STORE_KEY, SSH_AGENT_MODES_STORE_KEY, sanitizeAgentTerminalMode, sanitizeRememberedCommands } from "../lib/agentTerminal";
+import { connectionEntryEquals, loadConnectionEntry, saveConnectionEntry } from "../lib/connectionSettingMirror";
 import { clampFontSize, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
 import { confirmDialog } from "../lib/confirmDialog";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
-import { MIB, mibField, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
+import { MIB, mibField, persistMcpSettingsMirror, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
 import { DOWNLOAD_CONFLICT_POLICIES, type DownloadConflictPolicy } from "../lib/downloadPrefs";
 import { TRANSFER_DUPLICATE_POLICIES, type TransferDuplicatePolicy } from "../lib/transferQueue";
 import { SFTP_NAME_ENCODINGS, type SftpNameEncoding } from "../lib/sftpName";
@@ -62,15 +63,20 @@ import {
   mergeStartupStore,
   normalizeStartupConfig,
   STARTUP_COMMAND_MAX,
+  STARTUP_COMMANDS_STORE_KEY,
   STARTUP_DELAY_MAX_MS,
   STARTUP_DELAY_DEFAULT_MS,
   type StartupCommandEntry,
+  type StartupCommandsConfig,
 } from "../lib/startupCommands";
 import {
   choiceFromOverride,
   mergeNameEncodingStore,
+  NAME_ENCODING_OVERRIDES_STORE_KEY,
+  normalizeNameEncodingOverride,
   overrideFromChoice,
   type ConnectionNameEncodingChoice,
+  type NameEncodingOverride,
 } from "../lib/connectionNameEncoding";
 
 /** 连接级启动命令（P0-4，Tabby「Login scripts」对标）：同 X11 走组件内自治
@@ -82,21 +88,43 @@ const startupCommands = ref<StartupCommandEntry[]>([]);
 async function loadStartupCommands() {
   const connectionId = props.connectionId;
   if (!connectionId) return;
+  // 存储迁移批 2（IMPL_PLAN_STORAGE_SYNC）：镜像播种/收敛——条目缺失从
+  // sidecar 播种；条目存在但与 sidecar 漂移（云同步恢复后）则 store 赢，
+  // 推回 sidecar（复用读改写持久化）。
+  const mirrored = loadConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, normalizeStartupConfig);
+  const apply = (config: StartupCommandsConfig) => {
+    startupEnabled.value = config.enabled;
+    startupCommands.value = config.commands;
+  };
   try {
     const prefs = await window.dbxPlugin?.invoke<{ startup_commands?: unknown }>("local/preferences/get", {});
     const store = prefs?.startup_commands as Record<string, unknown> | undefined;
-    const config = normalizeStartupConfig(store?.[connectionId]);
-    startupEnabled.value = config.enabled;
-    startupCommands.value = config.commands;
+    const sidecar = normalizeStartupConfig(store?.[connectionId]);
+    if (mirrored === null) {
+      apply(sidecar);
+      saveConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, sidecar);
+      return;
+    }
+    if (!connectionEntryEquals(mirrored, sidecar)) {
+      apply(mirrored);
+      await persistStartupConfig(mirrored);
+      return;
+    }
+    apply(sidecar);
   } catch {
-    startupEnabled.value = false;
-    startupCommands.value = [];
+    // sidecar 不可用：镜像兜底（未迁移则维持空表，下次打开重试播种）。
+    if (mirrored !== null) apply(mirrored);
   }
+}
+
+function applyStartupConfig(config: StartupCommandsConfig) {
+  startupEnabled.value = config.enabled;
+  startupCommands.value = config.commands;
 }
 
 /// 读改写合并：`local/preferences/set` 对 startup_commands 是整键替换，
 /// 其他连接的桶从最新偏好读回后原样保留。
-async function persistStartupCommands() {
+async function persistStartupConfig(config: StartupCommandsConfig) {
   const connectionId = props.connectionId;
   if (!connectionId) return;
   try {
@@ -105,12 +133,21 @@ async function persistStartupCommands() {
       startup_commands: mergeStartupStore(
         prefs?.startup_commands,
         connectionId,
-        { enabled: startupEnabled.value, commands: startupCommands.value },
+        config,
       ),
     });
   } catch (cause) {
     emit("error", cause);
   }
+}
+
+async function persistStartupCommands() {
+  const connectionId = props.connectionId;
+  if (!connectionId) return;
+  const config: StartupCommandsConfig = { enabled: startupEnabled.value, commands: startupCommands.value };
+  await persistStartupConfig(config);
+  // 保存双写：RPC（sidecar 即时权威）+ 镜像（云同步载荷）。
+  saveConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, config);
 }
 
 async function setStartupEnabled(next: boolean) {
@@ -165,16 +202,33 @@ const connNameEncodingChoice = ref<ConnectionNameEncodingChoice>("follow");
 async function loadConnNameEncoding() {
   const connectionId = props.connectionId;
   if (!connectionId) return;
+  // 存储迁移批 2：镜像条目值与 sidecar 同形（"auto"/"latin-1"/null=跟随全局），
+  // 播种/收敛语义同启动命令；垃圾条目归一为 null，不会误删 sidecar 覆盖。
+  const mirrored = loadConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, normalizeNameEncodingOverride);
   try {
     const prefs = await window.dbxPlugin?.invoke<{ sftp_name_encoding_overrides?: unknown }>("local/preferences/get", {});
     const store = prefs?.sftp_name_encoding_overrides as Record<string, unknown> | undefined;
-    connNameEncodingChoice.value = choiceFromOverride(store?.[connectionId]);
+    const sidecar = normalizeNameEncodingOverride(store?.[connectionId]);
+    if (mirrored === null) {
+      connNameEncodingChoice.value = choiceFromOverride(sidecar);
+      saveConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, sidecar);
+      return;
+    }
+    if (mirrored !== sidecar) {
+      connNameEncodingChoice.value = choiceFromOverride(mirrored);
+      await persistConnNameEncodingOverride(mirrored);
+      return;
+    }
+    connNameEncodingChoice.value = choiceFromOverride(sidecar);
   } catch {
-    connNameEncodingChoice.value = "follow";
+    // sidecar 不可用：镜像兜底。
+    if (mirrored !== null) connNameEncodingChoice.value = choiceFromOverride(mirrored);
   }
 }
 
-async function persistConnNameEncoding() {
+/// 读改写合并：`local/preferences/set` 对该键是整表替换（其他连接的桶从最新
+/// 偏好读回后原样保留）；value=null 删除本连接桶（「跟随全局」）。
+async function persistConnNameEncodingOverride(override: NameEncodingOverride | null) {
   const connectionId = props.connectionId;
   if (!connectionId) return;
   try {
@@ -183,12 +237,21 @@ async function persistConnNameEncoding() {
       sftp_name_encoding_overrides: mergeNameEncodingStore(
         prefs?.sftp_name_encoding_overrides,
         connectionId,
-        overrideFromChoice(connNameEncodingChoice.value),
+        override,
       ),
     });
   } catch (cause) {
     emit("error", cause);
   }
+}
+
+async function persistConnNameEncoding() {
+  const connectionId = props.connectionId;
+  if (!connectionId) return;
+  const override = overrideFromChoice(connNameEncodingChoice.value);
+  await persistConnNameEncodingOverride(override);
+  // 保存双写：RPC + 镜像（null 同样落条目 = 「跟随全局」已迁移）。
+  saveConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, override);
 }
 
 function setConnNameEncoding(choice: ConnectionNameEncodingChoice) {
@@ -916,6 +979,42 @@ function updateLinkModifier(value: unknown) {
   updateBehavior({ linkModifier: String(value) as TerminalLinkModifier });
 }
 
+// ---------------------------------------------------------------------------
+// agent 模式 + 免审批命令的连接级镜像（存储迁移批 2，IMPL_PLAN_STORAGE_SYNC）：
+// sidecar（agent-modes.json / agent-approved-commands.json）在审批门即时消费，
+// pluginStore 只存云同步载荷。reloadSettings 拿到 sidecar 视图后：
+// 条目缺失 → 播种；条目存在但漂移（云同步恢复后）→ store 赢，采纳镜像并推回
+// sidecar（ssh/settings/set 是部分更新，只带漂移域）。保存双写在 saveSettings。
+// ---------------------------------------------------------------------------
+
+async function syncAgentSettingsMirror() {
+  const connectionId = props.connectionId;
+  const sessionId = props.sessionId;
+  const meta = settingsMeta.value;
+  if (!connectionId || !sessionId || !meta) return;
+  const sidecarMode = sanitizeAgentTerminalMode(meta.agentTerminalMode);
+  const sidecarRemembered = sanitizeRememberedCommands(meta.rememberedCommands);
+  const mirroredMode = loadConnectionEntry(SSH_AGENT_MODES_STORE_KEY, connectionId, sanitizeAgentTerminalMode);
+  const mirroredRemembered = loadConnectionEntry(SSH_AGENT_APPROVED_STORE_KEY, connectionId, sanitizeRememberedCommands);
+  if (mirroredMode === null) saveConnectionEntry(SSH_AGENT_MODES_STORE_KEY, connectionId, sidecarMode);
+  if (mirroredRemembered === null) saveConnectionEntry(SSH_AGENT_APPROVED_STORE_KEY, connectionId, sidecarRemembered);
+  if (mirroredMode === null || mirroredRemembered === null) return;
+  const modeDrift = !connectionEntryEquals(mirroredMode, sidecarMode);
+  const rememberedDrift = !connectionEntryEquals(mirroredRemembered, sidecarRemembered);
+  if (!modeDrift && !rememberedDrift) return;
+  if (modeDrift) settingsDraft.agentTerminalMode = mirroredMode;
+  if (rememberedDrift) settingsDraft.rememberedCommands = mirroredRemembered;
+  try {
+    await window.dbxPlugin.invoke("ssh/settings/set", {
+      sessionId,
+      ...(modeDrift ? { agentTerminalMode: mirroredMode } : {}),
+      ...(rememberedDrift ? { rememberedCommands: mirroredRemembered } : {}),
+    });
+  } catch {
+    // 推回失败不阻断弹窗加载：镜像仍在，下次打开重试。
+  }
+}
+
 async function reloadSettings() {
   downloadDirDraft.value = props.downloadPrefs.loadDir();
   downloadUseDefaultDraft.value = props.downloadPrefs.loadUseDefault();
@@ -958,11 +1057,13 @@ async function reloadSettings() {
       settingsDraft.passwordPromptHint = meta.passwordPromptHint || "";
       settingsDraft.totpPromptHint = meta.totpPromptHint || "";
       settingsDraft.quickSudoProfileId = meta.quickSudoProfileId || "";
-      const agentMode = meta.agentTerminalMode;
-      settingsDraft.agentTerminalMode = agentMode && (AGENT_MODES as readonly string[]).includes(agentMode) ? agentMode : "off";
+      settingsDraft.agentTerminalMode = sanitizeAgentTerminalMode(meta.agentTerminalMode);
       settingsDraft.rememberedCommands = sanitizeRememberedCommands(meta.rememberedCommands);
       settingsDraft.sudoPassword = meta.sudoPassword || "";
       settingsDraft.totpSecret = meta.totpSecret || "";
+      // 存储迁移批 2（IMPL_PLAN_STORAGE_SYNC）：agent 模式与免审批命令的
+      // 镜像播种/收敛（逐域独立，见函数注释）。
+      await syncAgentSettingsMirror();
     }
   } catch {
     settingsLoadFailed.value = true;
@@ -1218,7 +1319,10 @@ async function saveMcpSettings() {
   mcpSaving.value = true;
   mcpError.value = "";
   try {
-    await window.dbxPlugin.invoke("mcp/settings/set", {
+    // 可同步子集一次成形：RPC（sidecar 即时权威）与 pluginStore 镜像（云同
+    // 步载荷）双写同一份；localTransferRoot 不在保存参数里，由 sidecar 部分
+    // 更新语义保留（存储迁移批 1，IMPL_PLAN_STORAGE_SYNC）。
+    const updates = {
       maxReadBytes: Number.parseInt(mcpDraft.readMiB.trim(), 10) * MIB,
       maxUploadBytes: Number.parseInt(mcpDraft.uploadMiB.trim(), 10) * MIB,
       maxDownloadBytes: Number.parseInt(mcpDraft.downloadMiB.trim(), 10) * MIB,
@@ -1226,7 +1330,9 @@ async function saveMcpSettings() {
       // 不识别新字段时整体报错，经 mcpError 容错展示）。
       execPermissionMode: mcpDraft.permissionMode === "confirm" ? "confirm" : "autonomous",
       connectionScope: mcpDraft.connectionScope.split("\n").map((line) => line.trim()).filter(Boolean),
-    });
+    };
+    await window.dbxPlugin.invoke("mcp/settings/set", updates);
+    persistMcpSettingsMirror({ ...updates });
     emit("notice", t("mcpLimits.saved"));
   } catch (cause) {
     mcpError.value = settingsErrorOf(cause);
@@ -1260,6 +1366,7 @@ async function saveSettings() {
     props.suggestionPrefs.persistMinChars(Number.parseInt(suggestionMinCharsDraft.value, 10) || 1);
     props.suggestionPrefs.persistMaxChars(Number.parseInt(suggestionMaxCharsDraft.value, 10) || 64);
     if (profileEditing.value) await saveProfileDraft();
+    const rememberedCommands = sanitizeRememberedCommands(settingsDraft.rememberedCommands);
     const updates: Record<string, unknown> = {
       quickSudo: settingsDraft.quickSudo,
       sudoUsePty: settingsDraft.sudoUsePty,
@@ -1268,12 +1375,17 @@ async function saveSettings() {
       totpPromptHint: settingsDraft.totpPromptHint,
       quickSudoProfileId: settingsDraft.quickSudoProfileId,
       agentTerminalMode: settingsDraft.agentTerminalMode,
-      rememberedCommands: sanitizeRememberedCommands(settingsDraft.rememberedCommands),
+      rememberedCommands,
     };
     if (settingsDraft.sudoPassword) updates.sudoPassword = settingsDraft.sudoPassword;
     if (settingsDraft.totpSecret.trim()) updates.totpSecret = settingsDraft.totpSecret;
     const meta = await window.dbxPlugin.invoke<SshSettings>("ssh/settings/set", { sessionId: props.sessionId, ...updates });
     settingsMeta.value = meta;
+    // 存储迁移批 2：保存成功即镜像连接级 agent 两域（云同步载荷）。
+    if (props.connectionId) {
+      saveConnectionEntry(SSH_AGENT_MODES_STORE_KEY, props.connectionId, sanitizeAgentTerminalMode(settingsDraft.agentTerminalMode));
+      saveConnectionEntry(SSH_AGENT_APPROVED_STORE_KEY, props.connectionId, rememberedCommands);
+    }
     settingsDraft.sudoPassword = "";
     settingsDraft.totpSecret = "";
     await saveMcpSettings();
@@ -2253,6 +2365,9 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
           </template>
 
         </div>
+        <!-- 存储迁移（IMPL_PLAN_STORAGE_SYNC）：可同步配置经宿主 host.storage 进
+             DBX secrets 加密同步；生效前提在 DBX 侧，这里向用户交代边界。 -->
+        <p class="muted settings-note">{{ t("settingsSyncNote") }}</p>
         <footer>
           <button :disabled="settingsLoading || settingsLoadFailed || settingsSaving || (!settingsMeta?.sudoPasswordSet && !settingsMeta?.totpConfigured)" @click="clearStoredSecrets"><Trash2 />{{ t("settingsClearSecrets") }}</button>
           <button @click="emit('update:open', false)">{{ t("close") }}</button>

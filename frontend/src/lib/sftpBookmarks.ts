@@ -1,8 +1,12 @@
 /**
  * SFTP 路径书签：全局命名路径清单（不按连接分，上限 20 条，镜像 quick_commands 模式）。
- * 后端存储 sftp-bookmarks.json，前端经 sftp/bookmarks/list|save|delete 三方法读写。
- * 本模块提供类型、前端先行校验、响应收敛与 RPC 封装；纯函数可单测，invoke 走 window.dbxPlugin。
+ * 权威存储 pluginStore（宿主 ui-storage.json，随 DBX secrets 同步加密上云；
+ * IMPL_PLAN_STORAGE_SYNC 批 1）：sidecar `sftp/bookmarks/list` 仅作一次性迁移
+ * 种子，本模块提供类型、校验、权威清单存取与 upsert/remove 纯函数；可单测。
  */
+
+import { pluginStore } from "./pluginStore";
+import { randomUUID } from "./uuid";
 
 export interface SftpBookmark {
   id: string;
@@ -15,11 +19,6 @@ export interface SftpBookmark {
 export interface SftpBookmarkInput {
   label: string;
   path: string;
-}
-
-export interface SftpBookmarkSaveResult {
-  bookmark: SftpBookmark;
-  created: boolean;
 }
 
 export const SFTP_BOOKMARKS_LIMIT = 20;
@@ -104,22 +103,64 @@ export function sanitizeSftpBookmarks(raw: unknown): SftpBookmark[] {
   return out;
 }
 
+/** pluginStore 权威键（IMPL_PLAN_STORAGE_SYNC 批 1）。 */
+export const SFTP_BOOKMARKS_STORE_KEY = "ssh-sftp-bookmarks";
+
+/**
+ * 从 pluginStore 读权威清单；返回 null 表示键尚不存在（未迁移，调用方应走
+ * sidecar 种子搬迁）。存在但为空数组是合法用户态（已清空），不触发搬迁。
+ */
+export function loadSftpBookmarksFromStore(): SftpBookmark[] | null {
+  try {
+    const raw = pluginStore.getItem(SFTP_BOOKMARKS_STORE_KEY);
+    if (raw === null) return null;
+    return sortBookmarksByLabel(sanitizeSftpBookmarks(JSON.parse(raw)));
+  } catch {
+    // 坏 JSON 视为空清单：不回退种子（键已存在 = 已迁移，避免复活旧数据）。
+    return [];
+  }
+}
+
+/** 全量写穿 pluginStore（空数组同样落键，标记"已迁移"）；落盘前按 label 排序。 */
+export function persistSftpBookmarks(list: readonly SftpBookmark[]): SftpBookmark[] {
+  const normalized = sortBookmarksByLabel(sanitizeSftpBookmarks(list));
+  try {
+    pluginStore.setItem(SFTP_BOOKMARKS_STORE_KEY, JSON.stringify(normalized));
+  } catch {
+    // 持久化失败不阻断：本次会话内存态仍生效。
+  }
+  return normalized;
+}
+
+/**
+ * 新建或按 id 更新：新建生成 id/时间戳并追加；更新保留原 createdAt、刷新
+ * updatedAt。label 重复/超限由调用方 validateBookmarkInput 前置拦截（与后端
+ * 同规则）；落盘形态与后端一致（按 label 排序、≤20 条）。
+ */
+export function upsertBookmark(
+  list: readonly SftpBookmark[],
+  input: SftpBookmarkInput & { id?: string },
+  now = Date.now(),
+): { bookmarks: SftpBookmark[]; bookmark: SftpBookmark } {
+  const label = nonEmptyTrimmed(input?.label);
+  const path = nonEmptyTrimmed(input?.path);
+  const existing = input?.id ? list.find((bookmark) => bookmark.id === input.id) : undefined;
+  const bookmark: SftpBookmark = existing
+    ? { ...existing, label, path, updatedAt: now }
+    : { id: randomUUID(), label, path, createdAt: now, updatedAt: now };
+  const next = sortBookmarksByLabel([...list.filter((item) => item.id !== bookmark.id), bookmark]).slice(
+    0,
+    SFTP_BOOKMARKS_LIMIT,
+  );
+  return { bookmarks: next, bookmark };
+}
+
+/** 按 id 移除；id 不存在时返回等价副本。 */
+export function removeBookmark(list: readonly SftpBookmark[], id: string): SftpBookmark[] {
+  return list.filter((bookmark) => bookmark.id !== id);
+}
+
 export async function listBookmarks(): Promise<SftpBookmark[]> {
   const result = await window.dbxPlugin.invoke<unknown>("sftp/bookmarks/list");
   return sanitizeSftpBookmarks(result);
-}
-
-export async function saveBookmark(input: SftpBookmarkInput): Promise<SftpBookmarkSaveResult> {
-  const result = await window.dbxPlugin.invoke<{ bookmark?: unknown; created?: unknown }>("sftp/bookmarks/save", {
-    label: nonEmptyTrimmed(input?.label),
-    path: nonEmptyTrimmed(input?.path),
-  });
-  const [bookmark] = sanitizeSftpBookmarks({ bookmarks: [result?.bookmark] });
-  if (!bookmark) throw new Error("sftp/bookmarks/save returned an invalid bookmark");
-  return { bookmark, created: result?.created === true };
-}
-
-export async function deleteBookmark(id: string): Promise<{ success: boolean; removed: boolean }> {
-  const result = await window.dbxPlugin.invoke<{ success?: unknown; removed?: unknown }>("sftp/bookmarks/delete", { id });
-  return { success: result?.success !== false, removed: result?.removed === true };
 }

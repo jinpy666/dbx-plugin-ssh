@@ -1,26 +1,32 @@
 import { computed, ref, watch, type Ref } from "vue";
 import {
-  AGENT_MODES,
+  SSH_AGENT_MODES_STORE_KEY,
   agentPromptCommandReadOnly,
   approvalRemainingSecs,
   buildAgentResolveBody,
   clearSessionBoundAgentPrompts,
   dropAgentPrompt,
+  sanitizeAgentTerminalMode,
   type AgentNoticePayload,
   type AgentPromptPayload,
   type AgentTerminalMode,
 } from "../lib/agentTerminal";
+import { loadConnectionEntry, saveConnectionEntry } from "../lib/connectionSettingMirror";
 
 /** AI 终端同步执行（agent terminal mode）：审批挑战队列 + 执行横幅 + 连接级模式切换。
- * 审批语义对齐 host-key 挑战；ssh/agent/* 事件仅当前会话生效（事件接线仍在 App.vue）。 */
+ * 审批语义对齐 host-key 挑战；ssh/agent/* 事件仅当前会话生效（事件接线仍在 App.vue）。
+ * 存储迁移批 2：连接级模式镜像进 pluginStore（工具栏读时播种、切换双写；
+ * 云同步恢复后的收敛由设置弹窗权威执行，工具栏保证播种与保存一致）。 */
 export function useAgentTerminalMode(options: {
   t: (key: string, values?: Record<string, string | number>) => string;
   showError: (cause: unknown, target?: "terminal" | "sftp") => void;
   session: Ref<{ sessionId?: string } | undefined>;
+  /** 当前会话的连接 id（镜像键）：未知时跳过镜像读写。 */
+  connectionId: () => string | undefined;
   sendTerminalBytes: (data: Uint8Array) => void;
   closeToolbarPopovers: () => void;
 }) {
-  const { t, showError, session, sendTerminalBytes, closeToolbarPopovers } = options;
+  const { t, showError, session, connectionId, sendTerminalBytes, closeToolbarPopovers } = options;
 
 // AI 终端同步执行：审批挑战队列 / 执行横幅状态（ssh/agent/* 事件仅当前会话生效）。
 // 跨会话并发审批按 challengeId 排队，弹窗一次只渲染队首（后端同会话已串行化）。
@@ -126,20 +132,25 @@ function toggleAgentModeMenu() {
   if (next) void refreshAgentMode();
 }
 /// 读取当前连接的 agentTerminalMode（与设置弹窗同一 ssh/settings/get 视图）；
-/// 失败保留上次已知值，仅影响按钮态不影响终端。
+/// 失败保留上次已知值，仅影响按钮态不影响终端。读时顺带播种镜像（条目缺失
+/// 才写，云同步恢复后的漂移收敛由设置弹窗权威执行）。
 async function refreshAgentMode() {
   const sessionId = session.value?.sessionId;
   if (!sessionId) return;
   try {
     const meta = await window.dbxPlugin.invoke<{ agentTerminalMode?: string }>("ssh/settings/get", { sessionId });
-    const mode = meta.agentTerminalMode;
-    agentMode.value = mode && (AGENT_MODES as readonly string[]).includes(mode) ? (mode as AgentTerminalMode) : "off";
+    const mode = sanitizeAgentTerminalMode(meta.agentTerminalMode);
+    const connId = connectionId();
+    if (connId && loadConnectionEntry(SSH_AGENT_MODES_STORE_KEY, connId, sanitizeAgentTerminalMode) === null) {
+      saveConnectionEntry(SSH_AGENT_MODES_STORE_KEY, connId, mode);
+    }
+    agentMode.value = mode;
   } catch {
     // 静默降级：读不到就保持现状（默认 off），不打断终端使用。
   }
 }
 
-/// 切换即生效（ssh/settings/set），成功后本地同步并收起弹出层。
+/// 切换即生效（ssh/settings/set），成功后本地同步、镜像双写并收起弹出层。
 async function applyAgentMode(mode: AgentTerminalMode) {
   const sessionId = session.value?.sessionId;
   if (!sessionId || agentModeBusy.value) return;
@@ -147,6 +158,8 @@ async function applyAgentMode(mode: AgentTerminalMode) {
   try {
     await window.dbxPlugin.invoke("ssh/settings/set", { sessionId, agentTerminalMode: mode });
     agentMode.value = mode;
+    const connId = connectionId();
+    if (connId) saveConnectionEntry(SSH_AGENT_MODES_STORE_KEY, connId, mode);
     agentModeOpen.value = false;
   } catch (cause) {
     showError(cause, "terminal");

@@ -6,7 +6,14 @@
  * 本模块只做编辑器的归一化/合并纯逻辑（sidecar 同款上限：20 条、单条 4KiB、
  * 延迟 0..=30000ms 缺省 300ms）。命令在 shell 起来后按序注入，仅 SSH 交互
  * shell 会话生效；remote command（exec）会话被 sidecar 跳过。
+ *
+ * 存储迁移批 2（IMPL_PLAN_STORAGE_SYNC）：同形状镜像进 pluginStore 作云同步
+ * 载荷（播种/收敛在 SettingsDialog，`connectionSettingMirror.ts` 助手）；
+ * sidecar 文件仍是会话启动时的即时权威。
  */
+
+/** 镜像键：`Record<connectionId, StartupCommandsConfig>`。 */
+export const STARTUP_COMMANDS_STORE_KEY = "ssh-startup-commands";
 
 /** 每连接命令数上限（与 sidecar `startup_commands::MAX_COMMANDS` 一致）。 */
 export const STARTUP_COMMAND_MAX = 20;

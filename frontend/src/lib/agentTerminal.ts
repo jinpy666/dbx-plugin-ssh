@@ -7,6 +7,17 @@ export const AGENT_MODES = ["off", "auto", "strict"] as const;
 
 export type AgentTerminalMode = (typeof AGENT_MODES)[number];
 
+/** 镜像键（存储迁移批 2，IMPL_PLAN_STORAGE_SYNC）：连接级 agent 模式
+ * `Record<connectionId, mode>`，sidecar agent-modes.json 仍即时权威。 */
+export const SSH_AGENT_MODES_STORE_KEY = "ssh-agent-modes";
+/** 镜像键：连接级免审批命令 `Record<connectionId, string[]>`。 */
+export const SSH_AGENT_APPROVED_STORE_KEY = "ssh-agent-approved-commands";
+
+/** 白名单归一：未知/缺失一律回 off（与设置弹窗、工具栏面板同一语义）。 */
+export function sanitizeAgentTerminalMode(value: unknown): AgentTerminalMode {
+  return (AGENT_MODES as readonly string[]).includes(value as string) ? (value as AgentTerminalMode) : "off";
+}
+
 export type AgentRisk = "low" | "elevated";
 
 export type AgentFinishStatus = "done" | "timeout" | "denied";

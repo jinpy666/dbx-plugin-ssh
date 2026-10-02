@@ -5,17 +5,22 @@
 // （宿主桥 → guarded localStorage → 内存，见 shared/frontend/pluginStorage）
 // 读写，键名保持不变。通道与降级语义、旧键搬家见适配器文档。
 //
-// 明确不进本 store 的键（保持直读 localStorage）：
+// 明确不进本 store 的键（保持直读 localStorage）：以下键全部是
+// sidecar preferences.json 权威 + localStorage 仅作 web 直连场景的同步缓存
+// （App.vue cachePrefs/hydratePrefs 写穿，迁走即双权威）：
 // - ssh-download-directory / ssh-download-use-default-dir /
-//   ssh-download-conflict-policy：权威在 sidecar preferences.json
-//   （local/preferences/*），localStorage 仅作 web 直连场景的同步缓存
-//   （App.vue cachePrefs/hydratePrefs）。
-// - ssh-transfer-concurrency / ssh-transfer-duplicate-policy /
-//   ssh-history-suggestions-enabled / ssh-history-suggestion-min-chars /
-//   ssh-history-suggestion-max-chars：同上，sidecar preferences 权威 +
-//   localStorage 同步缓存（App.vue cachePrefs/hydratePrefs），迁走即双权威。
-// - ssh-quick-commands：已迁 sidecar 全局存储，localStorage 旧键仅作一次性
-//   迁移种子（App.vue hydrateQuickCommands），不再作为活键。
+//   ssh-download-conflict-policy
+// - ssh-transfer-concurrency / ssh-transfer-max-active /
+//   ssh-transfer-download-limit-kib / ssh-transfer-duplicate-policy /
+//   ssh-transfer-compress-mode / ssh-transfer-compress-threshold-mib
+// - ssh-sftp-compat-mode / ssh-sftp-name-encoding
+// - ssh-history-suggestions-enabled / ssh-history-suggestion-min-chars /
+//   ssh-history-suggestion-max-chars
+// 另：
+// - ssh-quick-commands：曾是 localStorage 活键（M32 前旧档），M32 迁 sidecar
+//   后本键闲置；存储迁移批 1（IMPL_PLAN_STORAGE_SYNC）重新以同名键成为
+//   pluginStore 活键——同名接力让适配器的惰性搬家自动把 localStorage 旧档
+//   带入宿主通道，sidecar 旧数据则由调用方经 RPC 一次性搬迁（键缺失才搬）。
 // - dbx-term-diag（App.vue）：控制台手动开启的诊断开关，非用户偏好，
 //   沙箱内本就不可写，guarded 直读保持原状。
 
@@ -28,6 +33,10 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 命令 → 最近执行时刻（Warp 式 history 面板右侧相对时间），与命令环同一
   // 采集口推进；wire 形态 [{c,t}]，命令环清空/淘汰时同步修剪。
   "ssh-command-history-times",
+  // history 面板富元数据（执行时长 + 退出码，wire 形态 [{c,d,x}]）：与命令环
+  // 同一采集口推进、随命令环修剪（App.vue persistCommandHistoryMeta）。
+  // 必须在册：宿主 storage 水合只拉白名单键，漏注册 = 每次启动面板列全丢。
+  "ssh-command-history-meta",
   "ssh-sftp-pane-open",
   "ssh-follow-directory",
   "ssh-sftp-side-tab",
@@ -56,6 +65,11 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 行内 ghost 自动建议（对标 Warp 线 1）：SettingsDialog 开关行自治读写，
   // 默认开。
   "ssh-terminal-ghost-suggest",
+  // 「Tab 接受建议」可选开关（ghostAcceptKey.ts 自治读写，默认关）。
+  "ssh-ghost-tab-accept",
+  // 建议黑名单（对标 Warp IgnoredSuggestionsModel，suggestionBlocklist.ts
+  // 自治读写）：点 ✗ 屏蔽的单条建议不再提示。
+  "ssh-suggestion-blocklist",
   // Docker/Podman 引擎连接设置：单键 JSON 映射（connectionKey → settings）。
   // 按连接的动态键无法在创建期声明（宿主 storage 无列键），收进一个结构化
   // 值由 dockerEngine.ts 自行拆装；曾用 localStorage 动态键，在工作台
@@ -63,6 +77,26 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-docker-engine",
   // Per-connection SSH forwarding presets used by the independent tunnel manager.
   "ssh-tunnel-profiles",
+  // 存储迁移批 1（IMPL_PLAN_STORAGE_SYNC）：全局偏好三域的权威键——快速命令
+  // / 关键词高亮规则 / SFTP 路径书签。原 sidecar JSON 文件降级为一次性迁移
+  // 种子（各域 load*FromStore 返回 null 才搬迁，空清单不复活）。
+  "ssh-quick-commands",
+  "ssh-highlight-rules",
+  "ssh-sftp-bookmarks",
+  // MCP 设置镜像（批 1 收尾）：sidecar 仍即时消费 mcp-settings.json，本键只
+  // 存可同步子集作云同步载荷（保存双写 + 启动播种/收敛，settingsModel.ts）。
+  "ssh-mcp-settings",
+  // 存储迁移批 2（IMPL_PLAN_STORAGE_SYNC）：连接级设置四域的镜像键（值内
+  // 按 connectionId 分桶，connectionSettingMirror.ts 助手）。sidecar 仍即时
+  // 权威（审批门/会话启动/SFTP 列目录现读），镜像只作云同步载荷；条目级
+  // 播种/收敛在设置弹窗与工具栏面板。
+  "ssh-startup-commands",
+  "ssh-name-encoding-overrides",
+  "ssh-agent-modes",
+  "ssh-agent-approved-commands",
+  // 存储迁移批 3：传输/下载/历史建议 14 个偏好键合并单镜像（preferencesMirror.ts，
+  // 键名与 local/preferences wire 一致）；sidecar 即时权威，保存双写 + 启动播种/收敛。
+  "ssh-preferences-mirror",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);
