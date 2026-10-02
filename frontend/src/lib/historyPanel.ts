@@ -265,3 +265,73 @@ export function canOpenHistoryPanel(gates: HistoryPanelGates): boolean {
     !gates.transferBusy
   );
 }
+
+// —— 分桶档（scope = 连接 id；本地/串口终端固定桶）——三个历史存储键保持
+// 单键值内分桶（宿主 storage 无列键、按连接动态键不可声明，同
+// ssh-docker-engine 先例）；旧版单映射档（裸数组）一次性迁入 legacyScope 桶。
+
+export interface HistoryBucketOptions {
+  /** 旧版全局档（升级前）的迁入目标桶。 */
+  legacyScope: string;
+}
+
+export type HistoryTimesBuckets = Record<string, Record<string, number>>;
+export type HistoryMetaBuckets = Record<string, Record<string, HistoryMetaRow>>;
+/** 持久化 wire 形态（按作用域的条目数组）。 */
+export type HistoryTimesWireBuckets = Record<string, Array<{ c: string; t: number }>>;
+export type HistoryMetaWireBuckets = Record<string, Array<{ c: string; d: number | null; x: number | null }>>;
+
+/** 解析分桶时间档：逐桶 sanitize；旧档（裸 [{c,t}] 数组）整体迁入 legacyScope。 */
+export function sanitizeHistoryTimesBuckets(raw: unknown, options: HistoryBucketOptions, limit = HISTORY_TIMES_LIMIT): HistoryTimesBuckets {
+  if (Array.isArray(raw)) {
+    const legacy = sanitizeHistoryTimes(raw, limit);
+    return Object.keys(legacy).length && options.legacyScope ? { [options.legacyScope]: legacy } : {};
+  }
+  if (!raw || typeof raw !== "object") return {};
+  const out: HistoryTimesBuckets = {};
+  for (const [scope, bucket] of Object.entries(raw)) {
+    if (!scope.trim()) continue;
+    const rows = sanitizeHistoryTimes(bucket, limit);
+    if (Object.keys(rows).length) out[scope] = rows;
+  }
+  return out;
+}
+
+/** 解析分桶元数据档：逐桶 sanitize；旧档（裸 [{c,d,x}] 数组）整体迁入 legacyScope。 */
+export function sanitizeHistoryMetaBuckets(raw: unknown, options: HistoryBucketOptions, limit = HISTORY_META_LIMIT): HistoryMetaBuckets {
+  if (Array.isArray(raw)) {
+    const legacy = sanitizeHistoryMeta(raw, limit);
+    return Object.keys(legacy).length && options.legacyScope ? { [options.legacyScope]: legacy } : {};
+  }
+  if (!raw || typeof raw !== "object") return {};
+  const out: HistoryMetaBuckets = {};
+  for (const [scope, bucket] of Object.entries(raw)) {
+    if (!scope.trim()) continue;
+    const rows = sanitizeHistoryMeta(bucket, limit);
+    if (Object.keys(rows).length) out[scope] = rows;
+  }
+  return out;
+}
+
+/** 持久化前修剪分桶时间档：每桶按本作用域命令环裁剪（wire 为条目数组），空桶丢弃。 */
+export function pruneHistoryTimesBuckets(times: Readonly<HistoryTimesBuckets>, rings: Readonly<Record<string, readonly string[]>>): HistoryTimesWireBuckets {
+  const out: HistoryTimesWireBuckets = {};
+  for (const [scope, bucket] of Object.entries(times)) {
+    const rows = pruneHistoryTimes(bucket, rings[scope] ?? []);
+    if (rows.length) out[scope] = rows;
+  }
+  return out;
+}
+
+/** 持久化前过滤分桶元数据档：每桶只留本作用域命令环存续的条目，空桶丢弃。 */
+export function persistableHistoryMetaBuckets(meta: Readonly<HistoryMetaBuckets>, rings: Readonly<Record<string, readonly string[]>>): HistoryMetaWireBuckets {
+  const out: HistoryMetaWireBuckets = {};
+  for (const [scope, bucket] of Object.entries(meta)) {
+    const live = new Set(rings[scope] ?? []);
+    const rows = Object.entries(bucket)
+      .filter(([command]) => live.has(command))
+      .map(([c, row]) => ({ c, d: row.durationMs, x: row.exitCode }));
+    if (rows.length) out[scope] = rows;
+  }
+  return out;
+}

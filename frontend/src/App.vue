@@ -148,7 +148,7 @@ import {
   sanitizeTransferCompressThresholdMib,
   type SftpCompressMode,
 } from "./lib/preferencesMirror";
-import { isPersistableCommand, mergeShellHistory, parseShellHistoryText, pushCommandHistory, sanitizeCommandHistory } from "./lib/commandHistory";
+import { mergeShellHistory, parseShellHistoryText, persistableCommandHistoryBuckets, pushCommandHistory, sanitizeCommandHistoryBuckets } from "./lib/commandHistory";
 import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
 import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, saveGhostTabAccept } from "./lib/ghostAcceptKey";
@@ -174,7 +174,7 @@ import { sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy, type TransferTask,
 } from "./lib/transferQueue";
 import { filterQuickCommands, QUICK_COMMANDS_LIMIT } from "./lib/quickCommands";
-import type { SuggestionAnchor } from "./lib/overlayPlacement";
+import { flippedOverlayBottom, type SuggestionAnchor } from "./lib/overlayPlacement";
 import { registerWatch } from "./lib/watchEdits";
 import { batchTargetLabel } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
@@ -327,12 +327,13 @@ import {
   decorateHistoryEntries,
   filterHistoryEntries,
   moveHistoryPanelIndex,
-  pruneHistoryTimes,
+  persistableHistoryMetaBuckets,
+  pruneHistoryTimesBuckets,
   recordHistoryMeta,
   recordHistoryTime,
   resolveHistoryPanelKey,
-  sanitizeHistoryMeta,
-  sanitizeHistoryTimes,
+  sanitizeHistoryMetaBuckets,
+  sanitizeHistoryTimesBuckets,
   type HistoryPanelEntry,
 } from "./lib/historyPanel";
 import TerminalGutter from "./components/TerminalGutter.vue";
@@ -792,13 +793,48 @@ const blankMenu = ref(false);
 // 侧栏（目录树/快捷路径）行右键：打开 / 复制路径 / 复制文件名 / 压缩。
 const sideMenu = ref<{ path: string }>();
 const commandRunning = ref(false);
-// 命令历史：内存环形 + pluginStore 非敏感持久化；index 为 -1 表示未在浏览历史。
-const commandHistory = ref<string[]>(loadCommandHistory());
+// 命令历史按作用域隔离（scope = 连接 id；本地/串口终端各占固定桶）：↑ history
+// 面板/建议/ghost/命令弹窗只读当前作用域的桶，多终端（多连接）历史不再互串
+// ——以终端的历史为准。三个 pluginStore 键保持单键（宿主 storage 无列键、
+// 按连接动态键不可声明，同 ssh-docker-engine 先例），值内分桶；旧版全局环
+// 一次性迁入 local 桶，SSH 连接以各自 shell 历史文件回填（loadRemoteShellHistory）。
+// scope 引用后段声明的 connectionId/serialSession——可写 computed 惰性求值，
+// 首读在挂载后，无 TDZ 问题（watch 则必须放 setup 尾部，同 promptHints 先例）。
+const HISTORY_SCOPE_LOCAL = "local";
+const HISTORY_SCOPE_SERIAL = "serial";
+const historyScope = computed(
+  () => connectionId.value || (serialSession.value ? HISTORY_SCOPE_SERIAL : HISTORY_SCOPE_LOCAL),
+);
+const EMPTY_HISTORY_RING: string[] = [];
+const EMPTY_HISTORY_TIMES: Record<string, number> = {};
+const EMPTY_HISTORY_META: Record<string, import("./lib/historyPanel").HistoryMetaRow> = {};
+const historyBuckets = ref<Record<string, string[]>>(loadCommandHistoryBuckets());
+const historyTimeBuckets = ref<Record<string, Record<string, number>>>(loadCommandHistoryTimesBuckets());
+const historyMetaBuckets = ref<Record<string, Record<string, import("./lib/historyPanel").HistoryMetaRow>>>(loadCommandHistoryMetaBuckets());
+// 当前作用域的活跃视图（可写 computed）：采集/清空/回填照旧写这三个名字，
+// 落点即当前连接的桶；缺桶时返回稳定空对象，避免消费方被新引用反复触发。
+const commandHistory = computed<string[]>({
+  get: () => historyBuckets.value[historyScope.value] ?? EMPTY_HISTORY_RING,
+  set: (next) => {
+    historyBuckets.value = { ...historyBuckets.value, [historyScope.value]: next };
+  },
+});
 // 命令 → 最近执行时刻（Warp 式 history 面板相对时间的数据面），与命令环同采集口推进。
-const commandHistoryTimes = ref<Record<string, number>>(loadCommandHistoryTimes());
+const commandHistoryTimes = computed<Record<string, number>>({
+  get: () => historyTimeBuckets.value[historyScope.value] ?? EMPTY_HISTORY_TIMES,
+  set: (next) => {
+    historyTimeBuckets.value = { ...historyTimeBuckets.value, [historyScope.value]: next };
+  },
+});
 // 富元数据映射（批 4d，Warp command search 同位）：命令 → {时长, 退出码}，
 // OSC 633 D 帧写入；并行结构与时间映射同款，随其持久化。
-const commandHistoryMeta = ref<Record<string, import("./lib/historyPanel").HistoryMetaRow>>(loadCommandHistoryMeta());
+const commandHistoryMeta = computed<Record<string, import("./lib/historyPanel").HistoryMetaRow>>({
+  get: () => historyMetaBuckets.value[historyScope.value] ?? EMPTY_HISTORY_META,
+  set: (next) => {
+    historyMetaBuckets.value = { ...historyMetaBuckets.value, [historyScope.value]: next };
+  },
+});
+// 命令历史浏览态（命令弹窗 ↑↓）；index 为 -1 表示未在浏览历史，作用域切换时作废。
 const commandHistoryIndex = ref(-1);
 const commandHistoryBackup = ref("");
 // 快速命令：用户自定义片段（≤20 条），全局存储在插件数据目录（sidecar），
@@ -2461,6 +2497,20 @@ function handleHistoryPanelPanelKey(event: KeyboardEvent) {
 function syncAiSearchAnchor() {
   aiSearchAnchor.value = readTerminalSuggestionAnchor();
 }
+
+// AI 搜索条定位：底边贴光标行顶并留 gap——浮在光标行上方，不遮输入行
+// （与 TerminalPromptHints 同一语义；此前 top 贴光标行顶，与光标同行）。
+// 包含块高度优先实测 terminal-pane（batch/标记条让位时 host 比 pane 矮，
+// 与 history 面板同一坐标系），退化用 suggestionViewport；皆不可测时不给
+// 内联样式，走 CSS 兜底位（贴终端底部左缘）。
+const aiSearchBarEl = ref<HTMLElement | null>(null);
+const aiSearchBarStyle = computed(() => {
+  const anchor = aiSearchAnchor.value;
+  if (!anchor) return undefined;
+  const containerHeight = aiSearchBarEl.value?.parentElement?.clientHeight || suggestionViewport.value.height || 0;
+  if (!(containerHeight > 0)) return undefined;
+  return { left: `${anchor.x}px`, bottom: `${flippedOverlayBottom(anchor.y, containerHeight)}px` };
+});
 
 function closeAiSearch() {
   aiSearchState.value = createAiSearchState();
@@ -6158,20 +6208,20 @@ function chooseZmodem() {
 }
 
 
-function loadCommandHistory(): string[] {
+// —— 三键均为单键分桶档（值内 Record<scope, …>）：读档经 *Buckets sanitize
+// （旧版全局档一次性迁入 local 桶），写档逐桶过滤/修剪后整表落盘。——
+function loadCommandHistoryBuckets(): Record<string, string[]> {
   try {
-    return sanitizeCommandHistory(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_KEY) || "null"));
+    return sanitizeCommandHistoryBuckets(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_KEY) || "null"), { legacyScope: HISTORY_SCOPE_LOCAL });
   } catch {
-    return [];
+    return {};
   }
 }
 
 function persistCommandHistory() {
   try {
-    // 疑似内嵌凭据 / 超长 / 多行的命令只留在内存，不写持久层。
-    // 显式单参：裸传 isPersistableCommand 会把 filter 的 index 喂进 maxLength
-    // 形参，任何命令都「超长」被滤掉，历史环从未真正落盘（刷新即清空）。
-    pluginStore.setItem(COMMAND_HISTORY_KEY, JSON.stringify(commandHistory.value.filter((command) => isPersistableCommand(command))));
+    // 逐桶过滤：疑似内嵌凭据 / 超长 / 多行的命令只留在内存，不写持久层。
+    pluginStore.setItem(COMMAND_HISTORY_KEY, JSON.stringify(persistableCommandHistoryBuckets(historyBuckets.value)));
   } catch {
     // localStorage 不可用时命令历史仅保留在内存中。
   }
@@ -6198,11 +6248,12 @@ const {
   commandHistoryTimes, pushTerminalCommandHistory, persistCommandHistoryTimes,
 });
 
-// —— 执行时间映射（Warp 式 history 面板右侧相对时间）：wire 形态为
-// [{c,t}] 条目数组，读回经 sanitizeHistoryTimes，写前按历史环修剪。——
-function loadCommandHistoryTimes(): Record<string, number> {
+// —— 执行时间映射（Warp 式 history 面板右侧相对时间）：分桶 wire 为
+// Record<scope, [{c,t}]>，读回经 sanitizeHistoryTimesBuckets，写前逐桶按本
+// 作用域历史环修剪。——
+function loadCommandHistoryTimesBuckets(): Record<string, Record<string, number>> {
   try {
-    return sanitizeHistoryTimes(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_TIMES_KEY) || "null"));
+    return sanitizeHistoryTimesBuckets(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_TIMES_KEY) || "null"), { legacyScope: HISTORY_SCOPE_LOCAL });
   } catch {
     return {};
   }
@@ -6210,15 +6261,15 @@ function loadCommandHistoryTimes(): Record<string, number> {
 
 function persistCommandHistoryTimes() {
   try {
-    pluginStore.setItem(COMMAND_HISTORY_TIMES_KEY, JSON.stringify(pruneHistoryTimes(commandHistoryTimes.value, commandHistory.value)));
+    pluginStore.setItem(COMMAND_HISTORY_TIMES_KEY, JSON.stringify(pruneHistoryTimesBuckets(historyTimeBuckets.value, historyBuckets.value)));
   } catch {
     // 存储不可用时时间戳仅保留在内存中（面板回退为不显示时间）。
   }
 }
 
-function loadCommandHistoryMeta(): Record<string, import("./lib/historyPanel").HistoryMetaRow> {
+function loadCommandHistoryMetaBuckets(): Record<string, Record<string, import("./lib/historyPanel").HistoryMetaRow>> {
   try {
-    return sanitizeHistoryMeta(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_META_KEY) || "null"));
+    return sanitizeHistoryMetaBuckets(JSON.parse(pluginStore.getItem(COMMAND_HISTORY_META_KEY) || "null"), { legacyScope: HISTORY_SCOPE_LOCAL });
   } catch {
     return {};
   }
@@ -6226,9 +6277,7 @@ function loadCommandHistoryMeta(): Record<string, import("./lib/historyPanel").H
 
 function persistCommandHistoryMeta() {
   try {
-    const live = new Set(commandHistory.value);
-    const pruned = Object.fromEntries(Object.entries(commandHistoryMeta.value).filter(([command]) => live.has(command)));
-    pluginStore.setItem(COMMAND_HISTORY_META_KEY, JSON.stringify(Object.entries(pruned).map(([c, row]) => ({ c, d: row.durationMs, x: row.exitCode }))));
+    pluginStore.setItem(COMMAND_HISTORY_META_KEY, JSON.stringify(persistableHistoryMetaBuckets(historyMetaBuckets.value, historyBuckets.value)));
   } catch {
     // 存储不可用时元数据仅保留在内存中（面板回退为不显示时长/退出码）。
   }
@@ -7481,6 +7530,14 @@ function dismissPromptHints() {
   promptHintsDismissed.value = true;
   savePromptHintsDismissed(true);
 }
+
+// 命令历史作用域切换（连接切换 / SSH↔本地 / 本地↔串口）：命令弹窗的历史
+// 浏览态随环换桶作废，避免 ↑↓ 指向另一作用域的下标/草稿。放 setup 尾部：
+// watch 创建即求值 historyScope，引用的 connectionId/serialSession 在前段。
+watch(historyScope, () => {
+  commandHistoryIndex.value = -1;
+  commandHistoryBackup.value = "";
+});
 </script>
 
 <template>
@@ -7965,12 +8022,14 @@ function dismissPromptHints() {
           </div>
         </div>
         <!-- # AI 命令搜索模式提示（Warp AI Command Search 同位）：激活后 onData
-             全部改道本地状态机、字节不进 PTY，提示条锚在光标格展示 query 与键位；
-             回车发起宿主 AI 会话（ask），结果由用户复制回填，插件不代执行。 -->
+             全部改道本地状态机、字节不进 PTY，提示条浮在光标行上方展示 query 与
+             键位（底边贴光标行顶，不遮输入行）；回车发起宿主 AI 会话（ask），
+             结果由用户复制回填，插件不代执行。 -->
         <div
           v-if="aiSearchState.active && aiSearchAnchor"
+          ref="aiSearchBarEl"
           class="terminal-ai-search mono"
-          :style="{ left: `${aiSearchAnchor.x}px`, top: `${aiSearchAnchor.y}px` }"
+          :style="aiSearchBarStyle"
           role="status"
         >
           <span class="terminal-ai-search-badge" aria-hidden="true">#</span>
@@ -9871,11 +9930,14 @@ body.resizing-col { cursor: col-resize !important; user-select: none; }
   font-size: 10px;
   white-space: nowrap;
 }
-/* # AI 命令搜索模式提示（Warp AI 对齐批）：锚在光标格的行内提示条，令牌
-   缺失 fallback 保可见（与 ghost 键位胶囊同策略）。 */
+/* # AI 命令搜索模式提示（Warp AI 对齐批）：浮在光标行上方（底边贴光标行顶）
+   的行内提示条，令牌缺失 fallback 保可见（与 ghost 键位胶囊同策略）。 */
 .terminal-ai-search {
   position: absolute;
   z-index: 7;
+  /* 内联样式缺帧（包含块尚不可测）时的兜底位：贴终端底部左缘。 */
+  bottom: 12px;
+  left: 8px;
   display: flex;
   max-width: calc(100% - 16px);
   align-items: center;

@@ -264,13 +264,17 @@ try {
   // search box filters after click-focus; terminal Enter runs the line (#138).
   // 独立页面 + addInitScript 种子：commandHistory 水合在 App setup（晚于
   // addInitScript），mock 宿主 storage 的兜底档正是 window.localStorage。
+  // 值为分桶档（scope = connectionId）：历史按连接隔离，mock 页面的作用域
+  // 是 mock 宿主注入的 "visual-connection"。
   console.log("==> history panel walkthrough");
   const historyPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   historyPage.on("pageerror", (err) => pageError.push(String(err)));
   await historyPage.addInitScript(() => {
     window.localStorage.setItem(
       "ssh-command-history",
-      JSON.stringify(["echo ui-mock-history-a", "tail -f /var/log/ui-mock.log", "kubectl get pods -n ui-mock"]),
+      JSON.stringify({
+        "visual-connection": ["echo ui-mock-history-a", "tail -f /var/log/ui-mock.log", "kubectl get pods -n ui-mock"],
+      }),
     );
   });
   await historyPage.goto(`${baseUrl}?render=dom`, { waitUntil: "domcontentloaded", timeout: 30_000 });

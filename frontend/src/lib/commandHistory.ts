@@ -138,3 +138,43 @@ export function mergeShellHistory(current: string[], shellLines: readonly (strin
   extra.reverse();
   return [...current, ...extra].slice(0, limit);
 }
+
+// —— 按作用域分桶（scope = 连接 id；本地/串口终端固定桶）——多终端（多连接）
+// 各占一桶，↑ 面板/建议/ghost/命令弹窗只读当前作用域，历史不再互串。存储键
+// 保持单键（宿主 storage 无列键、按连接动态键不可声明，同 ssh-docker-engine
+// 先例），值内分桶；旧版全局环（裸 string[]）一次性迁入 legacyScope 桶
+// （升级不丢档），SSH 连接随后以各自 shell 历史文件回填，来源回到终端本身。
+
+export interface CommandHistoryBucketOptions {
+  /** 旧版全局环（升级前档）的迁入目标桶。 */
+  legacyScope: string;
+}
+
+export type CommandHistoryBuckets = Record<string, string[]>;
+
+/** 解析分桶历史档：逐桶 sanitize；旧档（裸数组）整体迁入 legacyScope。 */
+export function sanitizeCommandHistoryBuckets(raw: unknown, options: CommandHistoryBucketOptions, limit = COMMAND_HISTORY_LIMIT): CommandHistoryBuckets {
+  if (Array.isArray(raw)) {
+    const legacy = sanitizeCommandHistory(raw, limit);
+    return legacy.length && options.legacyScope ? { [options.legacyScope]: legacy } : {};
+  }
+  if (!raw || typeof raw !== "object") return {};
+  const out: CommandHistoryBuckets = {};
+  for (const [scope, bucket] of Object.entries(raw)) {
+    if (!scope.trim()) continue;
+    const rows = sanitizeCommandHistory(bucket, limit);
+    if (rows.length) out[scope] = rows;
+  }
+  return out;
+}
+
+/** 持久化前逐桶过滤（凭据/超长/多行拒收）并丢弃空桶。 */
+export function persistableCommandHistoryBuckets(buckets: Readonly<CommandHistoryBuckets>): CommandHistoryBuckets {
+  const out: CommandHistoryBuckets = {};
+  for (const [scope, bucket] of Object.entries(buckets)) {
+    if (!scope.trim()) continue;
+    const rows = bucket.filter((command) => isPersistableCommand(command));
+    if (rows.length) out[scope] = rows;
+  }
+  return out;
+}

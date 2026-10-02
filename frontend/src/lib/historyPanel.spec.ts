@@ -8,8 +8,12 @@ import {
   chooseHistoryPanelPlacement,
   clampHistoryPanelIndex,
   decorateHistoryEntries,
+  persistableHistoryMetaBuckets,
+  pruneHistoryTimesBuckets,
   recordHistoryMeta,
   sanitizeHistoryMeta,
+  sanitizeHistoryMetaBuckets,
+  sanitizeHistoryTimesBuckets,
   filterHistoryEntries,
   moveHistoryPanelIndex,
   pruneHistoryTimes,
@@ -234,5 +238,39 @@ describe("chooseHistoryPanelPlacement (Warp 版式：优先输入行上方)", ()
 
   it("keeps above when the viewport is unmeasurable", () => {
     expect(chooseHistoryPanelPlacement(300, 17, 0)).toBe("above");
+  });
+});
+
+describe("分桶历史档（scope = 连接 id，本地/串口固定桶）", () => {
+  it("sanitizeHistoryTimesBuckets migrates the legacy flat array into the legacy scope", () => {
+    expect(sanitizeHistoryTimesBuckets([{ c: "ls", t: 100 }], { legacyScope: "local" })).toEqual({ local: { ls: 100 } });
+    expect(sanitizeHistoryTimesBuckets(null, { legacyScope: "local" })).toEqual({});
+    expect(sanitizeHistoryTimesBuckets([{ c: "", t: 5 }], { legacyScope: "local" })).toEqual({});
+  });
+
+  it("sanitizeHistoryTimesBuckets sanitizes each scope independently", () => {
+    const raw = {
+      "conn-1": [{ c: "ls", t: 100 }, { c: "bad", t: -1 }],
+      "conn-2": "junk",
+      "": [{ c: "dropped", t: 1 }],
+    };
+    expect(sanitizeHistoryTimesBuckets(raw, { legacyScope: "local" })).toEqual({ "conn-1": { ls: 100 } });
+  });
+
+  it("sanitizeHistoryMetaBuckets migrates the legacy flat array into the legacy scope", () => {
+    expect(sanitizeHistoryMetaBuckets([{ c: "ls", d: 12, x: 0 }], { legacyScope: "local" })).toEqual({ local: { ls: { durationMs: 12, exitCode: 0 } } });
+    expect(sanitizeHistoryMetaBuckets("junk", { legacyScope: "local" })).toEqual({});
+  });
+
+  it("pruneHistoryTimesBuckets prunes each scope against its own ring and drops empty scopes", () => {
+    const times = { "conn-1": { a: 1, gone: 3 }, "conn-2": { gone: 4 } };
+    const rings = { "conn-1": ["a", "b"] };
+    expect(pruneHistoryTimesBuckets(times, rings)).toEqual({ "conn-1": [{ c: "a", t: 1 }] });
+  });
+
+  it("persistableHistoryMetaBuckets keeps only ring-live rows per scope and drops empty scopes", () => {
+    const meta = { "conn-1": { a: { durationMs: 1, exitCode: 0 }, gone: { durationMs: 2, exitCode: 1 } } };
+    const rings = { "conn-1": ["a"], "conn-2": [] };
+    expect(persistableHistoryMetaBuckets(meta, rings)).toEqual({ "conn-1": [{ c: "a", d: 1, x: 0 }] });
   });
 });
