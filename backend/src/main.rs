@@ -15,6 +15,7 @@ mod host_key;
 mod job_object;
 mod keys;
 mod local_downloads;
+mod local_editors;
 mod local_fs;
 mod local_terminal;
 mod mcp;
@@ -2154,6 +2155,17 @@ impl Plugin {
                 let path = required_string(&params, "path")?;
                 let history = transfer_history::load_history(&plugin_data_dir());
                 local_downloads::open_validated(&history, std::path::Path::new(path))?;
+                Ok(json!({ "success": true }))
+            }
+            // 按扩展名映射的编辑器打开（`local/editors/list` 提供目录）：
+            // editorId 走知名编辑器目录，custom 走用户自定义命令行（argv
+            // 化、不过 shell）；路径 allowlist 与 local/open 同源。
+            "local/editors/list" => Ok(local_editors::editors_list_payload()),
+            "local/open-with" => {
+                let path = required_string(&params, "path")?;
+                let spec = local_editors::launch_spec_from_params(&params)?;
+                let history = transfer_history::load_history(&plugin_data_dir());
+                local_editors::open_with_validated(&history, std::path::Path::new(&path), &spec)?;
                 Ok(json!({ "success": true }))
             }
             "sftp/transfer/resumable" => self.ssh.resumable_uploads(),

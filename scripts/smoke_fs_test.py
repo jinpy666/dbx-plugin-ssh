@@ -2506,6 +2506,66 @@ def main() -> None:
             req("local/preferences/set", {"sftp_name_encoding": "auto"})
             print("    latin-1 wire register/edit/upload-back round-trip ok")
 
+        def case_local_editors_list():
+            # 编辑器目录（编辑器映射增强）：条目形状齐备，平台基线编辑器必在
+            # （macos=textedit / windows=notepad，均为系统自带恒可用）。
+            payload = req("local/editors/list")
+            platform = str(payload.get("platform") or "")
+            if platform not in {"macos", "windows", "linux", "other"}:
+                raise AssertionError(f"local/editors/list platform: {payload}")
+            editors = payload.get("editors")
+            if not isinstance(editors, list) or not editors:
+                raise AssertionError(f"local/editors/list editors: {json.dumps(editors)[:200]}")
+            ids = set()
+            for editor in editors:
+                for key in ("id", "name", "available", "launch", "suggestedExtensions"):
+                    if key not in editor:
+                        raise AssertionError(f"editor entry missing {key}: {editor}")
+                if not isinstance(editor["available"], bool) or not isinstance(editor["launch"], dict):
+                    raise AssertionError(f"editor entry types: {editor}")
+                ids.add(str(editor["id"]))
+            baseline = {"macos": "textedit", "windows": "notepad"}.get(platform)
+            if baseline and baseline not in ids:
+                raise AssertionError(f"{platform} baseline editor {baseline} missing: {sorted(ids)}")
+            available = [str(e["id"]) for e in editors if e["available"]]
+            watch_state["available_editor"] = available[0] if available else ""
+            print(f"    platform={platform} editors={len(editors)} available={available or 'none'}")
+
+        def case_local_open_with_guardrails():
+            # 三条拒绝路径：unknown editorId 明确报错；可用编辑器打开未记录
+            # 路径被下载历史 allowlist 拦截；custom 通道空命令被拒。
+            try:
+                req("local/open-with", {"path": "/definitely-not-opened", "editorId": "no-such-editor"})
+            except SidecarError as error:
+                if missing_method(error) is not None:
+                    raise
+                if "Unknown editor id" not in str(error):
+                    raise AssertionError(f"unknown editorId error: {error}")
+            else:
+                raise AssertionError("unknown editorId accepted")
+            editor_id = watch_state.get("available_editor")
+            if not editor_id:
+                raise SkipSignal("no editor available on this host; allowlist branch untested")
+            try:
+                req("local/open-with", {"path": "/definitely-not-opened", "editorId": editor_id})
+            except SidecarError as error:
+                if missing_method(error) is not None:
+                    raise
+                if "not saved by a completed download" not in str(error):
+                    raise AssertionError(f"allowlist error: {error}")
+            else:
+                raise AssertionError("unrecorded path accepted by local/open-with")
+            try:
+                req("local/open-with", {"path": "/definitely-not-opened", "custom": {"command": "   "}})
+            except SidecarError as error:
+                if missing_method(error) is not None:
+                    raise
+                if "non-empty command" not in str(error):
+                    raise AssertionError(f"empty custom command error: {error}")
+            else:
+                raise AssertionError("empty custom command accepted")
+            print(f"    unknown-id / allowlist / empty-custom all rejected (available={editor_id})")
+
         def case_mcp_sftp_toolface():
             # M17-B MCP 工具面：sftp_mkdir/sftp_list_dir/sftp_rename/sftp_remove
             # （+ sftp_exists 收口）在 autonomous 模式经 mcp/call 基本往返。
@@ -2584,6 +2644,14 @@ def main() -> None:
         report.run("watcher latin-1 wire path register/edit/upload-back", "watch/upload",
                    case_watch_latin1_back,
                    needs="watch/stop drops exactly its watch; stop-all sweeps")
+
+        print("--- local editor catalog group (editor mapping) ---")
+        report.run("local/editors/list returns shaped per-platform catalog", "local/editors/list",
+                   case_local_editors_list)
+        report.run("local/open-with rejects unknown id / unrecorded path / empty custom",
+                   "local/open-with",
+                   case_local_open_with_guardrails,
+                   needs="local/editors/list returns shaped per-platform catalog")
 
         step("cleanup leftovers")
         # Best-effort mode/secret restore even when a late case failed: the

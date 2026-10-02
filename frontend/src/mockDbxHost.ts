@@ -1068,6 +1068,18 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
       ],
     };
   } else if (method === "local/capabilities") result = { canSaveLocal: false, downloadsDir: "" };
+  else if (method === "local/editors/list") {
+    // 外部编辑器目录（编辑器映射增强）：mock 给一条可用的 VS Code 让
+    // 「打开方式」子菜单在无 sidecar 的开发环境也有可见选项。
+    result = {
+      platform: "macos",
+      editors: [
+        { id: "vscode", name: "Visual Studio Code", available: false, launch: { kind: "openApp", appId: "Visual Studio Code" }, suggestedExtensions: [".txt", ".md", ".json"] },
+        { id: "textedit", name: "TextEdit", available: true, launch: { kind: "openApp", appId: "TextEdit" }, suggestedExtensions: [".txt"] },
+      ],
+    };
+  }
+  else if (method === "local/open-with") result = { success: true };
   else if (method === "local/metrics") {
     // 本地指标（dock 本地终端系统信息带）：与 ssh/metrics 同形状，但反映
     // sidecar 宿主机本身——无 gpu/npu（SSH-only 语义）、无 osId/osPretty

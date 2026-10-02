@@ -52,6 +52,8 @@ describe("ssh pluginStore wiring", () => {
         "ssh-ai-assist",
         // Docker/Podman 引擎连接设置（单键 JSON 映射，dockerEngine.ts 自治）。
         "ssh-docker-engine",
+        // 外部编辑器配置（编辑器映射增强，editorRules.ts 自治）。
+        "ssh-editor-config",
         "ssh-tunnel-profiles",
         // 存储迁移批 1（IMPL_PLAN_STORAGE_SYNC）：全局偏好三域权威键，
         // sidecar JSON 降级为一次性搬迁种子。

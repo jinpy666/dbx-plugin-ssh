@@ -97,9 +97,13 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-name-encoding-overrides",
   "ssh-agent-modes",
   "ssh-agent-approved-commands",
-  // 存储迁移批 3：传输/下载/历史建议 14 个偏好键合并单镜像（preferencesMirror.ts，
+  // 存储迁移批 3（IMPL_PLAN_STORAGE_SYNC）：传输/下载/历史建议 14 个偏好键合并单镜像（preferencesMirror.ts，
   // 键名与 local/preferences wire 一致）；sidecar 即时权威，保存双写 + 启动播种/收敛。
   "ssh-preferences-mirror",
+  // 外部编辑器配置（扩展名→编辑器关联/默认编辑器/自定义命令/回传策略）：
+  // 单键 JSON（editorRules.ts 拆装净化），纯前端消费——打开时把解析结果
+  // 传给 sidecar `local/open-with`，sidecar 不读此配置。
+  "ssh-editor-config",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);

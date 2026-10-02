@@ -72,6 +72,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `sftp/createDirectory`、`sftp/rename`、`sftp/delete`、`sftp/exists`、`sftp/rename-unique`、`sftp/touch`、`sftp/write`、`sftp/upload/start/finish`、`sftp/upload-local`、`watch/upload` | SFTP 写操作/预检（`sftp_name_encoding` 为 `latin-1` 时走裸包客户端字节保真，路径来源分工见 `sftp/list` 节 M15-B/M16 段；symlink 三命令见独立行） |
 | `sftp/upload/start`、`finish` | 上传事务生命周期（`resumeTaskId` 断点续传；`finish` 校验后交后台任务推送并立即返回，见「上传两阶段计数与收尾语义」）。start/finish 响应附 `compression: "gzip"\|"none"`（M33 压缩通道决策结果，见「压缩传输（gzip 混合方案）」节；旧客户端可忽略） |
 | `watch/start`、`watch/stop`、`watch/stop-all`、`watch/upload` | 外部编辑器回写 watcher（仅桌面端，见「外部编辑器 watcher（watch/*）」节）：`start` 对 `remote-edit/` 下载目录内的本机文件登记监听并返回 `{watchId}`，内容确认变化后发 `watch/file-modified` 事件；`upload` 把监听文件当前字节按 `sftp/write` 同款原子提交推回远端（latin-1 按所属连接编码走裸包字节保真，M21） |
+| `local/editors/list`、`local/open-with` | 外部编辑器目录与按名打开（编辑器映射增强，仅桌面端消费，见「外部编辑器目录与打开方式（local/editors/*、local/open-with）」节）：`list` 返回平台知名编辑器目录（文件系统/PATH 探测，不 spawn 进程，unavailable 条目仍返回）；`open-with` 在与 `local/open` 同源的下载历史 allowlist 下用目录编辑器或用户自定义命令行打开已下载文件（argv 直接 spawn，不过 shell） |
 | `sftp/download/start`、`next`、`finish` | 下载事务生命周期（`offset` 断点续传，见下文；桌面端可选 `downloadDir` 指定本机绝对保存目录）。**路径形态契约（M27-A）**：latin-1 生效时 `remotePath` 必须是 `sftp/list` 回传的 wire 形式（`pathFromUri(entry.uri)`）——wire 域内字面 `%` 已被 `escape_wire` 自转义为 `%25`，因此 wire 字符串中的 `%XX`（X∈hex）唯一解读就是转义还原（`has_wire_escapes` 判分支）；该入口不接受用户字面输入的显示文本，含字面 `%XX` 的真实文件名经列表回传时其 wire 形式为 `%25XX`，往返无损。**车道判定按生效编码区分（M28-B 修 D-7）**：latin-1 维持上述 raw 车道；auto 生效时一律走高层客户端——auto 列表 uri 由高层产出、字面 `%` 未经 `%25` 自转义，wire 串里的 `%XX` 是文件名字面量而非转义，不还原（auto 以字面量语义与列表一致）。响应附 `compression: "gzip"\|"none"`（M33 压缩通道决策结果，见「压缩传输（gzip 混合方案）」节；`offset > 0` 续传恒为 `none`） |
 | `sftp/download/tree/start` | 递归目录下载启动：远端 `read_dir` 走树扫描（有界），本地镜像目录布局后复用 `sftp/download/next`/`finish`/`sftp/transfer/cancel` 分块管线（见「递归目录下载」节）。`remotePath` 路径形态契约同 `sftp/download/start`（M27-A：列表回传的 wire 形式）。响应附 `compression`（M33：满足压缩条件时改走「远端 tar.gz 单流 → 本地解包 staging 树」通道，见「压缩传输（gzip 混合方案）」节） |
 | `sftp/stat`、`sftp/exists`、`sftp/touch`、`sftp/write` | 扩展文件操作：元信息单查、存在性检查、空文件创建、小文件直写；latin-1 下 `sftp/stat` 整条 wire 还原走裸包 LSTAT，`sftp/exists` 按 `form` 参数分工还原（缺省「wire 前缀 + 显示末段」、`form: "wire"` 整条），均走裸包 LSTAT（M17，见 `sftp/exists` 节） |
@@ -1081,7 +1082,8 @@ plain/`.gz`/远端临时件，取消与会话关闭都穿过它（此前会话�
 SFTP「用外部编辑器打开」的回写链（M15 立项，M20/M21 真容器收口；实现 `backend/src/file_watch.rs`）。
 前端先把远端文件经 `sftp/download/start` 带 `downloadDir=<下载目录>/remote-edit/<时间戳>/` 落盘，
 打开 OS 默认应用后调 `watch/start` 登记监听；编辑器保存且 sidecar 确认内容真变后发
-`watch/file-modified` 事件，工作台弹确认并由 `watch/upload` 把当前磁盘字节推回远端。
+`watch/file-modified` 事件，工作台按回传策略处置（默认 `auto`：保存即静默 `watch/upload` 回传；
+可切 `ask` 逐次弹确认，见下节「外部编辑器目录与打开方式」末段）把当前磁盘字节推回远端。
 
 - `watch/start {sessionId, remotePath, localPath}` → `{watchId}`。仅桌面端（本地下载能力缺失直接拒绝，
   web/docker 无本机文件系统语义）；`localPath` 必须是插件自身 `remote-edit/` 下载目录之下、经
@@ -1101,6 +1103,33 @@ SFTP「用外部编辑器打开」的回写链（M15 立项，M20/M21 真容器�
   按 `sftp/write` 同款「`.dbx-part` 暂存 → 原子 rename、权限位保留」落回远端；只读门禁
   `ensure_writable` 与其他 SFTP 写一致。latin-1 连接按 watch 所属连接的编码判定整条 wire 还原后
   走裸包字节保真回写（M21）。
+
+### 外部编辑器目录与打开方式（local/editors/list、local/open-with）
+
+「按扩展名映射编辑器」的数据面（编辑器映射增强，对标 WinSCP Preferences→Editors 的文件掩码
+关联与 Explorer「打开方式」；实现 `backend/src/local_editors.rs`）。目录来自内置知名编辑器清单
++ 本机探测：macOS 查 `/Applications`/`~/Applications`，Windows 查标准安装路径（含 WPS
+`<root>\Kingsoft\WPS Office\<version>\office6\` 版本目录扫描），Linux/其他查 PATH——
+探测只查文件系统、绝不 spawn 进程；unavailable 条目仍返回（前端关联列表可引用，编辑器装好
+后即时生效）。映射/关联配置（扩展名→编辑器、默认编辑器、自定义编辑器清单、回传策略）持久化
+在前端 pluginStore 单键（`ssh-editor-config`，`frontend/src/lib/editorRules.ts` 净化），sidecar
+不读——打开时前端把解析结果传给本方法。
+
+- `local/editors/list` → `{platform, editors: [{id, name, available, launch, suggestedExtensions}]}`。
+  `launch` 为 `{kind:"openApp", appId}`（macOS `open -a`）或 `{kind:"exe", exe, args}`（argv 直接
+  spawn，`{file}` 占位符打开时替换为下载路径；缺省占位符则路径追加末尾）。Windows 侧
+  CreateProcess 不能执行 `.cmd`，VS Code 只探测两个标准 `.exe` 安装路径（用户级/机器级）。
+- `local/open-with {path, editorId}` 或 `{path, custom: {name, command}}` → `{success}`。路径
+  allowlist 与 `local/open` 同源（传输历史中已完成下载的 `localPath` 精确匹配，其余一律拒绝，
+  防任意路径执行原语）；`editorId` 未知报 `Unknown editor id: …`，目录中已定义但本机未安装报
+  `Editor '…' is not installed on this machine`。`custom.command` 按 shlex 风格分词（Windows
+  友好偏差：引号外反斜杠除转义引号/反斜杠外保持字面，`"C:\Program Files\app.exe"` 保形），
+  首 token 为可执行文件、其余为参数，argv 直接 spawn 不过 shell；空命令报
+  `Custom editor requires a non-empty command`，分词遇未闭合引号报
+  `Command has an unterminated quote`。
+- 回传策略（`uploadPolicy`）是前端行为：`auto`（默认，FinalShell 式）下 `watch/file-modified`
+  命中即直接 `watch/upload`，`ask` 保持逐次确认弹窗；确认弹窗的「总是上传」仍是逐 watchId
+  记忆（`frontend/src/composables/useExternalEdits.ts`）。
 
 ### sudo 下载（DownloadSudo）
 

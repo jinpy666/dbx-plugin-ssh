@@ -136,6 +136,12 @@ function mountSettings(sessionId?: string) {
         persistCompressMode: () => {},
         persistCompressThreshold: () => {},
       },
+      editorPrefs: {
+        loadConfig: () => ({ associations: [], customEditors: [], uploadPolicy: "auto" as const }),
+        persistConfig: () => undefined,
+        loadEditors: () => [],
+        reloadEditors: async () => [],
+      },
       suggestionPrefs: {
         loadEnabled: () => true,
         loadMinChars: () => 2,

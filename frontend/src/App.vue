@@ -9,7 +9,9 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import {
   Archive,
+  Check,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Disc,
   Eye,
@@ -348,6 +350,7 @@ import SideNavPanel from "./components/SideNavPanel.vue";
 import DockerPanel from "./components/DockerPanel.vue";
 import DockerWhaleLogo from "./components/DockerWhaleLogo.vue";
 import { Switch } from "./components/ui/switch";
+import { defaultPatternFor, newCustomEditorId, resolveEditorForFile, sanitizeEditorConfig, type CustomEditor, type EditorConfig, type KnownEditor, type ResolvedEditor } from "./lib/editorRules";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "./components/ui/context-menu";
 import { Popover, PopoverAnchor, PopoverContent } from "./components/ui/popover";
@@ -5738,6 +5741,69 @@ const {
   closeFileMenu: () => { fileMenu.value = undefined; },
 });
 
+// —— 打开方式子菜单与自定义编辑器命令（编辑器映射增强）——
+// 子菜单 = 系统默认 + sidecar 探测到的可用编辑器 + 用户自定义命令，选中即开
+// （一次性，不写关联）；持久化关联走设置弹窗或自定义命令弹窗的「记住为默认」。
+const availableExternalEditors = computed(() => externalEditors.value.filter((editor) => editor.available));
+/** 当前文件按关联/默认解析到的编辑器 id（子菜单打勾标识；system 返回空串）。 */
+function mappedEditorIdFor(fileName: string): string {
+  const resolved = resolveEditorForFile(fileName, editorConfig.value, externalEditors.value);
+  return resolved.kind === "system" ? "" : resolved.editor.id;
+}
+function openWithSystemEntry(entry: SftpEntry) {
+  void openInExternalEditor(entry, { kind: "system" });
+}
+function openWithKnownEntry(entry: SftpEntry, editor: KnownEditor) {
+  void openInExternalEditor(entry, { kind: "known", editor });
+}
+function openWithCustomEntry(entry: SftpEntry, editor: CustomEditor) {
+  void openInExternalEditor(entry, { kind: "custom", editor });
+}
+// 自定义编辑器命令弹窗：命令串由 sidecar argv 化执行（不过 shell），
+// 「记住为默认」写入 {pattern → customId} 关联（pattern 取文件扩展名掩码）。
+const customEditorOpen = ref(false);
+const customEditorEntry = ref<SftpEntry>();
+const customEditorName = ref("");
+const customEditorCommand = ref("");
+const customEditorRemember = ref(true);
+const customEditorPattern = computed(() =>
+  customEditorEntry.value ? defaultPatternFor(customEditorEntry.value.name) : "*",
+);
+function beginCustomEditorCommand(entry: SftpEntry) {
+  customEditorEntry.value = entry;
+  customEditorName.value = "";
+  customEditorCommand.value = "";
+  customEditorRemember.value = true;
+  customEditorOpen.value = true;
+}
+async function commitCustomEditor() {
+  const entry = customEditorEntry.value;
+  const command = customEditorCommand.value.trim();
+  if (!entry || !command) return;
+  const id = newCustomEditorId();
+  const name = customEditorName.value.trim() || command.split(/\s+/)[0] || id;
+  const next = sanitizeEditorConfig(editorConfig.value);
+  next.customEditors = [...next.customEditors, { id, name, command }];
+  if (customEditorRemember.value) {
+    const pattern = defaultPatternFor(entry.name);
+    next.associations = [
+      ...next.associations.filter((assoc) => assoc.pattern.toLowerCase() !== pattern.toLowerCase()),
+      { pattern, customId: id },
+    ];
+  }
+  updateEditorConfig(next);
+  customEditorOpen.value = false;
+  await openInExternalEditor(entry, { kind: "custom", editor: { id, name, command } });
+}
+
+/** 设置弹窗的外部编辑器适配器：权威态在本域（pluginStore 单键 + 探测缓存）。 */
+const editorPrefsAdapter = {
+  loadConfig: () => editorConfig.value,
+  persistConfig: (value: EditorConfig) => updateEditorConfig(value),
+  loadEditors: () => externalEditors.value,
+  reloadEditors: () => ensureExternalEditors(),
+};
+
 // 行内重命名：提交/短路语义收口在 composables/useSftpRename。
 const {
   renamingPath,
@@ -5973,6 +6039,10 @@ const {
   handleWatchModified,
   joinLocalPath,
   openInExternalEditor,
+  editorConfig,
+  updateEditorConfig,
+  externalEditors,
+  ensureExternalEditors,
 } = useExternalEdits({
   t, showNotice, showError, loadDirectory,
   session,
@@ -7004,6 +7074,8 @@ const modalOpenStates = computed(() => [
   operationDialog.value,
   symlinkDialog.value !== null,
   watchModifiedQueue.value.length > 0,
+  // 自定义编辑器命令弹窗（编辑器映射增强），模板顺序在 watch 确认弹窗之后。
+  customEditorOpen.value,
   commandOpen.value,
   profilesOpen.value,
   auditOpen.value,
@@ -8938,6 +9010,24 @@ watch(historyScope, () => {
                   <!-- 外部编辑器回传（P2-5，桌面端）：web/docker 的 sidecar 不在本机，
                        监听与回传都不可用，localCanSave 未探测到前也保持禁用。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite || !localCanSave" @select="openInExternalEditor(fileMenu.entry)"><ExternalLink />{{ t("sftpEdit.openExternal") }}</ContextMenuItem>
+                  <!-- 打开方式（编辑器映射增强）：系统默认 + 探测到的编辑器 +
+                       自定义命令，选中即开；关联管理在设置弹窗「外部编辑器」区。 -->
+                  <ContextMenuSub v-if="fileMenu.entry.kind === 'file'" @update:open="(open: boolean) => { if (open) void ensureExternalEditors(); }">
+                    <ContextMenuSubTrigger :disabled="!canWrite || !localCanSave" class="gap-2"><ExternalLink />{{ t("sftpEdit.openWith") }}<ChevronRight class="ml-auto opacity-60" /></ContextMenuSubTrigger>
+                    <ContextMenuSubContent class="min-w-52">
+                      <ContextMenuItem :disabled="!canWrite || !localCanSave" @select="openWithSystemEntry(fileMenu.entry)"><span class="inline-flex w-4 justify-center"><Check v-if="!mappedEditorIdFor(fileMenu.entry.name)" /></span><ExternalLink class="opacity-70" />{{ t("sftpEdit.systemDefault") }}</ContextMenuItem>
+                      <template v-if="availableExternalEditors.length">
+                        <ContextMenuSeparator />
+                        <ContextMenuItem v-for="editor in availableExternalEditors" :key="`known-${editor.id}`" :disabled="!canWrite || !localCanSave" @select="openWithKnownEntry(fileMenu.entry, editor)"><span class="inline-flex w-4 justify-center"><Check v-if="mappedEditorIdFor(fileMenu.entry.name) === editor.id" /></span>{{ editor.name }}</ContextMenuItem>
+                      </template>
+                      <template v-if="editorConfig.customEditors.length">
+                        <ContextMenuSeparator />
+                        <ContextMenuItem v-for="editor in editorConfig.customEditors" :key="`custom-${editor.id}`" :disabled="!canWrite || !localCanSave" @select="openWithCustomEntry(fileMenu.entry, editor)"><span class="inline-flex w-4 justify-center"><Check v-if="mappedEditorIdFor(fileMenu.entry.name) === editor.id" /></span>{{ editor.name }}</ContextMenuItem>
+                      </template>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem :disabled="!canWrite || !localCanSave" @select="beginCustomEditorCommand(fileMenu.entry)"><span class="inline-flex w-4 justify-center" /><Pencil />{{ t("sftpEdit.customCommand") }}</ContextMenuItem>
+                    </ContextMenuSubContent>
+                  </ContextMenuSub>
                   <!-- 符号链接改指向（P2-6）：读取现有 target 预填后 update。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'symlink'" :disabled="!canWrite" @select="beginSymlinkEdit(fileMenu.entry)"><Link2 />{{ t("symlink.editAction") }}</ContextMenuItem>
                   <ContextMenuItem :disabled="!canWrite" @select="beginRename(fileMenu.entry)"><Pencil />{{ t("rename") }}</ContextMenuItem>
@@ -9052,6 +9142,23 @@ watch(historyScope, () => {
           <button @click="uploadWatchedFileAlways">{{ t("sftpEdit.alwaysUpload") }}</button>
           <button class="primary-button" @click="uploadWatchedFileOnce">{{ t("sftpEdit.uploadOnce") }}</button>
         </footer>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 自定义编辑器命令（编辑器映射增强）：name/command 记入 pluginStore
+         单键配置，「记住为默认」写 {pattern → customId} 关联；确定即用该命令
+         打开本次文件。命令串由 sidecar 分词成 argv 直接 spawn（不过 shell）。 -->
+    <Dialog :open="customEditorOpen" @update:open="(open) => { if (!open) customEditorOpen = false; }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <header><DialogTitle>{{ t("sftpEdit.customCommandTitle") }}</DialogTitle><button :title="t('close')" class="icon-button" @click="customEditorOpen = false"><X /></button></header>
+        <input v-model="customEditorName" :placeholder="t('sftpEdit.customEditorNamePlaceholder')" />
+        <input v-model="customEditorCommand" class="mono" spellcheck="false" autofocus :placeholder="t('sftpEdit.customEditorCommandPlaceholder')" />
+        <p class="muted">{{ t("sftpEdit.customEditorCommandHint") }}</p>
+        <label class="settings-switch-row">
+          <Switch v-model="customEditorRemember" size="sm" />
+          <span>{{ t("sftpEdit.rememberAssociation", { pattern: customEditorPattern }) }}</span>
+        </label>
+        <footer><button @click="customEditorOpen = false">{{ t("cancel") }}</button><button class="primary-button" :disabled="!customEditorCommand.trim()" @click="commitCustomEditor">{{ t("sftpEdit.customCommandRun") }}</button></footer>
       </DialogContent>
     </Dialog>
 
@@ -9329,6 +9436,7 @@ watch(historyScope, () => {
       :host-color-scheme="appearance.colorScheme"
       :download-prefs="downloadPrefsAdapter"
       :transfer-prefs="transferPrefsAdapter"
+      :editor-prefs="editorPrefsAdapter"
       :suggestion-prefs="suggestionPrefsAdapter"
       :highlight-rules="highlightRules"
       :highlight-saving="highlightSaving"

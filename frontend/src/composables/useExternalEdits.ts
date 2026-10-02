@@ -1,5 +1,6 @@
 import { computed, ref, watch, type Ref } from "vue";
 import { enqueueWatchModified, popWatchModified, registerWatch, watchName, type ModifiedPrompt, type WatchRegistry } from "../lib/watchEdits";
+import { loadEditorConfig, resolveEditorForFile, sanitizeEditorConfig, saveEditorConfig, type EditorConfig, type KnownEditor, type ResolvedEditor } from "../lib/editorRules";
 import type { SftpEntryKind } from "../lib/sftpEntries";
 import type { TransferTask } from "../lib/transferQueue";
 
@@ -75,17 +76,45 @@ const alwaysUploadWatches = new Set<string>();
 // 回传排成一队，避免并发回传的 notice/目录刷新互相覆盖（上传不丢，逐个执行）。
 let watchUploadChain: Promise<void> = Promise.resolve();
 
+// —— 编辑器映射（扩展名 → 编辑器）与回传策略 ——
+// 配置单键存 pluginStore（editorRules.ts 净化），本域是唯一读写口：App 的
+// 右键子菜单与设置面板都经这里的 ref 消费。known 目录来自 sidecar
+// `local/editors/list`（进程内缓存，配置面板可显式重探）。
+const editorConfig = ref<EditorConfig>(loadEditorConfig());
+const externalEditors = ref<KnownEditor[]>([]);
+let externalEditorsLoaded = false;
+
+/** 覆盖写回编辑器配置（设置面板/「记住为默认」共用入口），净化后落存储。 */
+function updateEditorConfig(next: EditorConfig) {
+  editorConfig.value = sanitizeEditorConfig(next);
+  saveEditorConfig(editorConfig.value);
+}
+
+/** 拉取知名编辑器目录（local/editors/list，探测走文件系统/PATH 不 spawn）。 */
+async function ensureExternalEditors(): Promise<KnownEditor[]> {
+  if (externalEditorsLoaded) return externalEditors.value;
+  try {
+    const payload = await window.dbxPlugin.invoke<{ editors: KnownEditor[] }>("local/editors/list");
+    externalEditors.value = payload.editors ?? [];
+    externalEditorsLoaded = true;
+  } catch (cause) {
+    showError(cause, "sftp");
+  }
+  return externalEditors.value;
+}
+
 // —— 外部编辑器回传（P2-5；M15 起逐文件化）——
-// watch/file-modified 的确认策略：「总是上传」的记忆命中直接进上传串行链；
-// 否则事件入队、逐个弹确认框（后到文件的 modified 事件排队等待，不顶替
-// 未决确认、不丢事件），用户对队头决议（上传一次 / 总是上传 / 取消）后才
-// 轮到下一个文件。watch/upload 由 sidecar 从 remote-edit 下载路径读字节、
-// 经 sftp/write 同款原子提交写回远端（写门禁 ensure_writable 在后端强制）。
-// 完成后刷新当前目录，让大小/修改时间立即反映编辑后的内容。
+// watch/file-modified 的确认策略（三档收敛为一条判定）：「总是上传」的
+// watchId 记忆命中、或全局回传策略为 auto（FinalShell 式保存即回传，默认）
+// 时直接进上传串行链；否则事件入队、逐个弹确认框（后到文件的 modified 事件
+// 排队等待，不顶替未决确认、不丢事件），用户对队头决议（上传一次 / 总是上传
+// / 取消）后才轮到下一个文件。watch/upload 由 sidecar 从 remote-edit 下载路径
+// 读字节、经 sftp/write 同款原子提交写回远端（写门禁 ensure_writable 在后端
+// 强制）。完成后刷新当前目录，让大小/修改时间立即反映编辑后的内容。
 function handleWatchModified(watchId: string) {
   // 不认识的 watchId（监听已被顶替/会话已关）静默丢弃，不弹窗也不上传。
   if (!activeExternalWatches.value[watchId]) return;
-  if (alwaysUploadWatches.has(watchId)) {
+  if (alwaysUploadWatches.has(watchId) || editorConfig.value.uploadPolicy === "auto") {
     void uploadWatchedFile(watchId);
     return;
   }
@@ -197,11 +226,30 @@ async function downloadForExternalEdit(entry: ExternalEditEntry, downloadDir: st
   }
 }
 
-/** 「在外部编辑器中打开」：下载 → watch/start → 系统默认程序打开 → 通知。
- * 仅桌面端可用（web/docker 的 sidecar 不在本机，无法监听也无法回传）。
- * M15 起可并发打开多个文件：每次打开独立下载、独立注册 watch，互不顶替
- * （同远端路径的重复打开由注册表与 sidecar 的 per-path dedup 收敛为最新）。 */
-async function openInExternalEditor(entry: ExternalEditEntry) {
+/** 打开目标 → sidecar 调用：known 走 editorId、custom 走 custom 命令串，
+ * system 保持旧 `local/open`（OS 默认程序）。三条路共用下载历史 allowlist。 */
+async function invokeOpenFor(localPath: string, resolved: ResolvedEditor): Promise<void> {
+  if (resolved.kind === "system") {
+    await window.dbxPlugin.invoke("local/open", { path: localPath });
+    return;
+  }
+  if (resolved.kind === "known") {
+    await window.dbxPlugin.invoke("local/open-with", { path: localPath, editorId: resolved.editor.id });
+    return;
+  }
+  await window.dbxPlugin.invoke("local/open-with", {
+    path: localPath,
+    custom: { name: resolved.editor.name, command: resolved.editor.command },
+  });
+}
+
+/** 「在外部编辑器中打开」（P2-5；M15 起逐文件化；M-编辑器映射增强）：下载 →
+ * watch/start → 按扩展名映射解析的编辑器打开（override 供「打开方式」子菜单
+ * 临时指定）→ 通知。仅桌面端可用（web/docker 的 sidecar 不在本机，无法监听
+ * 也无法回传）。映射解析：关联表 → 默认编辑器 → 系统默认程序（editorRules）。
+ * 可并发打开多个文件：每次打开独立下载、独立注册 watch，互不顶替（同远端
+ * 路径的重复打开由注册表与 sidecar 的 per-path dedup 收敛为最新）。 */
+async function openInExternalEditor(entry: ExternalEditEntry, override?: ResolvedEditor) {
   closeFileMenu();
   if (!session.value) return;
   const local = await probeLocalCapabilities();
@@ -210,6 +258,8 @@ async function openInExternalEditor(entry: ExternalEditEntry) {
     return;
   }
   try {
+    const editors = await ensureExternalEditors();
+    const resolved = override ?? resolveEditorForFile(entry.name, editorConfig.value, editors);
     const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
     const dir = joinLocalPath(loadDownloadDir() || local.downloadsDir, `remote-edit/${stamp}`);
     const localPath = await downloadForExternalEdit(entry, dir);
@@ -226,14 +276,20 @@ async function openInExternalEditor(entry: ExternalEditEntry) {
       name: entry.name,
       remotePath,
     });
-    // 宿主 local/open 校验该路径确为本插件完成的下载（防任意路径打开）。
+    // 宿主校验该路径确为本插件完成的下载（防任意路径打开/执行原语）。
     try {
-      await window.dbxPlugin.invoke("local/open", { path: localPath });
+      await invokeOpenFor(localPath, resolved);
     } catch {
       await window.dbxPlugin.invoke("local/reveal", { path: localPath });
     }
     copyTextToClipboard(localPath, "sftpEdit.pathCopied");
-    showNotice(t("sftpEdit.watching", { name: entry.name }));
+    // 回传策略决定提示语：auto 说明保存即自动回传；ask 提示等确认后回传。
+    showNotice(
+      t(
+        editorConfig.value.uploadPolicy === "auto" ? "sftpEdit.watchingAuto" : "sftpEdit.watching",
+        { name: entry.name },
+      ),
+    );
   } catch (cause) {
     showError(cause, "sftp");
   }
@@ -251,5 +307,9 @@ async function openInExternalEditor(entry: ExternalEditEntry) {
     uploadWatchedFileAlways,
     joinLocalPath,
     openInExternalEditor,
+    editorConfig,
+    updateEditorConfig,
+    externalEditors,
+    ensureExternalEditors,
   };
 }

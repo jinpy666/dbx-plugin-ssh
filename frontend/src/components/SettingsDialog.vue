@@ -27,6 +27,7 @@ import { confirmDialog } from "../lib/confirmDialog";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
 import { MIB, mibField, persistMcpSettingsMirror, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
 import { DOWNLOAD_CONFLICT_POLICIES, type DownloadConflictPolicy } from "../lib/downloadPrefs";
+import { type EditorAssociation, type EditorConfig, type KnownEditor } from "../lib/editorRules";
 import { TRANSFER_DUPLICATE_POLICIES, type TransferDuplicatePolicy } from "../lib/transferQueue";
 import { SFTP_NAME_ENCODINGS, type SftpNameEncoding } from "../lib/sftpName";
 import {
@@ -464,6 +465,14 @@ const props = defineProps<{
     persistMinChars(value: number): void;
     persistMaxChars(value: number): void;
   };
+  /** 外部编辑器配置（扩展名关联/默认编辑器/回传策略）的读写适配器 + 知名
+   * 编辑器目录（权威态与探测在 App：pluginStore 单键 + local/editors/list）。 */
+  editorPrefs: {
+    loadConfig(): EditorConfig;
+    persistConfig(value: EditorConfig): void;
+    loadEditors(): KnownEditor[];
+    reloadEditors(): Promise<KnownEditor[]>;
+  };
   /** 关键词高亮规则（M32-A2：权威态 + RPC 在 App，本组件只读 + 上抛增量）。 */
   highlightRules: HighlightRuleView[];
   highlightSaving: boolean;
@@ -598,6 +607,63 @@ const transferMaxActiveDraft = ref(String(props.transferPrefs.loadMaxActive()));
 const transferDownloadLimitDraft = ref(String(props.transferPrefs.loadDownloadLimit()));
 const sftpCompatModeDraft = ref(props.transferPrefs.loadCompatMode());
 const sftpNameEncodingDraft = ref<SftpNameEncoding>(props.transferPrefs.loadNameEncoding());
+// 外部编辑器草稿（transfer 面板）：配置整体草稿化、随主「保存」落库；
+// known 目录（local/editors/list 探测）每次打开设置时重探。
+const editorConfigDraft = ref<EditorConfig>({ associations: [], customEditors: [], uploadPolicy: "auto" });
+const editorKnownEditors = ref<KnownEditor[]>([]);
+const editorAssociationPatternDraft = ref("");
+const editorAssociationTargetDraft = ref("");
+const editorDefaultDraft = ref("");
+const editorTargetOptions = computed(() => [
+  ...editorKnownEditors.value.filter((editor) => editor.available).map((editor) => ({ value: `known:${editor.id}`, label: editor.name })),
+  ...editorConfigDraft.value.customEditors.map((editor) => ({ value: `custom:${editor.id}`, label: editor.name })),
+]);
+function editorTargetName(target: string): string {
+  if (target.startsWith("custom:")) {
+    const id = target.slice(7);
+    return editorConfigDraft.value.customEditors.find((editor) => editor.id === id)?.name || id;
+  }
+  if (target.startsWith("known:")) {
+    const id = target.slice(6);
+    return editorKnownEditors.value.find((editor) => editor.id === id)?.name || id;
+  }
+  return target;
+}
+function associationTargetValue(assoc: EditorAssociation): string {
+  return assoc.customId ? `custom:${assoc.customId}` : assoc.editorId ? `known:${assoc.editorId}` : "";
+}
+function editorDefaultValue(config: EditorConfig): string {
+  return config.defaultCustomId
+    ? `custom:${config.defaultCustomId}`
+    : config.defaultEditorId
+      ? `known:${config.defaultEditorId}`
+      : /* reka Select 不接受空串 value，用 "system" 哨兵表示系统默认 */ "system";
+}
+function addEditorAssociation() {
+  const pattern = editorAssociationPatternDraft.value.trim();
+  const target = editorAssociationTargetDraft.value;
+  if (!pattern || !target) return;
+  const assoc: EditorAssociation = target.startsWith("custom:")
+    ? { pattern, customId: target.slice("custom:".length) }
+    : { pattern, editorId: target.slice("known:".length) };
+  editorConfigDraft.value = { ...editorConfigDraft.value, associations: [...editorConfigDraft.value.associations, assoc] };
+  editorAssociationPatternDraft.value = "";
+  editorAssociationTargetDraft.value = "";
+}
+function removeEditorAssociation(index: number) {
+  editorConfigDraft.value = {
+    ...editorConfigDraft.value,
+    associations: editorConfigDraft.value.associations.filter((_, i) => i !== index),
+  };
+}
+function removeCustomEditor(id: string) {
+  editorConfigDraft.value = {
+    ...editorConfigDraft.value,
+    customEditors: editorConfigDraft.value.customEditors.filter((editor) => editor.id !== id),
+    associations: editorConfigDraft.value.associations.filter((assoc) => assoc.customId !== id),
+  };
+  if (editorDefaultDraft.value === `custom:${id}`) editorDefaultDraft.value = "system";
+}
 // M33：压缩传输策略与阈值草稿（阈值 0=不限下限，上限 65536 MiB）。
 const TRANSFER_COMPRESS_MODES = ["auto", "on", "off"] as const;
 const transferCompressModeDraft = ref(props.transferPrefs.loadCompressMode());
@@ -1042,6 +1108,9 @@ async function reloadSettings() {
   suggestionsEnabledDraft.value = props.suggestionPrefs.loadEnabled();
   suggestionMinCharsDraft.value = String(props.suggestionPrefs.loadMinChars());
   suggestionMaxCharsDraft.value = String(props.suggestionPrefs.loadMaxChars());
+  editorConfigDraft.value = props.editorPrefs.loadConfig();
+  editorDefaultDraft.value = editorDefaultValue(editorConfigDraft.value);
+  void props.editorPrefs.reloadEditors().then((list) => { editorKnownEditors.value = list; });
   if (settingsLoading.value || settingsSaving.value) return;
   settingsLoading.value = true;
   settingsLoadFailed.value = false;
@@ -1377,6 +1446,12 @@ async function saveSettings() {
     props.suggestionPrefs.persistEnabled(suggestionsEnabledDraft.value);
     props.suggestionPrefs.persistMinChars(Number.parseInt(suggestionMinCharsDraft.value, 10) || 1);
     props.suggestionPrefs.persistMaxChars(Number.parseInt(suggestionMaxCharsDraft.value, 10) || 64);
+    props.editorPrefs.persistConfig({
+      ...editorConfigDraft.value,
+      defaultEditorId: editorDefaultDraft.value.startsWith("known:") ? editorDefaultDraft.value.slice("known:".length) : undefined,
+      defaultCustomId: editorDefaultDraft.value.startsWith("custom:") ? editorDefaultDraft.value.slice("custom:".length) : undefined,
+      // editorDefaultDraft === "system"（或意外值）时不落默认编辑器字段。
+    });
     if (profileEditing.value) await saveProfileDraft();
     const rememberedCommands = sanitizeRememberedCommands(settingsDraft.rememberedCommands);
     const updates: Record<string, unknown> = {
@@ -1912,6 +1987,53 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("downloadSettings.conflictHint") }}</p>
             <p class="muted settings-note">{{ t("downloadSettings.hint") }}</p>
+            <h3 class="settings-section-title">{{ t("sftpEdit.settingsSection") }}</h3>
+            <label class="settings-field">
+              <span>{{ t("sftpEdit.defaultEditorTitle") }}</span>
+              <Select :model-value="editorDefaultDraft" @update:model-value="(v) => (editorDefaultDraft = String(v))">
+                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="system">{{ t("sftpEdit.defaultEditorSystem") }}</SelectItem>
+                  <SelectItem v-for="option in editorTargetOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <p class="muted settings-note">{{ t("sftpEdit.defaultEditorHint") }}</p>
+            <span class="settings-field"><span>{{ t("sftpEdit.uploadPolicyTitle") }}</span></span>
+            <label class="settings-field settings-radio-row">
+              <input v-model="editorConfigDraft.uploadPolicy" type="radio" name="editor-upload-policy" value="auto" />
+              <span>{{ t("sftpEdit.uploadPolicy.auto") }}</span>
+            </label>
+            <label class="settings-field settings-radio-row">
+              <input v-model="editorConfigDraft.uploadPolicy" type="radio" name="editor-upload-policy" value="ask" />
+              <span>{{ t("sftpEdit.uploadPolicy.ask") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("sftpEdit.uploadPolicyHint") }}</p>
+            <h3 class="settings-section-title">{{ t("sftpEdit.associationsTitle") }}</h3>
+            <p v-if="!editorConfigDraft.associations.length" class="muted settings-note">{{ t("sftpEdit.noAssociations") }}</p>
+            <div v-for="(assoc, index) in editorConfigDraft.associations" :key="`${assoc.pattern}-${index}`" class="flex items-center gap-2 py-0.5">
+              <span class="mono">{{ assoc.pattern }}</span>
+              <span class="muted truncate">→ {{ editorTargetName(associationTargetValue(assoc)) }}</span>
+              <button type="button" class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="removeEditorAssociation(index)"><Trash2 /></button>
+            </div>
+            <div class="settings-dir-row">
+              <input v-model="editorAssociationPatternDraft" class="mono" spellcheck="false" :placeholder="t('sftpEdit.associationPatternPlaceholder')" />
+              <Select :model-value="editorAssociationTargetDraft" @update:model-value="(v) => (editorAssociationTargetDraft = String(v))">
+                <SelectTrigger size="xs"><SelectValue :placeholder="t('sftpEdit.associationTargetPlaceholder')" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="option in editorTargetOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <button type="button" :disabled="!editorAssociationPatternDraft.trim() || !editorAssociationTargetDraft" @click="addEditorAssociation"><Plus />{{ t("sftpEdit.addAssociation") }}</button>
+            <p class="muted settings-note">{{ t("sftpEdit.associationsHint") }}</p>
+            <h3 class="settings-section-title">{{ t("sftpEdit.customEditorsTitle") }}</h3>
+            <p v-if="!editorConfigDraft.customEditors.length" class="muted settings-note">{{ t("sftpEdit.noCustomEditors") }}</p>
+            <div v-for="editor in editorConfigDraft.customEditors" :key="editor.id" class="flex items-center gap-2 py-0.5">
+              <span class="shrink-0">{{ editor.name }}</span>
+              <span class="muted mono truncate">{{ editor.command }}</span>
+              <button type="button" class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="removeCustomEditor(editor.id)"><Trash2 /></button>
+            </div>
             <h3 class="settings-section-title">{{ t("transferCfg.title") }}</h3>
             <label class="settings-field">
               <span>{{ t("transferCfg.concurrency") }}</span>
