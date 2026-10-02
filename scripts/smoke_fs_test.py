@@ -769,6 +769,49 @@ def main() -> None:
             if unknown is None or "Unknown connection action" not in unknown:
                 raise AssertionError(f"unknown action not rejected: {unknown}")
 
+        def case_connection_action_import_sessions():
+            # 连接表单「从终端会话文件导入」：path 注入跳过系统对话框（宿主
+            # 从不携带该参数），断言复用导入解析器、首条会话回填、凭据结构性
+            # 缺位。真实对话框路径仅桌面真机可测；WindTerm 主密码指回向导的
+            # 分支在 Rust 单测覆盖。
+            fixture_dir = Path(tempfile.mkdtemp(prefix="dbx-ssh-smoke-import-"))
+            fixture = fixture_dir / "sessions.mxtsessions"
+            fixture.write_text(
+                "[Bookmarks]\n"
+                "SubRep=Prod\\Web\n"
+                "web1=#109#0%192.168.1.10%22%deploy%pw%...\n"
+                "db1=#109#0%10.0.0.5%%%pw%...\n",
+                encoding="utf-8",
+            )
+            try:
+                result = req("connection/action",
+                             {"action": {"id": "import-sessions"}, "path": str(fixture)})
+                values = result.get("fieldValues") or {}
+                for key in ("display_name", "host", "port", "username", "authentication"):
+                    if key not in values:
+                        raise AssertionError(f"fieldValues missing {key}: {json.dumps(values)[:200]}")
+                if values.get("display_name") != "web1" or values.get("host") != "192.168.1.10":
+                    raise AssertionError(f"first session not mapped: {json.dumps(values)[:200]}")
+                if values.get("authentication") != "none" or "password" in values:
+                    raise AssertionError(f"credential material in fieldValues: {json.dumps(values)[:200]}")
+                message = str(result.get("message") or "")
+                if "1 of 2" not in message:
+                    raise AssertionError(f"message missing batch hint: {message[:200]}")
+                empty = None
+                try:
+                    no_sessions = fixture_dir / "empty.config"
+                    no_sessions.write_text("# only a comment\n", encoding="utf-8")
+                    req("connection/action",
+                        {"action": {"id": "import-sessions"}, "path": str(no_sessions)})
+                except SidecarError as raised:
+                    empty = str(raised)
+                    if missing_method(raised) is not None:
+                        raise
+                if empty is None or "No SSH sessions" not in empty:
+                    raise AssertionError(f"session-less file not rejected: {empty}")
+            finally:
+                shutil.rmtree(fixture_dir, ignore_errors=True)
+
         # -- keys group ------------------------------------------------------------
 
         def case_keys_discover():
@@ -1357,6 +1400,8 @@ def main() -> None:
                    case_profiles_settings_binding, needs="sudo/profiles/save create")
         report.run("connection/action quick-sudo-profiles", "connection/action",
                    case_connection_action_profiles, needs="sudo/profiles/save create")
+        report.run("connection/action import-sessions", "connection/action",
+                   case_connection_action_import_sessions)
         report.run("sudo/profiles/off flow accepted + bogus rejected", "sudo/profiles/save",
                    case_profiles_off_flow_and_reject)
         report.run("sudo/profiles/delete + repeat", "sudo/profiles/delete",

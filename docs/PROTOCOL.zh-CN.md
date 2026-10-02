@@ -78,7 +78,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `sudo/upload/start`、`sudo/upload/finish` | sudo 上传（sudo 模式下向 root 目录上传，UploadSudo）：start 参数族与 `sftp/upload/start` 一致（`remotePath`），分块二进制帧/进度事件/取消全复用；finish 把 spool 推到登录用户 home 暂存件后经 exec `sudo mv` 提交，见「sudo 上传（UploadSudo）」节 |
 | `sudo/profiles/list`、`sudo/profiles/save`、`sudo/profiles/delete` | 全局 Quick Sudo 配置管理（多套命名凭据/策略档，插件数据目录持久化，密钥永不回显） |
 | `sudo/profiles/options` | 连接表单动态下拉选项（`sudo_profile` 字段的 `options_action`）：返回 `{options: [{value: id, label: name}]}`，按名称排序，永不携带密钥 |
-| `connection/action` | 连接表单动作（manifest `connection-provider.actions` 声明）：`action=quick-sudo-profiles` 返回全局配置清单与本连接绑定状态的纯文本摘要（`{message, fieldValues}`） |
+| `connection/action` | 连接表单动作（manifest `connection-provider.actions` 声明），返回 `{message, fieldValues}`（`fieldValues` 键 = manifest 字段 key，由宿主回填当前表单）：`action=quick-sudo-profiles` 返回全局配置清单与本连接绑定状态的纯文本摘要；`action=import-private-key` 桌面端弹系统文件框读私钥回填 `private_key`（web/docker 报桌面限定，取消选文件安静返回 `{message:"", fieldValues:null}`）；`action=import-sessions`（`when: create`）桌面端弹系统文件框，按扩展名/JSON 顶层形态嗅探向导同款 8 来源（`.json` 按 hosts/bookmarks 分流 Electerm/Termius）并**复用 `import/preview` 同一解析器**，把首条会话回填 `display_name/host/port/username/authentication/private_key_path`（密码永不回填、私钥只回路径，与预览同红线）；多会话时 `message` 报「1 of N」并指引工作台向导批量，WindTerm 加密导出指回向导要主密码，无会话文件报错。可选 `path` 参数跳过系统对话框，供冒烟/自测注入固定文件（宿主从不携带；载荷仍只有脱敏字段，与预览同边界） |
 | `keys/discover` | 本地 SSH 私钥发现（不返回私钥内容） |
 | `ssh/knownHosts/list`、`ssh/knownHosts/remove` | known_hosts 条目管理（含 `@cert-authority` / `@revoked` 标记条目） |
 | `ssh/sessions/list` | 只读会话清单：sidecar 当前跟踪的活跃会话 |
@@ -107,6 +107,8 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 `import/preview/finish { taskId }` 只接受所有声明字节已到齐的任务；它在返回前移除原始文件字节和 WindTerm 主密码，返回 `{ sourceKind, sessions, totalSessions, truncated, export }`。这是一次性**临时 preview/export**：不创建连接、没有 `import/commit` 成功语义、也不持久化导入结果。所有格式（含 ZIP）使用解析前受限 accumulator，在每个 session `push` 前强制 `MAX_PREVIEW_SESSIONS=1000`，超限 fail-closed 而不是先构造巨大 `Vec` 后截断；ZIP 另受条目、单项与总解压预算限制。`sessions` 是最多 1000 行的脱敏预览（仅名称、主机、端口、用户、分组、描述、认证类别、`hasSecret` 与 `secretNote`）；`export` 是可供前端保存的规范化 JSON：`{ schemaVersion, sourceKind, sessions }`。每一行认证信息只有 `kind`、`hasSecret`、`keyPath`（路径元数据）和 `secretNote`；普通密码、私钥内容和私钥口令都不进入 `ImportedAuth` 预览模型，解密/检查仅用 `Zeroizing` 临时缓冲后立即释放；因此它们在任何响应、导出或插件私有文件中均不存在。该插件不再创建或读取 `imported-connections.json`。
 
 `import/preview/cancel { taskId }` 幂等地丢弃未完成的内存上传；组件卸载、读取失败、ACK 超时和用户返回均应调用它。sidecar 进程退出同样释放进程内状态。导出优先使用宿主 `saveFile`，其次 `fileTransfer`；Host API 1.0 同时缺失两项时，顶层、非 sandbox 页面使用浏览器 Blob 下载。因 issue #93，sandbox iframe **不得**尝试 `<a download>`：它必须失败并提示用户升级到带 `saveFile`/`fileTransfer` 的宿主或在顶层浏览器上下文打开，不能静默返回无导出结果。
+
+同一解析管线另有单会话形态：连接表单动作 `connection/action import-sessions`（见 RPC 总表）在桌面端由 sidecar 直接读盘（可选 `path` 注入），按扩展名/JSON 形态嗅探 kind 后走 `parse_uploaded` 同一入口，只取首条会话回填表单——批量选择、WindTerm 主密码问询与预览表仍归工作台向导；两条路径的解析器、容量上限与脱敏语义必然一致（同一代码）。
 
 ## 运行时设置
 

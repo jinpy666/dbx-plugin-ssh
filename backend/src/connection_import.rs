@@ -2594,7 +2594,10 @@ fn validate_kind(kind: &str) -> Result<(), String> {
     }
 }
 
-fn parse_uploaded(
+/// kind → 解析器分发。流式预览（`import/preview/finish`）与连接表单的
+/// 「导入会话」动作（`connection/action import-sessions`）共用同一套解析器，
+/// 两边的容量上限与脱敏语义因此必然一致。
+pub fn parse_uploaded(
     kind: &str,
     file: &[u8],
     user_config: Option<&[u8]>,
@@ -2617,6 +2620,97 @@ fn parse_uploaded(
         ),
         _ => Err(format!("Unknown import kind: {kind}")),
     }
+}
+
+/// 按扩展名嗅探导入来源，供连接表单的「导入会话」动作（`connection/action
+/// import-sessions`）在无 UI 的场景下替代向导的来源选择。无扩展名/未识别
+/// 扩展名一律回落 OpenSSH config——`~/.ssh/config` 没有扩展名是常态，选中
+/// 的文件到底是不是会话文件交给解析器判定。扩展名大小写不敏感。
+pub fn sniff_kind(file_name: &str, bytes: &[u8]) -> &'static str {
+    let lower = file_name.to_lowercase();
+    if lower.ends_with(".mxtsessions") {
+        "moba"
+    } else if lower.ends_with(".xts") {
+        "xshell"
+    } else if lower.ends_with(".sessions") {
+        "windterm"
+    } else if lower.ends_with(".xml") {
+        "securecrt"
+    } else if lower.ends_with(".zip") {
+        "finalshell"
+    } else if lower.ends_with(".json") {
+        sniff_json_kind(bytes)
+    } else {
+        "sshconfig"
+    }
+}
+
+/// `.json` 是 Electerm 与 Termius 共用的扩展名，按顶层形态分流：Termius 有
+/// `hosts` 数组（顶层或 `data` 下），Electerm 是顶层数组或 `bookmarks` 对象。
+/// 坏 JSON 也归 Electerm，让解析器报出与向导一致的原文错误。
+fn sniff_json_kind(bytes: &[u8]) -> &'static str {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) => {
+            if value.get("hosts").is_some()
+                || value
+                    .get("data")
+                    .and_then(|data| data.get("hosts"))
+                    .is_some()
+            {
+                "termius"
+            } else {
+                "electerm"
+            }
+        }
+        Err(_) => "electerm",
+    }
+}
+
+/// 连接表单「导入会话」动作的读盘入口：与流式预览同一个 64 MiB 总预算，
+/// 超限直接拒绝而不是读一半。返回嗅探出的 kind 与原始字节，调用方喂给
+/// [`parse_uploaded`]。
+pub fn read_session_file(path: &std::path::Path) -> Result<(&'static str, Vec<u8>), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Cannot read '{}': {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err("The selected path is not a file".to_string());
+    }
+    if metadata.len() > MAX_INPUT_BYTES as u64 {
+        return Err(format!(
+            "Import files exceed the {} MiB total limit",
+            MAX_INPUT_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Cannot read '{}': {error}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok((sniff_kind(&file_name, &bytes), bytes))
+}
+
+/// 把一条解析结果映射为连接表单 `fieldValues`（键 = manifest 字段 key）。凭据
+/// 结构性缺位，与预览/导出模型同一条红线：密码永不回填（`authentication`
+/// 只声明类别，密码留空由宿主在连接时问），私钥只回路径不回内容。
+pub fn session_field_values(session: &ImportedSession) -> Value {
+    let mut values = json!({
+        "display_name": preview_text(&session.name),
+        "host": preview_text(&session.host),
+        "port": session.port,
+        "username": preview_text(&session.username),
+        "authentication": auth_kind(&session.auth),
+    });
+    if let ImportedAuth::PrivateKey {
+        path: Some(path), ..
+    } = &session.auth
+    {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            values["private_key_path"] = json!(trimmed);
+        }
+    }
+    values
 }
 
 /// Builds a portable, normalized export with metadata only. Passwords, private
@@ -4301,5 +4395,101 @@ mod tests {
         assert!(!config_flag_is_on(&json!("off")));
         // Home prefix expansion without HOME keeps the path verbatim.
         assert_eq!(expand_home_prefix("relative/id_rsa"), "relative/id_rsa");
+    }
+
+    // -- Connection-form import action ---------------------------------------
+
+    #[test]
+    fn sniff_kind_matches_every_wizard_source_extension() {
+        for (file_name, want) in [
+            ("sessions.mxtsessions", "moba"),
+            ("Sessions.MXTSESSIONS", "moba"),
+            ("xshell-backup.xts", "xshell"),
+            ("folders.sessions", "windterm"),
+            ("export.xml", "securecrt"),
+            ("connect.zip", "finalshell"),
+            ("config", "sshconfig"),
+            ("weird.unknown", "sshconfig"),
+        ] {
+            assert_eq!(sniff_kind(file_name, b""), want, "{file_name}");
+        }
+    }
+
+    #[test]
+    fn sniff_kind_splits_json_sources_by_top_level_shape() {
+        assert_eq!(
+            sniff_kind("t.json", br#"{"data": {"hosts": [{"label": "a"}]}}"#),
+            "termius"
+        );
+        assert_eq!(sniff_kind("t.json", br#"{"hosts": []}"#), "termius");
+        assert_eq!(
+            sniff_kind("t.json", br#"[{"host": "1.2.3.4"}]"#),
+            "electerm"
+        );
+        assert_eq!(sniff_kind("t.json", br#"{"bookmarks": []}"#), "electerm");
+        // 坏 JSON 也归 Electerm，让解析器报出与向导一致的原文错误。
+        assert_eq!(sniff_kind("t.json", b"{not json"), "electerm");
+    }
+
+    #[test]
+    fn session_field_values_maps_credentials_by_path_only() {
+        let values = session_field_values(&sample_sessions()[0]);
+        assert_eq!(values["display_name"], "web");
+        assert_eq!(values["host"], "10.0.0.1");
+        assert_eq!(values["port"], 22);
+        assert_eq!(values["username"], "root");
+        assert_eq!(values["authentication"], "password");
+        assert!(
+            values.get("password").is_none(),
+            "password must never be filled"
+        );
+        assert!(values.get("private_key_path").is_none());
+
+        let values = session_field_values(&sample_sessions()[1]);
+        assert_eq!(values["authentication"], "private-key");
+        assert_eq!(values["private_key_path"], "/home/u/key");
+        assert!(
+            values.get("private_key").is_none(),
+            "key content must never be filled"
+        );
+
+        let none = ImportedSession {
+            auth: ImportedAuth::None,
+            ..sample_sessions()[0].clone()
+        };
+        assert_eq!(session_field_values(&none)["authentication"], "none");
+    }
+
+    #[test]
+    fn form_action_reuses_parsers_for_first_session_mapping() {
+        // 真实 MobaXterm 文本走 parse_uploaded 全管线（与向导同一入口），
+        // 首条会话的 fieldValues 与手写映射一致。
+        let text = concat!(
+            "[Bookmarks]\n",
+            "SubRep=Prod\\Web\n",
+            "web1=#109#0%192.168.1.10%22%deploy%pw%...\n",
+            "db1=#109#0%10.0.0.5%%%pw%...\n",
+        );
+        let sessions = parse_uploaded("moba", text.as_bytes(), None, None).unwrap();
+        assert_eq!(sessions.len(), 2);
+        let values = session_field_values(&sessions[0]);
+        assert_eq!(values["display_name"], "web1");
+        assert_eq!(values["host"], "192.168.1.10");
+        assert_eq!(values["username"], "deploy");
+        assert_eq!(values["authentication"], "none");
+    }
+
+    #[test]
+    fn read_session_file_reports_sniffed_kind_and_bytes() {
+        let dir = std::env::temp_dir().join(format!("dbx-import-action-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bookmarks.mxtsessions");
+        std::fs::write(&path, "[Bookmarks]\n").unwrap();
+        let (kind, bytes) = read_session_file(&path).unwrap();
+        assert_eq!(kind, "moba");
+        assert_eq!(bytes, b"[Bookmarks]\n");
+        let missing = read_session_file(&dir.join("absent.sessions"));
+        assert!(missing.is_err(), "missing file must be a readable error");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

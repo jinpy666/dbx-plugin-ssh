@@ -1157,6 +1157,15 @@
           "when": "always",
           "requires_valid_form": false,
           "timeout_ms": 120000
+        },
+        {
+          "id": "import-sessions",
+          "label": "Import from terminal session file",
+          "description": "Pick a session export from MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius or an OpenSSH config; the first session fills this form (passwords and key contents are never filled). Desktop only; bulk import lives in the workbench import wizard.",
+          "variant": "outline",
+          "when": "create",
+          "requires_valid_form": false,
+          "timeout_ms": 120000
         }
       ],
       "capabilities": [
@@ -1534,6 +1543,10 @@
             "import-private-key": {
               "label": "Importar clave privada desde archivo",
               "description": "Elige un archivo de clave privada en este equipo; su contenido rellena el campo de contenido de la clave y se guarda en la bóveda al guardar. Solo escritorio."
+            },
+            "import-sessions": {
+              "label": "Importar desde archivo de sesiones de terminal",
+              "description": "Elige una exportación de sesiones de MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius o un config de OpenSSH; la primera sesión rellena este formulario (las contraseñas y el contenido de las claves privadas nunca se rellenan). Solo escritorio; la importación masiva está en el asistente de importación del espacio de trabajo."
             }
           }
         },
@@ -1818,6 +1831,10 @@
             "import-private-key": {
               "label": "Importa chiave privata da file",
               "description": "Scegli un file di chiave privata su questo computer; il contenuto riempie il campo del contenuto della chiave e viene salvato nel vault al salvataggio. Solo desktop."
+            },
+            "import-sessions": {
+              "label": "Importa da file di sessioni di terminale",
+              "description": "Scegli un'esportazione di sessioni da MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius o un config OpenSSH; la prima sessione riempie questo modulo (password e contenuti delle chiavi private non vengono mai inseriti). Solo desktop; l'importazione in blocco si trova nella procedura guidata di importazione del workbench."
             }
           }
         },
@@ -2102,6 +2119,10 @@
             "import-private-key": {
               "label": "ファイルから秘密鍵をインポート",
               "description": "このマシン上の秘密鍵ファイルを選択すると、内容がキー内容フィールドに入力され、保存時に vault に保存されます。デスクトップのみ。"
+            },
+            "import-sessions": {
+              "label": "ターミナルセッションファイルからインポート",
+              "description": "MobaXterm・Xshell・WindTerm・SecureCRT・FinalShell・Electerm・Termius のセッションエクスポートまたは OpenSSH config を選ぶと、最初のセッションがこのフォームに入力されます（パスワードと秘密鍵の内容は入力されません）。デスクトップのみ。一括インポートはワークベンチのインポートウィザードを利用してください。"
             }
           }
         },
@@ -2386,6 +2407,10 @@
             "import-private-key": {
               "label": "Importar chave privada de arquivo",
               "description": "Escolha um arquivo de chave privada nesta máquina; o conteúdo preenche o campo de conteúdo da chave e é salvo no cofre ao salvar. Somente desktop."
+            },
+            "import-sessions": {
+              "label": "Importar de arquivo de sessões de terminal",
+              "description": "Escolha uma exportação de sessões do MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius ou um config do OpenSSH; a primeira sessão preenche este formulário (senhas e conteúdo de chaves privadas nunca são preenchidos). Somente desktop; a importação em massa fica no assistente de importação do workbench."
             }
           }
         },
@@ -2670,6 +2695,10 @@
             "import-private-key": {
               "label": "从文件导入私钥",
               "description": "选择本机私钥文件，内容将填入「私钥内容」字段，保存后存入密钥库。仅桌面端可用。"
+            },
+            "import-sessions": {
+              "label": "从终端会话文件导入",
+              "description": "选择 MobaXterm、Xshell、WindTerm、SecureCRT、FinalShell、Electerm、Termius 的会话导出或 OpenSSH config，首条会话将回填本表单（密码与私钥内容永不回填）。仅桌面端可用；批量导入请用工作台的导入向导。"
             }
           }
         },
@@ -2954,6 +2983,10 @@
             "import-private-key": {
               "label": "從檔案匯入私鑰",
               "description": "選擇本機私鑰檔案，內容將填入「私鑰內容」欄位，保存後存入金鑰庫。僅桌面端可用。"
+            },
+            "import-sessions": {
+              "label": "從終端機工作階段檔案匯入",
+              "description": "選擇 MobaXterm、Xshell、WindTerm、SecureCRT、FinalShell、Electerm、Termius 的工作階段匯出或 OpenSSH config，第一筆工作階段將回填本表單（密碼與私鑰內容永不回填）。僅桌面端可用；大量匯入請使用工作區的匯入精靈。"
             }
           }
         },

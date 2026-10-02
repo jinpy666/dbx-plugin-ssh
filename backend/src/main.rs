@@ -1871,6 +1871,72 @@ impl Plugin {
                             }
                         }
                     }
+                    // 「从终端会话文件导入」：桌面端弹系统文件选择框，按扩展名/
+                    // JSON 形态嗅探来源后复用导入预览的解析器，把首条会话回填
+                    // 表单字段。凭据结构性缺位——密码永不回填、私钥只回路径。
+                    // 表单模型是一次一条连接，批量选择仍走工作台向导；WindTerm
+                    // 加密导出需要主密码，无 UI 的动作问不了，指回向导。可选
+                    // path 参数跳过系统对话框，供冒烟/自测注入固定文件（宿主
+                    // 从不携带；载荷仍只有脱敏字段，与预览同边界）。
+                    "import-sessions" => {
+                        if !local_downloads::can_save_local(|key| std::env::var_os(key)) {
+                            return Err(
+                                "File import is only available on desktop — use the import wizard in the workbench"
+                                    .to_string(),
+                            );
+                        }
+                        let (kind, bytes) = match params
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                        {
+                            Some(path) => {
+                                connection_import::read_session_file(std::path::Path::new(path))?
+                            }
+                            None => {
+                                let Some(path) = local_fs::pick_file()? else {
+                                    return Ok(json!({ "message": "", "fieldValues": null }));
+                                };
+                                connection_import::read_session_file(std::path::Path::new(&path))?
+                            }
+                        };
+                        let sessions = match connection_import::parse_uploaded(
+                            kind, &bytes, None, None,
+                        ) {
+                            Ok(sessions) => sessions,
+                            Err(error)
+                                if error
+                                    == connection_import::WINDTERM_MASTER_PASSWORD_REQUIRED =>
+                            {
+                                return Err(format!(
+                                    "{error} — use the import wizard in the workbench, which can ask for it"
+                                ));
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        let Some(session) = sessions.first() else {
+                            return Err(
+                                "No SSH sessions were found in the selected file — expected a MobaXterm/Xshell/WindTerm/SecureCRT/FinalShell/Electerm/Termius export or an OpenSSH config"
+                                    .to_string(),
+                            );
+                        };
+                        let total = sessions.len();
+                        let name = session.name.trim();
+                        let name = if name.is_empty() {
+                            session.host.as_str()
+                        } else {
+                            name
+                        };
+                        let message = if total > 1 {
+                            format!("Imported '{name}' (1 of {total} sessions); use the workbench import wizard for the rest")
+                        } else {
+                            format!("Imported '{name}'")
+                        };
+                        Ok(json!({
+                            "message": message,
+                            "fieldValues": connection_import::session_field_values(session),
+                        }))
+                    }
                     other => Err(format!("Unknown connection action: {other}")),
                 }
             }

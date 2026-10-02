@@ -385,6 +385,55 @@ for (const locale of locales) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Session file import action (`when: create`).
+//
+// Desktop hosts open the native dialog, the sidecar sniffs the wizard source
+// by extension / JSON shape and fills the form with the FIRST imported
+// session. The form model is one connection, so the action must never claim
+// batch semantics — the description has to point bulk imports at the
+// workbench wizard in every locale. Credentials are structurally absent
+// server-side; the manifest side only has to keep the contract stable:
+// create-only (editing an existing connection cannot be "the first import"),
+// runs without a valid form (it is the thing that fills it), and the long
+// native-pick timeout like the private-key action.
+// ---------------------------------------------------------------------------
+const importSessions = provider.actions.find((action) => action.id === "import-sessions");
+assert(importSessions, "import-sessions action must be declared on the connection provider");
+assert.equal(importSessions.when, "create", "import-sessions: only meaningful on the create form");
+assert.equal(
+  importSessions.requires_valid_form,
+  false,
+  "import-sessions: runs before any field is filled",
+);
+assert.equal(
+  importSessions.timeout_ms,
+  120000,
+  "import-sessions: native pick + parse needs the same long timeout as the key import",
+);
+assert.equal(
+  importSessions.close_on_success,
+  undefined,
+  "import-sessions: keep the form open so the user can review the fill",
+);
+for (const locale of locales) {
+  const localized = manifest.localizations[locale]?.contributions?.[provider.id]?.actions?.["import-sessions"]
+    ?? (locale === "en" ? importSessions : undefined);
+  assert(localized?.label?.trim(), `${locale}/import-sessions: missing label`);
+  assert(localized?.description?.trim(), `${locale}/import-sessions: missing description`);
+  // 语言中性断言：七语描述都必须枚举来源（OpenSSH config 是唯一拉丁写法稳定
+  // 的锚点）。「批量导入走工作台向导」「桌面限定」的措辞差异大，靠 review。
+  assert(
+    String(localized.description).includes("OpenSSH"),
+    `${locale}/import-sessions: description must enumerate the accepted sources`,
+  );
+  assert(
+    String(localized.description).length >= 80,
+    `${locale}/import-sessions: description too short to carry the single-session + desktop caveat`,
+  );
+}
+
+
 // Package B: ssh/trigger + external password manager fields (manifest §2.2).
 // Triggers are one tssh/JSON text area gated by a separate, default-off switch.
 const TRIGGER_FIELDS = ["triggers_enabled", "triggers", "trigger_answer_1", "trigger_answer_2", "password_command", "passphrase_command"];
