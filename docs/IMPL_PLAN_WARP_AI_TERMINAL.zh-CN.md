@@ -175,23 +175,41 @@ t8y2/dbx#10629（合并于 2026-09-29）给插件桥新增**直连文本生成**
 v2（免面板、生成即回填输入行）与 AI 修复直出都可落在 `generateText` 上，
 仅需 `aiCompletion` 能力位探测。插件零新增权限（`host.ai` 已声明）。
 
-### 11.2 仍需宿主扩展的 AI 能力（按优先级）
+### 11.2 仍需宿主扩展的 AI 能力（2026-10-02 对照最新 main `a55f307ec` 复核后收敛为三项）
 
-1. **生成取消 / 流式**（中优先）：`generateText` 为单轮阻塞、无 abort 桥。
-   `#` 打字即建议（Warp 完全体）与长输出场景需要 `host.ai.generateTextStream`
-   （onChunk + 取消）或至少 `host.ai.cancelGeneration(requestId)`。
-2. **发送确认的会话内记忆**（高优先，体验）：每次 `generateText` 都弹原生
-   确认框，对「失败修复条」这类高频入口过重。请宿主提供工作台级「本次会话
-   记住该插件/模型的授权」（等价插件侧 fixConsent 的宿主原生版），保持
-   「插件名 + 模型」首次明示。
+1. **发送确认的会话内记忆**（高优先，体验）：每次 `generateText` 都弹原生
+   确认框（`PluginWorkbenchHost.confirm` 逐次 ask），对「失败修复条」这类
+   高频入口过重。请宿主提供工作台级「本次会话记住该插件/模型的授权」
+   （等价插件侧 fixConsent 的宿主原生版），保持「插件名 + 模型」首次明示。
+2. **生成取消 / 流式**（中优先）：`pluginAiCompletion` 为单轮阻塞（busy
+   锁、无 abort 桥；输出上限 16000 字符）。`#` 打字即建议（Warp 完全体）与
+   长输出场景需要 `host.ai.generateTextStream`（onChunk + 取消）或至少
+   `host.ai.cancelGeneration(requestId)`。
 3. **受限 system-prompt 附加段或任务类型枚举**（中低优先）：systemPrompt
-   现被宿主钉死，格式指令只能塞 user prompt（可用但次优）。希望开放
-   「插件附加指令段」（宿主限长/审白名单）或提供任务类型枚举
-   （如 `command-generation` / `rewrite` / `classify`）让输出格式更稳。
-4. **口径确认（非新能力）**：Agent 档对插件连接的工具面——`mode:"agent"`
-   文档写「uses live tools … when available」，但 MCP.zh-CN 记载 Scoped AI
-   会话禁用 `dbx_call_plugin_tool`。宿主给出准确口径后，插件侧 Agent 档
-   （P2）即可接线。
+   被宿主钉死为通用文本生成（数据非指令/无工具），格式指令只能塞 user
+   prompt（可用但输出格式稳定性次优）。希望开放「插件附加指令段」（宿主
+   限长/审白名单）或提供任务类型枚举（`command-generation`/`rewrite`/
+   `classify`）让输出格式更稳。
+
+**已撤销的原第 4 项（Agent 档口径确认）**——最新 main 代码给出明确答案，
+无需宿主扩展：scoped CLI/AI 会话**可以**触达插件工具（`server.rs`
+`allowed_plugin_connections` + `plugin_tools_enforce_session_scope` 测试），
+条件是 ① 全局 MCP 策略启用 `dbx_plugin_tools` / `dbx_plugin_call`（用户可在
+设置里开关，`mcpPolicySelection.ts` 工具清单含这两项），② 会话 scope 覆盖
+插件连接。插件工具文档的旧记载「Scoped AI 会话禁用 dbx_call_plugin_tool」
+已过时（且工具名已演进为 `dbx_plugin_list`/`dbx_plugin_tools`/
+`dbx_plugin_call`）。**P2 Agent 档的解锁条件 = 用户的 MCP 策略配置，不是
+宿主新代码**；`ssh_exec` 等工具在 agent 会话内仍过插件自身
+`execPermissionMode` 审批，执行红线不变。
+
+### 11.2a 补充边界（复核实测）
+
+- **web 运行时无直连生成**：`PluginWorkbenchHost` 仅 `isTauriRuntime()` 时
+  注入 `aiCompletion`——web/docker 面板只有 `openConversation`（快照对话）。
+  插件侧门控须按 `capabilities.aiCompletion` 探测，web 下回退面板会话。
+- **生成参数宿主钉死**：`maxOutputTokens: 2048`、输出 ≤16000 字符、
+  systemPrompt 固定——插件 prompt 设计须按 2048 token 输出预算裁剪（`#`
+  搜索单命令 + Why 行、修复单命令 + Why 行均在其内）。
 
 ### 11.3 明确不需要宿主扩展的（避免过度索取）
 

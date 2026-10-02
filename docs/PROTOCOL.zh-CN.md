@@ -1236,3 +1236,11 @@ wave-1 不做 `completion/listDirectory`、`completion/environment`（wave 2+）
   （截断 + 脱敏）后方可出境；`#` 命令搜索只发自然语言与元数据。
 - **执行红线**：AI 生成内容不回写 PTY、不代执行；Agent 档（opt-in）的执行面为既有
   MCP 工具 + `execPermissionMode` 审批 + `ssh/agent/prompt` 终端挑战，本插件不新增执行路径。
+- **直连文本生成（宿主 t8y2/dbx#10629 已发布）**：`host.ai.listProviders`/
+  `discoverModels`/`listModels`/`generateText`（能力位 `aiModelDiscovery`/
+  `aiCompletion`，桌面 Tauri 运行时独有；web 面板仅快照对话）。每次发送宿主
+  原生确认（插件名+模型）；输出 ≤16k 纯文本、预算 2048 token；systemPrompt
+  宿主钉死。Agent 档工具面（最新 main 实测）：scoped CLI/AI 会话按全局 MCP
+  策略（`dbx_plugin_tools`/`dbx_plugin_call`）+ 会话 scope 触达插件工具——
+  旧「Scoped AI 会话禁用 dbx_call_plugin_tool」记载过时，工具名已演进为
+  `dbx_plugin_list`/`dbx_plugin_tools`/`dbx_plugin_call`。
