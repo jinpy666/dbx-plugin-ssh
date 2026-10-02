@@ -7538,6 +7538,7 @@ const promptHintsVisible = computed(() =>
     commandRunning: commandRunning.value,
     transferBusy: terminalTransferBusy.value,
     overlayOpen: suggestionOpen.value || completionOpen.value || historyPanelOpen.value || quickSelectOpen.value || searchOpen.value,
+    aiSearchActive: aiSearchState.value.active,
   }),
 );
 watch(promptHintsVisible, (visible) => {

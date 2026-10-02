@@ -612,6 +612,9 @@ try {
   // # 模式：键入 # 即本地改道（字节不进 PTY），提示条出现且随打字更新。
   await aiSearchPage.keyboard.press("#");
   await expect(aiSearchPage, ".terminal-ai-search", "# mode hint appears");
+  // 引导条让位（真机截图回归）：# 模式字节不进 PTY、行缓冲恒空，引导条
+  // 若不显式让位会与 # 搜索条叠画。
+  check("# mode hides the prompt-hints cheat sheet", (await aiSearchPage.locator(".terminal-prompt-hints").count()) === 0, `hints=${await aiSearchPage.locator(".terminal-prompt-hints").count()}`);
   await aiSearchPage.keyboard.type("list files by size");
   await expectText(aiSearchPage, ".terminal-ai-search-query", "list files by size", "# mode shows the natural language query");
   // Esc 退出：不发起任何请求。

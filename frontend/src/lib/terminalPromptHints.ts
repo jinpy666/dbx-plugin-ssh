@@ -62,6 +62,9 @@ export interface PromptHintsGates {
   transferBusy: boolean;
   /** 任一既有浮层开启（建议/补全/history 面板/quick-select/终端搜索）。 */
   overlayOpen: boolean;
+  /** `#` AI 命令搜索模式在场：该模式字节不进 PTY，lineEmpty 恒为真——
+   *  不显式判位引导条会与 `#` 搜索条叠画（真机截图回归）。 */
+  aiSearchActive: boolean;
 }
 
 export function shouldShowPromptHints(gates: PromptHintsGates): boolean {
@@ -73,7 +76,8 @@ export function shouldShowPromptHints(gates: PromptHintsGates): boolean {
     !gates.alternateActive &&
     !gates.commandRunning &&
     !gates.transferBusy &&
-    !gates.overlayOpen
+    !gates.overlayOpen &&
+    !gates.aiSearchActive
   );
 }
 

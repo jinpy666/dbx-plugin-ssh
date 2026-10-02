@@ -22,12 +22,17 @@ const gates = (patch: Partial<PromptHintsGates> = {}): PromptHintsGates => ({
   commandRunning: false,
   transferBusy: false,
   overlayOpen: false,
+  aiSearchActive: false,
   ...patch,
 });
 
 describe("shouldShowPromptHints", () => {
   it("静置空行且无遮挡时显示", () => {
     expect(shouldShowPromptHints(gates())).toBe(true);
+  });
+
+  it("# AI 搜索模式在场即隐藏（该模式字节不进 PTY，lineEmpty 恒真）", () => {
+    expect(shouldShowPromptHints(gates({ aiSearchActive: true }))).toBe(false);
   });
 
   it("任一门关闭即不显示（逐项验证）", () => {
