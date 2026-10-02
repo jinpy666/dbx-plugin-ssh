@@ -603,6 +603,13 @@ function setGhostTabAccept(value: boolean) {
 const aiSettingsState = ref<AiSettings>(loadAiSettings());
 const aiBridgeReady = ref(false);
 const aiSearchState = ref<AiSearchState>(createAiSearchState());
+// `#` 直连生成的等待态（2026-10-02 反馈：发起后无任何提示，用户不知道在等
+// AI 返回）：pending 期间输入冻结（全部吞键）、提示条切 loading 形态、Esc
+// 本地放弃（放弃 = 过期令牌，迟到的结果不回填）；generateText 无取消桥
+// （宿主扩展清单项），放弃只能做到「结果不插入」。
+const aiSearchPending = ref(false);
+const aiSearchPendingQuery = ref("");
+let aiSearchToken = 0;
 const aiSearchAnchor = ref<SuggestionAnchor | null>(null);
 // 修复条状态：command/exitCode/output 已是脱敏后快照（触发时一次成型），
 // anchorY 为触发光标行顶（相对 terminal-host），bottom 样式按它落位。
@@ -1944,6 +1951,19 @@ function createTerminal() {
       terminalDiag.swallowed += 1;
       return;
     }
+    // `#` 直连生成等待期：输入冻结（全部吞键防误操作/重复发起），Esc 本地
+    // 放弃——令牌过期，迟到的结果不回填（generateText 无取消桥）。
+    if (aiSearchPending.value) {
+      if (data === "\u001b") {
+        aiSearchToken += 1;
+        aiSearchPending.value = false;
+        aiSearchPendingQuery.value = "";
+        aiSearchAnchor.value = null;
+        showNotice(t("aiSearch.abandonedNotice"));
+      }
+      terminalDiag.swallowed += 1;
+      return;
+    }
     // # AI 命令搜索模式（Warp AI Command Search 同位）：激活后 onData 全部
     // 改道本地状态机，字节不进 PTY（退出无需擦远端）；回车发起宿主 AI 会话。
     if (aiSearchState.value.active) {
@@ -2538,10 +2558,19 @@ async function submitAiSearch(query: string) {
   if (!trimmed) return;
   const api = window.dbxPlugin;
   if (aiCompletionAvailable(api)) {
+    // 等待态：提示条切 loading（query 冻结显示），Esc 可放弃；令牌防迟到
+    // 结果回填。listAiModels/generateText 两段 await 全程在 pending 内。
+    const token = ++aiSearchToken;
+    aiSearchPendingQuery.value = trimmed;
+    aiSearchPending.value = true;
+    // closeAiSearch 会清锚点，等待条渲染依赖它——重读一次（同一 tick，光标
+    // 未动，坐标不变）。
+    aiSearchAnchor.value = readTerminalSuggestionAnchor();
     try {
       const model = pickDefaultAiModel(await listAiModels(api));
       if (!model) throw new Error("no configured ai model");
       const result = (await generateAiText(api, { configId: model.configId, model: model.model, prompt: buildAiSearchPrompt({ query: trimmed }) })).trim();
+      if (token !== aiSearchToken) return; // 用户已放弃：结果丢弃不回填
       const parsed = parseAiResultText(result);
       if (!parsed) throw new Error("empty ai response");
       replaceTerminalLineWith(parsed.command, false);
@@ -2549,7 +2578,14 @@ async function submitAiSearch(query: string) {
       showNotice(parsed.why || t("aiSearch.filledNotice"));
       return;
     } catch {
+      if (token !== aiSearchToken) return; // 放弃后失败同样静默（不打扰）
       // 直连失败（无模型/宿主确认取消/供应商错误已泛化）→ 回退面板会话。
+    } finally {
+      if (token === aiSearchToken) {
+        aiSearchPending.value = false;
+        aiSearchPendingQuery.value = "";
+        aiSearchAnchor.value = null;
+      }
     }
   }
   const sent = await openAiConversation(api, buildAiSearchRequest({ query: trimmed, context: aiContextExtras() })).catch(() => false);
@@ -2980,6 +3016,9 @@ function resetCommandMarker() {
   // AI 助手状态随会话复位（Warp AI 对齐批）：# 模式/修复条/推荐卡/输出采集
   // 缓冲（解码器重建，避免跨会话的多字节残态）。
   closeAiSearch();
+  aiSearchToken += 1;
+  aiSearchPending.value = false;
+  aiSearchPendingQuery.value = "";
   aiFixBar.value = null;
   clearFixRecommendation();
   aiOutputCapture.reset();
@@ -8055,15 +8094,22 @@ watch(historyScope, () => {
              键位（底边贴光标行顶，不遮输入行）；回车发起宿主 AI 会话（ask），
              结果由用户复制回填，插件不代执行。 -->
         <div
-          v-if="aiSearchState.active && aiSearchAnchor"
+          v-if="(aiSearchState.active || aiSearchPending) && aiSearchAnchor"
           ref="aiSearchBarEl"
           class="terminal-ai-search mono"
+          :class="{ pending: aiSearchPending }"
           :style="aiSearchBarStyle"
           role="status"
         >
           <span class="terminal-ai-search-badge" aria-hidden="true">#</span>
-          <span class="terminal-ai-search-query" :class="{ placeholder: !aiSearchState.query }">{{ aiSearchState.query || t("aiSearch.hintPlaceholder") }}</span>
-          <span class="terminal-ai-search-keys"><kbd>Enter</kbd> {{ t("aiSearch.hintSubmit") }}<span aria-hidden="true"> · </span><kbd>Esc</kbd> {{ t("aiSearch.hintCancel") }}</span>
+          <template v-if="aiSearchPending">
+            <span class="terminal-ai-search-query">{{ aiSearchPendingQuery }}</span>
+            <span class="terminal-ai-search-keys terminal-ai-search-pending"><Loader2 class="spinning" aria-hidden="true" /> {{ t("aiSearch.pendingHint") }}<span aria-hidden="true"> · </span><kbd>Esc</kbd> {{ t("aiSearch.pendingEscHint") }}</span>
+          </template>
+          <template v-else>
+            <span class="terminal-ai-search-query" :class="{ placeholder: !aiSearchState.query }">{{ aiSearchState.query || t("aiSearch.hintPlaceholder") }}</span>
+            <span class="terminal-ai-search-keys"><kbd>Enter</kbd> {{ t("aiSearch.hintSubmit") }}<span aria-hidden="true"> · </span><kbd>Esc</kbd> {{ t("aiSearch.hintCancel") }}</span>
+          </template>
         </div>
         <!-- 失败命令修复条（Warp Fix-with-AI 同位）：非弹窗不抢焦点，贴触发光标
              行顶；新命令开始/Esc 关闭/会话切换即消失。「用 AI 修复」首次发送过
@@ -10007,6 +10053,19 @@ body.resizing-col { cursor: col-resize !important; user-select: none; }
   flex: 0 0 auto;
   color: var(--muted-foreground);
   font-size: 10px;
+}
+.terminal-ai-search.pending .terminal-ai-search-query {
+  color: var(--muted-foreground);
+}
+.terminal-ai-search-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.terminal-ai-search-pending svg {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2;
 }
 .terminal-ai-search-keys kbd {
   display: inline-grid;

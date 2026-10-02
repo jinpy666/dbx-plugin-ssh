@@ -755,7 +755,8 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string, par
     const can = prompt.includes("User request:")
       ? "ls -S\nWhy: sorts by size, largest first."
       : "df -h /srv\nWhy: the deploy failed because the disk filled up; check free space first.";
-    return can as unknown as T;
+    // 400ms 延迟：等待态提示（loading 条 + 输入冻结）在走查里可观测。
+    return new Promise((resolve) => setTimeout(() => resolve(can), 400)) as unknown as T;
   }
   if (method === "host.ai.setRecommendations") {
     aiRecommendations.push((params ?? {}) as Record<string, unknown>);

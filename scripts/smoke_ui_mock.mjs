@@ -627,7 +627,13 @@ try {
   await aiSearchPage.keyboard.press("#");
   await aiSearchPage.keyboard.type("list files by size");
   await aiSearchPage.keyboard.press("Enter");
-  check("Enter leaves # mode after submit", (await aiSearchPage.locator(".terminal-ai-search").count()) === 0, "hint count");
+  // 等待态（mock 生成 400ms）：submit 后提示条切 loading 形态（不是消失），
+  // 输入冻结——打字不落 PTY、再按 Enter 不重复发起；结果回填后条收起。
+  await expect(aiSearchPage, ".terminal-ai-search.pending", "pending tips shown while generating");
+  check("typing frozen while pending (no PTY echo)", !(await aiSearchPage.locator(".xterm-rows").textContent())?.includes("zzz"), "echo check");
+  await aiSearchPage.keyboard.press("Enter");
+  const gensDuringPending = await aiSearchPage.evaluate(() => (window.__dbxMockAiGenerations ?? []).length);
+  check("re-Enter during pending does not double-submit", gensDuringPending === 1, `generations=${gensDuringPending}`);
   // 生成即回填（Warp 同款默认插入，无插件层回填确认）：Why 行走通知。
   await expect(aiSearchPage, ".notice", "why/filled notice appears");
   await expectText(aiSearchPage, ".xterm-rows", "ls -S", "generated command filled into the input line");
