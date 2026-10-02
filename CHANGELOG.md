@@ -4,6 +4,11 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.3] — 2026-10-02
+
+- **恢复连接右键动态端口映射二级菜单**。宿主 0.6.30 已发布 `dynamic` context-menu 贡献点，manifest 恢复 `manage-tunnels` 的 `dynamic: true`（0.7.2 曾因宿主未发布该字段而临时降级为声明式 `open-workbench`）。右键二级菜单重新提供管理入口、按预设逐条启动/停止、批量启动与停止所有映射；sidecar 侧 `contextMenu/resolve/manage-tunnels` 实现一直保留，本次无需后端改动。`engines.dbx` 相应收紧为 `>=0.6.30`——更早的宿主 manifest 解析器不认识 `dynamic` 字段会拒绝安装，版本约束给出干净的不兼容提示。
+  **Restored the dynamic connection context-menu submenu for port forwards.** DBX 0.6.30 has shipped the `dynamic` context-menu contribution, so the manifest restores `dynamic: true` on `manage-tunnels` (0.7.2 had temporarily downgraded the entry to a declarative `open-workbench` action). The submenu again offers the manage entry, per-profile start/stop, start-all and stop-all; the sidecar's `contextMenu/resolve/manage-tunnels` implementation was kept all along, so no backend change is needed. `engines.dbx` is tightened to `>=0.6.30` — older hosts reject the manifest outright on the unknown `dynamic` field, and the version constraint turns that into a clean incompatibility message.
+
 ## [0.7.2] — 2026-10-01
 
 - **修复 0.7.1 安装失败**。manifest 的连接右键「端口映射」项携带了宿主尚未发布的 `dynamic` 字段，宿主 manifest 解析器（`deny_unknown_fields`）会拒绝整个 manifest 并报 "unknown field `dynamic`"，现行全部 DBX 版本（含 0.6.29）都无法安装 0.7.1。现改为宿主已支持的声明式 `open-workbench` action：右键「端口映射」直接打开该连接的端口映射管理界面；依赖宿主动态菜单能力的逐条/批量二级菜单暂缓启用（sidecar 侧 `contextMenu/resolve/manage-tunnels` 实现保留，宿主能力在 0.6.29 之后的版本发布后，加回 `dynamic: true` 即恢复）。
