@@ -9007,25 +9007,26 @@ watch(historyScope, () => {
                        sudo 模式下默认「下载」已自动换 sudo 车道（UploadSudo/DownloadSudo
                        同一判定），该项隐藏避免重复入口。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' && !sudoMode" :disabled="!canWrite" @select="downloadEntry(fileMenu.entry, true)"><Download />{{ t("sudoDownload.action") }}</ContextMenuItem>
-                  <!-- 外部编辑器回传（P2-5，桌面端）：web/docker 的 sidecar 不在本机，
-                       监听与回传都不可用，localCanSave 未探测到前也保持禁用。 -->
-                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!canWrite || !localCanSave" @select="openInExternalEditor(fileMenu.entry)"><ExternalLink />{{ t("sftpEdit.openExternal") }}</ContextMenuItem>
-                  <!-- 打开方式（编辑器映射增强）：系统默认 + 探测到的编辑器 +
-                       自定义命令，选中即开；关联管理在设置弹窗「外部编辑器」区。 -->
+                  <!-- 外部编辑器打开方式（编辑器映射增强）：唯一入口——独立
+                       「在外部编辑器中打开」已并入子菜单（首项系统默认即原
+                       行为），避免双入口语义冲突。web/docker 的 sidecar 不在
+                       本机，监听与回传都不可用，localCanSave 未探测到前保持
+                       禁用；选中即开（一次性，不写关联），关联管理在设置弹窗
+                       「外部编辑器」区。勾选标识当前映射解析命中，右对齐。 -->
                   <ContextMenuSub v-if="fileMenu.entry.kind === 'file'" @update:open="(open: boolean) => { if (open) void ensureExternalEditors(); }">
                     <ContextMenuSubTrigger :disabled="!canWrite || !localCanSave" class="gap-2"><ExternalLink />{{ t("sftpEdit.openWith") }}<ChevronRight class="ml-auto opacity-60" /></ContextMenuSubTrigger>
                     <ContextMenuSubContent class="min-w-52">
-                      <ContextMenuItem :disabled="!canWrite || !localCanSave" @select="openWithSystemEntry(fileMenu.entry)"><span class="inline-flex w-4 justify-center"><Check v-if="!mappedEditorIdFor(fileMenu.entry.name)" /></span><ExternalLink class="opacity-70" />{{ t("sftpEdit.systemDefault") }}</ContextMenuItem>
+                      <ContextMenuItem :disabled="!canWrite || !localCanSave" @select="openWithSystemEntry(fileMenu.entry)">{{ t("sftpEdit.systemDefault") }}<Check v-if="!mappedEditorIdFor(fileMenu.entry.name)" class="ml-auto" /></ContextMenuItem>
                       <template v-if="availableExternalEditors.length">
                         <ContextMenuSeparator />
-                        <ContextMenuItem v-for="editor in availableExternalEditors" :key="`known-${editor.id}`" :disabled="!canWrite || !localCanSave" @select="openWithKnownEntry(fileMenu.entry, editor)"><span class="inline-flex w-4 justify-center"><Check v-if="mappedEditorIdFor(fileMenu.entry.name) === editor.id" /></span>{{ editor.name }}</ContextMenuItem>
+                        <ContextMenuItem v-for="editor in availableExternalEditors" :key="`known-${editor.id}`" :disabled="!canWrite || !localCanSave" @select="openWithKnownEntry(fileMenu.entry, editor)">{{ editor.name }}<Check v-if="mappedEditorIdFor(fileMenu.entry.name) === editor.id" class="ml-auto" /></ContextMenuItem>
                       </template>
                       <template v-if="editorConfig.customEditors.length">
                         <ContextMenuSeparator />
-                        <ContextMenuItem v-for="editor in editorConfig.customEditors" :key="`custom-${editor.id}`" :disabled="!canWrite || !localCanSave" @select="openWithCustomEntry(fileMenu.entry, editor)"><span class="inline-flex w-4 justify-center"><Check v-if="mappedEditorIdFor(fileMenu.entry.name) === editor.id" /></span>{{ editor.name }}</ContextMenuItem>
+                        <ContextMenuItem v-for="editor in editorConfig.customEditors" :key="`custom-${editor.id}`" :disabled="!canWrite || !localCanSave" @select="openWithCustomEntry(fileMenu.entry, editor)">{{ editor.name }}<Check v-if="mappedEditorIdFor(fileMenu.entry.name) === editor.id" class="ml-auto" /></ContextMenuItem>
                       </template>
                       <ContextMenuSeparator />
-                      <ContextMenuItem :disabled="!canWrite || !localCanSave" @select="beginCustomEditorCommand(fileMenu.entry)"><span class="inline-flex w-4 justify-center" /><Pencil />{{ t("sftpEdit.customCommand") }}</ContextMenuItem>
+                      <ContextMenuItem :disabled="!canWrite || !localCanSave" @select="beginCustomEditorCommand(fileMenu.entry)"><Pencil />{{ t("sftpEdit.customCommand") }}</ContextMenuItem>
                     </ContextMenuSubContent>
                   </ContextMenuSub>
                   <!-- 符号链接改指向（P2-6）：读取现有 target 预填后 update。 -->
