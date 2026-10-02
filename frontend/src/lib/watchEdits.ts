@@ -1,9 +1,9 @@
 /**
  * 外部编辑器回传的多文件并行纯逻辑（M15，P2-5 的多文件扩展）。RPC 与 UI
  * 状态留在 App.vue，本模块只做三件纯事：
- * 1. watch 注册表（watchId -> 条目）：同一会话可同时挂多个远端文件，
- *    重复 watch/start 同一远端路径时按 remotePath 粒度顶替旧条目（与
- *    sidecar 的 per-path dedup 语义一致）；
+ * 1. watch 注册表（watchId -> 条目）：同一会话可同时挂多个远端文件；同一
+ *    远端路径多次打开产生多个本地副本 watcher，全部保留（任一副本保存都
+ *    回传同一远端目标，上传串行链保证最后写入者生效）；
  * 2. file-modified 事件排队：逐文件弹确认，后到的 modified 事件入队等待，
  *    不顶替未决确认，也不丢事件；
  * 3. 队列头决议：只有队头的 watchId 被处置（上传/总是/取消）时才出队。
@@ -31,16 +31,13 @@ function validEntry(entry: ExternalWatchEntry | undefined): entry is ExternalWat
   return !!entry && !!entry.watchId && !!entry.name && !!entry.remotePath;
 }
 
-/** 注册一个新监听：先顶替同 remotePath 的旧条目（旧 watchId 已被 sidecar
- * dedup 停掉，留着只会收不到事件），再挂上新条目。 */
+/** 注册一个新监听：追加挂载，不顶替同 remotePath 的旧条目。sidecar 的
+ * dedup 键是 {sessionId, 本地副本路径}——每次打开落新的时间戳目录，旧副本
+ * 的 watcher 依然存活；同一远端文件开多个窗口时，任何一个副本的保存都应
+ * 回传同一远端路径，按 remotePath 顶替会让旧窗口的保存静默丢失（真机回归）。 */
 export function registerWatch(watches: WatchRegistry, entry: ExternalWatchEntry): WatchRegistry {
   if (!validEntry(entry)) return watches;
-  const next: WatchRegistry = {};
-  for (const [watchId, existing] of Object.entries(watches)) {
-    if (existing.remotePath !== entry.remotePath) next[watchId] = existing;
-  }
-  next[entry.watchId] = { ...entry };
-  return next;
+  return { ...watches, [entry.watchId]: { ...entry } };
 }
 
 /** 移除一个监听（watch/stop、会话关闭等）。 */

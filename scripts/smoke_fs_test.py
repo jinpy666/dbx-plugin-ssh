@@ -2418,8 +2418,8 @@ def main() -> None:
 
         def case_watch_edit_upload():
             # 外部编辑 a：直接改本地副本（编辑器保存语义），事件须按 watchId
-            # 精确路由，upload-back 后远端字节与本地一致。先越过 pump 的启动
-            # 抑制窗（SUPPRESS_WINDOW=2s，编辑器预热噪音被直接丢弃）。
+            # 精确路由，upload-back 后远端字节与本地一致。（抑制窗已归零——
+            # 预热噪音由 SHA-256 基线把关——这里的 sleep 只是节奏留白。）
             time.sleep(2.5)
             Path(watch_state["local_a"]).write_text(f"external edit A {time.time()}\n")
             event = wait_watch_event(watch_state["id_a"], watch_state["marker"])
@@ -2450,6 +2450,56 @@ def main() -> None:
             if watch_drain:
                 raise AssertionError(f"identical re-save re-fired: {watch_drain}")
             print("    per-watch routing + upload-back round-trip + identical-save dedup ok")
+
+        def case_watch_immediate_and_atomic():
+            # 真机回归双锁：① watch/start 后立即保存（<2s）必须触发——旧 2s
+            # 启动抑制窗会把"编辑器已在运行、秒开秒存"的真实保存静默吞掉；
+            # ② 原子保存（临时件 + rename 覆盖，WPS/Office 的保存形态）必须
+            # 触发——文件级监听在 inode 交换后失聪，现在监听父目录，指纹把关。
+            local_c, size_c = watch_download_local(f"{watch_dir}/wa.txt")
+            if size_c <= 0:
+                raise AssertionError(f"immediate-case fixture size: {size_c}")
+            watch_c = str(req("watch/start", {
+                "sessionId": session_id, "remotePath": f"{watch_dir}/wa.txt",
+                "localPath": local_c}).get("watchId") or "")
+            if not watch_c:
+                raise AssertionError("immediate-case watch id missing")
+            # ① 不睡抑制窗，落盘即编辑。
+            marker = len(client.events)
+            Path(local_c).write_text(f"immediate edit {time.time()}\n")
+            wait_watch_event(watch_c, marker)
+            # ② 原子写：同目录临时件 + rename 覆盖（inode 交换）。
+            marker = len(client.events)
+            tmp = Path(local_c).with_name(Path(local_c).name + ".smoke-tmp")
+            tmp.write_text(f"atomic edit {time.time()}\n")
+            os.replace(tmp, local_c)
+            wait_watch_event(watch_c, marker)
+            # 回传校验：远端字节与本地原子写后的内容一致。
+            back = req("watch/upload", {"watchId": watch_c})
+            local_bytes = Path(local_c).read_bytes()
+            if int(back.get("size") or -1) != len(local_bytes):
+                raise AssertionError(f"atomic upload-back size: {back}")
+            read_back = req("sftp/read", {"sessionId": session_id,
+                                          "path": f"{watch_dir}/wa.txt", "maxBytes": 4096})
+            if base64.b64decode(read_back.get("dataBase64", "")) != local_bytes:
+                raise AssertionError("atomic upload-back content mismatch")
+            # ③ 同远端双副本：dedup 键是本地副本路径，两个副本的 watcher 都
+            # 存活、各自触发（前端注册表按 watchId 全保留，任一窗口保存都可回传）。
+            local_d, _ = watch_download_local(f"{watch_dir}/wa.txt")
+            watch_d = str(req("watch/start", {
+                "sessionId": session_id, "remotePath": f"{watch_dir}/wa.txt",
+                "localPath": local_d}).get("watchId") or "")
+            if not watch_d or watch_d == watch_c:
+                raise AssertionError(f"two-copy watch ids: {watch_c}/{watch_d}")
+            marker = len(client.events)
+            Path(local_c).write_text(f"copy-c edit {time.time()}\n")
+            wait_watch_event(watch_c, marker)
+            marker = len(client.events)
+            Path(local_d).write_text(f"copy-d edit {time.time()}\n")
+            wait_watch_event(watch_d, marker)
+            req("watch/stop", {"watchId": watch_c})
+            req("watch/stop", {"watchId": watch_d})
+            print("    immediate save + atomic save (temp+rename) + two-copy watchers all fire")
 
         def case_watch_stop_semantics():
             req("watch/stop", {"watchId": watch_state["id_a"]})
@@ -2638,9 +2688,13 @@ def main() -> None:
                    "watch/upload",
                    case_watch_edit_upload,
                    needs="watch/start registers two files with distinct ids")
+        report.run("watcher immediate save (<2s) and atomic save (temp+rename) both fire",
+                   "watch/upload",
+                   case_watch_immediate_and_atomic,
+                   needs="watcher external edit routes events per watch + upload-back")
         report.run("watch/stop drops exactly its watch; stop-all sweeps", "watch/stop-all",
                    case_watch_stop_semantics,
-                   needs="watcher external edit routes events per watch + upload-back")
+                   needs="watcher immediate save (<2s) and atomic save (temp+rename) both fire")
         report.run("watcher latin-1 wire path register/edit/upload-back", "watch/upload",
                    case_watch_latin1_back,
                    needs="watch/stop drops exactly its watch; stop-all sweeps")

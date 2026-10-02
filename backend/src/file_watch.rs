@@ -38,11 +38,14 @@ use tokio::sync::RwLock as AsyncRwLock;
 
 /// Collapse a burst of editor save events into one evaluation.
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
-/// Editor saves that land right after `watch/start` are almost always the
-/// editor re-writing its own state (or the download's tail flush); the first
-/// window after registration is suppressed so the watcher never fires on the
-/// file it was just created from.
-pub const SUPPRESS_WINDOW: Duration = Duration::from_secs(2);
+/// Post-registration suppression window. Deliberately ZERO: the SHA-256
+/// baseline fingerprint already filters warm-up noise (a re-write of the just
+/// downloaded bytes classifies as `Same` and never emits), while a fixed
+/// window silently ate REAL early saves — an editor that was already running
+/// (or a user saving seconds after `open`) writes inside 2s, the event was
+/// dropped with no feedback and the upload never happened (真机回归). Keep
+/// the tunable so tests can still exercise the suppression branch.
+pub const SUPPRESS_WINDOW: Duration = Duration::ZERO;
 /// Files above this size are never hashed (and therefore never emit): the
 /// fingerprint is the only misfire guard, and hashing a huge file on every
 /// save would hurt more than a missed upload prompt.
@@ -296,6 +299,18 @@ impl WatchRuntime {
         }
 
         let watch_id = uuid::Uuid::new_v4().to_string();
+        // Watch the parent DIRECTORY, not the file: atomic saves (write temp +
+        // rename over the target — how WPS/Office and some VS Code paths save)
+        // swap the inode, which kills a file-level inotify watch on the first
+        // save and goes deaf from then on. Directory watches survive renames
+        // on every backend; sibling noise (lock/temp files) only re-arms the
+        // debounce and is gated by the fingerprint, so it cannot misfire.
+        let watch_target = local_path.parent().filter(|dir| dir.is_dir()).ok_or_else(|| {
+            format!(
+                "Watched file '{}' has no watchable parent directory",
+                local_path.display()
+            )
+        })?;
         let (event_tx, event_rx) = mpsc::unbounded_channel::<()>();
         let mut watcher =
             notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
@@ -304,10 +319,10 @@ impl WatchRuntime {
                     let _ = event_tx.send(());
                 }
             })
-            .map_err(|error| format!("Failed to watch '{}': {error}", local_path.display()))?;
+            .map_err(|error| format!("Failed to watch '{}': {error}", watch_target.display()))?;
         watcher
-            .watch(&local_path, notify::RecursiveMode::NonRecursive)
-            .map_err(|error| format!("Failed to watch '{}': {error}", local_path.display()))?;
+            .watch(&watch_target, notify::RecursiveMode::NonRecursive)
+            .map_err(|error| format!("Failed to watch '{}': {error}", watch_target.display()))?;
 
         let started_at = self.clock.now();
         let pump = Arc::new(AsyncRwLock::new(WatchPump {

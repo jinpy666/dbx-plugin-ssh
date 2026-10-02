@@ -21,15 +21,16 @@ describe("registerWatch", () => {
     expect(watches["w-2"].remotePath).toBe("/remote/b.txt");
   });
 
-  it("replaces the stale watchId of the same remote path", () => {
+  it("keeps every copy of the same remote path alive", () => {
     let watches: WatchRegistry = {};
     watches = registerWatch(watches, entry("w-1", "a.txt", "/remote/a.txt"));
     watches = registerWatch(watches, entry("w-2", "b.txt", "/remote/b.txt"));
-    // 重新打开 a.txt：sidecar dedup 停掉 w-1 颁发 w-3，注册表按 remotePath 顶替。
+    // 重新打开 a.txt：新副本落新的时间戳目录、拿到新的 watchId；旧副本的
+    // watcher 依然存活，它的保存同样要回传（按 remotePath 顶替会静默丢事件）。
     watches = registerWatch(watches, entry("w-3", "a.txt", "/remote/a.txt"));
-    expect(watches["w-1"]).toBeUndefined();
-    expect(watches["w-3"].name).toBe("a.txt");
+    expect(watches["w-1"]).toBeDefined();
     expect(watches["w-2"]).toBeDefined();
+    expect(watches["w-3"].name).toBe("a.txt");
   });
 
   it("ignores incomplete entries", () => {
