@@ -160,7 +160,8 @@ import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // provider/模型全在宿主 Settings → AI；能力缺失全链路降级。
 import { aiBridgeAvailable, aiCompletionAvailable, aiRecommendationsAvailable, clearAiRecommendations, generateAiText, listAiModels, openAiConversation, pickDefaultAiModel, setAiRecommendations } from "./lib/aiBridge";
 import { TailCapture } from "./lib/aiCapture";
-import { buildAiAssistRequest, buildAiFixPrompt, buildAiFixRequest, buildAiSearchRequest } from "./lib/aiRequests";
+import { formatAiResultConfirmation, parseAiResultText } from "./lib/aiResultParse";
+import { buildAiAssistRequest, buildAiFixPrompt, buildAiFixRequest, buildAiSearchPrompt, buildAiSearchRequest } from "./lib/aiRequests";
 import { canActivateAiSearch, classifyAiSearchInput, createAiSearchState, nextAiSearchState, type AiSearchState } from "./lib/aiSearchMode";
 import { loadAiSettings, saveAiSettings, sanitizeAiSettings, type AiSettings } from "./lib/aiSettings";
 import { isExpectedNonZeroExit, shouldOfferAiFix } from "./lib/aiFix";
@@ -2517,13 +2518,35 @@ function closeAiSearch() {
   aiSearchAnchor.value = null;
 }
 
-/** `#` 发起：拼请求 → host.ai.openConversation（ask）。发送与失败都给可见
- *  提示；生成的命令由用户在 AI 面板复制回填，插件不代填不代跑。 */
+/** `#` 发起：优先直连生成（aiCompletion 能力位，桌面运行时）——列模型 →
+ *  挑默认 → generateText（prompt 与面板会话共用 buildAiSearchPrompt）→ 确认
+ *  弹窗（命令行突出 + Why 说明 + 七语「不执行」确认）→ **用户显式同意后回填
+ *  输入行**（不回车不执行，红线不变）；首行为空/异常/直连能力缺失回退既有
+ *  面板会话路径。发送与失败都给可见提示。 */
 async function submitAiSearch(query: string) {
   const trimmed = query.trim();
   closeAiSearch();
   if (!trimmed) return;
-  const sent = await openAiConversation(window.dbxPlugin, buildAiSearchRequest({ query: trimmed, context: aiContextExtras() })).catch(() => false);
+  const api = window.dbxPlugin;
+  if (aiCompletionAvailable(api)) {
+    try {
+      const model = pickDefaultAiModel(await listAiModels(api));
+      if (!model) throw new Error("no configured ai model");
+      const result = (await generateAiText(api, { configId: model.configId, model: model.model, prompt: buildAiSearchPrompt({ query: trimmed }) })).trim();
+      const parsed = parseAiResultText(result);
+      if (!parsed) throw new Error("empty ai response");
+      const accepted = await confirmDialog(formatAiResultConfirmation(parsed, { fillConfirm: t("aiSearch.fillConfirm") }));
+      if (accepted) {
+        replaceTerminalLineWith(parsed.command, false);
+        terminal?.focus();
+        showNotice(t("aiSearch.filledNotice"));
+      }
+      return;
+    } catch {
+      // 直连失败（无模型/宿主确认取消/供应商错误已泛化）→ 回退面板会话。
+    }
+  }
+  const sent = await openAiConversation(api, buildAiSearchRequest({ query: trimmed, context: aiContextExtras() })).catch(() => false);
   showNotice(t(sent ? "aiSearch.sentNotice" : "aiSearch.unavailable"));
 }
 
@@ -2586,13 +2609,15 @@ async function aiFixFromBar() {
       const triageHint = await aiFixTriageHint(bar.output);
       const prompt = buildAiFixPrompt({ command: bar.command, exitCode: bar.exitCode, output: bar.output, triageHint });
       const result = (await generateAiText(api, { configId: model.configId, model: model.model, prompt })).trim();
-      const command = result.split("\n")[0]?.trim();
-      if (!command) throw new Error("empty ai response");
-      const accepted = await confirmDialog(`${result}\n\n${t("aiFix.fillConfirm")}`);
+      // 结果结构化（AI 体验改造 v2）：「命令行（前置标签）+ Why 行」分行排版，
+      // 解析失败（首行为空）按异常回退面板会话；无 Why 行时展示退化为仅命令。
+      const parsed = parseAiResultText(result);
+      if (!parsed) throw new Error("empty ai response");
+      const accepted = await confirmDialog(formatAiResultConfirmation(parsed, { commandLabel: t("aiFix.commandLabel"), fillConfirm: t("aiFix.fillConfirm") }));
       if (accepted) {
         aiFixBar.value = null;
         clearFixRecommendation();
-        replaceTerminalLineWith(command, false);
+        replaceTerminalLineWith(parsed.command, false);
         terminal?.focus();
         showNotice(t("aiFix.filledNotice"));
       }
@@ -9441,7 +9466,7 @@ watch(historyScope, () => {
           <DialogTitle>{{ t("confirm") }}</DialogTitle>
           <button :title="t('close')" class="icon-button" @click="resolvePendingConfirmDialog(false)"><X /></button>
         </header>
-        <p class="muted">{{ pendingConfirmDialog.message }}</p>
+        <p class="muted confirm-message">{{ pendingConfirmDialog.message }}</p>
         <footer>
           <button @click="resolvePendingConfirmDialog(false)">{{ t("cancel") }}</button>
           <button :class="pendingConfirmDialog.danger ? 'danger-button' : 'primary-button'" @click="resolvePendingConfirmDialog(true)">{{ t("confirm") }}</button>
@@ -9536,6 +9561,9 @@ watch(historyScope, () => {
 </template>
 
 <style scoped>
+/* 通用确认弹窗消息保留换行（AI 直连生成结果的「命令行 + Why 行」结构化排版
+ * 依赖分行；其余单行消息不受影响）。 */
+.confirm-message { white-space: pre-line; }
 /* SFTP 面板扩展（工作包 B）：搜索/类型过滤、批量条、路径历史、属性弹窗。 */
 .sftp-filter-bar { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); padding: 5px 7px; }
 .sftp-search-input { display: flex; flex: 1; min-width: 0; height: 26px; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 7px; background: var(--background); }
