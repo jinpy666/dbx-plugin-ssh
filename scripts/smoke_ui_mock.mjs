@@ -296,7 +296,8 @@ try {
   const hintsAfterType = await historyPage.locator(".terminal-prompt-hints").count();
   check("shortcut hint strip hides while typing", hintsAfterType === 0, `hints=${hintsAfterType}`);
   await historyPage.keyboard.press("Backspace");
-  await sleep(200);
+  // 退格回显也是输出：等 600ms 输出活跃窗放行（防抖静默）后再断言回归。
+  await sleep(750);
   const hintsAfterBackspace = await historyPage.locator(".terminal-prompt-hints").count();
   check("shortcut hint strip returns after clearing the line", hintsAfterBackspace === 1, `hints=${hintsAfterBackspace}`);
 
@@ -608,6 +609,10 @@ try {
   await aiSearchPage.goto(`${baseUrl}?render=dom&aifix=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
   await aiSearchPage.bringToFront();
   await aiSearchPage.click(".terminal-host");
+
+  // 引导条（输出静默 600ms 后放行）：含 # AI 命令搜索项（aiSearch 可用时）。
+  await expect(aiSearchPage, ".terminal-prompt-hints", "prompt hints bar appears after output settles");
+  await expectText(aiSearchPage, ".terminal-prompt-hints", "AI command search", "hints bar includes the # AI search entry");
 
   // # 模式：键入 # 即本地改道（字节不进 PTY），提示条出现且随打字更新。
   await aiSearchPage.keyboard.press("#");

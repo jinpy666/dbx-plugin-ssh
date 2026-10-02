@@ -9,6 +9,7 @@ import {
   loadPromptHintsEnabled,
   savePromptHintsDismissed,
   savePromptHintsEnabled,
+  isPasswordPromptLine,
   shouldShowPromptHints,
   type PromptHintsGates,
 } from "./terminalPromptHints";
@@ -23,6 +24,8 @@ const gates = (patch: Partial<PromptHintsGates> = {}): PromptHintsGates => ({
   transferBusy: false,
   overlayOpen: false,
   aiSearchActive: false,
+  outputQuiet: true,
+  passwordPromptOnScreen: false,
   ...patch,
 });
 
@@ -33,6 +36,20 @@ describe("shouldShowPromptHints", () => {
 
   it("# AI 搜索模式在场即隐藏（该模式字节不进 PTY，lineEmpty 恒真）", () => {
     expect(shouldShowPromptHints(gates({ aiSearchActive: true }))).toBe(false);
+  });
+
+  it("输出活跃与凭据提示均抑制（登录刷屏 / Password: 场景）", () => {
+    expect(shouldShowPromptHints(gates({ outputQuiet: false }))).toBe(false);
+    expect(shouldShowPromptHints(gates({ passwordPromptOnScreen: true }))).toBe(false);
+  });
+
+  it("isPasswordPromptLine：password/口令/密码提示命中，空串与普通行不命中", () => {
+    expect(isPasswordPromptLine("Password:")).toBe(true);
+    expect(isPasswordPromptLine("[sudo] password for jinpy:")).toBe(true);
+    expect(isPasswordPromptLine("Enter password:")).toBe(true);
+    expect(isPasswordPromptLine("请输入密码：")).toBe(true);
+    expect(isPasswordPromptLine("postgres=# select 1;")).toBe(false);
+    expect(isPasswordPromptLine("")).toBe(false);
   });
 
   it("任一门关闭即不显示（逐项验证）", () => {

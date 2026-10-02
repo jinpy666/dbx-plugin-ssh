@@ -152,7 +152,7 @@ import { mergeShellHistory, parseShellHistoryText, persistableCommandHistoryBuck
 import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
 import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, saveGhostTabAccept } from "./lib/ghostAcceptKey";
-import { loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
+import { isPasswordPromptLine, loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // AI 助手（Warp AI 对齐批，IMPL_PLAN_WARP_AI_TERMINAL）：宿主 AI 通道封装 +
@@ -1995,6 +1995,7 @@ function createTerminal() {
       })
     ) {
       aiSearchState.value = { active: true, query: "" };
+      dismissPromptHints();
       syncAiSearchAnchor();
       terminalDiag.swallowed += 1;
       return;
@@ -3016,6 +3017,11 @@ function resetCommandMarker() {
   // AI 助手状态随会话复位（Warp AI 对齐批）：# 模式/修复条/推荐卡/输出采集
   // 缓冲（解码器重建，避免跨会话的多字节残态）。
   closeAiSearch();
+  if (promptHintsQuietTimer) {
+    clearTimeout(promptHintsQuietTimer);
+    promptHintsQuietTimer = undefined;
+  }
+  promptHintsOutputQuiet.value = true;
   aiSearchToken += 1;
   aiSearchPending.value = false;
   aiSearchPendingQuery.value = "";
@@ -3139,6 +3145,7 @@ function writeTerminalOutput(data: Uint8Array) {
   // （active）的输出文本进尾部环形缓冲；快进快出的命令（E/C/D 同一 chunk）
   // 由 D 帧判定一并采集——wasActive 覆盖长输出的中间 chunk，D 帧 chunk 覆盖
   // 尾段正文。剥 ANSI 后入缓冲——633 帧噪声不进 AI 快照。
+  markTerminalOutputActive();
   const aiChunkWasActive = commandMarker.active;
   const aiChunkUpdates = commandMarkerParser.push(data);
   applyCommandMarker(aiChunkUpdates);
@@ -7556,6 +7563,32 @@ const promptHintsEnabled = ref(loadPromptHintsEnabled());
 const promptHintsDismissed = ref(loadPromptHintsDismissed());
 const promptHintsLineEmpty = ref(true);
 const promptHintsAnchor = ref<SuggestionAnchor | null>(null);
+// 输出活跃抑制（真机反馈：登录 banner 刷屏期引导条闪现遮挡输出）：写输出即
+// 置 quiet=false，600ms 静默后放行（防抖单 timer；会话复位归位）。
+const promptHintsOutputQuiet = ref(true);
+let promptHintsQuietTimer: ReturnType<typeof setTimeout> | undefined;
+function markTerminalOutputActive() {
+  promptHintsOutputQuiet.value = false;
+  if (promptHintsQuietTimer) clearTimeout(promptHintsQuietTimer);
+  promptHintsQuietTimer = setTimeout(() => {
+    promptHintsQuietTimer = undefined;
+    promptHintsOutputQuiet.value = true;
+  }, 600);
+}
+// 密码提示启发采样：光标行与上一行文本命中 password/passphrase 提示 → 抑制。
+function passwordPromptOnScreen(): boolean {
+  try {
+    const buffer = terminal?.buffer.active;
+    if (!buffer || buffer.type !== "normal") return false;
+    const row = buffer.baseY + Math.min(buffer.cursorY, buffer.length - 1);
+    for (let y = row; y >= Math.max(0, row - 1); y -= 1) {
+      if (isPasswordPromptLine(buffer.getLine(y)?.translateToString(true) ?? "")) return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
 // 引导条键位标签跟随实时绑定（不写死键名）：历史搜索取 command-history 的
 // 首个 Ctrl 系绑定（默认表里即 Ctrl+R，⌘⇧H 在前但 mac 上 ⌘ 系不是终端键位
 // 心智），补全取 completions 首个绑定（默认 Ctrl+/）。解绑则隐藏对应项。
@@ -7578,6 +7611,8 @@ const promptHintsVisible = computed(() =>
     transferBusy: terminalTransferBusy.value,
     overlayOpen: suggestionOpen.value || completionOpen.value || historyPanelOpen.value || quickSelectOpen.value || searchOpen.value,
     aiSearchActive: aiSearchState.value.active,
+    outputQuiet: promptHintsOutputQuiet.value,
+    passwordPromptOnScreen: passwordPromptOnScreen(),
   }),
 );
 watch(promptHintsVisible, (visible) => {
@@ -8028,6 +8063,7 @@ watch(historyScope, () => {
         <TerminalPromptHints
           v-if="promptHintsVisible"
           :locale="locale"
+          :ai-search-available="aiBridgeOk() && aiSettingsState.search"
           :history-key-label="promptHintsHistoryKey"
           :completions-key-label="promptHintsCompletionsKey"
           :anchor="promptHintsAnchor"

@@ -21,6 +21,8 @@ interface Props {
   /** 补全手动键的展示标签（同上，跟随实时绑定——Ctrl+Space 被系统输入法
    *  抢占的机器上默认键已改为 Ctrl+/，标签必须跟着绑定走而非写死）。 */
   completionsKeyLabel: string;
+  /** 宿主 AI 能力与 # 搜索开关均可用：引导条追加 # AI 命令搜索项。 */
+  aiSearchAvailable: boolean;
   /** 光标格像素坐标（y 为光标行顶）；null = 定位不可用，贴终端底部。 */
   anchor: SuggestionAnchor | null;
   /** 定位包含块实测高度（terminal-pane）；缺省时走 fallback。 */
@@ -56,6 +58,7 @@ const style = computed(() => {
 <template>
   <div ref="rootEl" class="terminal-prompt-hints" :class="{ 'anchor-fallback': anchor === null }" :style="style" role="note" :aria-label="t('terminalHints.ariaLabel')">
     <span class="terminal-prompt-hints-item"><kbd>↑</kbd><span>{{ t("terminalHints.history") }}</span></span>
+    <span v-if="aiSearchAvailable" class="terminal-prompt-hints-item"><kbd>#</kbd><span>{{ t("terminalHints.aiSearch") }}</span></span>
     <span v-if="historyKeyLabel" class="terminal-prompt-hints-item"><kbd>{{ historyKeyLabel }}</kbd><span>{{ t("terminalHints.searchHistory") }}</span></span>
     <span v-if="completionsKeyLabel" class="terminal-prompt-hints-item"><kbd>{{ completionsKeyLabel }}</kbd><span>{{ t("terminalHints.completions") }}</span></span>
     <span class="terminal-prompt-hints-item"><kbd>→</kbd><span>{{ t("terminalHints.ghostAccept") }}</span></span>

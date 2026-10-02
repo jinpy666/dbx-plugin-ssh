@@ -65,6 +65,10 @@ export interface PromptHintsGates {
   /** `#` AI 命令搜索模式在场：该模式字节不进 PTY，lineEmpty 恒为真——
    *  不显式判位引导条会与 `#` 搜索条叠画（真机截图回归）。 */
   aiSearchActive: boolean;
+  /** 终端输出活跃（最近 600ms 有输出）：登录 banner 刷屏期不弹，防遮挡。 */
+  outputQuiet: boolean;
+  /** 屏上有凭据输入提示（Password: 等）：密码处引导毫无意义还可能泄操作。 */
+  passwordPromptOnScreen: boolean;
 }
 
 export function shouldShowPromptHints(gates: PromptHintsGates): boolean {
@@ -77,10 +81,24 @@ export function shouldShowPromptHints(gates: PromptHintsGates): boolean {
     !gates.commandRunning &&
     !gates.transferBusy &&
     !gates.overlayOpen &&
-    !gates.aiSearchActive
+    !gates.aiSearchActive &&
+    gates.outputQuiet &&
+    !gates.passwordPromptOnScreen
   );
 }
 
+
+// —— 密码提示启发（2026-10-02 真机反馈）：`Password:`/`[sudo] password` 这类
+// 凭据输入行长得和"空行提示符静置"一模一样（行缓冲口径恒空），但 ↑ 历史/
+// 补全引导在密码输入处毫无意义还可能泄操作。采样文本命中即抑制引导条。
+const PASSWORD_PROMPT_PATTERN = /(?:pass(?:word|wd|phrase)|口令|密码)[^:：]*[:：]\s*$|^enter password\b/i;
+
+/** 该行文本是否为凭据输入提示（trimEnd 后判定；空串恒 false）。 */
+export function isPasswordPromptLine(text: string): boolean {
+  const trimmed = (text ?? "").trimEnd();
+  if (!trimmed) return false;
+  return PASSWORD_PROMPT_PATTERN.test(trimmed);
+}
 
 // —— 放置侧（2026-10-02 体验反馈）：光标在第一行（刚登录/刚清屏）时上方
 // 放不下引导条，翻到光标行下方——下方是空屏，不遮内容。纯几何供单测。
