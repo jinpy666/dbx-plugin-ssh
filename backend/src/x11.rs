@@ -575,7 +575,7 @@ pub(crate) async fn bridge_channel(
     if let DisplayServer::UnixSocket(path) = &target.server {
         let local = tokio::net::UnixStream::connect(path)
             .await
-            .map_err(&connect_error)?;
+            .map_err(connect_error)?;
         let mut stream = channel.into_stream();
         stream
             .write_all(&setup)
@@ -602,7 +602,7 @@ pub(crate) async fn bridge_channel(
     };
     let mut local = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
-        .map_err(&connect_error)?;
+        .map_err(connect_error)?;
     let mut stream = channel.into_stream();
     stream
         .write_all(&setup)

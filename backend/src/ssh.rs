@@ -1326,6 +1326,11 @@ pub type RemoteForwardTable = Mutex<HashMap<(String, u32), forward::RelayTarget>
 /// still being created.
 struct TransportLeaseCounter(AtomicUsize);
 
+/// `#[allow(deprecated)]`: the newest stable renamed `fetch_update` to
+/// `try_update` (cosmetic; semantics unchanged). Calling the new name would
+/// hard-break every older rustc (including the 1.88 floor), so keep the old
+/// name until the toolchain floor moves past the renaming release.
+#[allow(deprecated)]
 impl TransportLeaseCounter {
     fn new() -> Self {
         Self(AtomicUsize::new(1))
