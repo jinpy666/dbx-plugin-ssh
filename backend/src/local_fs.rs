@@ -82,31 +82,326 @@ pub fn browse_local_dir(path: Option<&str>, data_dir: &Path) -> Result<Value, St
 /// cancels. Used by the connection form's "import private key" action — the
 /// host-rendered form cannot pick files itself.
 pub fn pick_file() -> Result<Option<String>, String> {
-    pick_file_platform().map(|picked| {
-        picked
-            .map(|path| path.trim().to_string())
+    let ssh_dir = home_subdir(".ssh");
+    trim_picked(pick_file_dialog(ssh_dir.as_deref(), None))
+}
+
+/// One "Import connections" source type. `kind` matches the
+/// `connection_import` sniff vocabulary so the parsed file kind and the
+/// user-chosen type share one vocabulary; `extensions`/`macos_types` drive the
+/// file-picker filter per platform (custom extensions have no macOS UTI, so
+/// they stay unfiltered there and rely on the explicit type step).
+pub struct ImportSourceSpec {
+    pub kind: &'static str,
+    pub label: &'static str,
+    pub extensions: &'static [&'static str],
+    pub macos_types: &'static [&'static str],
+    /// HOME-relative directory the file picker starts in (`.ssh` for the
+    /// OpenSSH config); `None` starts at the home directory itself.
+    pub default_subdir: Option<&'static str>,
+}
+
+/// Same sources (and order) as the workbench import wizard's step 1.
+pub const IMPORT_SOURCES: &[ImportSourceSpec] = &[
+    ImportSourceSpec {
+        kind: "moba",
+        label: "MobaXterm (.mxtsessions)",
+        extensions: &["mxtsessions"],
+        macos_types: &[],
+        default_subdir: None,
+    },
+    ImportSourceSpec {
+        kind: "xshell",
+        label: "Xshell (.xts)",
+        extensions: &["xts"],
+        macos_types: &[],
+        default_subdir: None,
+    },
+    ImportSourceSpec {
+        kind: "windterm",
+        label: "WindTerm (.sessions)",
+        extensions: &["sessions"],
+        macos_types: &[],
+        default_subdir: None,
+    },
+    ImportSourceSpec {
+        kind: "securecrt",
+        label: "SecureCRT (.xml)",
+        extensions: &["xml"],
+        macos_types: &["public.xml"],
+        default_subdir: None,
+    },
+    ImportSourceSpec {
+        kind: "finalshell",
+        label: "FinalShell (.zip)",
+        extensions: &["zip"],
+        macos_types: &["public.zip-archive"],
+        default_subdir: None,
+    },
+    ImportSourceSpec {
+        kind: "electerm",
+        label: "Electerm (.json)",
+        extensions: &["json"],
+        macos_types: &["public.json"],
+        default_subdir: None,
+    },
+    ImportSourceSpec {
+        kind: "termius",
+        label: "Termius (.json)",
+        extensions: &["json"],
+        macos_types: &["public.json"],
+        default_subdir: None,
+    },
+    ImportSourceSpec {
+        kind: "sshconfig",
+        label: "OpenSSH config (~/.ssh)",
+        extensions: &[],
+        macos_types: &[],
+        default_subdir: Some(".ssh"),
+    },
+];
+
+/// Looks up a source spec by its `kind` (the `source` parameter the smoke
+/// tests inject to skip the native dialog).
+pub fn import_source_by_kind(kind: &str) -> Option<&'static ImportSourceSpec> {
+    IMPORT_SOURCES.iter().find(|source| source.kind == kind)
+}
+
+/// Native "choose the source type" dialog for the connection form's
+/// "Import connections" action. Returns the index into [`IMPORT_SOURCES`];
+/// `None` when the user cancels.
+pub fn pick_import_source() -> Result<Option<usize>, String> {
+    let labels: Vec<&str> = IMPORT_SOURCES.iter().map(|s| s.label).collect();
+    pick_source_dialog(&labels).map(|picked| {
+        picked.and_then(|label| labels.iter().position(|candidate| *candidate == label))
+    })
+}
+
+fn home_subdir(subdir: &str) -> Option<PathBuf> {
+    let base = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+    let dir = PathBuf::from(base).join(subdir);
+    dir.is_dir().then_some(dir)
+}
+
+fn trim_picked(picked: Result<Option<String>, String>) -> Result<Option<String>, String> {
+    picked.map(|path| {
+        path.map(|path| path.trim().to_string())
             .filter(|path| !path.is_empty())
     })
 }
 
+/// File-picker filter for one import source. Each platform honors the field it
+/// can: Windows/Linux filter on `extensions`, macOS on `macos_types` (custom
+/// extensions have no UTI and stay unfiltered there, relying on the explicit
+/// type step ahead of the dialog). Each field is only read behind its
+/// platform cfg, so unused-on-this-platform is structural — suppressed here,
+/// not per field.
+#[allow(dead_code)]
+pub struct FilePickFilter {
+    pub name: &'static str,
+    pub extensions: &'static [&'static str],
+    pub macos_types: &'static [&'static str],
+}
+
+impl FilePickFilter {
+    fn from_source(source: &ImportSourceSpec) -> Self {
+        Self {
+            name: source.label,
+            extensions: source.extensions,
+            macos_types: source.macos_types,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn has_extensions(&self) -> bool {
+        !self.extensions.is_empty()
+    }
+
+    fn has_macos_types(&self) -> bool {
+        !self.macos_types.is_empty()
+    }
+}
+
+/// Native "pick one from a list" dialog; returns the picked label, `None` on
+/// cancel. Used by the import source selection before the file dialog.
 #[cfg(windows)]
-fn pick_file_platform() -> Result<Option<String>, String> {
+fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
 
-    // OpenFileDialog 需要 STA；默认目录 ~/.ssh 不存在时退回用户目录；
-    // -EncodedCommand 传 base64(UTF-16LE) 规避引号转义，输出 UTF-8。
-    const SCRIPT: &str = concat!(
+    // WinForms 单选列表（复用 OpenFileDialog 同款 STA + EncodedCommand 管线）：
+    // 第一项默认选中，OK 返回选中项文本，关闭窗口静默取消。
+    let mut script = String::from(
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;",
         "Add-Type -AssemblyName System.Windows.Forms;",
-        "$ssh=[IO.Path]::Combine($env:USERPROFILE,'.ssh');",
-        "$d=New-Object System.Windows.Forms.OpenFileDialog;",
-        "$d.InitialDirectory=$(if(Test-Path $ssh){$ssh}else{$env:USERPROFILE});",
-        "$d.Filter='Key files (*.pem;*.ppk;*.key;id_*)|*.pem;*.ppk;*.key;id_*|All files (*.*)|*.*';",
-        "if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Out.Write($d.FileName)}"
+        "$f=New-Object System.Windows.Forms.Form;",
+        "$f.Text='Import connections';$f.Width=380;$f.Height=400;",
+        "$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false;$f.TopMost=$true;$f.StartPosition='CenterScreen';",
+        "$l=New-Object System.Windows.Forms.Label;",
+        "$l.Text='Choose the source of the sessions to import:';$l.SetBounds(12,10,340,20);$f.Controls.Add($l);",
+        "$radios=@();",
     );
-    let mut utf16le = Vec::with_capacity(SCRIPT.len() * 2);
-    for unit in SCRIPT.encode_utf16() {
+    for (index, label) in labels.iter().enumerate() {
+        script.push_str(&format!(
+            "$r{index}=New-Object System.Windows.Forms.RadioButton;$r{index}.Text='{label}';$r{index}.SetBounds(16,{y},340,24);$f.Controls.Add($r{index});$radios+=$r{index};",
+            index = index,
+            y = 40 + index * 30,
+            label = label,
+        ));
+    }
+    script.push_str("$radios[0].Checked=$true;");
+    script.push_str(
+        "$ok=New-Object System.Windows.Forms.Button;$ok.Text='OK';$ok.DialogResult='OK';$ok.SetBounds(270,360,80,26);$f.Controls.Add($ok);$f.AcceptButton=$ok;",
+        "if($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){$sel=$radios | Where-Object {$_.Checked} | Select-Object -First 1;[Console]::Out.Write($sel.Text)}",
+    );
+    let mut utf16le = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        utf16le.extend_from_slice(&unit.to_le_bytes());
+    }
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-STA",
+            "-EncodedCommand",
+            &BASE64_STANDARD.encode(utf16le),
+        ])
+        .output()
+        .map_err(|error| format!("Failed to launch the source picker: {error}"))?;
+    let label = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if label.is_empty() { None } else { Some(label) })
+}
+
+#[cfg(not(windows))]
+fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // AppleScript choose from list：取消输出空串/`false`，选中输出该项文本。
+        let list = labels
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let output = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "choose from list {{{list}}} with title \"Import connections\" with prompt \"Choose the source of the sessions to import:\""
+            ))
+            .output()
+            .map_err(|error| format!("Failed to launch the source picker: {error}"))?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let label = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok((!label.is_empty() && label != "false").then_some(label))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // zenity 列表显示 label；kdialog radiolist 用 kind 作 tag、label 作标题，
+        // 两者输出都映射回 label 交给统一解析。
+        for program in ["zenity", "kdialog"] {
+            let mut command = std::process::Command::new(program);
+            let uses_tags = program == "kdialog";
+            if program == "zenity" {
+                command
+                    .arg("--list")
+                    .arg("--title=Import connections")
+                    .arg("--text=Choose the source of the sessions to import:")
+                    .arg("--column=Source");
+                for label in labels {
+                    command.arg(label);
+                }
+            } else {
+                command
+                    .arg("--radiolist")
+                    .arg("Choose the source of the sessions to import:")
+                    .arg("--title=Import connections");
+                for (index, label) in labels.iter().enumerate() {
+                    command
+                        .arg(if index == 0 {
+                            label.to_string()
+                        } else {
+                            format!("{index}")
+                        })
+                        .arg(label)
+                        .arg(if index == 0 { "on" } else { "off" });
+                }
+            }
+            match command.output() {
+                Ok(output) => {
+                    if !output.status.success() {
+                        return Ok(None);
+                    }
+                    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if text.is_empty() {
+                        return Ok(None);
+                    }
+                    // zenity 原样返回 label；kdialog 返回 tag（label 或序号）。
+                    if labels.contains(&text.as_str()) {
+                        return Ok(Some(text));
+                    }
+                    if let Ok(index) = text.parse::<usize>() {
+                        if let Some(label) = labels.get(index) {
+                            return Ok(Some(label.to_string()));
+                        }
+                    }
+                    return Ok(None);
+                }
+                Err(_) => continue,
+            }
+        }
+        Err("No source picker available (install zenity or kdialog)".to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = labels;
+        Err("Source picker is not available on this platform".to_string())
+    }
+}
+
+/// Parameterized native file picker shared by the private-key import (no
+/// filter, `~/.ssh` default) and the per-source import connections picker.
+#[cfg(windows)]
+fn pick_file_dialog(
+    default_dir: Option<&Path>,
+    filter: Option<&FilePickFilter>,
+) -> Result<Option<String>, String> {
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+
+    // OpenFileDialog 需要 STA；默认目录不存在时退回用户目录；
+    // -EncodedCommand 传 base64(UTF-16LE) 规避引号转义，输出 UTF-8。
+    let mut script = String::from(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;",
+        "Add-Type -AssemblyName System.Windows.Forms;",
+        "$d=New-Object System.Windows.Forms.OpenFileDialog;",
+    );
+    match default_dir {
+        Some(dir) => script.push_str(&format!(
+            "$d.InitialDirectory='{}';",
+            dir.to_string_lossy().replace('\'', "''")
+        )),
+        None => script.push_str("$d.InitialDirectory=$env:USERPROFILE;"),
+    }
+    match filter {
+        Some(filter) if filter.has_extensions() => {
+            let (name, extensions) = (filter.name, filter.extensions);
+            let patterns = extensions
+                .iter()
+                .map(|extension| format!("*.{extension}"))
+                .collect::<Vec<_>>()
+                .join(";");
+            script.push_str(&format!(
+                "$d.Filter='{} ({})|{}|All files (*.*)|*.*';",
+                name, patterns, patterns,
+            ));
+        }
+        _ => script.push_str("$d.Filter='All files (*.*)|*.*';"),
+    }
+    script.push_str(
+        "if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Out.Write($d.FileName)}",
+    );
+    let mut utf16le = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
         utf16le.extend_from_slice(&unit.to_le_bytes());
     }
     let output = std::process::Command::new("powershell.exe")
@@ -123,23 +418,39 @@ fn pick_file_platform() -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn pick_file_platform() -> Result<Option<String>, String> {
-    // 默认定位 ~/.ssh（不存在时退回用户主目录）；用户取消时非零退出。
-    let output = std::process::Command::new("osascript")
-        .args([
-            "-e",
-            "set homeDir to path to home folder",
-            "-e",
-            "set defaultDir to homeDir",
-            "-e",
-            "try",
-            "-e",
-            "set defaultDir to alias ((POSIX path of homeDir) & \".ssh\")",
-            "-e",
-            "end try",
-            "-e",
-            "POSIX path of (choose file default location defaultDir)",
-        ])
+fn pick_file_dialog(
+    default_dir: Option<&Path>,
+    filter: Option<&FilePickFilter>,
+) -> Result<Option<String>, String> {
+    // 默认定位 `default_dir`（缺省用户主目录）；用户取消时非零退出。
+    // `of type` 只接受 UTI：自定义扩展名（.mxtsessions 等）没有 UTI，
+    // 对应来源不过滤，靠前置的类型选择步骤引导。
+    let mut command = std::process::Command::new("osascript");
+    command.arg("-e").arg(format!(
+        "set defaultDir to {}",
+        match default_dir {
+            Some(dir) => format!("POSIX file \"{}\"", dir.display()),
+            None => "path to home folder".to_string(),
+        }
+    ));
+    command.arg("-e").arg(format!(
+        "POSIX path of (choose file default location defaultDir{})",
+        match filter {
+            Some(filter) if filter.has_macos_types() => {
+                let macos_types = filter.macos_types;
+                format!(
+                    " of type {{{}}}",
+                    macos_types
+                        .iter()
+                        .map(|uti| format!("\"{uti}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            _ => String::new(),
+        }
+    ));
+    let output = command
         .output()
         .map_err(|error| format!("Failed to launch the file picker: {error}"))?;
     if !output.status.success() {
@@ -150,44 +461,69 @@ fn pick_file_platform() -> Result<Option<String>, String> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn pick_file_platform() -> Result<Option<String>, String> {
-    let home = std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".ssh"))
-        .filter(|dir| dir.is_dir());
-    let zenity_default = home
-        .as_ref()
+fn pick_file_dialog(
+    default_dir: Option<&Path>,
+    filter: Option<&FilePickFilter>,
+) -> Result<Option<String>, String> {
+    let fallback = std::env::var_os("HOME").map(PathBuf::from);
+    let default = default_dir.or(fallback.as_deref());
+    let zenity_default = default
         .map(|dir| format!("{}/", dir.to_string_lossy()))
         .unwrap_or_default();
-    let pickers: Vec<(&str, Vec<String>)> = vec![
-        (
-            "zenity",
-            vec![
-                "--file-selection".to_string(),
-                format!("--filename={zenity_default}"),
-            ],
-        ),
-        (
-            "kdialog",
-            vec![
-                "--getopenfilename".to_string(),
-                home.map(|dir| dir.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| ".".to_string()),
-            ],
-        ),
-    ];
-    for (program, args) in pickers {
-        match std::process::Command::new(program).args(&args).output() {
-            Ok(output) => {
-                if !output.status.success() {
-                    return Ok(None);
-                }
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                return Ok(if path.is_empty() { None } else { Some(path) });
-            }
-            Err(_) => continue,
+    let mut command = std::process::Command::new("zenity");
+    command.arg("--file-selection");
+    if !zenity_default.is_empty() {
+        command.arg(format!("--filename={zenity_default}"));
+    }
+    if let Some(filter) = filter {
+        if filter.has_extensions() {
+            let (name, extensions) = (filter.name, filter.extensions);
+            let patterns = extensions
+                .iter()
+                .map(|extension| format!("*.{extension}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            command.arg(format!("--file-filter={name} | {patterns}"));
         }
     }
-    Err("No file picker available (install zenity or kdialog)".to_string())
+    if let Ok(output) = command.output() {
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok(if path.is_empty() { None } else { Some(path) });
+    }
+    // zenity 不在时回落 kdialog（过滤器语法 `*.pat|Name`）。
+    let kdialog_dir = default
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ".".to_string());
+    let mut command = std::process::Command::new("kdialog");
+    command.arg("--getopenfilename").arg(&kdialog_dir);
+    if let Some(filter) = filter {
+        if let Some(first) = filter.extensions.first() {
+            command.arg(format!("*.{first}|{}", filter.name));
+        }
+    }
+    match command.output() {
+        Ok(output) => {
+            if !output.status.success() {
+                return Ok(None);
+            }
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(if path.is_empty() { None } else { Some(path) })
+        }
+        Err(_) => Err("No file picker available (install zenity or kdialog)".to_string()),
+    }
+}
+
+/// Opens the per-source filtered file picker after the user picked an import
+/// source; `None` when the user cancels.
+pub fn pick_import_file(source: &ImportSourceSpec) -> Result<Option<String>, String> {
+    let default_dir = source.default_subdir.and_then(home_subdir);
+    trim_picked(pick_file_dialog(
+        default_dir.as_deref(),
+        Some(&FilePickFilter::from_source(source)),
+    ))
 }
 
 /// Pre-download conflict probe for the "ask me" policy: reports whether

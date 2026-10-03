@@ -70,6 +70,10 @@ const TOTP_PROMPT_PATTERS: &[&str] = &[
     // 指令行 "Please Enter MFA Code."（见 koko pkg/auth/mfa_option.go）。
     "otp code",
     "mfa code",
+    // 阿里云 Bastionhost 官方 SSH 运维提问原文："Please Input Mfa Code (SMS):"。
+    // "mfa code" 子串本已命中，显式收录防止子串列表收紧后静默失效；
+    // 说明行 "Two-Step Verification required" 刻意不入表——那是上下文不是输入位。
+    "please input mfa code",
     "mfa:",
     "totp:",
     "2fa code",
@@ -2452,6 +2456,47 @@ mod tests {
             classify_auth_prompt("<user>@root@host's password: ", &auth),
             Some(PromptKind::Password)
         );
+    }
+
+    /// 阿里云 Bastionhost 的官方 SSH 运维形态：说明行 "Two-Step Verification
+    /// required" + 提问行 "Please Input Mfa Code (SMS):"。提问行必须凭内置
+    /// pattern 识别（不经提示词）；说明行是上下文——既不构成验证码提问，
+    /// 也不得让文案未知的提问回码。
+    #[test]
+    fn aliyun_bastionhost_prompt_shapes() {
+        let _otp_ledger = otp_ledger_test_guard();
+        let mut auth = terminal_auth();
+        auth.flow_mode = Some(AuthFlowMode::PasswordThenOtp);
+
+        // 提问行原文命中，无需任何提示词。
+        assert_eq!(
+            classify_auth_prompt("Please Input Mfa Code (SMS): ", &auth),
+            Some(PromptKind::Totp)
+        );
+
+        // 说明行单独出现不构成验证码提问；未知提问借它兜底也不得回码。
+        assert_eq!(
+            classify_auth_prompt("Two-Step Verification required", &auth),
+            None
+        );
+        let context =
+            keyboard_interactive_challenge_context("jumper", "Two-Step Verification required");
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut KeyboardInteractiveState::first_factor_accepted(),
+            &context,
+            &[prompt("Code: ", false)],
+        );
+        assert_eq!(answers, vec![String::new()]);
+
+        // 完整一问（真实说明 + 真实提问）照常回码。
+        let answers = keyboard_interactive_answers(
+            &auth,
+            &mut KeyboardInteractiveState::first_factor_accepted(),
+            &context,
+            &[prompt("Please Input Mfa Code (SMS): ", true)],
+        );
+        assert_eq!(answers, vec!["654321".to_string()]);
     }
 
     /// 登录期 2FA 组合矩阵：流程模式 × 服务器提问形态 × 首因子是否已过。

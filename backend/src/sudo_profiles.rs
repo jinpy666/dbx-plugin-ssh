@@ -551,58 +551,6 @@ pub fn effective_use_pty(connection_pty: bool, profile: Option<&SudoProfile>) ->
         .unwrap_or(connection_pty)
 }
 
-/// Plain-text summary returned by the connection-form action
-/// (`connection/action` with action `quick-sudo-profiles`): the global
-/// profile list plus the connection's current binding. The host can only
-/// render a message on the connection panel (no interactive plugin pages),
-/// so this doubles as the discoverable entry point hinting where the full
-/// management UI lives. Secrets are reported as set/not-set only.
-pub fn action_summary(store: &SudoProfileStore, connection_id: Option<&str>) -> String {
-    let mut lines = Vec::new();
-    if store.profiles.is_empty() {
-        lines.push("No global Quick Sudo profiles yet.".to_string());
-        lines.push(
-            "Create one in the SSH workbench: toolbar key button, or Settings > Sudo credential source > Manage profiles."
-                .to_string(),
-        );
-    } else {
-        lines.push(format!(
-            "Global Quick Sudo profiles ({}):",
-            store.profiles.len()
-        ));
-        let mut profiles = store.profiles.clone();
-        profiles.sort_by_key(|left| left.name.to_lowercase());
-        for profile in profiles {
-            lines.push(format!(
-                "- {}: password {}, TOTP {}, flow {}{}",
-                profile.name,
-                if profile.sudo_password.trim().is_empty() {
-                    "not set"
-                } else {
-                    "set"
-                },
-                if profile.totp_secret.trim().is_empty() {
-                    "not set"
-                } else {
-                    "set"
-                },
-                profile.auth_flow_mode,
-                if profile.sudo_use_pty { ", PTY" } else { "" },
-            ));
-        }
-    }
-    if let Some(connection_id) = connection_id.filter(|id| !id.is_empty()) {
-        match bound_profile(store, connection_id) {
-            Some(profile) => lines.push(format!("Bound to this connection: {}", profile.name)),
-            None => lines.push(
-                "This connection uses its own sudo configuration (no global profile bound)."
-                    .to_string(),
-            ),
-        }
-    }
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,40 +882,6 @@ mod tests {
         assert!(effective_use_pty(false, Some(profile)));
         assert!(effective_use_pty(true, None));
         assert!(!effective_use_pty(false, None));
-    }
-
-    #[test]
-    fn action_summary_lists_profiles_and_binding() {
-        let secret = test_secret("sum");
-        let store = store_with("ops", &secret);
-        let summary = action_summary(&store, Some("conn-1"));
-        assert!(
-            summary.contains("Global Quick Sudo profiles (1)"),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("- ops: password set, TOTP set, flow password_then_otp"),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("Bound to this connection: ops"),
-            "{summary}"
-        );
-        assert!(!summary.contains(&secret), "summary leaked a secret");
-
-        let unbound = action_summary(&store, Some("other-conn"));
-        assert!(
-            unbound.contains("uses its own sudo configuration"),
-            "{unbound}"
-        );
-        let no_id = action_summary(&store, None);
-        assert!(!no_id.contains("Bound to this connection"), "{no_id}");
-
-        let empty = action_summary(&SudoProfileStore::default(), None);
-        assert!(
-            empty.contains("No global Quick Sudo profiles yet"),
-            "{empty}"
-        );
     }
 
     /// Writes a v2 file whose `crypto.storage` header names the keychain tier

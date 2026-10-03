@@ -21,6 +21,9 @@ Why a mock server instead of the usual docker container: koko 的登录流程是
  10. 提问文案仅在挑战 instructions 中                   -> 仍可识别并自动回码
  11. 未保存动态码 + 中文 MFA 提问                        -> 宿主密文弹窗输入当前码后登录成功
  12. 复制会话复用已认证 transport                        -> 独立 PTY，不再次要求 MFA
+ 13. 阿里云短信 MFA（官方提问原文）+ off                 -> 宿主密文弹窗输入短信码后登录成功
+ 14. 阿里云短信 MFA + 私钥（publickey partial success）  -> 弹窗输入短信码后登录成功
+ 15. 阿里云 OTP 提问 + 已配 TOTP 密钥                    -> 官方文案免提示词自动回码
 
 paramiko 未安装、或旧 sidecar 未注册 `connection/test` 时 SKIP（不判失败）。
 主机密钥/私钥均为本机运行时生成，不涉及任何真实凭据或生产主机。
@@ -57,6 +60,11 @@ MFA_CODE = "654321"  # 静态码：确定性，不依赖时钟/真实 TOTP 密�
 MFA_INSTRUCTION = "Please Enter MFA Code."  # koko mfaOptionInstruction
 MFA_QUESTION = "[OTP Code]: "  # koko mfaOptionQuestion（MFA 类型 otp）
 MFA_ROUNDS_BEFORE_GIVING_UP = 6
+
+# 阿里云 Bastionhost 官方 SSH 运维提问原文（帮助中心「通过 SSH 客户端连接堡垒机」）：
+# password/publickey 第一因子通过后，keyboard-interactive 抛出说明行 + 提问行。
+ALIYUN_MFA_INSTRUCTION = "Two-Step Verification required"
+ALIYUN_MFA_PROMPT = "Please Input Mfa Code (SMS):"
 
 # mock 堡垒机的认证形态（与 backend/src/ssh.rs 的 koko_login::Shape 对应）。
 PASSWORD_THEN_MFA = "password_then_mfa"
@@ -573,6 +581,41 @@ def scenario_matrix() -> list[Scenario]:
             prompt="[MFA认证]：",
             manual_answer=MFA_CODE,
             expect_manual_prompt="[MFA认证]：",
+        ),
+        Scenario(
+            "13. 阿里云短信 MFA + off：宿主密文弹窗输入短信码",
+            PASSWORD_THEN_MFA,
+            {},
+            {"authentication": "password", "auth_flow_mode": "off"},
+            True,
+            expect_answers=[MFA_CODE],
+            instruction=ALIYUN_MFA_INSTRUCTION,
+            prompt=ALIYUN_MFA_PROMPT,
+            manual_answer=MFA_CODE,
+            expect_manual_prompt=ALIYUN_MFA_PROMPT,
+        ),
+        Scenario(
+            "14. 阿里云短信 MFA + 私钥（publickey partial success）：弹窗输入短信码",
+            PASSWORD_THEN_MFA,
+            {},
+            {"authentication": "private-key", "auth_flow_mode": "off"},
+            True,
+            expect_answers=[MFA_CODE],
+            instruction=ALIYUN_MFA_INSTRUCTION,
+            prompt=ALIYUN_MFA_PROMPT,
+            needs_key=True,
+            manual_answer=MFA_CODE,
+            expect_manual_prompt=ALIYUN_MFA_PROMPT,
+        ),
+        Scenario(
+            "15. 阿里云 OTP 提问 + 已配 TOTP 密钥：官方文案免提示词自动回码",
+            PASSWORD_THEN_MFA,
+            dict(totp),
+            dict(password_then_otp),
+            True,
+            expect_answers=[MFA_CODE],
+            instruction=ALIYUN_MFA_INSTRUCTION,
+            prompt=ALIYUN_MFA_PROMPT,
         ),
     ]
 
