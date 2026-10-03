@@ -2479,10 +2479,8 @@ mod tests {
             classify_auth_prompt("Two-Step Verification required", &auth),
             None
         );
-        let context = keyboard_interactive_challenge_context(
-            "jumper",
-            "Two-Step Verification required",
-        );
+        let context =
+            keyboard_interactive_challenge_context("jumper", "Two-Step Verification required");
         let answers = keyboard_interactive_answers(
             &auth,
             &mut KeyboardInteractiveState::first_factor_accepted(),
