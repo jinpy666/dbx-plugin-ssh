@@ -141,9 +141,21 @@ function updateZmodemProgress(progress: ZmodemUploadProgress) {
 function finishZmodemUpload(cause?: unknown) {
   const wasActive = zmodemState.value !== "idle";
   const receiving = zmodemState.value === "receiving";
+  // 收尾容错：lrzsz sz 的 saybibi 只等 10s 接收方 ZFIN，慢了就直接退出不发
+  // "OO"，随后的 shell 提示符字节会让 zmodem.js 在 post-ZFIN 解析上抛
+  // PROTOCOL 异常——此时文件早已全部收完落盘，按成功收尾而不是报错。
+  // （正常完成路径的成功通知由 startZmodemReceive 发，这里只在容错分支发，
+  // 避免双重提示。）
+  const gracefulReceive = Boolean(cause) && receiving && savedFileCount > 0 && savedFileCount === receivedFileCount;
+  const savedCount = savedFileCount;
+  const savedPath = receiveLastSavedPath;
   cancelZmodemUpload();
   if (!wasActive) return;
-  if (cause) {
+  if (gracefulReceive) {
+    showNotice(t("zmodemReceiveComplete", { count: savedCount }), savedPath
+      ? [{ label: t("revealInFolder"), run: () => void revealTransferTarget(savedPath) }]
+      : undefined);
+  } else if (cause) {
     const key = receiving ? "zmodemReceiveFailed" : "zmodemUploadFailed";
     showError(new Error(t(key, { error: cause instanceof Error ? cause.message : String(cause) })), "terminal");
   }
