@@ -330,12 +330,15 @@ impl WatchRuntime {
         // save and goes deaf from then on. Directory watches survive renames
         // on every backend; sibling noise (lock/temp files) only re-arms the
         // debounce and is gated by the fingerprint, so it cannot misfire.
-        let watch_target = local_path.parent().filter(|dir| dir.is_dir()).ok_or_else(|| {
-            format!(
-                "Watched file '{}' has no watchable parent directory",
-                local_path.display()
-            )
-        })?;
+        let watch_target = local_path
+            .parent()
+            .filter(|dir| dir.is_dir())
+            .ok_or_else(|| {
+                format!(
+                    "Watched file '{}' has no watchable parent directory",
+                    local_path.display()
+                )
+            })?;
         let (event_tx, event_rx) = mpsc::unbounded_channel::<()>();
         let mut watcher =
             notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
@@ -346,7 +349,7 @@ impl WatchRuntime {
             })
             .map_err(|error| format!("Failed to watch '{}': {error}", watch_target.display()))?;
         watcher
-            .watch(&watch_target, notify::RecursiveMode::NonRecursive)
+            .watch(watch_target, notify::RecursiveMode::NonRecursive)
             .map_err(|error| format!("Failed to watch '{}': {error}", watch_target.display()))?;
 
         let started_at = self.clock.now();
