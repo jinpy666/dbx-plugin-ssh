@@ -270,6 +270,10 @@ fn redacted_secret_flag(value: &Option<String>) -> &'static str {
 #[serde(rename_all = "camelCase")]
 pub struct RdpStartRequest {
     pub workbench_id: String,
+    /// Owning plugin connection (lifecycle identity). The start merge uses it
+    /// to pull the connection form's saved password — the webview never sees
+    /// credentials, so it cannot pass them here itself.
+    pub connection_id: Option<String>,
     pub host: String,
     /// Defaults to 3389.
     pub port: Option<u16>,
@@ -3480,6 +3484,7 @@ mod tests {
         let data_dir = tempfile::tempdir().expect("tempdir");
         let build = |host: String, username: String, domain: Option<String>| RdpStartRequest {
             workbench_id: "w1".to_string(),
+            connection_id: None,
             host,
             port: Some(3389),
             username,

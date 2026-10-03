@@ -79,6 +79,7 @@ import {
   resolveTerminalInputRoute,
 } from "./lib/terminalTrzsz";
 import { Osc7DirectoryParser } from "./lib/terminalDirectoryTracking";
+import { PromptNewlineTransformer } from "./lib/terminalPromptNewline";
 import { handleOsc52ClipboardWrite } from "./lib/terminalOsc";
 import { confirmDialog, useConfirmDialogHost } from "./lib/confirmDialog";
 import { subscribeHostEnvironment } from "../../shared/frontend/hostThemeRuntime";
@@ -1174,6 +1175,10 @@ let pendingTerminalInput = "";
 let activeTerminalSessionId = "";
 const pendingTerminalFrames = new Map<number, { stream: number; data: Uint8Array }>();
 const directoryParser = new Osc7DirectoryParser();
+// 提示符换行修复（t8y2/dbx#10750）：sidecar 给每个交互 shell 会话武装了
+// 按提示符发 OSC 7 的钩子，这里把帧当作"提示符即将绘制"的信号——可见输出
+// 不在行首就在帧前补 CRLF。字节级透传，无钩子流恒等直通。
+const promptNewline = new PromptNewlineTransformer();
 // OSC 633 shell-integration markers (pure frontend parse; no-op streams pass through).
 const commandMarkerParser = new Osc633CommandParser();
 
@@ -1448,6 +1453,7 @@ const {
   t, showError, showNotice,
   rdpSession, rdpState, rdpSurface, rdpScaleMode, rdpClipboardChunks,
   workbenchId,
+  connectionId,
   isDisposed: () => disposed,
   getTerminal: () => terminal,
 });
@@ -3003,6 +3009,8 @@ function startCommandMarkerTick(startedAt: number) {
 
 function resetCommandMarker() {
   commandMarkerParser.reset();
+  // 提示符换行状态同属会话流：不把上一会话的行首游标与不完整序列带进新流。
+  promptNewline.reset();
   stopCommandMarkerTick();
   // 会话切换/断开连带复位 SetUserVar cwd 优先通道：不把上一会话的目录裁决
   // 带进新会话（OSC 7 回落立即恢复权威）。
@@ -3157,7 +3165,12 @@ function writeTerminalOutput(data: Uint8Array) {
   // 正文照采——执行期 chunk 靠 active 判定，快进快出命令靠 D 帧 chunk 判定。
   if (aiChunkWasActive || commandMarker.active || aiChunkUpdates.lastExitCode != null) aiOutputCapture.append(stripAnsiEscapes(aiOutputDecoder.decode(data, { stream: true })));
   maybeOfferAiFix(aiChunkUpdates);
-  terminalWriteThrottle.write(data);
+  // 提示符换行修复（t8y2/dbx#10750）：OSC 7 帧前按需补 CRLF。备用屏
+  // （vim/top 绝对定位重绘）与 zmodem/trzsz 传输期间只跟踪不插入——二进制
+  // 显示流与全屏应用的画面不容忍多余换行。directoryParser/采集链仍吃原始
+  // 字节：变换器只做插入，帧本身原样保留。
+  const suppressPromptNewline = terminalTransferBusy.value || terminal?.buffer.active.type === "alternate";
+  terminalWriteThrottle.write(promptNewline.push(data, { suppressInsert: suppressPromptNewline }));
 }
 
 /**

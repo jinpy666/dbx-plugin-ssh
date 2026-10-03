@@ -34,6 +34,9 @@ export function useRdpSession(options: {
   rdpScaleMode: Ref<RdpConnectOptions["scaleMode"]>;
   rdpClipboardChunks: Map<string, { parts: string[]; received: number }>;
   workbenchId: Ref<string>;
+  /** 当前连接 id（可选）：rdp/start 带上它，sidecar 才能把连接表单暂存的
+   * 密码/用户名合并进 NLA 认证（webview 拿不到凭据，只能给身份）。 */
+  connectionId: Ref<string>;
   isDisposed: () => boolean;
   getTerminal: () => Terminal | undefined;
 }) {
@@ -47,6 +50,7 @@ export function useRdpSession(options: {
     rdpScaleMode,
     rdpClipboardChunks,
     workbenchId,
+    connectionId,
     isDisposed,
     getTerminal,
   } = options;
@@ -65,6 +69,7 @@ export function useRdpSession(options: {
     try {
       const info = await window.dbxPlugin.invoke<{ sessionId: string; host: string; port: number }>("rdp/start", {
         workbenchId: workbenchId.value,
+        connectionId: connectionId.value || undefined,
         host: options.host,
         port: options.port,
         username: options.username,
