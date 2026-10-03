@@ -46,14 +46,17 @@ pub const DEBOUNCE: Duration = Duration::from_millis(500);
 /// dropped with no feedback and the upload never happened (真机回归). Keep
 /// the tunable so tests can still exercise the suppression branch.
 pub const SUPPRESS_WINDOW: Duration = Duration::ZERO;
-/// Files above this size are never hashed (and therefore never emit): the
-/// fingerprint is the only misfire guard, and hashing a huge file on every
-/// save would hurt more than a missed upload prompt.
+/// Files above this size are not hashed: the fingerprint degrades to
+/// size+mtime (see [`file_fingerprint`]). Hashing a multi-hundred-MB file on
+/// every save would hurt more than the coarser change detection it buys.
 pub const MAX_HASH_BYTES: u64 = 64 * 1024 * 1024;
 /// `watch/upload` refuses files above this size: the round-trip is buffered
 /// in memory on purpose (single atomic commit), so multi-GB editor saves must
-/// go through the regular upload slot instead.
-pub const MAX_UPLOAD_BYTES: u64 = 64 * 1024 * 1024;
+/// go through the regular upload slot instead. Aligned with the manual
+/// `sftp/upload-local` cap (`sftp_ext::MAX_UPLOAD_LOCAL_SIZE`) so external
+/// editing supports exactly the sizes it can open — a 157MB SQL dump must
+/// survive watch/start AND save-round-trip, not the former only.
+pub const MAX_UPLOAD_BYTES: u64 = crate::sftp_ext::MAX_UPLOAD_LOCAL_SIZE;
 
 /// Async session-liveness probe injected from main.rs: the watcher cannot
 /// reach into the SSH session table directly (module boundaries), so each
@@ -77,12 +80,16 @@ pub struct WatchStartRequest {
 
 /// Content fingerprint of one snapshot of the watched file. `len` +
 /// `modified_ms` act as the cheap pre-filter; `sha256` is the authoritative
-/// comparison so an editor's mtime-only touch never fires the event.
+/// comparison so an editor's mtime-only touch never fires the event. `None`
+/// sha256 marks an oversized snapshot (over [`MAX_HASH_BYTES`]): size+mtime
+/// is then the whole fingerprint, so classification is coarser but the file
+/// stays watchable — refusing it outright killed external editing of large
+/// dumps (「远端文件不存在」 false alarm, 2026-10-03).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFingerprint {
     pub len: u64,
     pub modified_ms: u64,
-    pub sha256: [u8; 32],
+    pub sha256: Option<[u8; 32]>,
 }
 
 /// Outcome of comparing a fresh snapshot against the watch baseline.
@@ -97,23 +104,36 @@ pub enum ChangeVerdict {
     Undeterminable,
 }
 
-/// Reads and hashes `path`. `None` when the file is gone, unreadable, or over
-/// [`MAX_HASH_BYTES`] — the caller treats `None` as "cannot confirm a change".
+/// Reads and hashes `path`. `None` when the file is gone, unreadable, or not
+/// a regular file — the caller treats `None` as "cannot confirm a change"
+/// (and `watch/start` as "nothing to watch"). Files over [`MAX_HASH_BYTES`]
+/// keep a size+mtime fingerprint (`sha256: None`) instead: the baseline must
+/// exist for large downloads or external editing breaks above 64 MiB.
 pub fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    file_fingerprint_with_limit(path, MAX_HASH_BYTES)
+}
+
+/// [`file_fingerprint`] with an injectable hash cap — the seam the watcher
+/// tests use to exercise the oversized branch without a 64 MiB fixture.
+fn file_fingerprint_with_limit(path: &Path, max_hash_bytes: u64) -> Option<FileFingerprint> {
     let metadata = std::fs::metadata(path).ok()?;
     if !metadata.is_file() {
         return None;
     }
     let len = metadata.len();
-    if len > MAX_HASH_BYTES {
-        return None;
-    }
     let modified_ms = metadata
         .modified()
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_millis() as u64;
+    if len > max_hash_bytes {
+        return Some(FileFingerprint {
+            len,
+            modified_ms,
+            sha256: None,
+        });
+    }
     let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
@@ -136,7 +156,7 @@ pub fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     Some(FileFingerprint {
         len,
         modified_ms,
-        sha256,
+        sha256: Some(sha256),
     })
 }
 
@@ -154,8 +174,13 @@ pub fn classify_change(
     if baseline.modified_ms == current.modified_ms {
         return ChangeVerdict::Same;
     }
-    if baseline.sha256 == current.sha256 {
-        return ChangeVerdict::Same;
+    // Oversized snapshots (sha256 None) have no content proof either way:
+    // with len equal and mtime ticked, mtime IS the decision — a coarse but
+    // working signal where refusing to decide would drop real saves.
+    if let (Some(baseline_hash), Some(current_hash)) = (baseline.sha256, current.sha256) {
+        if baseline_hash == current_hash {
+            return ChangeVerdict::Same;
+        }
     }
     ChangeVerdict::ContentChanged
 }
@@ -703,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_is_undeterminable_for_missing_and_oversized() {
+    fn fingerprint_is_undeterminable_for_missing_and_directories() {
         assert_eq!(classify_change(&None, &None), ChangeVerdict::Undeterminable);
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(file_fingerprint(&dir.path().join("gone.txt")).is_none());
@@ -712,11 +737,39 @@ mod tests {
     }
 
     #[test]
+    fn oversized_file_keeps_size_mtime_fingerprint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big.txt");
+        // 6 bytes over a 4-byte cap: exercises the oversized branch without a
+        // 64 MiB fixture. Production passes MAX_HASH_BYTES here.
+        write_file(&path, b"123456");
+        let baseline = file_fingerprint_with_limit(&path, 4).expect("fingerprint");
+        assert_eq!(baseline.len, 6);
+        assert_eq!(baseline.sha256, None);
+        // Same bytes rewritten later: mtime ticks, no content proof — the
+        // coarse signal must still classify (ContentChanged), not stall.
+        std::thread::sleep(Duration::from_millis(10));
+        write_file(&path, b"123456");
+        let current = file_fingerprint_with_limit(&path, 4).expect("fingerprint");
+        assert_eq!(
+            classify_change(&Some(baseline), &Some(current.clone())),
+            ChangeVerdict::ContentChanged
+        );
+        // Unchanged file re-snapshotted: against the NEW baseline (current,
+        // what the pump stores after an emit) the verdict is Same.
+        let stable = file_fingerprint_with_limit(&path, 4).expect("fingerprint");
+        assert_eq!(
+            classify_change(&Some(current), &Some(stable)),
+            ChangeVerdict::Same
+        );
+    }
+
+    #[test]
     fn classify_change_treats_missing_snapshot_as_undeterminable() {
         let baseline = Some(FileFingerprint {
             len: 3,
             modified_ms: 1,
-            sha256: [0; 32],
+            sha256: Some([0; 32]),
         });
         assert_eq!(
             classify_change(&baseline, &None),
