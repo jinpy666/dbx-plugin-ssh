@@ -351,11 +351,12 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 远端 `sz` 发起的下载由前端 zmodem.js sentry 自动接管（`useZmodem` 接收状态机 + `lib/terminalZmodem.ts` 接收辅助），无需用户在终端手敲任何命令：
 
-- **接管条件**：sentry `on_detect` 且会话角色为 `receive` 时自动 `confirm()`；仅当本地有待上传文件（rz 上传占流）或 trzsz 正在传输时 deny（deny 即发送 ZMODEM abort 序列，远端 `sz` 干净退出）。
+- **接管条件**：sentry `on_detect` 且会话角色为 `receive` 时自动 `confirm()` 并立即 `session.start()`——ZRINIT 邀请帧由 `start()` 发出（confirm 只建会话不说话，漏调 start 的 sz 会等 ZRINIT 超时静默退出，真机 E2E 冒烟抓到过该缺陷）；仅当本地有待上传文件（rz 上传占流）或 trzsz 正在传输时 deny（deny 即发送 ZMODEM abort 序列，远端 `sz` 干净退出）。
 - **文件名安全**：offer 文件名是远端可控字符串，落盘前经 `sanitizeZmodemFileName` 净化——剥离路径段（POSIX/Windows 分隔符，`../../` 逃逸不生效）、去控制字符与 Windows 非法字符、保留名（CON/NUL/COM1…）加前缀、去尾部点空格、限长并保证非空。
 - **落盘三段式**（与 trzsz tsz 下载同一优先级，`useTrzsz.saveTrzszDownloadedFiles` 对齐）：①宿主 `fileTransfer`（optional 1.1 特性）：`beginSave` 打开目标后随 `on_input` 逐块流式写（`write(handleId, offset, chunk)`），不在内存攒整文件；②sidecar `local/saveFile`：本机落盘，支持下载目录设置/「每次询问」（按批次只问一次）与撞名冲突策略（rename/overwrite，取消只跳过该文件），完成后可「在文件夹中显示」；③浏览器 `saveFile` 兜底（web/docker 模式，sidecar 不在本机）：单次整包，上限 512 MiB。
-- **进度与取消**：overlay（`.zmodem-status`）显示文件名/百分比/文件计数/速度（1s 窗口 EWMA，与 trzsz 同款 `sampleTransferSpeed`）；取消按钮 `session.abort()`（CAN×5+BS×5），远端 `sz` 退出、本地丢弃未保存的残件；会话关闭/切换时静默 teardown。
-- **完成语义**：会话正常结束（ZFIN/OO）后按实际保存文件数发完成通知；保存失败中止会话并报错（`zmodemReceiveFailed`）。
+- **进度与取消**：overlay（`.zmodem-status`）显示文件名/百分比/文件计数/速度（1s 窗口 EWMA，与 trzsz 同款 `sampleTransferSpeed`）；取消按钮 `session.abort()`（CAN×5+BS×5）。取消语义按 lrzsz 实测校准：sz 流式 ZCRCG 块不读 stdin，CAN 序列在当前文件发完后才被看到——本地侧 abort 即死（字节丢弃、overlay 复位），远端滞后退出；会话关闭/切换时静默 teardown。
+- **完成语义与收尾容错**：会话正常结束（ZFIN/OO）后按实际保存文件数发完成通知；保存失败中止会话并报错（`zmodemReceiveFailed`）。lrzsz sz 的 `saybibi` 只等 10s 接收方 ZFIN，慢了就直接退出不发 "OO"，随后的 shell 提示符字节会让 zmodem.js 在 post-ZFIN 解析上抛 PROTOCOL 异常——文件已全数落盘时该异常按成功收尾（成功通知），不惊吓用户。
+- **端到端验收**：`scripts/smoke_zmodem_receive.py` + `scripts/zmodem_receive_bridge.mjs`（真实协议对：容器内 lrzsz sz ↔ 生产同款 zmodem.js，过真 sidecar PTY 泵；三用例——单文件 md5 对照、多文件中文名/空格 md5 对照、中途取消；需 node + frontend/node_modules + DBX_PLUGIN_SIDECAR，缺件 SKIP）。
 
 ## Sudo 文件操作
 
