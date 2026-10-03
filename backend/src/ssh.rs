@@ -1138,8 +1138,22 @@ impl client::Handler for HostKeyProbe {
 
 enum TerminalCommand {
     Input(Vec<u8>),
-    Resize { cols: u32, rows: u32 },
-    DirectoryTracking { enabled: bool },
+    Resize {
+        cols: u32,
+        rows: u32,
+    },
+    DirectoryTracking {
+        enabled: bool,
+    },
+    /// Session-open arming of the per-prompt hook (issue t8y2/dbx#10750): the
+    /// shell type was probed off the read loop and is already resolved, so the
+    /// handler never awaits the network. Non-bash/zsh shells are skipped
+    /// silently — unlike the user-facing DirectoryTracking toggle there is no
+    /// `directory-tracking-unavailable` event for shells that cannot host the
+    /// hook (a fish/nushell user must not get a warning toast on every open).
+    InstallPromptHook {
+        shell: RemoteShell,
+    },
     Close,
 }
 
@@ -2274,6 +2288,27 @@ impl SshRuntime {
             });
         }
 
+        // Prompt-hook arming (issue t8y2/dbx#10750): every interactive shell
+        // session arms the per-prompt OSC 7 hook for its whole lifetime so the
+        // frontend can keep the next prompt off the tail of un-newlined output
+        // (FinalShell/WindTerm behavior); the SFTP directory-follow toggle
+        // consumes the same frames. Detection runs off the read loop — probing
+        // inside a select! arm can stall the loop for the detection timeout —
+        // and the resolved shell rides the command queue into the loop, FIFO
+        // with the startup-commands input lines below. Only real shell
+        // sessions: spawn exec / remote_command replace the shell, so typing
+        // the hook line there would feed the command's stdin.
+        if interactive_shell_session(spawn_exec.as_deref(), &connection.remote_command) {
+            let hook_handle = entry.handle.clone();
+            let hook_tx = entry.terminal_tx.clone();
+            tokio::spawn(async move {
+                let shell = detect_remote_shell(&hook_handle).await;
+                let _ = hook_tx
+                    .send(TerminalCommand::InstallPromptHook { shell })
+                    .await;
+            });
+        }
+
         // Startup commands (Tabby "Login scripts" parity, M7 P0-4): after the
         // shell is up, type the connection's pre-configured command sequence
         // through the same input channel the keepalive uses. Only for real
@@ -2390,6 +2425,16 @@ impl SshRuntime {
                             let _ = channel.window_change(cols.max(1), rows.max(1), 0, 0).await;
                         }
                         Some(TerminalCommand::DirectoryTracking { enabled }) => {
+                            if !enabled {
+                                // Session-open arming made the hook session
+                                // infrastructure: turning SFTP directory-follow
+                                // off stops only the frontend navigation, while
+                                // the per-prompt hook (and the prompt-newline
+                                // fix built on it) stays armed for the session's
+                                // lifetime. Tearing it down here would silently
+                                // regress #10750 for follow-off users.
+                                continue;
+                            }
                             if remote_shell == RemoteShell::Unknown {
                                 remote_shell = detect_remote_shell(&entry.handle).await;
                             }
@@ -2403,10 +2448,10 @@ impl SshRuntime {
                                 ).await;
                                 continue;
                             }
-                            if directory_tracking_enabled == enabled {
+                            if directory_tracking_enabled {
                                 continue;
                             }
-                            directory_tracking_enabled = enabled;
+                            directory_tracking_enabled = true;
                             directory_filter.begin(directory_tracking_marker(&directory_marker_id));
                             publish_terminal(
                                 &task_id,
@@ -2415,7 +2460,27 @@ impl SshRuntime {
                                 &replay,
                                 &emitter,
                             ).await;
-                            let script = directory_tracking_script(enabled, &directory_marker_id, remote_shell);
+                            let script = directory_tracking_script(&directory_marker_id, remote_shell);
+                            if channel.data(script.as_bytes()).await.is_err() { break; }
+                        }
+                        Some(TerminalCommand::InstallPromptHook { shell }) => {
+                            // Silent session-open arming: unsupported shells are
+                            // skipped without the toggle's unavailable event,
+                            // and an already-armed hook (user-facing toggle
+                            // raced ahead) is left untouched. No `\r\x1b[2K`
+                            // line clear either — the typed line lands before
+                            // the first prompt and the handshake filter hides
+                            // its echo, so nothing on screen is disturbed.
+                            if !matches!(shell, RemoteShell::Bash | RemoteShell::Zsh) {
+                                continue;
+                            }
+                            if directory_tracking_enabled {
+                                continue;
+                            }
+                            remote_shell = shell;
+                            directory_tracking_enabled = true;
+                            directory_filter.begin(directory_tracking_marker(&directory_marker_id));
+                            let script = directory_tracking_script(&directory_marker_id, shell);
                             if channel.data(script.as_bytes()).await.is_err() { break; }
                         }
                         Some(TerminalCommand::Close) | None => {
@@ -11832,28 +11897,46 @@ fn decode_stream_text(carry: &mut Vec<u8>, data: &[u8]) -> String {
     text
 }
 
-fn directory_tracking_script(enabled: bool, session_id: &str, shell: RemoteShell) -> String {
+/// Installs the per-prompt OSC 7 hook for one interactive shell session
+/// (issue t8y2/dbx#10750): bash gets a `PROMPT_COMMAND` prepend, zsh a
+/// `precmd_functions` entry, each emitting `ESC]7;file://$HOST$PWD BEL`
+/// immediately before every prompt draw. The frontend consumes these frames
+/// twice — SFTP directory follow (as before) and the prompt-newline fix
+/// (insert CRLF when the preceding output did not end on a line start). The
+/// hook is session-local and idempotent (`__DBX_CWD_ACTIVE` guard), so
+/// re-arming on an already-hooked shell is a no-op remotely. Arming is now
+/// unconditional for the session's lifetime: there is no teardown script
+/// anymore — the SFTP follow toggle turning off must not strip the frame
+/// the newline fix depends on (frontend merely stops navigating).
+fn directory_tracking_script(session_id: &str, shell: RemoteShell) -> String {
     let marker = format!("\\033]777;dbx-directory-ready-{session_id}\\007");
-    let (body, history_flush) = match (shell, enabled) {
-        (RemoteShell::Bash, true) => (
+    // zsh's first `precmd_functions` run needs one extra line to trigger, so
+    // the install line is followed by a blank Enter; bash's PROMPT_COMMAND
+    // fires on the prompt that follows the install line by itself.
+    let (body, history_flush) = match shell {
+        RemoteShell::Bash => (
             r#"if [ -z "${__DBX_CWD_ACTIVE+x}" ]; then __DBX_CWD_ACTIVE=1; __DBX_OLD_HISTCONTROL_SET=${HISTCONTROL+x}; __DBX_OLD_HISTCONTROL=${HISTCONTROL-}; case ":${HISTCONTROL-}:" in *:ignorespace:*|*:ignoreboth:*) __DBX_HISTORY_NEEDS_DELETE=0 ;; *) __DBX_HISTORY_NEEDS_DELETE=1; HISTCONTROL="${HISTCONTROL:+$HISTCONTROL:}ignorespace" ;; esac; __DBX_OLD_PROMPT_COMMAND=${PROMPT_COMMAND-}; __dbx_emit_cwd(){ printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD"; }; PROMPT_COMMAND='__dbx_emit_cwd;'"$__DBX_OLD_PROMPT_COMMAND"; if [ "$__DBX_HISTORY_NEEDS_DELETE" = 1 ]; then history -d $((HISTCMD-1)) 2>/dev/null || true; fi; unset __DBX_HISTORY_NEEDS_DELETE; fi"#,
             "",
         ),
-        (RemoteShell::Bash, false) => (
-            r#"if [ -n "${__DBX_CWD_ACTIVE+x}" ]; then PROMPT_COMMAND=${__DBX_OLD_PROMPT_COMMAND-}; unset -f __dbx_emit_cwd 2>/dev/null || true; if [ "${__DBX_OLD_HISTCONTROL_SET-}" = x ]; then HISTCONTROL=${__DBX_OLD_HISTCONTROL-}; else unset HISTCONTROL; fi; unset __DBX_CWD_ACTIVE __DBX_OLD_PROMPT_COMMAND __DBX_OLD_HISTCONTROL_SET __DBX_OLD_HISTCONTROL; fi"#,
-            "",
-        ),
-        (RemoteShell::Zsh, true) => (
+        RemoteShell::Zsh => (
             r#"if [ -z "${__DBX_CWD_ACTIVE+x}" ]; then __DBX_CWD_ACTIVE=1; if [[ -o HIST_IGNORE_SPACE ]]; then __DBX_OLD_HIST_IGNORE_SPACE=1; else __DBX_OLD_HIST_IGNORE_SPACE=0; setopt HIST_IGNORE_SPACE; fi; __dbx_emit_cwd(){ printf '\033]7;file://%s%s\007' "${HOST:-localhost}" "$PWD"; }; typeset -ga precmd_functions; precmd_functions=(__dbx_emit_cwd ${precmd_functions:#__dbx_emit_cwd}); fi"#,
             " \r",
         ),
-        (RemoteShell::Zsh, false) => (
-            r#"if [ -n "${__DBX_CWD_ACTIVE+x}" ]; then precmd_functions=(${precmd_functions:#__dbx_emit_cwd}); unfunction __dbx_emit_cwd 2>/dev/null || true; if [[ "${__DBX_OLD_HIST_IGNORE_SPACE-1}" = 0 ]]; then unsetopt HIST_IGNORE_SPACE; fi; unset __DBX_CWD_ACTIVE __DBX_OLD_HIST_IGNORE_SPACE; fi"#,
-            " \r",
-        ),
-        (RemoteShell::Other, _) | (RemoteShell::Unknown, _) => ("", ""),
+        // Callers only arm for bash/zsh; Unknown/Other degrade to a no-op line
+        // so a stray invocation can never type garbage into a foreign shell.
+        RemoteShell::Other | RemoteShell::Unknown => ("", ""),
     };
     format!(" {body}; printf '{marker}'\r{history_flush}")
+}
+
+/// Whether a terminal session opened as an interactive remote shell (and only
+/// then): a spawn-exec command session or a connection-level `remote_command`
+/// replaces the shell, so shell-syntax lines like the prompt hook must never
+/// be typed into the channel — they would feed the command's stdin. Same
+/// gating as the startup-commands injector (their input lines share the FIFO,
+/// so relative order between the two is preserved whatever the send order).
+fn interactive_shell_session(spawn_exec: Option<&str>, remote_command: &str) -> bool {
+    spawn_exec.is_none() && remote_command.is_empty()
 }
 
 /// A caller-supplied session id is honoured only when it is safe as a registry
@@ -13637,16 +13720,59 @@ matrix-ed25519";
 
     #[test]
     fn directory_tracking_scripts_are_session_local() {
-        let bash = directory_tracking_script(true, "session-1", RemoteShell::Bash);
-        let zsh = directory_tracking_script(true, "session-1", RemoteShell::Zsh);
+        let bash = directory_tracking_script("session-1", RemoteShell::Bash);
+        let zsh = directory_tracking_script("session-1", RemoteShell::Zsh);
         assert!(bash.contains("PROMPT_COMMAND"));
         assert!(bash.contains("dbx-directory-ready-session-1"));
         assert!(zsh.contains("precmd_functions"));
         // Unknown shell: the script is deferred until the first toggle probes
         // the remote shell; before that it must degrade to a no-op script.
         assert_eq!(
-            directory_tracking_script(true, "session-1", RemoteShell::Unknown),
-            directory_tracking_script(true, "session-1", RemoteShell::Other)
+            directory_tracking_script("session-1", RemoteShell::Unknown),
+            directory_tracking_script("session-1", RemoteShell::Other)
+        );
+        // #10750: arming is unconditional for the session lifetime — there is
+        // no teardown variant anymore, so a bash script never restores
+        // PROMPT_COMMAND and a zsh script never unsets the hook function.
+        assert!(!bash.contains("${__DBX_OLD_PROMPT_COMMAND-}"));
+        assert!(!zsh.contains("unfunction"));
+        // Both installs are guarded and idempotent: a second arm is a no-op
+        // remotely instead of stacking a second emit function.
+        assert!(bash.contains("[ -z \"${__DBX_CWD_ACTIVE+x}\" ]"));
+        assert!(zsh.contains("[ -z \"${__DBX_CWD_ACTIVE+x}\" ]"));
+        // zsh needs one extra Enter to trigger the first precmd run inside the
+        // handshake window; bash's PROMPT_COMMAND fires on the next prompt.
+        assert!(zsh.ends_with("\r \r"));
+        assert!(bash.ends_with("\r"));
+    }
+
+    #[test]
+    fn prompt_hook_installs_osc7_report_before_every_prompt() {
+        // The whole point of #10750: the frontend keys the prompt-newline fix
+        // off OSC 7 frames, so both shell flavors must emit exactly that
+        // sequence (host + pwd, BEL-terminated) from their per-prompt hook.
+        for script in [
+            directory_tracking_script("s", RemoteShell::Bash),
+            directory_tracking_script("s", RemoteShell::Zsh),
+        ] {
+            assert!(script.contains("printf '\\033]7;file://%s%s\\007'"));
+        }
+    }
+
+    #[test]
+    fn interactive_shell_sessions_gate_shell_syntax_lines() {
+        // Plain shell session: prompt hook and startup commands both apply.
+        assert!(interactive_shell_session(None, ""));
+        // A spawn-exec command session or a connection-level remote_command
+        // replaces the shell — typing the hook line there would feed the
+        // command's stdin instead of a shell.
+        assert!(!interactive_shell_session(Some("tail -f log"), ""));
+        assert!(!interactive_shell_session(None, "exec zsh"));
+        // Gating mirrors the startup-commands injector so both lines share the
+        // command FIFO with a consistent notion of "interactive".
+        assert_eq!(
+            interactive_shell_session(None, "anything"),
+            startup_commands::executes_for("anything")
         );
     }
 
@@ -15143,18 +15269,35 @@ matrix-ed25519";
             let exec_payload = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let seen = exec_seen.lock().unwrap().clone();
-                    if !seen.is_empty() {
+                    // #10750: the base shell session now arms the prompt hook,
+                    // which probes `$SHELL` once via exec; the spawn session
+                    // execs the wrapped command. The two are independent tasks
+                    // on the shared transport, so neither arrival order nor
+                    // which lands first is deterministic — wait for both.
+                    let has_command = seen.iter().any(|command| command == "sh -c 'htop --tree'");
+                    let has_probe = seen
+                        .iter()
+                        .any(|command| command == "printf '%s' \"$SHELL\"");
+                    if has_command && has_probe {
                         break seen;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
             .await
-            .expect("the mock server must receive the exec request");
+            .expect("the mock server must receive the exec requests");
             assert_eq!(
-                exec_payload.as_slice(),
-                ["sh -c 'htop --tree'"],
+                exec_payload.len(),
+                2,
+                "exactly one shell probe (interactive session arming) and one command exec"
+            );
+            assert!(
+                exec_payload.contains(&"sh -c 'htop --tree'".to_string()),
                 "the command is wrapped as one single-quoted sh -c argument"
+            );
+            assert!(
+                exec_payload.contains(&"printf '%s' \"$SHELL\"".to_string()),
+                "the interactive base session arms its prompt hook with one $SHELL probe"
             );
 
             for opened in [base, spawned] {

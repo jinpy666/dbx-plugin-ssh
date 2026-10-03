@@ -12,7 +12,16 @@ Telnet/VNC/Serial/RDP 的 saved connection 生命周期也走同一入口，但�
 
 复制会话继承来源会话在连接时解析出的内存态 sudo 编排快照（`SudoAuth`），包括 `password_command` 当时的解析结果；复制时不会再次运行 `password_command`。会话建立后的设置同步仍按各会话现有更新机制独立生效。
 
-`ssh/session/open` 还可接收可选 `requestedSessionId`。前端可在调用长连接 RPC 前预分配该 id，使 `ssh/terminal/out/{sessionId}` 的首帧无需等待 RPC 返回即可进入终端；sidecar 会在注册表冲突或旧调用方缺失该字段时安全回退到新的 UUID，返回的 `sessionId` 始终是权威值。旧前端/sidecar 继续使用现有 replay 语义。交互 PTY 会先建立，远端 shell 能力探测只在启用目录跟踪时懒执行，不阻塞首个 Prompt。
+`ssh/session/open` 还可接收可选 `requestedSessionId`。前端可在调用长连接 RPC 前预分配该 id，使 `ssh/terminal/out/{sessionId}` 的首帧无需等待 RPC 返回即可进入终端；sidecar 会在注册表冲突或旧调用方缺失该字段时安全回退到新的 UUID，返回的 `sessionId` 始终是权威值。旧前端/sidecar 继续使用现有 replay 语义。交互 PTY 会先建立；交互 shell 会话打开时 sidecar 异步探测远端 shell 并武装提示符钩子（见下「提示符钩子与提示符换行」节），探测不阻塞首个 Prompt；命令会话（`spawnCommand`/`remote_command`）不武装。
+
+## 提示符钩子与提示符换行（t8y2/dbx#10750）
+
+每个**交互 shell 会话**打开时，sidecar 在读循环外异步探测远端 shell（`printf '%s' "$SHELL"`，5s 超时判 Other），bash/zsh 会话即向 channel 键入一次 hook 安装行（与启动命令共用命令 FIFO，`interactive_shell_session` 门控——`spawnCommand`/`remote_command` 替代了 shell，绝不向其 stdin 键入 shell 语法）：
+
+- bash 在 `PROMPT_COMMAND` 前置 `__dbx_emit_cwd`，zsh 向 `precmd_functions` 前插同名函数，二者均在**每次提示符绘制前**发一帧 `ESC]7;file://<host><pwd>BEL`（与 SFTP 目录跟随共用同一信号源）；安装行带 `__DBX_CWD_ACTIVE` 幂等守卫与会话本地回滚保护，重复武装为远端 no-op。
+- 武装对会话全生命周期生效：SFTP「跟随目录」开关关闭只停前端导航，**不再拆除钩子**（`ssh/terminal/directoryTracking {enabled:false}` 现为纯前端语义）；开关开启遇已武装则跳过重复安装。
+- **前端提示符换行**（FinalShell/WindTerm 行为）：`lib/terminalPromptNewline.ts` 字节级变换器把 OSC 7 帧当"提示符即将绘制"信号——可见输出不在行首就在帧前补一帧 CRLF，命令无结尾换行的输出不再与下一个提示符粘连。变换器除插入外逐字节透传（不解码 UTF-8，zmodem 显示流/trzsz 嗅探不受影响）；备用屏（vim/top）与 zmodem/trzsz 传输期间只跟踪不插入；无钩子流（fish/nushell、命令会话、安装失败）恒等直通。会话切换/断开时随命令标记一并复位。
+
 
 ## 同 transport 命令会话（WezTerm `spawn` 对标，WT-4）
 
