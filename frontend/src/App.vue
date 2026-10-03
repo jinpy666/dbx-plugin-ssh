@@ -9,6 +9,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import {
   Archive,
+  ArrowLeft,
   Check,
   ChevronDown,
   ChevronRight,
@@ -352,7 +353,7 @@ import DockerWhaleLogo from "./components/DockerWhaleLogo.vue";
 import { Switch } from "./components/ui/switch";
 import { defaultPatternFor, newCustomEditorId, resolveEditorForFile, sanitizeEditorConfig, type CustomEditor, type EditorConfig, type KnownEditor, type ResolvedEditor } from "./lib/editorRules";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
-import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "./components/ui/context-menu";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger } from "./components/ui/context-menu";
 import { Popover, PopoverAnchor, PopoverContent } from "./components/ui/popover";
 import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
 import SettingsDialog from "./components/SettingsDialog.vue";
@@ -6048,6 +6049,7 @@ const {
   session,
   openTransferPanel, transferTasks, pathFromUri, waitWhilePaused, cancelledTransferTasks, downloadChunkWaiters,
   waitForDownloadChunk: (taskId, offset) => waitForDownloadChunk(taskId, offset),
+  waitForDownloadReady: (taskId, compression) => waitForDownloadReady(taskId, compression),
   probeLocalCapabilities: () => probeLocalCapabilities(),
   loadDownloadDir, copyTextToClipboard,
   closeFileMenu: () => { fileMenu.value = undefined; },
@@ -6075,6 +6077,7 @@ const {
   probeLocalCapabilities,
   downloadEntry,
   waitForDownloadChunk,
+  waitForDownloadReady,
   batchDownload,
   saveHostFile,
   revealTransferTarget,

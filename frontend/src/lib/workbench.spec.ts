@@ -748,7 +748,7 @@ describe("connection info auth method label", () => {
 // 边界切分，而非假定顺序）：模板 = <template> 起点至 <style> 前最后一个
 // </template>（嵌套 template 元素的闭合符在行内，不会命中行首最后一个）。
 const appStyleIndex = appVueSource.indexOf("<style");
-const appTemplate = appVueSource.slice(appVueSource.indexOf("<template>"), appVueSource.lastIndexOf("</template>", appStyleIndex));
+const appTemplate = appVueSource.slice(appVueSource.lastIndexOf("<template>"), appVueSource.lastIndexOf("</template>", appStyleIndex));
 const appScript = appVueSource.slice(appVueSource.indexOf("<script"), appVueSource.indexOf("</script>"));
 
 // App.vue 持续模块化（状态/接线迁 composables/）：结构守卫的扫描范围相应
@@ -854,6 +854,39 @@ describe("App.vue popover/modal wiring structural guard", () => {
 // sandbox="allow-scripts" 下浏览器会静默丢弃该动作（无报错、无下载事件），
 // 表现为「提示已下载但本机没有文件」。唯一可靠兜底是宿主 host.saveFile
 // （顶层页面落盘）；本组用例从 App.vue 源码反向锁定该约束，防复发。
+describe("App.vue template component resolution guard", () => {
+  // 模板里用了未注册的组件标签时，Vue 把它当未知自定义元素原样输出——
+  // 不报构建错误、界面静默劣化（ContextMenuSub 曾因此整个平铺失效，
+  // 真机截图回归 2026-10-03）。此守卫强制模板中每个 PascalCase 标签都有
+  // 对应的 script setup 导入。
+  const VUE_BUILTINS = new Set(["Transition", "TransitionGroup", "KeepAlive", "Teleport", "Suspense", "TeleportStatic"]);
+  const importedNames = new Set<string>();
+  const importRe = /import\s+(?:([\w$]+)\s*,?\s*)?(?:\{([^}]*)\})?\s*from\s*["']/g;
+  for (const hit of appScript.matchAll(importRe)) {
+    if (hit[1]) importedNames.add(hit[1]);
+    for (const spec of (hit[2] || "").split(",")) {
+      const alias = spec.trim().split(/\s+as\s+/).pop()?.trim();
+      if (alias) importedNames.add(alias);
+    }
+  }
+  const templateTags = new Set<string>();
+  for (const hit of appTemplate.matchAll(/<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g)) {
+    templateTags.add(hit[1]);
+  }
+
+  it("extracts a non-empty tag inventory (guards against vacuous regex passes)", () => {
+    for (const tag of ["ContextMenu", "ContextMenuItem", "Dialog", "SettingsDialog"]) {
+      expect(templateTags, `模板标签提取丢失 ${tag}`).toContain(tag);
+    }
+    expect(importedNames.size).toBeGreaterThan(50);
+  });
+
+  it("resolves every PascalCase template tag to a script-setup import", () => {
+    const unresolved = [...templateTags].filter((tag) => !importedNames.has(tag) && !VUE_BUILTINS.has(tag));
+    expect(unresolved, `未导入的模板组件: ${unresolved.join(", ")}`).toEqual([]);
+  });
+});
+
 describe("issue #93 download fallback policy", () => {
   it("never creates in-iframe anchor downloads in any save path", () => {
     // 主链路（SFTP 下载 / trzsz / GIF 导出）不得出现 document.createElement("a")+
