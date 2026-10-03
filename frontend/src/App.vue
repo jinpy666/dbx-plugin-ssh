@@ -1453,6 +1453,7 @@ const {
   t, showError, showNotice,
   rdpSession, rdpState, rdpSurface, rdpScaleMode, rdpClipboardChunks,
   workbenchId,
+  connectionId,
   isDisposed: () => disposed,
   getTerminal: () => terminal,
 });

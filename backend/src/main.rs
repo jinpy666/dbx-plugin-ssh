@@ -24,6 +24,7 @@ mod metrics;
 mod metrics_history;
 mod model;
 mod multi_exec;
+mod non_ssh_credentials;
 mod otp;
 mod otp_store;
 mod preferences;
@@ -88,6 +89,9 @@ struct Plugin {
     mcp: Arc<mcp::McpState>,
     watcher: Arc<file_watch::WatchRuntime>,
     connection_import: connection_import::ImportStream,
+    /// 非 SSH 连接（telnet/vnc/rdp）的已存凭据暂存：connection/connect 生命周期
+    /// 存、*\/start 合并、connection/disconnect 清（见 non_ssh_credentials 模块）。
+    non_ssh_creds: non_ssh_credentials::NonSshCredentials,
 }
 
 impl Plugin {
@@ -117,6 +121,7 @@ impl Plugin {
             rdp: Arc::new(rdp_session::RdpSessionRuntime::new()),
             watcher: Arc::new(file_watch::WatchRuntime::new()),
             connection_import: connection_import::ImportStream::default(),
+            non_ssh_creds: non_ssh_credentials::NonSshCredentials::new(),
         })
     }
 
@@ -443,8 +448,23 @@ impl Plugin {
             "connection/connect" => {
                 let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
                 // 非 SSH 会话协议（telnet/vnc/serial/rdp）不走 SSH 连接存储：
-                // 会话生命周期由各自的 * / start 方法族与前端路由驱动。
+                // 会话生命周期由各自的 * / start 方法族与前端路由驱动。表单
+                // 密码（binding:"password" → connection.password）暂存进凭据
+                // 注册表，*\/start 合并（表单存了密码 = 自动登录/免密认证的
+                // 用户意图；没存则回落各自的连接弹窗）。
                 if endpoint.protocol != "ssh" {
+                    let connection = params.get("connection").cloned().unwrap_or(json!({}));
+                    self.non_ssh_creds.store(
+                        &endpoint.connection_id,
+                        connection
+                            .get("username")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        connection
+                            .get("password")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
                     return Ok(json!({ "success": true }));
                 }
                 let connection = StoredConnection::from_lifecycle_params(&params)?;
@@ -457,6 +477,7 @@ impl Plugin {
                     .and_then(|value| value.get("id"))
                     .and_then(Value::as_str)
                     .ok_or("Missing connection id")?;
+                self.non_ssh_creds.drop_connection(connection_id);
                 self.runtime
                     .block_on(self.ssh.disconnect_connection(connection_id))?;
                 self.runtime
@@ -665,7 +686,17 @@ impl Plugin {
             // 输入走 `telnet/terminal/in/{id}` 二进制通道，输出走
             // `telnet/terminal/out/{id}`，生命周期事件 `telnet/session/state`。
             "telnet/start" => {
-                let request: telnet_session::TelnetStartRequest = parse(params)?;
+                let mut request: telnet_session::TelnetStartRequest = parse(params)?;
+                // 表单密码 → 声明式自动登录（提示词正则用内置默认词表）；请求
+                // 已带 autoLogin（工具栏弹窗路径）时不覆盖。
+                if request.auto_login.is_none() {
+                    if let Some((username, password)) = self
+                        .non_ssh_creds
+                        .get(request.connection_id.as_deref().unwrap_or_default())
+                    {
+                        request.auto_login = Some(telnet_form_auto_login(&username, &password));
+                    }
+                }
                 self.runtime
                     .block_on(self.telnet.start(request, emitter.clone()))
             }
@@ -795,7 +826,21 @@ impl Plugin {
             // 远端剪贴板更新走 `vnc/clipboard` 事件。classic VNC-Auth 密码
             // ≤8 字节，仅建议在可信网络使用（None 认证为明文协议）。
             "vnc/start" => {
-                let request: vnc_session::VncStartRequest = parse(params)?;
+                let mut request: vnc_session::VncStartRequest = parse(params)?;
+                // 表单密码合并：请求已带密码（弹窗路径）时不覆盖。
+                if request
+                    .password
+                    .as_deref()
+                    .map(str::is_empty)
+                    .unwrap_or(true)
+                {
+                    if let Some((_, password)) = self
+                        .non_ssh_creds
+                        .get(request.connection_id.as_deref().unwrap_or_default())
+                    {
+                        request.password = Some(password);
+                    }
+                }
                 self.runtime
                     .block_on(self.vnc.start(request, emitter.clone()))
             }
@@ -849,7 +894,25 @@ impl Plugin {
             // + 16 MiB 上限；认证类失败不自动重连。
             "rdp/start" => {
                 rdp_start_gate(&plugin_data_dir())?;
-                let request: rdp_session::RdpStartRequest = parse(params)?;
+                let mut request: rdp_session::RdpStartRequest = parse(params)?;
+                // 表单密码/用户名合并：请求已带密码（弹窗路径）时不覆盖；
+                // 用户名只在请求留空时补（连接表单 username 对 telnet/rdp 可见）。
+                if request
+                    .password
+                    .as_deref()
+                    .map(str::is_empty)
+                    .unwrap_or(true)
+                {
+                    if let Some((username, password)) = self
+                        .non_ssh_creds
+                        .get(request.connection_id.as_deref().unwrap_or_default())
+                    {
+                        request.password = Some(password);
+                        if request.username.trim().is_empty() && !username.is_empty() {
+                            request.username = username;
+                        }
+                    }
+                }
                 self.runtime
                     .block_on(self.rdp.start(request, emitter.clone(), &plugin_data_dir()))
             }
@@ -1846,10 +1909,6 @@ impl Plugin {
             "connection/action" => {
                 let action = connection_action_id(&params)?;
                 match action {
-                    "quick-sudo-profiles" => {
-                        let connection_id = params.get("id").and_then(Value::as_str);
-                        Ok(self.ssh.profiles_action_summary(connection_id))
-                    }
                     // 「从文件导入私钥」：桌面端弹系统文件选择框，读取校验后
                     // 回填表单 private_key 字段；取消安静返回；web/docker
                     // sidecar 不在本机，指引粘贴内容。
@@ -1862,13 +1921,16 @@ impl Plugin {
                         }
                         action_import_private_key(&mut || local_fs::pick_file())
                     }
-                    // 「从终端会话文件导入」：桌面端弹系统文件选择框，按扩展名/
-                    // JSON 形态嗅探来源后复用导入预览的解析器，把首条会话回填
-                    // 表单字段。凭据结构性缺位——密码永不回填、私钥只回路径。
-                    // 表单模型是一次一条连接，批量选择仍走工作台向导；WindTerm
-                    // 加密导出需要主密码，无 UI 的动作问不了，指回向导。可选
-                    // path 参数跳过系统对话框，供冒烟/自测注入固定文件（宿主
-                    // 从不携带；载荷仍只有脱敏字段，与预览同边界）。
+                    // 「导入连接」：先弹原生来源选择（MobaXterm/Xshell/…/
+                    // OpenSSH config，与工作台向导同 8 类），再按所选类型弹带
+                    // 扩展名过滤的文件选择框，按扩展名/JSON 形态嗅探来源后复用
+                    // 导入预览的解析器，把首条会话回填表单字段。凭据结构性缺位
+                    // ——密码永不回填、私钥只回路径。表单模型是一次一条连接，
+                    // 批量选择仍走工作台向导；WindTerm 加密导出需要主密码，
+                    // 无 UI 的动作问不了，指回向导。可选 source/path 参数跳过
+                    // 两段系统对话框，供冒烟/自测注入（宿主从不携带；载荷仍
+                    // 只有脱敏字段，与预览同边界）。任一步取消整体 null 安静
+                    // 返回。
                     "import-sessions" => {
                         if !local_downloads::can_save_local(|key| std::env::var_os(key)) {
                             return Err(
@@ -1876,7 +1938,11 @@ impl Plugin {
                                     .to_string(),
                             );
                         }
-                        action_import_sessions(&params, &mut || local_fs::pick_file())
+                        action_import_sessions(
+                            &params,
+                            &mut local_fs::pick_import_source,
+                            &mut local_fs::pick_import_file,
+                        )
                     }
                     other => Err(format!("Unknown connection action: {other}")),
                 }
@@ -2613,10 +2679,31 @@ fn action_import_private_key(
 /// 「从终端会话文件导入」动作核心（picker 注入理由同上）；`path` 参数跳过
 /// 系统对话框，供冒烟/自测注入固定文件（宿主从不携带；载荷仍只有脱敏
 /// 字段，与预览同边界）。
+/// telnet 表单凭据 → 声明式自动登录：提示词/成败正则全部走内置默认词表
+/// （`DeclarativeAutoLogin` 的 None 语义），用户名为空时只应答密码提问。
+fn telnet_form_auto_login(username: &str, password: &str) -> telnet_session::AutoLoginSpec {
+    telnet_session::AutoLoginSpec {
+        rules: None,
+        secrets: Vec::new(),
+        declarative: Some(telnet_session::DeclarativeAutoLogin {
+            username: (!username.is_empty()).then_some(username.to_string()),
+            password: Some(password.to_string()),
+            username_prompt_regex: None,
+            password_prompt_regex: None,
+            success_regex: None,
+            failure_regex: None,
+            max_retries: None,
+        }),
+    }
+}
+
 fn action_import_sessions(
     params: &Value,
-    pick: &mut dyn FnMut() -> Result<Option<String>, String>,
+    pick_source: &mut dyn FnMut() -> Result<Option<usize>, String>,
+    pick_file: &mut dyn FnMut(&local_fs::ImportSourceSpec) -> Result<Option<String>, String>,
 ) -> Result<Value, String> {
+    // `path`（宿主从不携带，冒烟/单测注入）跳过两段对话框、直接读盘嗅探；
+    // `source` 只跳过来源选择段，文件框照常弹出（可再与 path 组合）。
     let (kind, bytes) = match params
         .get("path")
         .and_then(Value::as_str)
@@ -2624,7 +2711,22 @@ fn action_import_sessions(
     {
         Some(path) => connection_import::read_session_file(std::path::Path::new(path))?,
         None => {
-            let Some(path) = pick()? else {
+            let source = match params
+                .get("source")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                Some(kind) => local_fs::import_source_by_kind(kind)
+                    .ok_or_else(|| format!("Unknown import source: {kind}"))?,
+                None => {
+                    let Some(index) = pick_source()? else {
+                        // 取消来源选择：同取消选文件，整体 null 安静返回。
+                        return Ok(json!(null));
+                    };
+                    local_fs::IMPORT_SOURCES.get(index).expect("valid index")
+                }
+            };
+            let Some(path) = pick_file(source)? else {
                 // 取消选文件：同 import-private-key，整体 null 安静返回。
                 return Ok(json!(null));
             };
@@ -2958,21 +3060,28 @@ mod tests {
     }
 
     /// 宿主对 connection/action 响应的契约（与 ssh.rs 摘要臂测试同源）：
-    /// 取消选文件 = 整体 null（安静无操作）——不能回归成
+    /// 取消选文件/取消来源选择 = 整体 null（安静无操作）——不能回归成
     /// `{message, fieldValues: null}`（宿主以 must be an object 拒掉）。
     #[test]
     fn connection_action_cancel_returns_plain_null() {
+        let mut cancelled_file =
+            |_: &local_fs::ImportSourceSpec| -> Result<Option<String>, String> { Ok(None) };
         let mut cancelled = || -> Result<Option<String>, String> { Ok(None) };
+        let mut cancelled_source = || -> Result<Option<usize>, String> { Ok(None) };
         let value = action_import_private_key(&mut cancelled).expect("cancel is not an error");
         assert!(value.is_null(), "private-key cancel: {value}");
-        let value =
-            action_import_sessions(&json!({}), &mut cancelled).expect("cancel is not an error");
-        assert!(value.is_null(), "session cancel: {value}");
+        let value = action_import_sessions(&json!({}), &mut cancelled_source, &mut cancelled_file)
+            .expect("cancel is not an error");
+        assert!(value.is_null(), "session source cancel: {value}");
+        let mut picked_source = || -> Result<Option<usize>, String> { Ok(Some(0)) };
+        let value = action_import_sessions(&json!({}), &mut picked_source, &mut cancelled_file)
+            .expect("cancel is not an error");
+        assert!(value.is_null(), "session file cancel: {value}");
     }
 
     /// 契约另一半：fieldValues 一旦出现必须是 object，且只含 manifest 已声明
-    /// 字段、永不携带密码（凭据红线）。`path` 参数注入固定文件，picker 不得
-    /// 被触发。
+    /// 字段、永不携带密码（凭据红线）。`path` 参数注入固定文件，两段对话框
+    /// 都不得被触发。
     #[test]
     fn connection_action_import_sessions_fills_object_field_values_without_secrets() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2983,9 +3092,15 @@ mod tests {
         )
         .expect("write fixture");
         let params = json!({ "path": file.to_string_lossy() });
-        let mut picker =
-            || -> Result<Option<String>, String> { panic!("path param must skip the picker") };
-        let value = action_import_sessions(&params, &mut picker).expect("sshconfig import");
+        let mut picker = || -> Result<Option<usize>, String> {
+            panic!("path param must skip the source picker")
+        };
+        let mut file_picker =
+            |source: &local_fs::ImportSourceSpec| -> Result<Option<String>, String> {
+                panic!("path param must skip the file picker, got {}", source.kind)
+            };
+        let value = action_import_sessions(&params, &mut picker, &mut file_picker)
+            .expect("sshconfig import");
         let field_values = value
             .get("fieldValues")
             .and_then(Value::as_object)
@@ -2995,6 +3110,83 @@ mod tests {
         assert!(
             !field_values.contains_key("password"),
             "password must never be backfilled: {field_values:?}"
+        );
+    }
+
+    /// 「导入连接」的两段对话框流：`source` 参数跳过来源选择（冒烟注入同款
+    /// 契约），file picker 收到对应来源（默认目录 = ~/.ssh）；picker 注入
+    /// 固定文件后按既有解析器回填。未知来源显式报错。
+    #[test]
+    fn connection_action_import_sessions_resolves_source_then_picks_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("sessions.mxtsessions");
+        std::fs::write(
+            &file,
+            "[Bookmarks]\nSubRep=Prod\\Web\nweb1=#109#0%192.168.1.10%22%deploy%pw%...\n",
+        )
+        .expect("write fixture");
+        let params = json!({ "source": "moba" });
+        let picked = std::sync::Mutex::new(Vec::new());
+        let mut source_picker = || -> Result<Option<usize>, String> {
+            panic!("source param must skip the source picker")
+        };
+        let mut file_picker =
+            |source: &local_fs::ImportSourceSpec| -> Result<Option<String>, String> {
+                picked
+                    .lock()
+                    .expect("picked lock")
+                    .push(source.kind.to_string());
+                Ok(Some(file.to_string_lossy().into_owned()))
+            };
+        let value = action_import_sessions(&params, &mut source_picker, &mut file_picker)
+            .expect("moba import");
+        {
+            let entries = picked.lock().expect("picked lock");
+            assert_eq!(
+                *entries,
+                ["moba"],
+                "file picker must receive the chosen source"
+            );
+        }
+        assert_eq!(value["fieldValues"]["host"], "192.168.1.10");
+
+        let unknown = action_import_sessions(
+            &json!({ "source": "nope" }),
+            &mut source_picker,
+            &mut file_picker,
+        )
+        .expect_err("unknown source must be rejected");
+        assert!(unknown.contains("Unknown import source"), "{unknown}");
+    }
+
+    /// telnet 表单凭据 → 声明式自动登录：用户名为空时只带密码（登录提示由
+    /// 内置词表应答），非空时一并下发；正则槽位全部留空走内置默认词表。
+    #[test]
+    fn telnet_form_auto_login_builds_declarative_spec() {
+        let spec = telnet_form_auto_login("ops", "s3cret");
+        let debug_render = format!("{spec:?}");
+        let declarative = spec.declarative.expect("declarative form");
+        assert_eq!(declarative.username.as_deref(), Some("ops"));
+        assert_eq!(declarative.password.as_deref(), Some("s3cret"));
+        assert!(
+            declarative.username_prompt_regex.is_none()
+                && declarative.password_prompt_regex.is_none()
+        );
+        assert!(spec.rules.is_none() && spec.secrets.is_empty());
+
+        let password_only = telnet_form_auto_login("", "s3cret");
+        assert_eq!(
+            password_only
+                .declarative
+                .expect("declarative form")
+                .username,
+            None,
+            "blank form username must not answer login prompts"
+        );
+        // Debug 脱敏红线：spec 的调试呈现永不携带密码原文。
+        assert!(
+            !debug_render.contains("s3cret"),
+            "auto-login debug leaked a password"
         );
     }
 
@@ -3036,13 +3228,13 @@ mod tests {
     fn connection_action_id_accepts_host_object_and_legacy_string_forms() {
         assert_eq!(
             connection_action_id(&json!({
-                "action": { "id": "quick-sudo-profiles" }
+                "action": { "id": "import-private-key" }
             })),
-            Ok("quick-sudo-profiles")
+            Ok("import-private-key")
         );
         assert_eq!(
-            connection_action_id(&json!({ "action": "quick-sudo-profiles" })),
-            Ok("quick-sudo-profiles")
+            connection_action_id(&json!({ "action": "import-sessions" })),
+            Ok("import-sessions")
         );
         assert_eq!(
             connection_action_id(&json!({ "action": {} })),

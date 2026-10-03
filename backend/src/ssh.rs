@@ -5849,19 +5849,6 @@ impl SshRuntime {
         Ok(json!({ "success": true, "removed": removed }))
     }
 
-    /// `connection/action` with action `quick-sudo-profiles`: a plain-text
-    /// summary rendered by the host on the connection form panel — the
-    /// discoverable stub for global Quick Sudo management (the manager UI
-    /// itself lives in the workbench, which the message points to).
-    pub fn profiles_action_summary(&self, connection_id: Option<&str>) -> Value {
-        // 宿主契约：fieldValues 允许缺省但拒绝 null（"must be an object"）。
-        // 摘要动作没有字段要回填，直接不带该键。
-        let store = sudo_profiles::load_store(&self.data_dir);
-        json!({
-            "message": sudo_profiles::action_summary(&store, connection_id),
-        })
-    }
-
     /// Re-arms or disarms a session's in-terminal Quick Sudo watcher from the
     /// connection's current state: Quick Sudo on, connection writable, and
     /// the resolved auth actually holding a credential (password or TOTP).
@@ -13393,27 +13380,6 @@ matrix-ed25519";
         );
         store.bindings.remove("conn-src");
         assert!(effective_sudo_profile(&ghost, &store).is_none());
-    }
-
-    /// 宿主对 connection/action 响应的校验：整体可为 null / 字符串 / 对象，
-    /// 但对象里的 `fieldValues` 一旦出现就必须是 object——显式置 null 会被
-    /// 宿主以 "Plugin connection action fieldValues must be an object" 拒掉，
-    /// 表单按钮直接报错。摘要动作没有字段要回填，只能省略该键。
-    #[test]
-    fn connection_action_summary_omits_field_values_instead_of_null() {
-        let data_dir = tempfile::tempdir().expect("tempdir");
-        let runtime = SshRuntime::new(data_dir.path().to_path_buf());
-        let summary = runtime.profiles_action_summary(None);
-        assert!(
-            summary["message"].is_string(),
-            "host requires a string message: {summary}"
-        );
-        if let Some(field_values) = summary.get("fieldValues") {
-            assert!(
-                field_values.is_object(),
-                "host rejects a null fieldValues: {summary}"
-            );
-        }
     }
 
     /// Stress test: 5 MiB of continuous terminal output through the 2 MiB

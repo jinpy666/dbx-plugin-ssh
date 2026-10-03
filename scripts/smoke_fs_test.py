@@ -751,32 +751,13 @@ def main() -> None:
             if again.get("removed") is not False:
                 raise AssertionError(f"repeat delete should be a no-op: {json.dumps(again)[:160]}")
 
-        def case_connection_action_profiles():
-            result = req("connection/action",
-                         {"action": {"id": "quick-sudo-profiles"}, "id": connection_id})
-            # 宿主契约：fieldValues 缺省=不回填，但拒绝 null（must be an object）。
-            if "fieldValues" in result:
-                raise AssertionError(f"summary action must omit fieldValues: {json.dumps(result)[:200]}")
-            message = result.get("message") or ""
-            if "smoke-ops" not in message:
-                raise AssertionError(f"action message missing profile: {message[:200]}")
-            if "uses its own sudo configuration" not in message:
-                raise AssertionError(f"action message missing binding line: {message[:200]}")
-            unknown = None
-            try:
-                req("connection/action", {"action": {"id": "no-such-action"}})
-            except SidecarError as raised:
-                unknown = str(raised)
-                if missing_method(raised) is not None:
-                    raise
-            if unknown is None or "Unknown connection action" not in unknown:
-                raise AssertionError(f"unknown action not rejected: {unknown}")
-
         def case_connection_action_import_sessions():
-            # 连接表单「从终端会话文件导入」：path 注入跳过系统对话框（宿主
-            # 从不携带该参数），断言复用导入解析器、首条会话回填、凭据结构性
-            # 缺位。真实对话框路径仅桌面真机可测；WindTerm 主密码指回向导的
-            # 分支在 Rust 单测覆盖。
+            # 连接表单「导入连接」：path 注入跳过来源选择与文件两段系统对话框
+            # （宿主从不携带这些参数），断言复用导入解析器、首条会话回填、
+            # 凭据结构性缺位。真实对话框链路仅桌面真机可测；source 跳过来源
+            # 选择、WindTerm 主密码指回向导的分支在 Rust 单测覆盖。此处顺带
+            # 校验未知 action 被显式拒绝（原 quick-sudo-profiles 摘要动作的
+            # 契约测试随按钮移除并入这里）。
             fixture_dir = Path(tempfile.mkdtemp(prefix="dbx-ssh-smoke-import-"))
             fixture = fixture_dir / "sessions.mxtsessions"
             fixture.write_text(
@@ -800,6 +781,15 @@ def main() -> None:
                 message = str(result.get("message") or "")
                 if "1 of 2" not in message:
                     raise AssertionError(f"message missing batch hint: {message[:200]}")
+                unknown = None
+                try:
+                    req("connection/action", {"action": {"id": "no-such-action"}})
+                except SidecarError as raised:
+                    unknown = str(raised)
+                    if missing_method(raised) is not None:
+                        raise
+                if unknown is None or "Unknown connection action" not in unknown:
+                    raise AssertionError(f"unknown action not rejected: {unknown}")
                 empty = None
                 try:
                     no_sessions = fixture_dir / "empty.config"
@@ -1401,8 +1391,6 @@ def main() -> None:
                    case_profiles_options, needs="sudo/profiles/save create")
         report.run("ssh/settings binds profile", "ssh/settings/set",
                    case_profiles_settings_binding, needs="sudo/profiles/save create")
-        report.run("connection/action quick-sudo-profiles", "connection/action",
-                   case_connection_action_profiles, needs="sudo/profiles/save create")
         report.run("connection/action import-sessions", "connection/action",
                    case_connection_action_import_sessions)
         report.run("sudo/profiles/off flow accepted + bogus rejected", "sudo/profiles/save",
