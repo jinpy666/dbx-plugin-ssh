@@ -17,6 +17,9 @@ export interface BatchSendTarget {
   port?: number;
   username?: string;
   createdAt?: number;
+  /** 连接显示名（host.listConnections 实时读数，issue #10232）：终端改名后
+   * 无需重连即随下一次目标刷新生效；宿主缺该扩展点时缺省，标签回退 user@host。 */
+  name?: string;
 }
 
 export interface BatchSendResultRow {
@@ -103,12 +106,43 @@ export function normalizeLocalBatchTargets(raw: unknown): BatchSendTarget[] {
   return targets;
 }
 
-/** 目标行主标签：`user@host`，缺连接信息时回退短 session id。 */
+/** 目标行主标签：连接名优先（终端改名后批量目标同步显示新名，issue #10232），
+ * 未命名回退 `user@host`，连接信息缺失再回退短 session id。 */
 export function batchTargetLabel(target: BatchSendTarget): string {
+  const name = target.name?.trim();
+  if (name) return name;
   const host = target.host?.trim();
   if (!host) return target.sessionId.slice(0, 8);
   const user = target.username?.trim();
   return user ? `${user}@${host}` : host;
+}
+
+/**
+ * 宿主连接名覆盖（issue #10232）：把 `host.listConnections` 的实时连接名按
+ * connectionId 叠加到批量目标上——宿主连接表是唯一随改名即时更新的数据源
+ * （sidecar 的会话行只有连接时的 user@host，宿主改名也不重推）。响应形状双
+ * 兼容：真实宿主桥返回数组，插件内 mock 走 `{ connections: [...] }` 包装。
+ * 纯函数：非法行丢弃、空白名称视为未命名；本地终端目标无 connectionId 不受影响。
+ */
+export function applyConnectionNames(targets: BatchSendTarget[], raw: unknown): BatchSendTarget[] {
+  const rows = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).connections)
+      ? ((raw as Record<string, unknown>).connections as unknown[])
+      : [];
+  const names = new Map<string, string>();
+  for (const item of rows) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id : "";
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    if (id && name) names.set(id, name);
+  }
+  if (!names.size) return targets;
+  return targets.map((target) => {
+    const name = target.connectionId ? names.get(target.connectionId) : undefined;
+    return name ? { ...target, name } : target;
+  });
 }
 
 /** 多选切换；已选中则移除，未选中则追加。 */

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  BOOT_RESTORE_RETRY_DELAY_MS,
+  BOOT_RESTORE_RETRY_MAX,
   decideConnectRetry,
   INACTIVE_RETRY_DELAY_MS,
   INACTIVE_RETRY_MAX,
@@ -65,9 +67,15 @@ describe("decideConnectRetry", () => {
     expect(exhausted).toEqual({ kind: "fail" });
   });
 
-  it("keeps the regular backoff ladder for inactive errors during boot restore", () => {
+  it("polls inactive errors during boot restore on the dedicated restore window", () => {
+    // dbx-plugin-ssh#144: the regular ladder's 8s fast-fail window gave up
+    // before the host's connect replay landed, stranding the restored tab.
     const restored = decideConnectRetry({ ...BASE, inactive: true, bootRestore: true, cause: new Error("Connection is not active") });
-    expect(restored).toEqual({ kind: "retry", attempt: 1, delayMs: OPEN_RETRY_BASE_DELAY_MS });
+    expect(restored).toEqual({ kind: "retry", attempt: 1, delayMs: BOOT_RESTORE_RETRY_DELAY_MS });
+    const last = decideConnectRetry({ ...BASE, attempt: BOOT_RESTORE_RETRY_MAX - 1, inactive: true, bootRestore: true, cause: new Error("Connection is not active") });
+    expect(last).toEqual({ kind: "retry", attempt: BOOT_RESTORE_RETRY_MAX, delayMs: BOOT_RESTORE_RETRY_DELAY_MS });
+    const exhausted = decideConnectRetry({ ...BASE, attempt: BOOT_RESTORE_RETRY_MAX, inactive: true, bootRestore: true, cause: new Error("Connection is not active") });
+    expect(exhausted).toEqual({ kind: "fail" });
   });
 
   it("polls inactive errors at the short preconnect cadence while waiting for the host pre-dial", () => {

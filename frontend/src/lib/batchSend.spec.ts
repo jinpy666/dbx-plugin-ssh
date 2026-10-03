@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyConnectionNames,
   batchTargetLabel,
   deriveBatchCommandName,
   normalizeBatchTargets,
@@ -49,6 +50,36 @@ describe("batchTargetLabel", () => {
     expect(batchTargetLabel(row({}))).toBe("ops@prod-01");
     expect(batchTargetLabel(row({ username: "" }))).toBe("prod-01");
     expect(batchTargetLabel(row({ host: "", sessionId: "abcdef123456" }))).toBe("abcdef12");
+  });
+
+  it("prefers the connection name after a terminal rename (issue #10232)", () => {
+    expect(batchTargetLabel(row({ name: "app-server" }))).toBe("app-server");
+    // 空白名称视为未命名，回退 user@host。
+    expect(batchTargetLabel(row({ name: "   " }))).toBe("ops@prod-01");
+    expect(batchTargetLabel(row({ name: "app-server", host: "" }))).toBe("app-server");
+  });
+});
+
+describe("applyConnectionNames", () => {
+  it("overlays host connection names onto matching targets only", () => {
+    const targets = [row({ sessionId: "s-1" }), row({ sessionId: "s-2", connectionId: "conn-2" })];
+    const named = applyConnectionNames(targets, { connections: [{ id: "conn-2", name: "app-server" }] });
+    expect(named[0]).toEqual(targets[0]);
+    expect(named[1]).toEqual({ ...targets[1], name: "app-server" });
+  });
+
+  it("accepts the plain-array bridge shape and drops junk or unnamed rows", () => {
+    const targets = [row({})];
+    expect(
+      applyConnectionNames(targets, [{ id: "conn-1", name: "  ops-prod  " }, { id: "conn-1" }, "junk", null]),
+    ).toEqual([{ ...targets[0], name: "ops-prod" }]);
+  });
+
+  it("leaves targets untouched when no usable names exist", () => {
+    const targets = [row({}), row({ sessionId: "s-2", connectionId: "", local: true, host: "Local · zsh" })];
+    expect(applyConnectionNames(targets, [{ id: "conn-x", name: "   " }])).toEqual(targets);
+    expect(applyConnectionNames(targets, { connections: "nope" })).toEqual(targets);
+    expect(applyConnectionNames(targets, undefined)).toEqual(targets);
   });
 });
 

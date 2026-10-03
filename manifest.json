@@ -201,8 +201,36 @@
           "label": "Password",
           "type": "password",
           "binding": "password",
-          "description": "Password for \"Password\", \"Private key, then password\" and \"Auto\", used when Password source is \"Enter in this form\". Switch Password source to \"Local command\" to fetch it with a local command instead. Auto tries each method in order, so this is one of its possible sources.",
+          "description": "Password for \"Password\", \"Private key, then password\" and \"Auto\", used when Password source is \"Enter in this form\". Switch Password source to \"Local command\" to fetch it with a local command instead. Auto tries each method in order, so this is one of its possible sources. Telnet, VNC and RDP connections use this password directly.",
           "visible_when": {
+            "any_of": [
+              {
+                "all_of": [
+                  {
+                    "field": "protocol",
+                    "one_of": [
+                      "ssh"
+                    ]
+                  },
+                  {
+                    "field": "password_source",
+                    "one_of": [
+                      "direct"
+                    ]
+                  }
+                ]
+              },
+              {
+                "field": "protocol",
+                "one_of": [
+                  "telnet",
+                  "vnc",
+                  "rdp"
+                ]
+              }
+            ]
+          },
+          "required_when": {
             "all_of": [
               {
                 "field": "protocol",
@@ -216,12 +244,6 @@
                   "direct"
                 ]
               }
-            ]
-          },
-          "required_when": {
-            "field": "password_source",
-            "one_of": [
-              "direct"
             ]
           }
         },
@@ -1142,15 +1164,6 @@
       "filesystem_provider": "io.dbx.ssh.files",
       "actions": [
         {
-          "id": "quick-sudo-profiles",
-          "label": "Global Quick Sudo profiles",
-          "description": "Show the shared global Quick Sudo profiles and this connection's binding.",
-          "variant": "outline",
-          "when": "always",
-          "requires_valid_form": false,
-          "timeout_ms": 10000
-        },
-        {
           "id": "import-private-key",
           "label": "Import private key from file",
           "description": "Pick a private key file on this machine; its content fills the key content field and is stored in the vault on save. Desktop only.",
@@ -1161,8 +1174,8 @@
         },
         {
           "id": "import-sessions",
-          "label": "Import from terminal session file",
-          "description": "Pick a session export from MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius or an OpenSSH config; the first session fills this form (passwords and key contents are never filled). Desktop only; bulk import lives in the workbench import wizard.",
+          "label": "Import connections",
+          "description": "Choose a source (MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius or an OpenSSH config), then pick its export file; the first session fills this form (passwords and key contents are never filled). Desktop only; bulk import lives in the workbench import wizard.",
           "variant": "outline",
           "when": "create",
           "requires_valid_form": false,
@@ -1405,7 +1418,7 @@
             },
             "password": {
               "label": "Contraseña",
-              "description": "Contraseña para «Contraseña», «Clave privada y después contraseña» y «Automático»; obligatoria cuando «Origen de la contraseña» es «Escribir en este formulario». Para obtenerla con un comando local, cambia ese origen a «Comando local». Automático prueba cada método en orden, así que esta es una de sus posibles fuentes."
+              "description": "Contraseña para «Contraseña», «Clave privada y después contraseña» y «Automático»; obligatoria cuando «Origen de la contraseña» es «Escribir en este formulario». Las conexiones Telnet, VNC y RDP usan esta contraseña directamente. Para obtenerla con un comando local, cambia ese origen a «Comando local». Automático prueba cada método en orden, así que esta es una de sus posibles fuentes."
             },
             "password_source": {
               "label": "Origen de la contraseña",
@@ -1534,17 +1547,13 @@
             }
           },
           "actions": {
-            "quick-sudo-profiles": {
-              "label": "Perfiles Quick Sudo globales",
-              "description": "Muestra los perfiles Quick Sudo globales y el enlace de esta conexión."
-            },
             "import-private-key": {
               "label": "Importar clave privada desde archivo",
               "description": "Elige un archivo de clave privada en este equipo; su contenido rellena el campo de contenido de la clave y se guarda en la bóveda al guardar. Solo escritorio."
             },
             "import-sessions": {
-              "label": "Importar desde archivo de sesiones de terminal",
-              "description": "Elige una exportación de sesiones de MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius o un config de OpenSSH; la primera sesión rellena este formulario (las contraseñas y el contenido de las claves privadas nunca se rellenan). Solo escritorio; la importación masiva está en el asistente de importación del espacio de trabajo."
+              "label": "Importar conexiones",
+              "description": "Elige un origen (MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius o un config de OpenSSH) y después su archivo de exportación; la primera sesión rellena este formulario (las contraseñas y el contenido de las claves privadas nunca se rellenan). Solo escritorio; la importación masiva está en el asistente de importación del espacio de trabajo."
             }
           }
         },
@@ -1693,7 +1702,7 @@
             },
             "password": {
               "label": "Password",
-              "description": "Password per «Password», «Chiave privata, poi password» e «Automatico»; obbligatoria quando «Origine password» è «Inserisci nel modulo». Per recuperarla con un comando locale, cambia l'origine in «Comando locale». Automatico prova ogni metodo in ordine, quindi questa è una delle possibili fonti."
+              "description": "Password per «Password», «Chiave privata, poi password» e «Automatico»; obbligatoria quando «Origine password» è «Inserisci nel modulo». Le connessioni Telnet, VNC e RDP usano questa password direttamente. Per recuperarla con un comando locale, cambia l'origine in «Comando locale». Automatico prova ogni metodo in ordine, quindi questa è una delle possibili fonti."
             },
             "password_source": {
               "label": "Origine password",
@@ -1822,17 +1831,13 @@
             }
           },
           "actions": {
-            "quick-sudo-profiles": {
-              "label": "Profili Quick Sudo globali",
-              "description": "Mostra i profili Quick Sudo globali e il collegamento di questa connessione."
-            },
             "import-private-key": {
               "label": "Importa chiave privata da file",
               "description": "Scegli un file di chiave privata su questo computer; il contenuto riempie il campo del contenuto della chiave e viene salvato nel vault al salvataggio. Solo desktop."
             },
             "import-sessions": {
-              "label": "Importa da file di sessioni di terminale",
-              "description": "Scegli un'esportazione di sessioni da MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius o un config OpenSSH; la prima sessione riempie questo modulo (password e contenuti delle chiavi private non vengono mai inseriti). Solo desktop; l'importazione in blocco si trova nella procedura guidata di importazione del workbench."
+              "label": "Importa connessioni",
+              "description": "Scegli un'origine (MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius o un config OpenSSH) e poi il suo file di esportazione; la prima sessione riempie questo modulo (password e contenuti delle chiavi private non vengono mai inseriti). Solo desktop; l'importazione in blocco si trova nella procedura guidata di importazione del workbench."
             }
           }
         },
@@ -1981,7 +1986,7 @@
             },
             "password": {
               "label": "パスワード",
-              "description": "「パスワード」「秘密鍵の後にパスワード」「自動」で使うパスワードです。「パスワードの取得方法」が「このフォームに入力」のときは必須です。ローカルコマンドで取得する場合は取得方法を「ローカルコマンド」に切り替えてください。自動は各方式を順に試行するため、これは候補ソースの 1 つです。"
+              "description": "「パスワード」「秘密鍵の後にパスワード」「自動」で使うパスワードです。「パスワードの取得方法」が「このフォームに入力」のときは必須です。Telnet・VNC・RDP 接続ではこのパスワードをそのまま使います。ローカルコマンドで取得する場合は取得方法を「ローカルコマンド」に切り替えてください。自動は各方式を順に試行するため、これは候補ソースの 1 つです。"
             },
             "password_source": {
               "label": "パスワードの取得方法",
@@ -2110,17 +2115,13 @@
             }
           },
           "actions": {
-            "quick-sudo-profiles": {
-              "label": "グローバル Quick Sudo プロファイル",
-              "description": "グローバル Quick Sudo プロファイルとこの接続の紐付けを表示します。"
-            },
             "import-private-key": {
               "label": "ファイルから秘密鍵をインポート",
               "description": "このマシン上の秘密鍵ファイルを選択すると、内容がキー内容フィールドに入力され、保存時に vault に保存されます。デスクトップのみ。"
             },
             "import-sessions": {
-              "label": "ターミナルセッションファイルからインポート",
-              "description": "MobaXterm・Xshell・WindTerm・SecureCRT・FinalShell・Electerm・Termius のセッションエクスポートまたは OpenSSH config を選ぶと、最初のセッションがこのフォームに入力されます（パスワードと秘密鍵の内容は入力されません）。デスクトップのみ。一括インポートはワークベンチのインポートウィザードを利用してください。"
+              "label": "接続をインポート",
+              "description": "ソース（MobaXterm・Xshell・WindTerm・SecureCRT・FinalShell・Electerm・Termius または OpenSSH config）を選び、そのエクスポートファイルを選択すると、最初のセッションがこのフォームに入力されます（パスワードと秘密鍵の内容は入力されません）。デスクトップのみ。一括インポートはワークベンチのインポートウィザードを利用してください。"
             }
           }
         },
@@ -2269,7 +2270,7 @@
             },
             "password": {
               "label": "Senha",
-              "description": "Senha para «Senha», «Chave privada e depois senha» e «Automático»; obrigatória quando «Origem da senha» é «Digitar neste formulário». Para obtê-la com um comando local, mude a origem para «Comando local». Automático tenta cada método em ordem, então esta é uma das possíveis fontes."
+              "description": "Senha para «Senha», «Chave privada e depois senha» e «Automático»; obrigatória quando «Origem da senha» é «Digitar neste formulário». Conexões Telnet, VNC e RDP usam esta senha diretamente. Para obtê-la com um comando local, mude a origem para «Comando local». Automático tenta cada método em ordem, então esta é uma das possíveis fontes."
             },
             "password_source": {
               "label": "Origem da senha",
@@ -2398,17 +2399,13 @@
             }
           },
           "actions": {
-            "quick-sudo-profiles": {
-              "label": "Perfis Quick Sudo globais",
-              "description": "Mostra os perfis Quick Sudo globais e o vínculo desta conexão."
-            },
             "import-private-key": {
               "label": "Importar chave privada de arquivo",
               "description": "Escolha um arquivo de chave privada nesta máquina; o conteúdo preenche o campo de conteúdo da chave e é salvo no cofre ao salvar. Somente desktop."
             },
             "import-sessions": {
-              "label": "Importar de arquivo de sessões de terminal",
-              "description": "Escolha uma exportação de sessões do MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius ou um config do OpenSSH; a primeira sessão preenche este formulário (senhas e conteúdo de chaves privadas nunca são preenchidos). Somente desktop; a importação em massa fica no assistente de importação do workbench."
+              "label": "Importar conexões",
+              "description": "Escolha a origem (MobaXterm, Xshell, WindTerm, SecureCRT, FinalShell, Electerm, Termius ou um config do OpenSSH) e depois o arquivo de exportação; a primeira sessão preenche este formulário (senhas e conteúdo de chaves privadas nunca são preenchidos). Somente desktop; a importação em massa fica no assistente de importação do workbench."
             }
           }
         },
@@ -2557,7 +2554,7 @@
             },
             "password": {
               "label": "密码",
-              "description": "供「密码」「私钥后密码」「自动」三种认证使用；「密码来源」选「在表单中填写」时必填。若由本地命令取回，请把「密码来源」改为「本地命令取回」。自动按序尝试各认证方式，密码只是其中一种来源。"
+              "description": "供「密码」「私钥后密码」「自动」三种认证使用；「密码来源」选「在表单中填写」时必填。Telnet、VNC、RDP 连接直接使用此密码。若由本地命令取回，请把「密码来源」改为「本地命令取回」。自动按序尝试各认证方式，密码只是其中一种来源。"
             },
             "password_source": {
               "label": "密码来源",
@@ -2686,17 +2683,13 @@
             }
           },
           "actions": {
-            "quick-sudo-profiles": {
-              "label": "全局 Quick Sudo 配置",
-              "description": "查看共享的全局 Quick Sudo 配置及本连接的绑定状态。"
-            },
             "import-private-key": {
               "label": "从文件导入私钥",
               "description": "选择本机私钥文件，内容将填入「私钥内容」字段，保存后存入密钥库。仅桌面端可用。"
             },
             "import-sessions": {
-              "label": "从终端会话文件导入",
-              "description": "选择 MobaXterm、Xshell、WindTerm、SecureCRT、FinalShell、Electerm、Termius 的会话导出或 OpenSSH config，首条会话将回填本表单（密码与私钥内容永不回填）。仅桌面端可用；批量导入请用工作台的导入向导。"
+              "label": "导入连接",
+              "description": "先选择来源类型（MobaXterm、Xshell、WindTerm、SecureCRT、FinalShell、Electerm、Termius 或 OpenSSH config），再选择对应的导出文件，首条会话将回填本表单（密码与私钥内容永不回填）。仅桌面端可用；批量导入请用工作台的导入向导。"
             }
           }
         },
@@ -2845,7 +2838,7 @@
             },
             "password": {
               "label": "密碼",
-              "description": "供「密碼」「私鑰後密碼」「自動」三種認證使用；「密碼來源」選「在表單中填寫」時必填。若由本機命令取回，請把「密碼來源」改為「本機命令取回」。自動依序嘗試各認證方式，密碼只是其中一種來源。"
+              "description": "供「密碼」「私鑰後密碼」「自動」三種認證使用；「密碼來源」選「在表單中填寫」時必填。Telnet、VNC、RDP 連線直接使用此密碼。若由本機命令取回，請把「密碼來源」改為「本機命令取回」。自動依序嘗試各認證方式，密碼只是其中一種來源。"
             },
             "password_source": {
               "label": "密碼來源",
@@ -2974,17 +2967,13 @@
             }
           },
           "actions": {
-            "quick-sudo-profiles": {
-              "label": "全域 Quick Sudo 設定",
-              "description": "檢視共用的全域 Quick Sudo 設定及本連線的綁定狀態。"
-            },
             "import-private-key": {
               "label": "從檔案匯入私鑰",
               "description": "選擇本機私鑰檔案，內容將填入「私鑰內容」欄位，保存後存入金鑰庫。僅桌面端可用。"
             },
             "import-sessions": {
-              "label": "從終端機工作階段檔案匯入",
-              "description": "選擇 MobaXterm、Xshell、WindTerm、SecureCRT、FinalShell、Electerm、Termius 的工作階段匯出或 OpenSSH config，第一筆工作階段將回填本表單（密碼與私鑰內容永不回填）。僅桌面端可用；大量匯入請使用工作區的匯入精靈。"
+              "label": "匯入連線",
+              "description": "先選擇來源類型（MobaXterm、Xshell、WindTerm、SecureCRT、FinalShell、Electerm、Termius 或 OpenSSH config），再選擇對應的匯出檔案，第一筆工作階段將回填本表單（密碼與私鑰內容永不回填）。僅桌面端可用；大量匯入請使用工作區的匯入精靈。"
             }
           }
         },
