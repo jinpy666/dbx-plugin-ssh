@@ -1240,19 +1240,6 @@ mod tests {
         // 值」，所以来源必须由用户显式选）。私钥那组仍是「路径∨内容」，
         // manifest 表达不了 OR，保持两边都非必填（见
         // credential_requirements_stay_parse_time_only）。
-        let one_of = |key: &str, constraint: &str| -> Vec<String> {
-            fields.iter().find(|field| field["key"] == key).unwrap()[constraint]
-                .as_object()
-                .map(|gate| {
-                    gate["one_of"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|value| value.as_str().unwrap().to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
         let password_source = fields
             .iter()
             .find(|field| field["key"] == "password_source")
@@ -1265,23 +1252,57 @@ mod tests {
             .collect();
         assert_eq!(password_source["default"], "direct");
         assert_eq!(source_options, ["direct", "command"]);
-        let gate_field = |key: &str, constraint: &str| -> Option<String> {
-            fields.iter().find(|field| field["key"] == key).unwrap()[constraint]["field"]
-                .as_str()
-                .map(str::to_string)
+        // required_when 支持两种形态:单字段门控 { field, one_of } 与协议门控
+        // (M9)后的 all_of 叠加。归一成 (field, one_of) 列表统一断言。
+        let required_gates = |key: &str| -> Vec<(String, Vec<String>)> {
+            let gate = &fields.iter().find(|field| field["key"] == key).unwrap()["required_when"];
+            let clauses: Vec<serde_json::Value> = match gate.get("all_of") {
+                Some(all) => all.as_array().cloned().unwrap_or_default(),
+                None if gate.is_object() => vec![gate.clone()],
+                None => vec![],
+            };
+            clauses
+                .iter()
+                .map(|clause| {
+                    (
+                        clause["field"].as_str().unwrap_or_default().to_string(),
+                        clause["one_of"]
+                            .as_array()
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .map(|v| v.as_str().unwrap().to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect()
         };
+        // password:仅 SSH 且「表单直填」时必填——telnet/vnc/rdp 直接使用该
+        // 密码但不强制(serial 不显示),故协议门控叠加在来源门控之外。
         assert_eq!(
-            gate_field("password", "required_when").as_deref(),
-            Some("password_source")
+            required_gates("password"),
+            vec![
+                ("protocol".to_string(), vec!["ssh".to_string()]),
+                ("password_source".to_string(), vec!["direct".to_string()]),
+            ],
+            "password must be required only for SSH with the direct password source"
         );
-        assert_eq!(one_of("password", "required_when"), ["direct"]);
         assert_eq!(
-            gate_field("password_command", "required_when").as_deref(),
-            Some("password_source")
+            required_gates("password_command"),
+            vec![("password_source".to_string(), vec!["command".to_string()])],
         );
-        assert_eq!(one_of("password_command", "required_when"), ["command"]);
-        let mut covered = one_of("password", "required_when");
-        covered.extend(one_of("password_command", "required_when"));
+        // 分支覆盖不变式:两个来源分支的 one_of 合计必须恰好覆盖
+        // password_source 的全部取值,否则某选项「两边都不需要」或「两边都要」。
+        // 覆盖不变式只看来源门控本身:password 分支的协议门控(protocol∈ssh)
+        // 是叠加条件,不参与 password_source 的取值覆盖。
+        let mut covered: Vec<String> = required_gates("password")
+            .into_iter()
+            .chain(required_gates("password_command"))
+            .filter(|(field, _)| field == "password_source")
+            .flat_map(|(_, values)| values)
+            .collect();
         covered.sort();
         let mut expected = source_options.clone();
         expected.sort();
