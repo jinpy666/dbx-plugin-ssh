@@ -212,7 +212,9 @@ try {
   await expect(page, ".batch-bar", "batch send bar");
   await page.click(".batch-bar-targets");
   await expect(page, ".batch-targets-popover", "batch targets popover");
-  await expectText(page, ".batch-target-row", "demo@server.demo.internal", "target row user@host");
+  // issue #10232：目标行标签优先显示宿主连接名（mock 的 host.listConnections
+  // 夹具返回 "Production SSH"），user@host 只在旧宿主/未命名连接时兜底。
+  await expectText(page, ".batch-target-row", "Production SSH", "target row connection name");
   await expectText(page, ".batch-target-row", "Current", "current-session badge");
   // 快速命令下拉已迁到 reka Select（Phase 3）：点开触发钮，再点选项。
   await page.click(".batch-bar-quick");

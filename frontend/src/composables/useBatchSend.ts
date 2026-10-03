@@ -3,6 +3,7 @@ import { pluginStore } from "../lib/pluginStore";
 import { randomUUID } from "../lib/uuid";
 import { browseCommandHistory } from "../lib/commandHistory";
 import {
+  applyConnectionNames,
   batchTargetLabel,
   deriveBatchCommandName,
   normalizeBatchTargets,
@@ -150,6 +151,14 @@ async function refreshBatchTargets() {
       targets = [...targets, ...normalizeLocalBatchTargets(local?.sessions)];
     } catch {
       // 旧 sidecar 无本地会话能力：只保留 SSH 目标。
+    }
+    // 连接名覆盖（issue #10232）：host.listConnections 是宿主连接表的实时读数，
+    // 终端（连接）改名后无需重连，下一次目标刷新即生效；旧宿主缺该扩展点时
+    // 静默跳过，行标签回退 user@host。
+    try {
+      targets = applyConnectionNames(targets, await window.dbxPlugin.request<unknown>("host.listConnections"));
+    } catch {
+      // 旧宿主无 listConnections：保持 user@host 标签。
     }
     batchTargets.value = targets;
     // 剔除已关闭会话；选择为空时默认只预选当前会话（本地面板预选本地会话；
