@@ -240,6 +240,44 @@ for (const advanced_options of [false, true]) {
   }
 }
 
+// Protocol matrix (2026-10-03): the connection-type review - each non-SSH
+// protocol shows exactly its own field set, and the password row follows the
+// any_of contract above (telnet/vnc/rdp always, serial never).
+for (const protocol of options("protocol")) {
+  const current = state({ protocol });
+  const isSsh = protocol === "ssh";
+  const isTcp = ["ssh", "telnet", "vnc", "rdp"].includes(protocol);
+  current.visible("protocol", true);
+  current.visible("display_name", true);
+  current.visible("host", isTcp);
+  current.visible("port", isTcp);
+  current.visible("username", ["ssh", "telnet", "rdp"].includes(protocol));
+  // ssh renders its defaults-driven gate here (authentication=password +
+  // password_source=direct make it visible); the full gate matrix lives above.
+  current.visible("password", ["telnet", "vnc", "rdp"].includes(protocol) || isSsh);
+  current.required("password", isSsh); // ssh+direct requires it; non-SSH protocols keep it optional
+  current.visible("authentication", isSsh);
+  // ssh defaults to password auth, so its source/command pair follows the
+  // same either-or as the full matrix above (defaults: source visible).
+  current.visible("password_source", isSsh);
+  current.visible("password_command", false);
+  current.visible("private_key_path", false);
+  current.visible("private_key", false);
+  current.visible("private_key_passphrase", false);
+  current.visible("agent_socket", false);
+  current.visible("sudo_source", isSsh);
+  current.visible("serial_port", protocol === "serial");
+  current.visible("serial_baud", protocol === "serial");
+  current.visible("serial_data_bits", protocol === "serial");
+  current.visible("serial_parity", protocol === "serial");
+  current.visible("serial_stop_bits", protocol === "serial");
+  current.visible("serial_backspace", protocol === "serial");
+  current.visible("rdp_domain", protocol === "rdp");
+  current.visible("rdp_resolution", protocol === "rdp");
+  current.visible("rdp_certificate_policy", protocol === "rdp");
+  current.visible("rdp_clipboard", protocol === "rdp");
+}
+
 assert.equal(byKey.sudo_whitelist.type, "textarea");
 
 // ---------------------------------------------------------------------------
@@ -267,9 +305,22 @@ assert.equal(byKey.password_source.type, "select");
 assert.equal(byKey.password_source.binding, "config");
 assert.equal(byKey.password_source.default, "direct", "password_source: must default to the common case");
 assert.deepEqual(options("password_source").sort(), ["command", "direct"]);
-assert.deepEqual(byKey.password.required_when, { field: "password_source", one_of: ["direct"] });
-assert.deepEqual(byKey.password.visible_when, {
+// required_when is gated on protocol=ssh too: the dialog's required check
+// reads raw values (no visibility cascade on hidden operands), so a bare
+// password_source clause would mark the password required for Telnet/VNC/RDP,
+// where it is optional by design.
+assert.deepEqual(byKey.password.required_when, {
   all_of: [PROTOCOL_SSH, { field: "password_source", one_of: ["direct"] }],
+});
+// 2026-10-03: SSH keeps the source-driven gating, while Telnet/VNC/RDP show
+// the same password field unconditionally (their sessions are started by the
+// workbench from the connection's saved credential - see PROTOCOL "非 SSH 连
+// 接凭据暂存"). Serial is a local device and stays password-free.
+assert.deepEqual(byKey.password.visible_when, {
+  any_of: [
+    { all_of: [PROTOCOL_SSH, { field: "password_source", one_of: ["direct"] }] },
+    { field: "protocol", one_of: ["telnet", "vnc", "rdp"] },
+  ],
 });
 assert.deepEqual(byKey.password_command.required_when, { field: "password_source", one_of: ["command"] });
 assert.deepEqual(byKey.password_command.visible_when, {
@@ -277,8 +328,10 @@ assert.deepEqual(byKey.password_command.visible_when, {
 });
 // Every password_source option must be covered by exactly one required branch:
 // a gap means a save that the parser then rejects, an overlap means a dead end.
+const passwordRequiredSources = byKey.password.required_when.all_of
+  .find((clause) => clause.field === "password_source").one_of;
 assert.deepEqual(
-  [...byKey.password.required_when.one_of, ...byKey.password_command.required_when.one_of].sort(),
+  [...passwordRequiredSources, ...byKey.password_command.required_when.one_of].sort(),
   options("password_source").slice().sort(),
   "password_source branches must cover every option",
 );
