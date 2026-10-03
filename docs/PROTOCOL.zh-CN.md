@@ -340,12 +340,22 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 ## ZMODEM 触发检测（`ssh/zmodem`，#90）
 
-远端 `sz` 通过在 PTY 上发送 ZRQINIT 头开启 ZMODEM 下载会话；本插件不实现 ZMODEM 接收（下载请走 SFTP 面板），此前该序列要么灌进终端渲染乱码、要么被前端 sentry 静默 deny，用户得不到任何反馈。SSH PTY 会话（仅 stdout 流）在输出泵上挂了一个纯状态机检测器（`backend/src/zmodem_detect.rs`）：
+远端 `sz` 通过在 PTY 上发送 ZRQINIT 头开启 ZMODEM 下载会话。**ZMODEM 下载（接收）是插件功能**：前端 sentry（zmodem.js）常驻消费 `ssh/terminal/out` 帧，检测边沿即自动确认会话并接管收流（见下「ZMODEM 下载接收」）。SSH PTY 会话（仅 stdout 流）在输出泵上另挂一个纯状态机检测器（`backend/src/zmodem_detect.rs`）——它**不改写任何字节**，只在识别到 ZRQINIT 时产出一次事件边沿，供观测与 UX 兜底：
 
 - **识别序列**：ZMODEM 帧起始哨兵 `2A 2A 18` + 帧类型字节（`'B'`=ZHEX/`'A'`=ZBIN/`'C'`=ZBIN32，lrzsz 命名与 spec 相反处见模块注释），帧类型为 ZRQINIT（0x00；hex 帧为 ASCII `"00"`）即命中——lrzsz `sz` 的上线与重试都是 `zshhdr` hex 帧 `**\x18B00…\r\x8a\x11`。
-- **命中行为**：①该帧及其后 40s 窗口内的同类头被抑制（跨 binary 帧切割安全：哨兵与 hex 负载可分帧携带）；②首次命中发出 `ssh/zmodem` 事件 `{ sessionId, kind: "zrqinit" }`（重试不重复发）；③窗口过后自动回透传。
-- **不受影响**：ZRINIT（0x01，远端 `rz` 上传）与其它帧类型原样透传——前端 zmodem.js sentry 的 rz 上传流程依赖看到它们；普通文本（含字面 `**`）也不受影响。
-- **明确不做**：不实现 ZMODEM 协议本身（不应答 ZRINIT、不收发文件）；`kind` 预留扩展。本地终端 / 串口 / telnet 通路未接检测器（远端 sz 场景仅 SSH PTY，后续按需复用）。
+- **命中行为**：字节一律原样透传（协议帧由前端 sentry 消费）；40s 事件窗口内重试不再重复发事件，窗口过后自动复位（后续 `sz` 会再次上报）。跨 binary 帧切割安全：哨兵与类型位可分帧携带（部分候选跨帧 carry，≤5 字节）。
+- **不受影响**：ZRINIT（0x01，远端 `rz` 上传）与其它帧类型不触发事件；普通文本（含字面 `**`）照常透传。
+- **边界**：本地终端 / 串口 / telnet 通路未接检测器（远端 sz 场景仅 SSH PTY）；会话录制文件会包含 sz 协议帧（与 trzsz 帧现状一致）。
+
+## ZMODEM 下载接收（远端 sz 自动接收）
+
+远端 `sz` 发起的下载由前端 zmodem.js sentry 自动接管（`useZmodem` 接收状态机 + `lib/terminalZmodem.ts` 接收辅助），无需用户在终端手敲任何命令：
+
+- **接管条件**：sentry `on_detect` 且会话角色为 `receive` 时自动 `confirm()`；仅当本地有待上传文件（rz 上传占流）或 trzsz 正在传输时 deny（deny 即发送 ZMODEM abort 序列，远端 `sz` 干净退出）。
+- **文件名安全**：offer 文件名是远端可控字符串，落盘前经 `sanitizeZmodemFileName` 净化——剥离路径段（POSIX/Windows 分隔符，`../../` 逃逸不生效）、去控制字符与 Windows 非法字符、保留名（CON/NUL/COM1…）加前缀、去尾部点空格、限长并保证非空。
+- **落盘三段式**（与 trzsz tsz 下载同一优先级，`useTrzsz.saveTrzszDownloadedFiles` 对齐）：①宿主 `fileTransfer`（optional 1.1 特性）：`beginSave` 打开目标后随 `on_input` 逐块流式写（`write(handleId, offset, chunk)`），不在内存攒整文件；②sidecar `local/saveFile`：本机落盘，支持下载目录设置/「每次询问」（按批次只问一次）与撞名冲突策略（rename/overwrite，取消只跳过该文件），完成后可「在文件夹中显示」；③浏览器 `saveFile` 兜底（web/docker 模式，sidecar 不在本机）：单次整包，上限 512 MiB。
+- **进度与取消**：overlay（`.zmodem-status`）显示文件名/百分比/文件计数/速度（1s 窗口 EWMA，与 trzsz 同款 `sampleTransferSpeed`）；取消按钮 `session.abort()`（CAN×5+BS×5），远端 `sz` 退出、本地丢弃未保存的残件；会话关闭/切换时静默 teardown。
+- **完成语义**：会话正常结束（ZFIN/OO）后按实际保存文件数发完成通知；保存失败中止会话并报错（`zmodemReceiveFailed`）。
 
 ## Sudo 文件操作
 
