@@ -106,9 +106,20 @@ describe("receiveZmodemSession", () => {
         return undefined;
       }),
       has_ended: () => false,
+      start: vi.fn(() => Promise.resolve()),
       emit: (event: string, ...args: never[]) => handlers.get(event)?.(...args),
     };
   }
+
+  it("starts the session: the ZRINIT invite is emitted by start(), not confirm()", async () => {
+    // zmodem.js's Receive.start() is what sends the opening ZRINIT; a receive
+    // session that is only confirm()ed stays silent and the remote sz times
+    // out. Regression guard for the skipped-start bug found against real
+    // lrzsz in the docker smoke.
+    const session = stubSession();
+    receiveZmodemSession(session as never, vi.fn());
+    expect(session.start).toHaveBeenCalledTimes(1);
+  });
 
   it("resolves once the session ends and forwards offers to the handler", async () => {
     const session = stubSession();

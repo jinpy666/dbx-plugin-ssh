@@ -124,11 +124,13 @@ export async function sendZmodemFiles(session: Session, files: readonly File[], 
 }
 
 /**
- * Receive-side session pump: registers the batch offer handler and resolves
- * once the session ends (ZFIN/OO, abort, or peer loss). An offer handler
- * that throws resolves the promise with `{ error }` so the caller can tear
- * the session down — a rejection inside the event emitter would otherwise
- * surface as an unhandled rejection while the wire sits idle.
+ * Receive-side session pump: starts the session (the ZRINIT that invites the
+ * sender's first ZFILE is emitted by `start()`, not by `confirm()`) and
+ * registers the batch offer handler. Resolves once the session ends
+ * (ZFIN/OO, abort, or peer loss). An offer handler that throws resolves the
+ * promise with `{ error }` so the caller can tear the session down — a
+ * rejection inside the event emitter would otherwise surface as an unhandled
+ * rejection while the wire sits idle.
  */
 export function receiveZmodemSession(session: Session, onOffer: (offer: ZmodemOffer) => Promise<void> | void): Promise<{ error?: unknown }> {
   return new Promise((resolve) => {
@@ -144,6 +146,9 @@ export function receiveZmodemSession(session: Session, onOffer: (offer: ZmodemOf
         .catch((cause) => settle({ error: cause }));
     });
     session.on("session_end", () => settle({}));
+    // Receive sessions must be started explicitly: start() emits the ZRINIT
+    // that invites the sender's first ZFILE (confirm() alone stays silent).
+    void session.start?.()?.catch(() => undefined);
     if (session.has_ended()) settle({});
   });
 }

@@ -40,6 +40,9 @@ declare module "zmodem.js" {
     aborted(): boolean;
     close(): Promise<void>;
     has_ended(): boolean;
+    /** Receive sessions only: emits the opening ZRINIT and must be called
+     * once after `confirm()` or no offer ever arrives. */
+    start?(): Promise<unknown>;
     on(event: "offer", callback: (offer: ZmodemOffer) => void): this;
     on(event: "session_end", callback: () => void): this;
     on(event: "garbage", callback: (garbage: number[]) => void): this;
