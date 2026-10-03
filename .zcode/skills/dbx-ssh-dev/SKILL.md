@@ -78,7 +78,9 @@ scripts/sidecar_client.py   # stdio-framed 协议客户端库（直接驱动 sid
 - 测试 SSH 容器：`docker run -d --name dbx-ssh-test -p 2222:2222
   -e USER_NAME=sshuser -e USER_PASSWORD=DbxTest2026 -e PASSWORD_ACCESS=true
   linuxserver/openssh-server`，另开 `AllowTcpForwarding yes`（改
-  `/config/sshd/sshd_config` 后重启容器）供隧道语义验证。
+  `/config/sshd/sshd_config` 后重启容器）供隧道语义验证。smoke_fs_test 的
+  sudo 用例还需给测试用户提权（镜像默认无 sudoers 项）：
+  `docker exec dbx-ssh-test bash -c "which sudo || apt-get update -qq && apt-get install -y -qq sudo; echo 'sshuser ALL=(ALL) ALL' > /etc/sudoers.d/sshuser && chmod 440 /etc/sudoers.d/sshuser"`。
 - sidecar 协议：5 字节帧头 `[kind:u8][len:u32 BE]`+payload；binary 帧内
   `[u16 channel_len][channel][data]`；终端输入/上传块带 8 字节 BE 前缀
   （sequence/offset）——细节全封装在 sidecar_client.py，勿手搓。

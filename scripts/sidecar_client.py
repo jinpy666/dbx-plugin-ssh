@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import select
-import socket
 import struct
 import subprocess
 import sys
@@ -55,10 +55,44 @@ class SidecarClient:
         self.events: list[dict] = []
         self.binary_frames: list[bytes] = []
         self._pending: dict[int, dict] = {}
-        # Windows read path: the byte _wait_readable() peeked to detect
-        # readability. os.read on a pipe cannot peek without consuming, so
-        # that byte is parked here and handed back by _read_bytes.
-        self._peeked = b""
+        # One dedicated reader thread feeds a byte queue; every read on any
+        # platform pulls from it. Rationale: a pipe fd cannot be select()ed
+        # on Windows (WinError 10038), and the previous workaround — a probe
+        # thread doing a 1-byte os.read per wait — stayed blocked on the pipe
+        # after every timeout, and the first byte of the next burst was won
+        # by that zombie and lost forever (framing desync → the next blocking
+        # read hung the smoke scripts). The queue keeps timeouts loss-free:
+        # nothing is consumed off the pipe except by the framing layer.
+        self._chunks: "queue.SimpleQueue[bytes | None]" = queue.SimpleQueue()
+        self._read_closed = False
+        # Whole pipe chunks land here; _read_bytes slices off exactly what the
+        # framing layer asks for, so a read never over-consumes past the frame
+        # boundary (a 64KiB os.read chunk usually spans several frames).
+        self._leftover = bytearray()
+        threading.Thread(target=self._reader_loop, daemon=True).start()
+
+    def _reader_loop(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self.read_fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                self._chunks.put(None)  # EOF / pipe closed: one sentinel
+                return
+            self._chunks.put(chunk)
+
+    def _read_chunk(self, timeout: float) -> bytes:
+        if self._read_closed:
+            raise SidecarError("sidecar closed")
+        try:
+            chunk = self._chunks.get(timeout=timeout)
+        except queue.Empty:
+            raise SidecarError("timeout waiting for sidecar frame") from None
+        if chunk is None:
+            self._read_closed = True
+            raise SidecarError("sidecar closed")
+        return chunk
 
     @classmethod
     def start(cls, binary: str | None = None, data_dir: str | None = None, timeout: float = 20.0) -> "SidecarClient":
@@ -91,51 +125,26 @@ class SidecarClient:
 
     # -- low-level framing ---------------------------------------------------
 
-    def _wait_readable(self, fd: int, timeout: float) -> None:
-        """Block until `fd` has data or `timeout` elapses.
+    def _read_bytes(self, count: int, deadline: float | None = None) -> bytes:
+        """Read exactly `count` bytes (sliced from whole pipe chunks).
 
-        select() only works on sockets on Windows (a pipe fd raises
-        WinError 10038 / 10093), so there readability is probed by a daemon
-        thread doing a 1-byte read; POSIX keeps the plain select path. The
-        probe necessarily consumes the byte — it is parked in self._peeked
-        and handed back by _read_bytes, keeping the framing byte-exact.
+        Honors `deadline` (monotonic clock) when set: a chunk that does not
+        arrive in time raises SidecarError("timeout...") without discarding
+        whatever already arrived — the rest of a partially read frame stays
+        in _leftover, exactly like the pre-timeout state of a blocking read.
         """
-        if os.name != "nt":
-            ready, _, _ = select.select([fd], [], [], timeout)
-            if not ready:
-                raise SidecarError("timeout waiting for sidecar frame")
-            return
-        result: dict = {}
-
-        def _reader() -> None:
-            try:
-                result["data"] = os.read(fd, 1)
-            except OSError as error:  # closed pipe on teardown
-                result["error"] = error
-
-        thread = threading.Thread(target=_reader, daemon=True)
-        thread.start()
-        thread.join(timeout)
-        if thread.is_alive():
-            # The daemon reader stays blocked on the pipe and dies with the
-            # process; its eventual byte is simply lost — same semantics as
-            # a POSIX select that returns nothing.
-            raise SidecarError("timeout waiting for sidecar frame")
-        if "error" in result:
-            raise SidecarError(f"sidecar pipe read failed: {result['error']}")
-        if not result.get("data"):
-            raise SidecarError("sidecar closed")
-        self._peeked = result["data"]
-
-    def _read_bytes(self, count: int) -> bytes:
-        """Read exactly `count` bytes, prepending any parked peek byte."""
-        chunks = bytearray(self._peeked)
-        self._peeked = b""
+        chunks = bytearray()
         while len(chunks) < count:
-            chunk = os.read(self.read_fd, count - len(chunks))
-            if not chunk:
-                raise SidecarError("sidecar closed")
-            chunks.extend(chunk)
+            if self._leftover:
+                need = count - len(chunks)
+                chunks.extend(self._leftover[:need])
+                del self._leftover[:need]
+                continue
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise SidecarError("timeout waiting for sidecar frame")
+            budget = self.timeout if remaining is None else remaining
+            self._leftover.extend(self._read_chunk(budget))
         return bytes(chunks)
 
     def _send_raw(self, kind: int, payload: bytes) -> None:
@@ -148,14 +157,12 @@ class SidecarClient:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise SidecarError("timeout waiting for sidecar frame")
-        if not self._peeked:
-            self._wait_readable(self.read_fd, remaining)
-        header = self._read_bytes(5)
+        header = self._read_bytes(5, deadline)
         if len(header) < 5:
             raise SidecarError(f"sidecar closed (header={header!r})")
         kind = header[0]
         (length,) = struct.unpack(">I", header[1:5])
-        payload = self._read_bytes(length)
+        payload = self._read_bytes(length, deadline)
         return kind, payload
 
     def _pump(self, want_id: int | None = None, on_event=None) -> object:
