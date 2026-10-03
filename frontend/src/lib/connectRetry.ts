@@ -45,6 +45,18 @@ export const PRECONNECT_RETRY_MAX = 40;
 export const PRECONNECT_RETRY_DELAY_MS = 250;
 
 /**
+ * Boot restore (workbench tab reopened after a page refresh / host restart):
+ * the host's connect replay may land a beat after the restored page's first
+ * `ssh/session/open` (SPA boot ordering, credential re-push). The regular
+ * ladder's 8s fast-fail window strands the restored tab on the error card
+ * even though credentials arrive moments later (dbx-plugin-ssh#144), so
+ * inactive boot restores get their own bounded fixed-cadence window —
+ * 12 rounds × 1s ≈ 12s, between the preconnect and manual windows.
+ */
+export const BOOT_RESTORE_RETRY_MAX = 12;
+export const BOOT_RESTORE_RETRY_DELAY_MS = 1000;
+
+/**
  * A duplicate-session source cannot reappear by retrying the same immutable
  * source id. The caller may explicitly downgrade once to a fresh login, but
  * the ordinary timed retry ladder must never replay this error.
@@ -99,6 +111,14 @@ export function decideConnectRetry(options: {
   if (options.inactive && options.preconnect) {
     if (options.attempt >= PRECONNECT_RETRY_MAX) return { kind: "fail" };
     return { kind: "retry", attempt: options.attempt + 1, delayMs: PRECONNECT_RETRY_DELAY_MS };
+  }
+  // Boot restore racing the host's connect replay: the regular ladder's
+  // fast-fail window (8s) plus a short ladder gave up before the replay
+  // landed, stranding the restored tab on the error card (dbx-plugin-ssh#144).
+  // A bounded fixed-cadence window absorbs the ordering gap instead.
+  if (options.inactive && options.bootRestore) {
+    if (options.attempt >= BOOT_RESTORE_RETRY_MAX) return { kind: "fail" };
+    return { kind: "retry", attempt: options.attempt + 1, delayMs: BOOT_RESTORE_RETRY_DELAY_MS };
   }
   if (isPermanentConnectError(options.cause)) return { kind: "fail" };
   if (options.attempt >= options.maxAttempts) return { kind: "fail" };
