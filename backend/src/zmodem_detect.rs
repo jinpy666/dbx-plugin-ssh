@@ -1,13 +1,16 @@
 //! ZMODEM trigger detection on the SSH PTY output path (issue #90).
 //!
-//! Pure byte-stream state machine, no I/O: it recognizes the ZMODEM
-//! session-start sentinel `ZPAD ZPAD ZDLE framin` (`2A 2A 18` + one framing
-//! byte) and classifies headers whose frame type is ZRQINIT (0x00) — the
-//! sequence a remote `sz` emits to open a download. On a hit the caller is
-//! expected to stop publishing the affected bytes to the terminal and surface
-//! a user-visible hint instead; the protocol itself is NOT answered (no
-//! ZMODEM implementation here — supporting real transfers would be a separate
-//! feature).
+//! Pure byte-stream observer, no I/O: it recognizes the ZMODEM session-start
+//! sentinel `ZPAD ZPAD ZDLE framin` (`2A 2A 18` + one framing byte) and
+//! classifies headers whose frame type is ZRQINIT (0x00) — the sequence a
+//! remote `sz` emits to open a download.
+//!
+//! The detector never modifies the stream. ZMODEM download is a shipped
+//! feature (the frontend sentry, zmodem.js, consumes the protocol frames on
+//! `ssh/terminal/out`), so every byte — ZRQINIT included — passes through to
+//! the terminal path untouched. This module's only output is the boolean
+//! `feed` result: exactly one hit per ZRQINIT lifecycle, which the caller
+//! turns into the `ssh/zmodem` event (UX hint + observability).
 //!
 //! Wire facts this module is built on (verified against lrzsz 0.12.20 source,
 //! `src/zmodem.h` + `src/zm.c`):
@@ -18,69 +21,40 @@
 //! - lrzsz `sz` sends its first ZRQINIT — and every retry — via `zshhdr`
 //!   (ZHEX): `**\x18B` + `"00"` + 12 hex chars (4 header bytes + crc16) +
 //!   `0x0D 0x8A` + `0x11` (XON). It retries every 10s and gives up after
-//!   ~30s (`READLINE_PF(100)`, 3 tries), so the suppression window (40s)
-//!   covers the whole retry life before resetting.
-//! - lrzsz `rz` opens with a hex ZRINIT (`**\x18B01…`): that must reach the
-//!   frontend zmodem sentry untouched, because the rz upload flow is a
-//!   shipped feature. Only ZRQINIT triggers; every other frame type passes.
+//!   ~30s (`READLINE_PF(100)`, 3 tries), so the event window (40s) dedupes
+//!   the whole retry lifecycle into a single event before resetting.
+//! - lrzsz `rz` opens with a hex ZRINIT (`**\x18B01`): that never triggers —
+//!   only ZRQINIT does — so the rz upload flow produces no event.
 //!
-//! The detector is a streaming filter: a sentinel — or the header that
-//! follows it — may be split across arbitrary chunk boundaries (the terminal
+//! The detector is a streaming filter: a sentinel — or the type digits that
+//! follow it — may be split across arbitrary chunk boundaries (the terminal
 //! pump hands it whatever bytes the channel delivered), so partial
 //! candidates are carried between `feed` calls.
 
-/// How long a detection suppresses further ZRQINIT frames. sz gives up after
+/// How long a detection mutes further ZRQINIT events. sz gives up after
 /// ~30s (3 x 10s retries); 40s covers the whole lifecycle plus the trailing
-/// error text, then the filter returns to pass-through so a later `rz` still
-/// works without any manual reset.
-pub const SUPPRESS_WINDOW_MS: u64 = 40_000;
-
-/// Hex chars that follow the type digits in a hex header: 4 data bytes +
-/// crc16, i.e. the run dropped after a ZRQINIT classification.
-const HEX_HEADER_REST_MAX: usize = 12;
-/// Binary header payload after the framing byte: type(1) + 4 data bytes +
-/// crc16 (ZBIN) / crc32 (ZBIN32), counted in ZDLE-escape-aware units. Used
-/// to bound the drop scan after a binary ZRQINIT.
-const BINARY_HEADER_UNITS_ZBIN: usize = 6;
-const BINARY_HEADER_UNITS_ZBIN32: usize = 8;
-
-const ZDLE: u8 = 0x18;
+/// error text, then the detector re-arms so a later `sz` fires again.
+pub const EVENT_WINDOW_MS: u64 = 40_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// Pass-through; every byte is scanned for the sentinel.
+    /// Scanning for the sentinel; the next hit fires the event.
     Idle,
-    /// A ZRQINIT was seen: matching headers are dropped silently until the
-    /// wall-clock window expires. Other frame types (e.g. a ZRINIT from
-    /// `rz`) keep passing through.
-    Suppressed { until_ms: u64 },
+    /// A ZRQINIT was seen: further hits inside the wall-clock window are
+    /// silent (sz retries the same header every 10s). Other frame types
+    /// (e.g. a ZRINIT from `rz`) never trigger anyway.
+    Detected { until_ms: u64 },
 }
 
-/// Continuation of a hex ZRQINIT header that was cut by a chunk boundary
-/// mid-run: `hex_left` digits are still expected, then the optional
-/// `0x0D 0x8A/0x0A` + `0x11` trailer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingDrop {
-    None,
-    HexRun { hex_left: usize },
-}
+const ZDLE: u8 = 0x18;
 
-/// Outcome of feeding one PTY output chunk through the detector.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FeedOutcome {
-    /// Bytes that may be published to the terminal (header runs removed).
-    pub clean: Vec<u8>,
-    /// True exactly on the Idle → Suppressed transition, i.e. once per
-    /// detected `sz` attempt — callers emit one notification per session.
-    pub detected: bool,
-}
-
+/// Outcome of feeding one PTY output chunk through the detector. Bytes are
+/// never held back from the caller — the result is purely the event edge.
 #[derive(Debug)]
 pub struct Detector {
     mode: Mode,
-    pending_drop: PendingDrop,
-    /// Bytes held back because they may be the start of a sentinel split
-    /// across the chunk boundary (never more than sentinel + type digits).
+    /// Tail of the previous chunk that may be the start of a sentinel split
+    /// across the chunk boundary (never more than `CANDIDATE_MAX - 1`).
     carry: Vec<u8>,
 }
 
@@ -94,46 +68,34 @@ impl Detector {
     pub fn new() -> Self {
         Self {
             mode: Mode::Idle,
-            pending_drop: PendingDrop::None,
             carry: Vec::new(),
         }
     }
 
-    /// Feed one chunk of PTY output at wall-clock `now_ms`.
-    pub fn feed(&mut self, chunk: &[u8], now_ms: u64) -> FeedOutcome {
-        if let Mode::Suppressed { until_ms } = self.mode {
+    /// Feed one chunk of PTY output at wall-clock `now_ms`. Returns true
+    /// exactly on the Idle → Detected transition, i.e. once per detected
+    /// `sz` lifecycle — callers emit one notification per session.
+    pub fn feed(&mut self, chunk: &[u8], now_ms: u64) -> bool {
+        if let Mode::Detected { until_ms } = self.mode {
             if now_ms >= until_ms {
                 self.mode = Mode::Idle;
             }
         }
         let mut buf = std::mem::take(&mut self.carry);
         buf.extend_from_slice(chunk);
-        let mut out: Vec<u8> = Vec::with_capacity(buf.len());
-        let mut copied = 0usize; // buf[..copied] has been resolved into `out`
         let mut i = 0usize; // scan cursor
         let mut detected = false;
-        let mut hold: Option<usize> = None;
-
-        if self.pending_drop != PendingDrop::None {
-            i = self.consume_hex_run_tail(&buf, 0);
-            copied = i;
-            self.pending_drop = PendingDrop::None;
-        }
 
         while i < buf.len() {
             let Some(rel) = buf[i..].iter().position(|&b| b == b'*') else {
+                // No further candidate start in the tail: nothing to carry.
                 break;
             };
             let star = i + rel;
-            if star > copied {
-                out.extend_from_slice(&buf[copied..star]);
-                copied = star;
-            }
-            let remaining = buf.len() - star;
-            if remaining < 4 {
-                // Not even a full sentinel: hold for the next chunk.
-                hold = Some(star);
-                break;
+            if self.candidate_cut_short(&buf, star) {
+                // Not enough bytes to classify: hold for the next chunk.
+                self.carry = buf[star..].to_vec();
+                return detected;
             }
             if buf[star + 1] != b'*' || buf[star + 2] != ZDLE {
                 i = star + 1;
@@ -141,161 +103,56 @@ impl Detector {
             }
             match buf[star + 3] {
                 b'B' => {
-                    if remaining < 6 {
-                        hold = Some(star);
-                        break;
-                    }
                     let Some(frame_type) = hex_pair(buf[star + 4], buf[star + 5]) else {
                         // `**\x18B` followed by non-hex: not a ZMODEM header.
-                        // Keep scanning; the bytes flow through as text.
                         i = star + 1;
                         continue;
                     };
-                    if frame_type != 0 {
-                        // ZRINIT (rz), ZSINIT, ZFILE, …: pass through
-                        // untouched — the frontend sentry owns those flows.
-                        i = star + 6;
-                        continue;
+                    if frame_type == 0 {
+                        detected |= self.mark(now_ms);
                     }
-                    if self.mode == Mode::Idle {
-                        detected = true;
-                        self.mode = Mode::Suppressed {
-                            until_ms: now_ms.saturating_add(SUPPRESS_WINDOW_MS),
-                        };
-                    }
-                    // Drop the type digits plus the rest of the hex run and
-                    // the CRLF/XON trailer when present in this chunk.
                     i = star + 6;
-                    let mut dropped = 0usize;
-                    while i < buf.len()
-                        && dropped < HEX_HEADER_REST_MAX
-                        && buf[i].is_ascii_hexdigit()
-                    {
-                        i += 1;
-                        dropped += 1;
-                    }
-                    let mut header_done = true;
-                    if i < buf.len() {
-                        if buf[i] == 0x0D {
-                            i += 1;
-                            if i < buf.len() && (buf[i] == 0x8A || buf[i] == 0x0A) {
-                                i += 1;
-                            }
-                        }
-                        if i < buf.len() && buf[i] == 0x11 {
-                            i += 1;
-                        }
-                    } else {
-                        // The chunk ended inside the header — inside the
-                        // digit run, or between the run and the trailer:
-                        // carry the drop over so the continuation is
-                        // swallowed too (hex_left may be 0, meaning only
-                        // the CRLF/XON trailer is pending).
-                        header_done = false;
-                    }
-                    if !header_done {
-                        self.pending_drop = PendingDrop::HexRun {
-                            hex_left: HEX_HEADER_REST_MAX - dropped,
-                        };
-                    }
-                    copied = i;
                 }
-                framing @ (b'A' | b'C') => {
-                    if remaining < 5 {
-                        hold = Some(star);
-                        break;
+                b'A' | b'C' => {
+                    if buf[star + 4] == 0x00 {
+                        detected |= self.mark(now_ms);
                     }
-                    if buf[star + 4] != 0x00 {
-                        // Binary header of another type: pass intact.
-                        i = star + 5;
-                        continue;
-                    }
-                    if self.mode == Mode::Idle {
-                        detected = true;
-                        self.mode = Mode::Suppressed {
-                            until_ms: now_ms.saturating_add(SUPPRESS_WINDOW_MS),
-                        };
-                    }
-                    // Drop the rest of the binary header (4 data bytes +
-                    // crc), honouring ZDLE escaping (a 0x18 swallows the
-                    // byte after it). A cut inside this tail leaks at most a
-                    // few control bytes — binary ZRQINIT senders re-send a
-                    // full header on retry anyway.
                     i = star + 5;
-                    let units = if framing == b'C' {
-                        BINARY_HEADER_UNITS_ZBIN32
-                    } else {
-                        BINARY_HEADER_UNITS_ZBIN
-                    };
-                    let mut dropped = 0usize;
-                    while i < buf.len() && dropped < units {
-                        i += if buf[i] == ZDLE && i + 1 < buf.len() {
-                            2
-                        } else {
-                            1
-                        };
-                        dropped += 1;
-                    }
-                    copied = i;
                 }
                 _ => {
                     i = star + 1;
                 }
             }
         }
+        detected
+    }
 
-        match hold {
-            Some(start) => {
-                if start > copied {
-                    out.extend_from_slice(&buf[copied..start]);
-                }
-                self.carry = buf[start..].to_vec();
-            }
-            None => {
-                if copied < buf.len() {
-                    out.extend_from_slice(&buf[copied..]);
-                }
-            }
+    /// True when a candidate starting at `star` cannot be classified from
+    /// this chunk alone even though at least 4 bytes remain: the hex form
+    /// needs 6 bytes, the binary form 5.
+    fn candidate_cut_short(&self, buf: &[u8], star: usize) -> bool {
+        if buf.len() - star < 4 {
+            return true;
         }
-        FeedOutcome {
-            clean: out,
-            detected,
+        if buf[star + 1] != b'*' || buf[star + 2] != ZDLE {
+            return false;
+        }
+        match buf[star + 3] {
+            b'B' => buf.len() - star < 6,
+            b'A' | b'C' => buf.len() - star < 5,
+            _ => false,
         }
     }
 
-    /// Consume a hex ZRQINIT header continuation starting at `from`:
-    /// up to `hex_left` digits, then the optional CRLF/XON trailer.
-    fn consume_hex_run_tail(&mut self, buf: &[u8], from: usize) -> usize {
-        let PendingDrop::HexRun { hex_left } = self.pending_drop else {
-            return from;
+    /// One-shot edge: fire only when idle, then mute the window.
+    fn mark(&mut self, now_ms: u64) -> bool {
+        if self.mode != Mode::Idle {
+            return false;
+        }
+        self.mode = Mode::Detected {
+            until_ms: now_ms.saturating_add(EVENT_WINDOW_MS),
         };
-        let mut i = from;
-        let mut left = hex_left;
-        while i < buf.len() && left > 0 && buf[i].is_ascii_hexdigit() {
-            i += 1;
-            left -= 1;
-        }
-        if left > 0 && i == buf.len() {
-            // Still inside the digit run: keep waiting for the rest.
-            self.pending_drop = PendingDrop::HexRun { hex_left: left };
-            return i;
-        }
-        if left == 0 && i == buf.len() {
-            // Digits complete but the chunk ended before the trailer: keep
-            // waiting for it instead of eating a later chunk's first byte.
-            self.pending_drop = PendingDrop::HexRun { hex_left: 0 };
-            return i;
-        }
-        if i < buf.len() && buf[i] == 0x0D {
-            i += 1;
-            if i < buf.len() && (buf[i] == 0x8A || buf[i] == 0x0A) {
-                i += 1;
-            }
-        }
-        if i < buf.len() && buf[i] == 0x11 {
-            i += 1;
-        }
-        i
+        true
     }
 }
 
@@ -308,6 +165,11 @@ fn hex_pair(high: u8, low: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Longest complete candidate: hex header = sentinel(3) + 'B' + 2 type
+    /// digits; a binary candidate is one byte shorter. Bytes held back for a
+    /// possible split candidate never exceed `CANDIDATE_MAX - 1`.
+    const CANDIDATE_MAX: usize = 6;
 
     /// lrzsz `zshhdr(ZRQINIT, …)` as captured on the wire: sentinel + hex
     /// type "00" + 4 zero fields + crc16 "0000" + CRLF(0x0D 0x8A) + XON.
@@ -327,49 +189,42 @@ mod tests {
     }
 
     #[test]
-    fn hex_zrqinit_triggers_and_is_suppressed_in_one_frame() {
+    fn hex_zrqinit_triggers_once_per_lifecycle() {
         let mut detector = Detector::new();
         let mut data = b"before ".to_vec();
         data.extend_from_slice(&hex_zrqinit());
         data.extend_from_slice(b" after");
-        let outcome = detector.feed(&data, 1_000);
-        assert!(outcome.detected);
-        assert_eq!(outcome.clean, b"before  after".to_vec());
+        assert!(detector.feed(&data, 1_000));
+        assert!(!detector.feed(b"prompt $ ", 2_000));
     }
 
     #[test]
-    fn sentinel_split_across_chunk_boundaries_is_detected_without_leaks() {
+    fn sentinel_split_across_chunk_boundaries_is_detected() {
         let full = hex_zrqinit();
-        for cut in [2usize, 4, 5, 6, 7, 10, 14, 18] {
+        for cut in [1usize, 2, 3, 4, 5, 6, 7, 10, 14, 18] {
             let mut detector = Detector::new();
-            let mut detected_any = false;
-            let mut collected = Vec::new();
-            for (index, piece) in [&full[..cut], &full[cut..]].into_iter().enumerate() {
-                let outcome = detector.feed(piece, 1_000 + index as u64);
-                detected_any |= outcome.detected;
-                collected.extend_from_slice(&outcome.clean);
-            }
-            assert!(detected_any, "cut at {cut} must still detect");
-            assert_eq!(
-                collected,
-                Vec::<u8>::new(),
-                "cut at {cut} must not leak bytes"
-            );
-            // The suppression state persists after the split.
-            let outcome = detector.feed(&hex_zrqinit(), 1_100);
-            assert!(!outcome.detected);
-            assert!(outcome.clean.is_empty());
+            let detected = [&full[..cut], &full[cut..]]
+                .into_iter()
+                .enumerate()
+                .fold(false, |acc, (index, piece)| {
+                    acc | detector.feed(piece, 1_000 + index as u64)
+                });
+            assert!(detected, "cut at {cut} must still detect");
+            // The window mutes the immediate retry after the split too.
+            assert!(!detector.feed(&hex_zrqinit(), 1_100));
         }
     }
 
     #[test]
-    fn rz_zrinit_passes_through_byte_identical_without_detection() {
+    fn rz_zrinit_never_triggers() {
         let mut detector = Detector::new();
         let mut data = b"rz\r\n".to_vec();
         data.extend_from_slice(&hex_zrinit());
-        let outcome = detector.feed(&data, 1_000);
-        assert!(!outcome.detected);
-        assert_eq!(outcome.clean, data);
+        assert!(!detector.feed(&data, 1_000));
+        // The rz flow keeps working right after a sz was detected.
+        let mut detector = Detector::new();
+        assert!(detector.feed(&hex_zrqinit(), 1_000));
+        assert!(!detector.feed(&hex_zrinit(), 1_100));
     }
 
     #[test]
@@ -378,9 +233,7 @@ mod tests {
         // ZPAD ZPAD ZDLE 'C' + type 0x00 + 4 zero data bytes + 4 crc bytes.
         let mut data = b"**\x18C\x00".to_vec();
         data.extend_from_slice(&[0u8; 8]);
-        let outcome = detector.feed(&data, 1_000);
-        assert!(outcome.detected);
-        assert!(outcome.clean.is_empty());
+        assert!(detector.feed(&data, 1_000));
     }
 
     #[test]
@@ -388,46 +241,32 @@ mod tests {
         let mut detector = Detector::new();
         // ZPAD ZDLE 'A' + ZRINIT(0x01) + data + crc16.
         let data = [b"*\x18A\x01\x00\x00\x00\x00".as_slice(), &[0xBE, 0x50]].concat();
-        let outcome = detector.feed(&data, 1_000);
-        assert!(!outcome.detected);
-        assert_eq!(outcome.clean, data);
+        assert!(!detector.feed(&data, 1_000));
     }
 
     #[test]
-    fn suppressed_mode_drops_retries_but_passes_plain_text_and_expires() {
+    fn window_mutes_retries_then_re_arms() {
         let mut detector = Detector::new();
-        assert!(detector.feed(&hex_zrqinit(), 1_000).detected);
+        assert!(detector.feed(&hex_zrqinit(), 1_000));
         // sz retries the same header every 10s: silent, no new event.
-        let outcome = detector.feed(&hex_zrqinit(), 11_000);
-        assert!(!outcome.detected);
-        assert!(outcome.clean.is_empty());
-        // sz's eventual error text and the shell prompt stay visible.
-        let outcome = detector.feed(b"sz: giving up\r\n$ ", 12_000);
-        assert_eq!(outcome.clean, b"sz: giving up\r\n$ ".to_vec());
-        // A ZRINIT arriving inside the window (user starts rz right away)
-        // must still pass so the upload flow keeps working.
-        let outcome = detector.feed(&hex_zrinit(), 13_000);
-        assert_eq!(outcome.clean, hex_zrinit());
-        // After the window the detector is back to pass-through + scanning.
-        let outcome = detector.feed(&hex_zrqinit(), 1_000 + SUPPRESS_WINDOW_MS + 1);
-        assert!(outcome.detected);
-        assert!(outcome.clean.is_empty());
+        assert!(!detector.feed(&hex_zrqinit(), 11_000));
+        assert!(!detector.feed(&hex_zrinit(), 12_000));
+        // After the window the detector is back to scanning.
+        assert!(detector.feed(&hex_zrqinit(), 1_000 + EVENT_WINDOW_MS + 1));
     }
 
     #[test]
-    fn plain_text_with_asterisks_passes_unchanged() {
+    fn plain_text_with_asterisks_never_triggers() {
         let mut detector = Detector::new();
         let text = b"git 2**3=6\n**bold**\x18\n*not zmodem*\nok\n".to_vec();
-        let outcome = detector.feed(&text, 1_000);
-        assert!(!outcome.detected);
-        assert_eq!(outcome.clean, text);
-        // Same text must survive arbitrary chunk splits.
+        assert!(!detector.feed(&text, 1_000));
+        // Same text must not trigger across arbitrary chunk splits either.
         let mut detector = Detector::new();
-        let mut merged = Vec::new();
+        let mut detected = false;
         for piece in [&text[..9], &text[9..17], &text[17..]] {
-            merged.extend_from_slice(&detector.feed(piece, 1_000).clean);
+            detected |= detector.feed(piece, 1_000);
         }
-        assert_eq!(merged, text);
+        assert!(!detected);
     }
 
     #[test]
@@ -438,20 +277,35 @@ mod tests {
             data.extend_from_slice(type_digits.as_bytes());
             data.extend_from_slice(b"000000000000");
             data.extend_from_slice(&[0x0D, 0x8A, 0x11]);
-            let outcome = detector.feed(&data, 1_000);
-            assert!(!outcome.detected, "type {type_digits} must not trigger");
-            assert_eq!(outcome.clean, data);
+            assert!(
+                !detector.feed(&data, 1_000),
+                "type {type_digits} must not trigger"
+            );
         }
     }
 
     #[test]
-    fn trailing_partial_candidate_is_carried_not_dropped() {
+    fn trailing_partial_candidate_is_carried_and_completed() {
+        // A chunk ending in `*` must not lose the candidate: it completes
+        // with the next chunk.
         let mut detector = Detector::new();
-        // A chunk ending in `*` must not lose that byte: it may become a
-        // sentinel with the next chunk — or turn out to be plain text.
-        let outcome = detector.feed(b"done *", 1_000);
-        assert_eq!(outcome.clean, b"done ".to_vec());
-        let outcome = detector.feed(b"* done\n", 1_001);
-        assert_eq!(outcome.clean, b"** done\n".to_vec());
+        assert!(!detector.feed(b"done *", 1_000));
+        assert!(detector.feed(&hex_zrqinit(), 1_001));
+        // A cut inside the type digits is equally completed, not dropped.
+        let full = hex_zrqinit();
+        let mut detector = Detector::new();
+        assert!(!detector.feed(&full[..5], 1_000));
+        assert!(detector.feed(&full[5..], 1_001));
+    }
+
+    #[test]
+    fn carry_stays_bounded_for_pathological_input() {
+        let mut detector = Detector::new();
+        // A chunk of pure sentinel prefixes must not grow the carry without
+        // bound across many feeds.
+        for n in 0..1000 {
+            let _ = detector.feed(b"**\x18B0", n);
+        }
+        assert!(detector.carry.len() < CANDIDATE_MAX);
     }
 }

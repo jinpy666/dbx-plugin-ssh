@@ -4,6 +4,11 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [Unreleased]
+
+- **ZMODEM 下载（sz）自动接收**。远端跑 `sz` 时终端自动接管收流：进度浮条（文件名/百分比/多文件计数/速度）+ 取消按钮，落盘与 trzsz 下载同一三段式——宿主 fileTransfer 逐块流式写入（不在内存攒整文件）、本机 sidecar 落盘（支持下载目录设置/每次询问/撞名冲突处理，完成后可一键「在文件夹中显示」）、web/docker 模式浏览器 saveFile 兜底（512 MiB 上限）。远端提供的文件名经净化处理（剥离路径段防 `../../` 逃逸、Windows 保留名/非法字符），上传期间或 trzsz 传输中的 `sz` 请求自动拒绝（远端干净退出）。检测器从「拦截协议帧」改为「透传+事件窗口」——协议帧必须原样到达前端 sentry 才能开接收会话；原「请改用 SFTP 面板」提示退役。会话录制文件将包含 sz 协议帧（与 trzsz 现状一致）。
+  **ZMODEM downloads (sz) are now received automatically.** When the remote runs `sz`, the terminal takes over the stream: a progress overlay (file name, percent, multi-file counter, speed) with a cancel button, and saving through the same three-tier pipeline as trzsz downloads — streaming per-chunk writes via the host fileTransfer bridge (no whole-file buffering), sidecar saves to the local downloads directory (download-dir settings, ask-every-time, conflict resolution, reveal-in-folder), or the browser saveFile fallback in web/docker mode (512 MiB cap). Remote-provided file names are sanitized (path segments stripped against `../../` escapes, Windows reserved names and illegal glyphs), and an `sz` arriving during a pending rz upload or an active trzsz transfer is cleanly denied. The backend detector switched from suppressing protocol bytes to pass-through plus a dedup-only event window — the frames must reach the frontend sentry for a receive session to open, and the old "use the SFTP panel" notice is retired. Session recordings will contain sz protocol frames (consistent with the existing trzsz behavior).
+
 ## [0.7.3] — 2026-10-02
 
 - **恢复连接右键动态端口映射二级菜单**。宿主 0.6.30 已发布 `dynamic` context-menu 贡献点，manifest 恢复 `manage-tunnels` 的 `dynamic: true`（0.7.2 曾因宿主未发布该字段而临时降级为声明式 `open-workbench`）。右键二级菜单重新提供管理入口、按预设逐条启动/停止、批量启动与停止所有映射；sidecar 侧 `contextMenu/resolve/manage-tunnels` 实现一直保留，本次无需后端改动。`engines.dbx` 相应收紧为 `>=0.6.30`——更早的宿主 manifest 解析器不认识 `dynamic` 字段会拒绝安装，版本约束给出干净的不兼容提示。

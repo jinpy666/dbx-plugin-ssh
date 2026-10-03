@@ -362,11 +362,10 @@ export function usePluginEvents(options: {
       return;
     }
     // ZMODEM 触发检测（#90）：sidecar 在 PTY 输出里识别到远端 sz 发起的
-    // ZRQINIT 会话启动序列，协议帧已在 sidecar 侧抑制（不进终端渲染，也
-    // 不再走前端 sentry 的静默 deny），这里只把「改用 SFTP 下载」的提示浮
-    // 出来。负载仅含 sessionId/kind，不携带任何协议字节。
+    // ZRQINIT 时发 ssh/zmodem 事件（观测语义）。下载接收已由 useZmodem 的
+    // sentry 在 detect 边沿自动接管（含进度 overlay），这里不再弹提示，
+    // 避免与接收流程双重打扰。负载仅含 sessionId/kind，无协议字节。
     if (event.method === "ssh/zmodem" && event.params.sessionId === session.value?.sessionId) {
-      showNotice(t("zmodemDownloadUnsupported"));
       return;
     }
     // 会话自动录制（M14）：sidecar 在 open_session 时按 auto_record 偏好自动

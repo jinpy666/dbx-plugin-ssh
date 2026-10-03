@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Smoke test for the #90 ZMODEM trigger detection on the SSH PTY output path.
 
-The test container has no lrzsz (and the plugin deliberately does not answer
-ZMODEM), so the remote shell EMITS the exact wire sequences instead:
+The test container has no lrzsz, so the remote shell EMITS the exact wire
+sequences instead. Since ZMODEM download (receive) is now a frontend feature
+(the zmodem.js sentry consumes protocol frames on ssh/terminal/out), the
+sidecar passes every byte through and the detector only produces the
+`ssh/zmodem` event edge:
 
 - sz's ZRQINIT as lrzsz `zshhdr` sends it: `**\\x18B` + hex type "00" + 12 hex
-  chars + CRLF(0x0D 0x8A) + XON(0x11)  -> must be suppressed (no sentinel
-  bytes in any ssh/terminal/out frame) and produce exactly one `ssh/zmodem`
-  event; a retry inside the window must not produce a second event.
-- rz's ZRINIT (`**\\x18B01...`)                        -> must pass through
-  byte-identical (the frontend zmodem.js sentry needs it for rz uploads) and
-  must NOT trigger the event.
+  chars + CRLF(0x0D 0x8A) + XON(0x11)  -> must reach ssh/terminal/out frames
+  byte-identical (the frontend sentry needs it to open a receive session) and
+  produce exactly one `ssh/zmodem` event; a retry inside the 40s window must
+  not produce a second event.
+- rz's ZRINIT (`**\\x18B01...`)                        -> passes through
+  byte-identical and must NOT trigger the event.
 - plain text containing `**`                            -> passes untouched.
 
 Usage:
@@ -129,27 +132,27 @@ def main() -> int:
 
         # sz's ZRQINIT, byte-exact as lrzsz zshhdr() puts it on the wire.
         zrqinit_octal = r"printf '\052\052\030B0000000000000000\015\212\021'"
-        step("sz ZRQINIT: suppressed + one ssh/zmodem event")
+        step("sz ZRQINIT: passes through + one ssh/zmodem event")
         send(client, session_id, f"{zrqinit_octal}; echo AFTER_ZRQINIT", seq)
         chunks, events = drain(client, session_id, 4.0)
         merged = b"".join(chunks)
         if events != 1:
             fail(f"expected exactly 1 ssh/zmodem event, got {events}", client)
-        if b"\x2a\x2a\x18\x42" in merged:
-            fail("ZRQINIT sentinel leaked into terminal output frames", client)
+        if b"\x2a\x2a\x18\x42" not in merged:
+            fail("ZRQINIT sentinel did not reach terminal output frames (receive flow would break)", client)
         if b"AFTER_ZRQINIT" not in merged:
             fail("plain text after the ZRQINIT frame did not reach the terminal", client)
-        print("    PASS: event=1, sentinel suppressed, surrounding text intact")
+        print("    PASS: event=1, sentinel passed through, surrounding text intact")
 
-        step("retry inside suppression window: no second event")
+        step("retry inside event window: no second event")
         send(client, session_id, zrqinit_octal, seq)
         chunks, events = drain(client, session_id, 3.0)
         merged = b"".join(chunks)
         if events != 0:
             fail(f"retry inside window produced {events} extra ssh/zmodem event(s)", client)
-        if b"\x2a\x2a\x18\x42" in merged:
-            fail("retried ZRQINIT sentinel leaked into terminal output frames", client)
-        print("    PASS: no second event, retry suppressed")
+        if b"\x2a\x2a\x18\x42" not in merged:
+            fail("retried ZRQINIT sentinel did not reach terminal output frames", client)
+        print("    PASS: no second event, retry bytes still pass through")
 
         # rz's ZRINIT (hex type "01"): must pass through byte-identical so the
         # frontend zmodem.js sentry can still confirm the upload flow.

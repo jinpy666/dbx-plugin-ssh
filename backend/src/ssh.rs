@@ -2320,8 +2320,9 @@ impl SshRuntime {
         tokio::spawn(async move {
             let mut directory_filter = DirectoryHandshakeFilter::default();
             let mut directory_tracking_enabled = false;
-            // #90：ZMODEM 触发检测（远端 sz 发起的 ZRQINIT）。状态随会话存续，
-            // 抑制窗口超时后自动回到透传（详见 zmodem_detect 模块注释）。
+            // #90：ZMODEM 触发检测（远端 sz 发起的 ZRQINIT）。字节全透传，
+            // 检测器只产出事件边沿；事件窗口超时后自动复位（详见
+            // zmodem_detect 模块注释）。
             let mut zmodem_detector = crate::zmodem_detect::Detector::new();
             let mut directory_timeout = tokio::time::interval(Duration::from_millis(250));
             directory_timeout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2334,17 +2335,17 @@ impl SshRuntime {
                 tokio::select! {
                     _ = directory_timeout.tick() => {
                         if let Some(data) = directory_filter.flush_if_timed_out() {
-                            // 与主数据路径同一检测器：标记握手窗口里冲刷的
-                            // 字节同样不能绕过 ZMODEM 触发检测（#90）。
-                            let outcome = zmodem_detector.feed(&data, unix_now_ms());
-                            if outcome.detected {
+                            // 与主数据路径同一检测器：握手窗口里冲刷的字节同样
+                            // 参与 ZMODEM 触发检测（#90）。字节照常发布，检测器
+                            // 只产出事件边沿。
+                            if zmodem_detector.feed(&data, unix_now_ms()) {
                                 let _ = emitter.event(
                                     "ssh/zmodem",
                                     json!({ "sessionId": task_id, "kind": "zrqinit" }),
                                 );
                             }
-                            if !outcome.clean.is_empty() {
-                                publish_terminal(&task_id, TerminalStream::Stdout, outcome.clean, &replay, &emitter).await;
+                            if !data.is_empty() {
+                                publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
                             }
                         }
                         if directory_filter.take_failed() {
@@ -2540,21 +2541,14 @@ impl SshRuntime {
                         }
                         let Some(data) = directory_filter.filter(&data) else { continue; };
                         // #90 ZMODEM 触发检测：远端 `sz` 用 ZRQINIT 开启下载会
-                        // 话，本插件不实现 ZMODEM 接收——帧若照发，前端 sentry
-                        // 只会静默 deny（issue #90 的"没有任何反馈"），拦截后
-                        // 改发 ssh/zmodem 事件由前端给出可见提示。检测器只吃
-                        // Stdout（sz 的协议帧走 stdout；stderr 原样直通），且
-                        // 必须在录制/发布之前：终端展示与录制文件都不该混入
-                        // 协议乱码。ZRINIT（rz 上传）不触发，前端上传流程不受
-                        // 影响；抑制窗口超时后自动复位。
-                        let mut zmodem_detected = false;
-                        let data = if stream == TerminalStream::Stdout {
-                            let outcome = zmodem_detector.feed(&data, unix_now_ms());
-                            zmodem_detected = outcome.detected;
-                            outcome.clean
-                        } else {
-                            data
-                        };
+                        // 话。ZMODEM 下载接收已由前端 sentry（zmodem.js）承接，
+                        // 字节一律原样透传给终端路径（sentry 会消费协议帧）；
+                        // 检测器只产出事件边沿（40s 事件窗口内去重重试），供
+                        // UX 提示/观测。只在 Stdout 上扫（sz 的协议帧走
+                        // stdout；stderr 原样直通）。ZRINIT（rz 上传）不触发；
+                        // 窗口超时后自动复位，后续 `sz` 会再次上报。
+                        let zmodem_detected =
+                            stream == TerminalStream::Stdout && zmodem_detector.feed(&data, unix_now_ms());
                         if zmodem_detected {
                             let _ = emitter.event(
                                 "ssh/zmodem",

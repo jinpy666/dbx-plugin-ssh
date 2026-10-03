@@ -3176,15 +3176,15 @@ function dispatchTerminalOutput(data: Uint8Array) {
   ensureTrzszFilter().processServerOutput(data);
 }
 
-// ZMODEM 上传：sentry/检测/进度/收尾收口在 composables/useZmodem。
+// ZMODEM 上传/下载：sentry/检测/进度/落盘/收尾收口在 composables/useZmodem。
 const {
   zmodemState,
-  zmodemFileName,
-  zmodemTransferred,
-  zmodemTotalSize,
   zmodemSpeed,
+  zmodemFileIndex,
+  zmodemFileCount,
   zmodemBusy,
   zmodemPercent,
+  zmodemStatusLabel,
   resetZmodemSentry,
   finishZmodemUpload,
   cancelZmodemUpload,
@@ -3195,6 +3195,13 @@ const {
   terminal: () => terminal,
   sendTerminalBytes, dispatchTerminalOutput,
   loadDirectory: (path?: string) => loadDirectory(path),
+  // 懒引用：save 链/trzszBusy 都在本调用点之后才声明（TDZ），闭包只在传输时执行。
+  receiveAllowed: () => !trzszBusy.value,
+  probeLocalCapabilities: () => probeLocalCapabilities(),
+  saveHostFile: (chunks, fileName) => saveHostFile(chunks, fileName),
+  loadDownloadUseDefaultDir, askDownloadTarget, loadDownloadDir, resolveDownloadConflictFor,
+  applyChosenDirAsDefault,
+  revealTransferTarget: (path) => revealTransferTarget(path),
 });
 
 // trzsz (trz / tsz)：状态/进度/落盘收口在 composables/useTrzsz（终端流集成点在上方）。
@@ -8418,10 +8425,13 @@ watch(historyScope, () => {
           <code class="agent-run-command mono" :title="agentRunning.command">{{ agentRunning.command }}</code>
           <button class="agent-interrupt" @click="interruptAgentRun">{{ t("agentInterrupt") }}</button>
         </div>
-        <div v-if="zmodemBusy" class="zmodem-status" role="status">
+        <div v-if="zmodemBusy" class="zmodem-status trzsz-status" role="status">
           <Loader2 class="spinning" />
-          <span>{{ zmodemState === "waiting" ? t("zmodemWaiting") : t("zmodemUploading", { name: zmodemFileName, percent: zmodemPercent }) }}</span>
+          <span class="trzsz-label">{{ zmodemStatusLabel }}</span>
+          <progress v-if="zmodemState === 'uploading' || zmodemState === 'receiving'" :value="zmodemPercent" max="100" />
+          <span v-if="(zmodemState === 'uploading' || zmodemState === 'receiving') && zmodemFileCount > 1" class="trzsz-count mono">{{ zmodemFileIndex }}/{{ zmodemFileCount }}</span>
           <span v-if="zmodemSpeed">{{ formatBytes(zmodemSpeed) }}/s</span>
+          <button class="trzsz-cancel" :title="t('cancel')" :aria-label="t('cancel')" @click="cancelZmodemUpload"><X /></button>
         </div>
         <div v-if="trzszOverlayVisible" class="zmodem-status trzsz-status" role="status" :class="{ 'trzsz-done': trzszPhase === 'success', 'trzsz-failed': trzszPhase === 'failed' }">
           <Loader2 v-if="trzszPhase === 'waiting' || trzszPhase === 'transferring'" class="spinning" />
