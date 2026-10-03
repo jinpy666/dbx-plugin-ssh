@@ -16,6 +16,7 @@ interface ExternalEditDownloadInfo {
   taskId: string;
   fileName: string;
   size: number;
+  compression?: string;
 }
 
 /** 外部编辑器回传（P2-5，桌面端；M15 起逐文件化）：watch/file-modified 确认
@@ -34,6 +35,7 @@ export function useExternalEdits(options: {
   pathFromUri: (uri: string) => string;
   waitWhilePaused: (taskId: string) => Promise<void> | undefined;
   waitForDownloadChunk: (taskId: string, offset: number) => Promise<unknown>;
+  waitForDownloadReady: (taskId: string, compression: string | undefined) => Promise<void>;
   cancelledTransferTasks: Set<string>;
   downloadChunkWaiters: Map<string, { timer: number }>;
   probeLocalCapabilities: () => Promise<{ canSaveLocal: boolean; downloadsDir: string } | null | undefined>;
@@ -50,8 +52,9 @@ export function useExternalEdits(options: {
     openTransferPanel,
     transferTasks,
     pathFromUri,
-    waitWhilePaused,
-    waitForDownloadChunk,
+  waitWhilePaused,
+  waitForDownloadChunk,
+  waitForDownloadReady,
     cancelledTransferTasks,
     downloadChunkWaiters,
     probeLocalCapabilities,
@@ -187,8 +190,14 @@ async function downloadForExternalEdit(entry: ExternalEditEntry, downloadDir: st
     downloadDir,
     conflict: "overwrite",
   });
-  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now() };
+  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "download", fileName: info.fileName, size: info.size, transferred: 0, status: "queued", joinedAt: Date.now(), compression: info.compression === "gzip" ? "gzip" : undefined };
   try {
+    // 压缩任务等 prep 就绪（M33，与主下载路径同语义）：start 返回 compression=gzip
+    // 时 sidecar 在后台做「远端 gzip → 拉取 → 解压」，staging 未就绪时
+    // download/next 直接报 "still preparing"——超阈值大文件（如 157MB SQL）prep
+    // 要数十秒，首泵必撞，必须先等 ready（含 fallback/cancel/超时出口）。
+    // 等待器自身抛错（prep 超时/用户取消）也要走 catch 清理任务。
+    await waitForDownloadReady(info.taskId, info.compression);
     let offset = 0;
     while (offset < info.size) {
       await waitWhilePaused(info.taskId);

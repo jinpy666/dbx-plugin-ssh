@@ -431,6 +431,7 @@ async function openTransferTarget(path: string) {
 
   return {
     waitForDownloadChunk,
+    waitForDownloadReady,
     probeLocalCapabilities,
     downloadEntry,
     batchDownload,
