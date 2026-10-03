@@ -131,7 +131,10 @@ fn probe_versioned(
     })
 }
 
-fn first_existing(candidates: &[Option<PathBuf>], probe: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+fn first_existing(
+    candidates: &[Option<PathBuf>],
+    probe: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     candidates
         .iter()
         .flatten()
@@ -157,20 +160,19 @@ pub fn build_catalog(
     lister: &dyn Fn(&Path) -> Vec<PathBuf>,
 ) -> Vec<CatalogEntry> {
     let mut entries: Vec<CatalogEntry> = Vec::new();
-    let mut push =
-        |id: &'static str,
-         name: &'static str,
-         launch: LaunchSpec,
-         available: bool,
-         exts: &'static [&'static str]| {
-            entries.push(CatalogEntry {
-                id,
-                name,
-                launch,
-                available,
-                suggested_extensions: exts,
-            });
-        };
+    let mut push = |id: &'static str,
+                    name: &'static str,
+                    launch: LaunchSpec,
+                    available: bool,
+                    exts: &'static [&'static str]| {
+        entries.push(CatalogEntry {
+            id,
+            name,
+            launch,
+            available,
+            suggested_extensions: exts,
+        });
+    };
 
     match platform {
         "macos" => {
@@ -396,11 +398,22 @@ pub fn build_catalog(
         // Linux/other: PATH lookup, direct argv launch (no shell).
         _ => {
             let mut cli = |id: &'static str,
-                       name: &'static str,
-                       binary: &'static str,
-                       exts: &'static [&'static str]| {
+                           name: &'static str,
+                           binary: &'static str,
+                           exts: &'static [&'static str]| {
                 let found = probe_on_path(binary, env, probe);
-                push(id, name, exe_spec(found.as_deref()), found.is_some(), exts);
+                // 非 Windows 平台的 exe 展示路径统一 POSIX 分隔符：Path::join
+                // 的分隔符随构建宿主变化（Windows 上 join 会往 POSIX 风格目录
+                // 里插 '\'）。探测用原始 join 结果，落进 payload 前归一化。
+                let normalized =
+                    found.map(|path| PathBuf::from(path.to_string_lossy().replace('\\', "/")));
+                push(
+                    id,
+                    name,
+                    exe_spec(normalized.as_deref()),
+                    normalized.is_some(),
+                    exts,
+                );
             };
             cli("vscode", "Visual Studio Code", "code", text_extensions());
             cli("sublime", "Sublime Text", "subl", text_extensions());
@@ -642,7 +655,7 @@ mod tests {
         let wanted: Vec<String> = paths.iter().map(|p| p.replace('\\', "/")).collect();
         move |path: &Path| {
             let text = path.to_string_lossy().replace('\\', "/");
-            wanted.iter().any(|p| *p == text)
+            wanted.contains(&text)
         }
     }
 
@@ -714,7 +727,10 @@ mod tests {
     #[test]
     fn linux_catalog_probes_path() {
         let env = fake_env(&[]);
-        let linux_paths = ["/usr/local/bin/code".to_string(), "/usr/bin/gedit".to_string()];
+        let linux_paths = [
+            "/usr/local/bin/code".to_string(),
+            "/usr/bin/gedit".to_string(),
+        ];
         let probe = probe_from(&linux_paths);
         let catalog = build_catalog("linux", &env, &probe, &lister_from(&[]));
         let by_id = |id: &str| catalog.iter().find(|e| e.id == id).expect("entry");
@@ -774,7 +790,10 @@ mod tests {
             ["--wait", "/tmp/a b.txt"]
         );
         // No placeholder: path appended at the end.
-        assert_eq!(substitute_file(&["-n".into()], path), ["-n", "/tmp/a b.txt"]);
+        assert_eq!(
+            substitute_file(&["-n".into()], path),
+            ["-n", "/tmp/a b.txt"]
+        );
         // Every occurrence is replaced.
         assert_eq!(
             substitute_file(&["{file}".into(), "-o".into(), "{file}".into()], path),
@@ -825,12 +844,8 @@ mod tests {
         }
         assert!(launched.get());
         launched.set(false);
-        let rejected = open_with_validated_with(
-            &history,
-            Path::new("/etc/passwd"),
-            &spec,
-            &|_, _| Ok(()),
-        );
+        let rejected =
+            open_with_validated_with(&history, Path::new("/etc/passwd"), &spec, &|_, _| Ok(()));
         assert!(rejected
             .unwrap_err()
             .contains("not saved by a completed download"));
