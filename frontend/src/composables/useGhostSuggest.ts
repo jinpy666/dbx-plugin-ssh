@@ -22,12 +22,16 @@ export function useGhostSuggest(options: {
   suggestionOpen: Ref<boolean>;
   /** Warp 式 history 面板开启期间不出 ghost（面板打字即过滤，同屏不叠两层）。 */
   historyPanelOpen: Ref<boolean>;
+  /** 终端交互提示待答（issue #150 及其反馈扩展，MFA/验证码/密码待输入、
+   *  选择菜单与 y/n 确认）：惰性求值，键入期采样——交互应答不是命令前缀，
+   *  不出 ghost。 */
+  isInteractivePromptPending: () => boolean;
   completionController: { lineChanged(): void };
   suggestionMinCharsState: Ref<number>;
   suggestionMaxCharsState: Ref<number>;
   readTerminalCellFrame: () => { originLeft: number; originTop: number; cursorX: number; visibleRow: number; cellWidth: number; cellHeight: number } | null;
 }) {
-  const { terminal: terminalGet, sendTerminalBytes, getPendingTerminalInput, appendToPendingTerminalInput, commandRunning, terminalTransferBusy, commandHistory, quickCommands, suggestionOpen, historyPanelOpen, completionController, suggestionMinCharsState, suggestionMaxCharsState, readTerminalCellFrame } = options;
+  const { terminal: terminalGet, sendTerminalBytes, getPendingTerminalInput, appendToPendingTerminalInput, commandRunning, terminalTransferBusy, commandHistory, quickCommands, suggestionOpen, historyPanelOpen, isInteractivePromptPending, completionController, suggestionMinCharsState, suggestionMaxCharsState, readTerminalCellFrame } = options;
 
 // —— 终端行内 ghost 自动建议（对标 Warp/fish autosuggest）——状态机纯逻辑在
 // lib/terminalGhostSuggest.ts；数据源即上方 commandHistory/quickCommands refs
@@ -149,6 +153,8 @@ function updateGhostSuggestion() {
     enabled: ghostEnabled.value,
     // 远端命令执行中 / zmodem、trzsz 传输占用流时不出建议（任务约束）。
     commandRunning: commandRunning.value || terminalTransferBusy.value,
+    // 终端交互提示待答（issue #150 及其反馈扩展）：询问输入/选择处不出 ghost。
+    promptPending: isInteractivePromptPending(),
     compositionActive: false,
     sources: { history: commandHistory.value, quickCommands: quickCommands.value },
     bounds: {

@@ -53,8 +53,12 @@ export function useCommandSuggestions(options: {
    *  惰性求值——useGhostSuggest 在本 composable 之后初始化，闭包在 onData
    *  期才调用，无 TDZ 风险。 */
   inlineGhostActive: () => boolean;
+  /** 终端交互提示待答（issue #150 及其反馈扩展，MFA/验证码/密码待输入、
+   *  选择菜单与 y/n 确认）：惰性求值，键入期采样——交互应答不是命令键入，
+   *  不开建议/补全浮层。 */
+  isInteractivePromptPending: () => boolean;
 }) {
-  const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, persistCommandHistory, isHistoryPanelOpen, syncHistoryPanelAnchor, updateHistoryPanelFilter, pushTerminalCommandHistory, inlineGhostActive } = options;
+  const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, persistCommandHistory, isHistoryPanelOpen, syncHistoryPanelAnchor, updateHistoryPanelFilter, pushTerminalCommandHistory, inlineGhostActive, isInteractivePromptPending } = options;
 
 // 命令输入建议浮层（P1-1）运行时状态：条目/选中项/光标锚点与抑制门锁存。
 // 开关与长度上下限的权威值在上方 suggestions*State（sidecar 偏好）。
@@ -417,7 +421,7 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   }
 
   const guard = canShowSuggestions(
-    { alternateActive, lastCommand: lastTerminalCommand.value, typingChar, lineEmpty: lineBefore.length === 0 },
+    { alternateActive, lastCommand: lastTerminalCommand.value, typingChar, lineEmpty: lineBefore.length === 0, interactivePromptPending: isInteractivePromptPending() },
     suggestionGuardState,
   );
   suggestionGuardState = guard.state;

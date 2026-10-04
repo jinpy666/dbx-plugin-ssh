@@ -132,6 +132,9 @@ export interface GhostEvaluationInput {
   enabled: boolean;
   /** 远端命令执行中 / 传输占用：不出建议。 */
   commandRunning: boolean;
+  /** 终端交互提示待答（issue #150 及其反馈扩展，MFA/验证码/密码待输入、
+   *  选择菜单与 y/n 确认）：行上键入的是对远端的应答而非命令前缀，不出 ghost。 */
+  promptPending?: boolean;
   /** IME 组合中：不出建议（组合文本尚未落行）。 */
   compositionActive: boolean;
   /** 数据源：历史 + 快速命令（复用既有 refs，不新建存储）。 */
@@ -180,6 +183,7 @@ export function evaluateGhost(input: GhostEvaluationInput): GhostEvaluation {
   if (
     !input.enabled ||
     input.commandRunning ||
+    input.promptPending ||
     input.compositionActive ||
     state.hidden ||
     !state.cursorAtEnd ||

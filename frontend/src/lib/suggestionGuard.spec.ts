@@ -12,6 +12,7 @@ function evaluate(input: {
   lastCommand?: string | null;
   typingChar?: string | null;
   lineEmpty?: boolean;
+  interactivePromptPending?: boolean;
 }, state: SuggestionGuardState = createSuggestionGuardState()) {
   return canShowSuggestions(
     {
@@ -19,6 +20,7 @@ function evaluate(input: {
       lastCommand: input.lastCommand ?? null,
       typingChar: input.typingChar ?? null,
       lineEmpty: input.lineEmpty ?? true,
+      interactivePromptPending: input.interactivePromptPending ?? false,
     },
     state,
   );
@@ -111,5 +113,29 @@ describe("canShowSuggestions", () => {
     expect(evaluate({ typingChar: "/", lineEmpty: false }).show).toBe(true);
     expect(evaluate({ typingChar: "g", lineEmpty: true }).show).toBe(false);
     expect(evaluate({ typingChar: "g", lineEmpty: false }).show).toBe(true);
+  });
+
+  // issue #150 及其反馈扩展：终端交互提示待答（MFA/验证码/密码待输入、
+  // 选择菜单与 y/n 确认）时键入的是对远端的应答，不出建议；不落锁存——
+  // 交互结束后下一次键入照常评估。
+  it("hides while an interactive prompt is pending, without latching (#150)", () => {
+    const pending = evaluate({ typingChar: "6", interactivePromptPending: true });
+    expect(pending.show).toBe(false);
+    expect(pending.state.suppressed).toBe(false);
+    // 交互待答不吞跟随程序锁存：既有抑制态原样保留，也不因待答而解除。
+    const latched = evaluate({ typingChar: "6", lastCommand: "htop", interactivePromptPending: true }, evaluate({ lastCommand: "htop" }).state);
+    expect(latched.show).toBe(false);
+    expect(latched.state.suppressed).toBe(true);
+  });
+
+  it("keeps the Ctrl+C release gesture working during a pending prompt", () => {
+    const latched = evaluate({ lastCommand: "less app.log" }).state;
+    const ctrlC = evaluate({ typingChar: "\u0003", lastCommand: "less app.log", interactivePromptPending: true }, latched);
+    expect(ctrlC.show).toBe(false);
+    expect(ctrlC.state.suppressed).toBe(false);
+  });
+
+  it("resumes normal evaluation after the prompt clears", () => {
+    expect(evaluate({ typingChar: "d", interactivePromptPending: false }).show).toBe(true);
   });
 });

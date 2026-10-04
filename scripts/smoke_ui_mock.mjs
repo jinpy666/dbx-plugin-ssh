@@ -755,6 +755,47 @@ try {
   await panelPage.close();
   await degradedPage.close();
 
+  // --- issue #150：终端交互提示守卫（MFA 待码/选择菜单场景，↑↓ 与建议让位远端）---
+  // __dbxMockEmitTerminal 摆出堡垒机式提示行（光标邻域两行窗口命中），断言
+  // 交互待答期 ↑ 不开历史面板、键入应答不开建议/补全浮层；再回到普通提示符
+  // 做对照——↑ 照常开面板，证明守卫随提示行滚出采样窗口而放行、原行为不变。
+  // 每个场景都以「清屏 + 光标归位」开头：mock 会把 ↑ 的 ESC[A 字节原样回显，
+  // 回显本身会移动光标，清屏保证每个场景的采样窗口确定性。
+  console.log("==> issue #150 interactive prompt guard");
+  const guardPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  guardPage.on("pageerror", (err) => pageError.push(String(err)));
+  await guardPage.goto(`${baseUrl}?render=dom&noanim=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await sleep(2_500);
+  await guardPage.bringToFront();
+  await guardPage.click(".terminal-host");
+  const clearScreen = "\u001b[2J\u001b[H";
+  // MFA 待码场景：动态码提示行在光标行。
+  await guardPage.evaluate((prefix) => window.__dbxMockEmitTerminal(`${prefix}Please Enter MFA Code.\r\n[OTP Code]: `), clearScreen);
+  await guardPage.waitForTimeout(250);
+  await guardPage.keyboard.press("ArrowUp");
+  await guardPage.waitForTimeout(300);
+  check("#150 MFA prompt: ↑ opens no history panel", (await guardPage.locator(".terminal-history-panel").count()) === 0, "panel count");
+  await guardPage.keyboard.type("123456");
+  await guardPage.waitForTimeout(400);
+  check("#150 MFA prompt: typing the code opens no suggestion overlay", (await guardPage.locator(".command-suggestions").count()) === 0, "suggestion count");
+  check("#150 MFA prompt: typing the code opens no completion menu", (await guardPage.locator(".completion-menu").count()) === 0, "completion count");
+  await guardPage.screenshot({ path: `${SHOT_DIR}/08-interactive-prompt-guard.png`, fullPage: false }).catch(() => undefined);
+  console.log("  screenshot: docs/screenshots-ui-mock/08-interactive-prompt-guard.png");
+  // 选择菜单场景（堡垒机选目标服务器）。
+  await guardPage.evaluate((prefix) => window.__dbxMockEmitTerminal(`${prefix}  1  web-01 (10.0.0.1)\r\n  2  web-02 (10.0.0.2)\r\nSelect server: `), clearScreen);
+  await guardPage.waitForTimeout(250);
+  await guardPage.keyboard.press("ArrowUp");
+  await guardPage.waitForTimeout(300);
+  check("#150 server menu: ↑ opens no history panel", (await guardPage.locator(".terminal-history-panel").count()) === 0, "panel count");
+  // 对照组：回到普通提示符（提示行滚出采样窗口）→ ↑ 照常开面板。
+  await guardPage.evaluate((prefix) => window.__dbxMockEmitTerminal(`${prefix}user@server:~$ `), clearScreen);
+  await guardPage.waitForTimeout(250);
+  await guardPage.keyboard.press("ArrowUp");
+  await expect(guardPage, ".terminal-history-panel", "#150 control: ↑ opens the history panel at a normal prompt");
+  await guardPage.screenshot({ path: `${SHOT_DIR}/08b-interactive-prompt-guard-release.png`, fullPage: false }).catch(() => undefined);
+  console.log("  screenshot: docs/screenshots-ui-mock/08b-interactive-prompt-guard-release.png");
+  await guardPage.close();
+
   if (pageError.length) {
     failures.push(`page errors: ${pageError.slice(0, 3).join(" | ")}`);
   }

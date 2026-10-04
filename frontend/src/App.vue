@@ -157,6 +157,10 @@ import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCaptur
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
 import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, saveGhostTabAccept } from "./lib/ghostAcceptKey";
 import { isPasswordPromptLine, loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
+// 终端交互提示守卫（issue #150 及其反馈扩展）：远端询问输入/要求选择（MFA/
+// 验证码/密码待输入、选择菜单、y/n 确认）时，↑/↓ 留给远端交互，不唤起历史
+// 面板；键入应答不开建议/ghost 浮层。
+import { interactivePromptNearCursor, isInteractivePromptPending } from "./lib/interactivePromptGuard";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
 // AI 助手（Warp AI 对齐批，IMPL_PLAN_WARP_AI_TERMINAL）：宿主 AI 通道封装 +
@@ -937,6 +941,8 @@ const {
   // 浮层不弹。ghostEnabled 在下方 useGhostSuggest 才创建，惰性求值闭包
   // 仅在 onData 期调用，无初始化顺序问题。
   inlineGhostActive: () => ghostEnabled.value,
+  // 终端交互提示待答（issue #150 及其反馈扩展）：询问输入/选择处不开建议/补全。
+  isInteractivePromptPending: () => interactivePromptGatePending(),
 });
 
 // —— 快速命令数据面（M32-A3）：RPC 全部留在 App，编辑器/导入视图在
@@ -2385,7 +2391,8 @@ const {
 // 浏览不改高亮不改输入（选中只认键盘与点击）；取消导航（Esc / 底部最新一条
 // 再 ↓）恢复打开前的原输入行并收起面板。
 // ---------------------------------------------------------------------------
-/** 打开门：任一浮层/alternate 屏/命令运行中/传输占用时不拦截 ↑。 */
+/** 打开门：任一浮层/alternate 屏/命令运行中/传输占用/终端交互提示待答
+ *  （issue #150 及其反馈扩展，询问输入/选择场景）时不拦截 ↑。 */
 function historyPanelGateOpen(): boolean {
   return canOpenHistoryPanel({
     completionOpen: completionOpen.value,
@@ -2395,6 +2402,7 @@ function historyPanelGateOpen(): boolean {
     alternateActive: terminal?.buffer.active.type === "alternate",
     commandRunning: commandRunning.value,
     transferBusy: terminalTransferBusy.value,
+    interactivePromptPending: interactivePromptGatePending(),
   });
 }
 
@@ -2862,6 +2870,8 @@ const {
   commandRunning, terminalTransferBusy, commandHistory, quickCommands,
   suggestionOpen, historyPanelOpen, completionController,
   suggestionMinCharsState, suggestionMaxCharsState,
+  // 终端交互提示待答（issue #150 及其反馈扩展）：询问输入/选择处不出 ghost。
+  isInteractivePromptPending: () => interactivePromptGatePending(),
   readTerminalCellFrame,
 });
 function sendTerminalBytes(data: Uint8Array) {
@@ -7689,6 +7699,28 @@ function passwordPromptOnScreen(): boolean {
     return false;
   }
   return false;
+}
+// 终端交互提示采样（issue #150 及其反馈扩展）：光标行邻域命中询问输入/
+// 选择提示（动态码、密码、选择菜单、y/n 确认）→「交互待答态」。纯判定在
+// lib/interactivePromptGuard，这里只做 xterm buffer 读取。
+function interactivePromptOnScreen(): boolean {
+  try {
+    const buffer = terminal?.buffer.active;
+    if (!buffer || buffer.type !== "normal") return false;
+    const row = buffer.baseY + Math.min(buffer.cursorY, buffer.length - 1);
+    return interactivePromptNearCursor(row, (line) => buffer.getLine(line)?.translateToString(true) ?? "");
+  } catch {
+    return false;
+  }
+}
+/** 「终端交互提示待答」门：交互提示行在场（远端询问输入/要求选择）或连接
+ *  挑战弹窗未决（host-key/连接挑战 workbench 回退）任一成立。惰性求值：仅
+ *  键入/按键期采样，无 setup 顺序约束。 */
+function interactivePromptGatePending(): boolean {
+  return isInteractivePromptPending({
+    promptLineOnScreen: interactivePromptOnScreen(),
+    challengeDialogPending: !!hostKeyPrompt.value,
+  });
 }
 // 引导条键位标签跟随实时绑定（不写死键名）：历史搜索取 command-history 的
 // 首个 Ctrl 系绑定（默认表里即 Ctrl+R，⌘⇧H 在前但 mac 上 ⌘ 系不是终端键位

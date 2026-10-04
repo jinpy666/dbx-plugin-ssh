@@ -119,6 +119,7 @@ describe("canOpenHistoryPanel", () => {
     alternateActive: false,
     commandRunning: false,
     transferBusy: false,
+    interactivePromptPending: false,
   };
 
   it("opens when every gate is clear", () => {
@@ -129,6 +130,10 @@ describe("canOpenHistoryPanel", () => {
     for (const key of Object.keys(open) as Array<keyof typeof open>) {
       expect(canOpenHistoryPanel({ ...open, [key]: true })).toBe(false);
     }
+  });
+
+  it("does not grab ↑ while an interactive prompt is pending (#150: MFA/选择场景 ↑ 留给远端)", () => {
+    expect(canOpenHistoryPanel({ ...open, interactivePromptPending: true })).toBe(false);
   });
 });
 

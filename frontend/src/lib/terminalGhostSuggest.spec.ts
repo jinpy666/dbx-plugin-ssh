@@ -193,6 +193,10 @@ describe("evaluateGhost (gates + search + accept bytes)", () => {
     expect(evaluate({ compositionActive: true, line: "git s" }).match).toBeNull();
   });
 
+  it("hides while an interactive prompt is pending (#150: 对远端的应答不是命令前缀)", () => {
+    expect(evaluate({ promptPending: true, line: "6" }).match).toBeNull();
+  });
+
   it("hides when the setting is off", () => {
     expect(evaluate({ enabled: false, line: "git s" }).match).toBeNull();
   });

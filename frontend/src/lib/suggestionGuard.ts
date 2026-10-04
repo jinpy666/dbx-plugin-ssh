@@ -12,6 +12,10 @@ export interface SuggestionGuardInput {
   typingChar: string | null;
   /** 输入前命令行是否为空（pager 单键启发只在行首生效）。 */
   lineEmpty?: boolean;
+  /** 终端交互提示待答（issue #150 及其反馈扩展，MFA/验证码/密码待输入、
+   *  选择菜单与 y/n 确认）：键入的是对远端的应答而非命令，本轮不出建议；
+   *  不落锁存，交互结束后下一次键入照常评估。 */
+  interactivePromptPending?: boolean;
 }
 
 export interface SuggestionGuardState {
@@ -76,7 +80,10 @@ export function createSuggestionGuardState(): SuggestionGuardState {
  * - alternate buffer or an already-latched suppressive program hides;
  * - a suppressive `lastCommand` (re)latches and hides;
  * - Ctrl+C / q inside a latch releases it (that keystroke itself stays hidden);
- * - pager-style single keys at an empty line hide for that keystroke only.
+ * - pager-style single keys at an empty line hide for that keystroke only;
+ * - a pending interactive prompt on the remote side (MFA code, password,
+ *   selection menu, y/n confirm) hides for that keystroke only — no latch,
+ *   so the next keystroke after the prompt clears is evaluated as usual.
  */
 export function canShowSuggestions(input: SuggestionGuardInput, state: SuggestionGuardState = createSuggestionGuardState()): SuggestionGuardResult {
   let next: SuggestionGuardState = { ...state };
@@ -87,6 +94,7 @@ export function canShowSuggestions(input: SuggestionGuardInput, state: Suggestio
     return { show: false, state: next };
   }
 
+  if (input.interactivePromptPending) return { show: false, state: next };
   if (isSuppressiveCommand(input.lastCommand)) {
     next = { suppressed: true, suppressedBy: input.lastCommand };
     return { show: false, state: next };
