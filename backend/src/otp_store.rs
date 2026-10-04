@@ -608,14 +608,6 @@ fn decode_with_limits(raw: &[u8]) -> Result<image::DynamicImage, String> {
 }
 
 #[cfg(test)]
-pub fn reset_replay_cache() {
-    window_codes()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::vault::KeyfileProvider;
@@ -927,8 +919,8 @@ mod tests {
 
     #[test]
     fn take_window_code_blocks_replay_within_step_and_rotates_next_step() {
-        // 不调 reset_replay_cache():WINDOW_CODES 是进程级共享缓存,cargo test
-        // 并行跑用例时,这里的 reset 会把并发用例刚标记的窗口一并清掉,令其
+        // 不做跨用例 reset:WINDOW_CODES 是进程级共享缓存,cargo test
+        // 并行跑用例时,reset 会把并发用例刚标记的窗口一并清掉,令其
         // 防重放断言偶发失败。本用例的 entry/key 为本用例独有,进程内无别的
         // 用例会写同键,清缓存没有必要。
         let key = b"12345678901234567890";
@@ -949,7 +941,7 @@ mod tests {
 
     #[test]
     fn take_connection_totp_key_marks_window_via_shared_cache() {
-        // 同上:不用 reset_replay_cache()。entry.id 每次运行新生成,进程内
+        // 同上:不做跨用例 reset。entry.id 每次运行新生成,进程内
         // 键必然独占;reset 反而可能清掉并发用例的标记。
         let dir = temp_dir();
         let vault = keyfile_vault(&dir);
