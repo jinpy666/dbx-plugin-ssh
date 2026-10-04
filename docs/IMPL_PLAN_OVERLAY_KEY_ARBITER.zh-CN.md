@@ -8,7 +8,14 @@
 > 第 N 个浮层的集成成本是 O(N) 次手工编辑 × O(N²) 测试组合。
 >
 > 状态标记：✅ 已完成 / 🔜 待实施 / ⛔ 明确不做（含理由）。
-> **本文档是方案（未实施）**；按仓规，实施须人工对优先级表拍板后另开分支分批交付。
+> **状态（2026-10-05）：✅ 已实施（S1–S3 三个提交：仲裁器纯函数+快照 spec →
+> 历史面板+引导条接线 → 其余五浮层全量接线）。实施偏差（均已在代码注释说明）：**
+> ① 键维度按真实拓扑拆为七个——enter/tab/accept(→族) 三分，因三者让位规则不同
+> （ghost 对 completion 不让 → 却让 Tab；补全 Enter 恒透传）；② §1.2 的初版
+> 优先级表在快照守卫下被证伪两处（面板分支实际位于补全/建议之后、搜索/胶囊
+> 菜单之前），已按真实链序重排——快照先行的价值即在此；③ ghost 的 → 族接受
+> 分支不查表（Ctrl+F/Ctrl+E 无键维度，其组合键条件即让位编码的另一半），
+> 其 Tab/Esc 维度照常由 claims 表达。
 
 ## 0. 现状与问题（证据）
 
@@ -36,12 +43,13 @@
 ### 1.1 核心类型与唯一决策函数
 
 ```ts
-// frontend/src/lib/overlayArbiter.ts（新模块，纯函数，无依赖）
+// frontend/src/lib/overlayArbiter.ts（✅ 已实施：纯函数，无依赖）
 
-export type OverlayId = "historyPanel" | "promptHints" | "ghost" | "suggestion";
-export type ClaimKey = "arrowUp" | "arrowDown" | "accept" | "escape" | "anchor" | "typing";
+export type OverlayId = "historyPanel" | "promptHints" | "ghost" | "suggestion" | "completion" | "quickSelect" | "search";
+// 实施定稿为七个维度：enter/tab/accept(→族) 三分（让位规则不同，见 §1.2）。
+export type ClaimKey = "arrowUp" | "arrowDown" | "enter" | "tab" | "accept" | "escape" | "anchor";
 
-/** 一个浮层对某个键维度的一次声明。visible 由现有四模块的 can* 布尔照旧给出。 */
+/** 一个浮层对某个键维度的一次声明。visible 由现有各模块的 can* 布尔照旧给出。 */
 export interface ArbiterClaim {
   overlay: OverlayId;
   key: ClaimKey;
@@ -54,15 +62,16 @@ export interface ArbiterClaim {
 export function resolveKeyOwners(claims: readonly ArbiterClaim[]): Record<ClaimKey, OverlayId | null>;
 ```
 
-### 1.2 初始优先级表（本次拍板对象）
+### 1.2 优先级表（✅ 已按实施定稿；初版两处链序误读被 S1 快照守卫纠正）
 
-| ClaimKey | 最高 | 次高 | 说明 |
-| --- | --- | --- | --- |
-| `arrowUp` / `arrowDown` | 打开的历史面板 (300) > 交互提示待答→让位远端（无人持有）> 建议浮层 (200) > ghost 菜单 (100) > 引导条/ghost 静默唤起 (50) | — | 「让位远端」实现为**无人持有**：`interactivePromptPending` 时各浮层一律不声明（现有四模块已各自带此门，仲裁器只消费可见性） |
-| `accept`（→/Enter 接受） | 建议浮层 (300) > ghost (200) > 历史面板确认 (100) | — | 与现状 `ghostMenuSuppressed(suggestionOpen)` 互斥语义一致 |
-| `escape` | 打开的浮层按打开顺序栈顶 (300) | — | 用现有各浮层 open 布尔即可，无需新栈结构（同开互斥已由矩阵保证） |
-| `anchor`（引导条锚点） | 引导条独占 (100)；历史面板打开时不展示引导条（现状门已保证，仲裁器兜底） | — | 消除两浮层叠画 |
-| `typing` | 建议/ghost 让位规则收口（`isSuppressiveCommand` / pager 键等照旧在各模块内判定，仲裁器只收最终可见性） | — | 判定逻辑**不迁移**，只收口消费 |
+| ClaimKey | 优先级（高→低） | 说明 |
+| --- | --- | --- |
+| `arrowUp` / `arrowDown` | completion(400) > suggestion(300) > historyPanel(200) > quickSelect(100) | 面板关闭时的裸 ↑ 唤起是同 overlay 的另一条 claim（可见性=唤起门；#150 待答态判 false 即无人持有，↑ 归远端） |
+| `enter` | completion(400) > suggestion(300) > historyPanel(200) > quickSelect(100) | 补全 Enter 恒透传是其 handler 内语义，所有权不变 |
+| `tab` | ghost(500，可见性含 !completionOpen) > completion(400) > suggestion(300) > historyPanel(200) | 「Tab 接受建议」开关在菜单开着时不生效——让位编码在可见性 |
+| `accept`（→ 族） | ghost(500，唯一 claimant) | 词块/整段接受分支本体不查表（Ctrl+F/Ctrl+E 无维度） |
+| `escape` | completion(400) > suggestion(300) > historyPanel(200) > search(150) > ghost 键位胶囊(140) > quickSelect(100) | 链序：面板分支先于搜索/胶囊菜单 |
+| `anchor` | promptHints(100，唯一 claimant) | 其他浮层在场由其 overlayOpen 门置不可见，仲裁器兜底 |
 
 关键原则：**四模块的判定逻辑原样保留**（它们各有完整 spec），仲裁器只把
 「各自 can* 输出 + 键位声明」收口为单一决策点。这不是重写判定，是收口消费。
@@ -74,16 +83,17 @@ export function resolveKeyOwners(claims: readonly ArbiterClaim[]): Record<ClaimK
 - xterm `attachCustomKeyEventHandler` 的 ↑/↓/→/Esc 分支改查仲裁器持有者——
   分支数从「每浮层一套 if」收敛为「查表分发」。
 
-## 2. 迁移步骤（每步独立可回滚、独立过门）
+## 2. 迁移步骤（✅ 已完成；每步一个提交，独立可回滚）
 
-| 步骤 | 内容 | 验收门 |
-| --- | --- | --- |
-| S1 | 新增 `overlayArbiter.ts` + spec（含优先级表快照用例：#150/#152 的三张回归截图场景在 mock 断言键权归属） | 前端三件套 + smoke_ui_mock/settings all green |
-| S2 | 历史面板 + 引导条接入（占用量最少的两个先行） | 同上 + 手工：#152 三状态截图回归 |
-| S3 | ghost + 建议浮层接入（`ghostMenuSuppressed` 退役为仲裁表一行） | 同上 + #150 场景回归 |
-| S4 | 删除四模块内被仲裁器取代的互斥门（保留纯判定），App.vue 按键路由查表收口 | 全量 scripts/test.sh --skip-host |
+| 步骤 | 内容 | 验收门 | 状态 |
+| --- | --- | --- | --- |
+| S1 | 新增 `overlayArbiter.ts` + spec（含优先级表快照用例：#150/#152 的回归场景在 mock 断言键权归属） | 前端三件套 + smoke_ui_mock/settings all green | ✅ a622f776 |
+| S2 | 历史面板 + 引导条接入 | 同上 + #152 场景回归 | ✅ 3c7cf602 |
+| S3 | ghost/补全/建议/quick-select/搜索接入（ghost → 族两分支按 §1.2 注保留组合键条件） | 同上 + #150 场景回归 | ✅ bb73cc84 |
+| S4 | 收尾：路由查表核对（7 分支全部 owner 门）、§1.2 定稿回写、全量管线 | scripts/test.sh --skip-host all green | ✅ 本提交 |
 
-每步一个提交；任一步出回归，revert 该步即可，不影响已合入的前序步骤。
+实施修正记录：S1 快照守卫纠正了两处 §1.2 初版的链序误读（面板 vs 补全/建议/
+搜索/胶囊菜单的先后），见文首状态注 ②；键维度由五个扩为七个，见状态注 ①。
 
 ## 3. 风险与缓解
 
