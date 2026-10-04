@@ -6,8 +6,55 @@
 //! is our own plugin UI, and the paths stay on the user's machine.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value};
+
+/// 系统对话框 single-flight：SDK worker 池 ≥2 线程时，第二次「导入」会并发
+/// 再弹一个叠着的原生对话框（宿主 timeout_ms 只管放弃等待，管不住已弹出的
+/// 窗口）。RAII 释放覆盖取消/报错/panic 全部路径。
+static DIALOG_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+struct DialogFlightGuard;
+
+impl DialogFlightGuard {
+    fn acquire() -> Result<Self, String> {
+        DIALOG_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| DialogFlightGuard)
+            .map_err(|_| {
+                "A native file dialog is already open — finish or cancel it first".to_string()
+            })
+    }
+}
+
+impl Drop for DialogFlightGuard {
+    fn drop(&mut self) {
+        DIALOG_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+/// AppleScript 双引号字符串字面量转义：`"` 与 `\` 在文件名中均合法，不转义
+/// 会让 osascript 编译失败乃至注入 AppleScript 语句（osascript 是代码执行
+/// 原语）。仅被平台对话框引用，其余平台死代码——与 FilePickFilter 同一
+/// 处理：结构性 suppress，不加 cfg。
+#[allow(dead_code)]
+fn applescript_quote(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    for ch in text.chars() {
+        if ch == '"' || ch == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted
+}
+
+/// PowerShell 单引号字符串字面量（含成对引号）：内部单引号双写 `''`。
+#[allow(dead_code)]
+fn powershell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
 
 /// Cap per listing so a huge directory cannot stall the picker.
 const MAX_ENTRIES: usize = 500;
@@ -82,6 +129,7 @@ pub fn browse_local_dir(path: Option<&str>, data_dir: &Path) -> Result<Value, St
 /// cancels. Used by the connection form's "import private key" action — the
 /// host-rendered form cannot pick files itself.
 pub fn pick_file() -> Result<Option<String>, String> {
+    let _flight = DialogFlightGuard::acquire()?;
     let ssh_dir = home_subdir(".ssh");
     trim_picked(pick_file_dialog(ssh_dir.as_deref(), None))
 }
@@ -171,6 +219,7 @@ pub fn import_source_by_kind(kind: &str) -> Option<&'static ImportSourceSpec> {
 /// "Import connections" action. Returns the index into [`IMPORT_SOURCES`];
 /// `None` when the user cancels.
 pub fn pick_import_source() -> Result<Option<usize>, String> {
+    let _flight = DialogFlightGuard::acquire()?;
     let labels: Vec<&str> = IMPORT_SOURCES.iter().map(|s| s.label).collect();
     pick_source_dialog(&labels).map(|picked| {
         picked.and_then(|label| labels.iter().position(|candidate| *candidate == label))
@@ -185,7 +234,9 @@ fn home_subdir(subdir: &str) -> Option<PathBuf> {
 
 fn trim_picked(picked: Result<Option<String>, String>) -> Result<Option<String>, String> {
     picked.map(|path| {
-        path.map(|path| path.trim().to_string())
+        // 只剥对话框输出的 \r\n（osascript/zenity 各带一个换行）；路径本身
+        // 合法允许首尾空格，不能 trim。
+        path.map(|path| path.trim_matches(['\r', '\n']).to_string())
             .filter(|path| !path.is_empty())
     })
 }
@@ -246,10 +297,10 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
     ));
     for (index, label) in labels.iter().enumerate() {
         script.push_str(&format!(
-            "$r{index}=New-Object System.Windows.Forms.RadioButton;$r{index}.Text='{label}';$r{index}.SetBounds(16,{y},340,24);$f.Controls.Add($r{index});$radios+=$r{index};",
+            "$r{index}=New-Object System.Windows.Forms.RadioButton;$r{index}.Text={text};$r{index}.SetBounds(16,{y},340,24);$f.Controls.Add($r{index});$radios+=$r{index};",
             index = index,
             y = 40 + index * 30,
-            label = label,
+            text = powershell_quote(label),
         ));
     }
     script.push_str("$radios[0].Checked=$true;");
@@ -270,7 +321,9 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
         ])
         .output()
         .map_err(|error| format!("Failed to launch the source picker: {error}"))?;
-    let label = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let label = String::from_utf8_lossy(&output.stdout)
+        .trim_matches(['\r', '\n'])
+        .to_string();
     Ok(if label.is_empty() { None } else { Some(label) })
 }
 
@@ -281,7 +334,7 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
         // AppleScript choose from list：取消输出空串/`false`，选中输出该项文本。
         let list = labels
             .iter()
-            .map(|label| format!("\"{label}\""))
+            .map(|label| format!("\"{}\"", applescript_quote(label)))
             .collect::<Vec<_>>()
             .join(",");
         let output = std::process::Command::new("osascript")
@@ -294,7 +347,9 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
         if !output.status.success() {
             return Ok(None);
         }
-        let label = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let label = String::from_utf8_lossy(&output.stdout)
+            .trim_matches(['\r', '\n'])
+            .to_string();
         Ok((!label.is_empty() && label != "false").then_some(label))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -333,7 +388,9 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
                     if !output.status.success() {
                         return Ok(None);
                     }
-                    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let text = String::from_utf8_lossy(&output.stdout)
+                        .trim_matches(['\r', '\n'])
+                        .to_string();
                     if text.is_empty() {
                         return Ok(None);
                     }
@@ -379,8 +436,8 @@ fn pick_file_dialog(
     ));
     match default_dir {
         Some(dir) => script.push_str(&format!(
-            "$d.InitialDirectory='{}';",
-            dir.to_string_lossy().replace('\'', "''")
+            "$d.InitialDirectory={};",
+            powershell_quote(&dir.to_string_lossy())
         )),
         None => script.push_str("$d.InitialDirectory=$env:USERPROFILE;"),
     }
@@ -392,9 +449,13 @@ fn pick_file_dialog(
                 .map(|extension| format!("*.{extension}"))
                 .collect::<Vec<_>>()
                 .join(";");
+            // Filter 整体是 PowerShell 单引号字符串：name/patterns 里的
+            // `'` 需双写转义，否则脚本编译失败乃至注入。
             script.push_str(&format!(
-                "$d.Filter='{} ({})|{}|All files (*.*)|*.*';",
-                name, patterns, patterns,
+                "$d.Filter={};",
+                powershell_quote(&format!(
+                    "{name} ({patterns})|{patterns}|All files (*.*)|*.*"
+                )),
             ));
         }
         _ => script.push_str("$d.Filter='All files (*.*)|*.*';"),
@@ -415,7 +476,9 @@ fn pick_file_dialog(
         ])
         .output()
         .map_err(|error| format!("Failed to launch the file picker: {error}"))?;
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let path = String::from_utf8_lossy(&output.stdout)
+        .trim_matches(['\r', '\n'])
+        .to_string();
     Ok(if path.is_empty() { None } else { Some(path) })
 }
 
@@ -431,7 +494,12 @@ fn pick_file_dialog(
     command.arg("-e").arg(format!(
         "set defaultDir to {}",
         match default_dir {
-            Some(dir) => format!("POSIX file \"{}\"", dir.display()),
+            // `"` 与 `\` 在路径中合法：不转义会让 osascript 编译失败乃至
+            // 注入 AppleScript 语句（osascript 是代码执行原语）。
+            Some(dir) => format!(
+                "POSIX file \"{}\"",
+                applescript_quote(&dir.to_string_lossy())
+            ),
             None => "path to home folder".to_string(),
         }
     ));
@@ -458,7 +526,9 @@ fn pick_file_dialog(
     if !output.status.success() {
         return Ok(None);
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let path = String::from_utf8_lossy(&output.stdout)
+        .trim_matches(['\r', '\n'])
+        .to_string();
     Ok(if path.is_empty() { None } else { Some(path) })
 }
 
@@ -492,7 +562,9 @@ fn pick_file_dialog(
         if !output.status.success() {
             return Ok(None);
         }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let path = String::from_utf8_lossy(&output.stdout)
+            .trim_matches(['\r', '\n'])
+            .to_string();
         return Ok(if path.is_empty() { None } else { Some(path) });
     }
     // zenity 不在时回落 kdialog（过滤器语法 `*.pat|Name`）。
@@ -511,7 +583,9 @@ fn pick_file_dialog(
             if !output.status.success() {
                 return Ok(None);
             }
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = String::from_utf8_lossy(&output.stdout)
+                .trim_matches(['\r', '\n'])
+                .to_string();
             Ok(if path.is_empty() { None } else { Some(path) })
         }
         Err(_) => Err("No file picker available (install zenity or kdialog)".to_string()),
@@ -521,6 +595,7 @@ fn pick_file_dialog(
 /// Opens the per-source filtered file picker after the user picked an import
 /// source; `None` when the user cancels.
 pub fn pick_import_file(source: &ImportSourceSpec) -> Result<Option<String>, String> {
+    let _flight = DialogFlightGuard::acquire()?;
     let default_dir = source.default_subdir.and_then(home_subdir);
     trim_picked(pick_file_dialog(
         default_dir.as_deref(),
@@ -629,5 +704,29 @@ mod tests {
         } else {
             assert!(list_local_drives().is_empty());
         }
+    }
+
+    #[test]
+    fn quoting_helpers_escape_script_metacharacters() {
+        // AppleScript 双引号串内的 `"`/`\` 转义——文件名两者皆合法。
+        assert_eq!(applescript_quote("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(applescript_quote("plain"), "plain");
+        // PowerShell 单引号串内的 `'` 双写。
+        assert_eq!(powershell_quote("it's"), "'it''s'");
+        assert_eq!(powershell_quote("*.mxtsessions"), "'*.mxtsessions'");
+        // 首尾空格是合法路径/标签成分：quote 不增删。
+        assert_eq!(applescript_quote(" /tmp/a "), " /tmp/a ");
+        assert_eq!(powershell_quote(" a "), "' a '");
+    }
+
+    #[test]
+    fn trim_picked_strips_only_dialog_newlines() {
+        let picked = Ok(Some(" /tmp/dir with trailing space \r\n".to_string()));
+        assert_eq!(
+            trim_picked(picked).unwrap(),
+            Some(" /tmp/dir with trailing space ".to_string())
+        );
+        assert_eq!(trim_picked(Ok(Some("\r\n".to_string()))).unwrap(), None);
+        assert_eq!(trim_picked(Ok(None)).unwrap(), None);
     }
 }

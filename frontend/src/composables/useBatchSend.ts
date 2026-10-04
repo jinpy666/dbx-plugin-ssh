@@ -139,7 +139,12 @@ function applyRemoteBatchBarState(params: { draft?: unknown; quickPickId?: unkno
   }
 }
 
+// 刷新 stale-guard：连续两次刷新（快速开合下拉/连接事件）时旧响应可能后到
+// 覆盖新列表。epoch 递增，过期响应直接丢弃；下次刷新自愈。
+let batchTargetsEpoch = 0;
+
 async function refreshBatchTargets() {
+  const epoch = ++batchTargetsEpoch;
   batchLoading.value = true;
   batchError.value = "";
   try {
@@ -160,6 +165,7 @@ async function refreshBatchTargets() {
     } catch {
       // 旧宿主无 listConnections：保持 user@host 标签。
     }
+    if (epoch !== batchTargetsEpoch) return;
     batchTargets.value = targets;
     // 剔除已关闭会话；选择为空时默认只预选当前会话（本地面板预选本地会话；
     // 批量写入影响所有被选主机，宁缺毋滥）。
@@ -170,11 +176,12 @@ async function refreshBatchTargets() {
       batchSelected.value = currentSessionId && known.has(currentSessionId) ? [currentSessionId] : [];
     }
   } catch (cause) {
+    if (epoch !== batchTargetsEpoch) return;
     batchTargets.value = [];
     batchSelected.value = [];
     batchError.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
-    batchLoading.value = false;
+    if (epoch === batchTargetsEpoch) batchLoading.value = false;
   }
 }
 
@@ -245,13 +252,27 @@ async function sendBatchCommand() {
       const response = await window.dbxPlugin.invoke<{ results: unknown }>("ssh/terminal/batchInput", { sessionIds: sshIds, command });
       if (Array.isArray(response.results)) results.push(...response.results);
     }
-    for (const sessionId of localIds) {
+    let localAlive: Set<string> | undefined;
+    if (localIds.length) {
+      // 发送前复核本地会话存活（刷新到发送之间会话可能已关闭）：enqueue 是
+      // 同步且不抛错的（异步失败走全局 onError，无法归因到本行），不复核会把
+      // 已关闭会话恒报成功。探测失败按全部存活处理（旧 sidecar 无该能力）。
       try {
-        terminalInputQueue.enqueue(sessionId, new TextEncoder().encode(`${command}\r`));
-        results.push({ sessionId, success: true });
-      } catch (cause) {
-        results.push({ sessionId, success: false, error: cause instanceof Error ? cause.message : String(cause) });
+        const local = await window.dbxPlugin.invoke<{ sessions?: unknown }>("local/session/list", {}, { timeoutMs: 5000 });
+        localAlive = new Set(normalizeLocalBatchTargets(local?.sessions).map((target) => target.sessionId));
+      } catch {
+        localAlive = undefined;
       }
+    }
+    for (const sessionId of localIds) {
+      if (localAlive && !localAlive.has(sessionId)) {
+        results.push({ sessionId, success: false, error: "Local session has closed" });
+        continue;
+      }
+      // enqueue 即本地 PTY 的受理边界（与 SSH 路径的桥受理语义一致）；
+      // 异步发送失败由输入队列的全局 onError 上报。
+      terminalInputQueue.enqueue(sessionId, new TextEncoder().encode(`${command}\r`));
+      results.push({ sessionId, success: true });
     }
     batchSummary.value = summarizeBatchResults(results);
     if (batchSummary.value.sent) {

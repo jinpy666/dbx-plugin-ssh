@@ -182,11 +182,13 @@ export function summarizeBatchResults(raw: unknown): BatchSendSummary {
   };
 }
 
-/** 命令条保存快速命令时的默认名称：压平空白后截断（超长以省略号收尾）。 */
+/** 命令条保存快速命令时的默认名称：压平空白后截断（超长以省略号收尾）。
+ * 按 code point 截断——UTF-16 code unit 直切会把 emoji 代理对劈成乱码。 */
 export function deriveBatchCommandName(command: string, maxLength = 30): string {
   const flat = command.replace(/\s+/g, " ").trim();
-  if (flat.length <= maxLength) return flat;
-  return `${flat.slice(0, Math.max(1, maxLength - 1))}…`;
+  const chars = Array.from(flat);
+  if (chars.length <= maxLength) return flat;
+  return `${chars.slice(0, Math.max(1, maxLength - 1)).join("")}…`;
 }
 
 /** 命令条下拉切换：按 id 取快速命令文本；未知 id 返回空串（保持原输入）。 */

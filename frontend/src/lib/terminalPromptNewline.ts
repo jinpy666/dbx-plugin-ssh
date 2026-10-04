@@ -98,6 +98,14 @@ export class PromptNewlineTransformer {
         // longer (ESC ( B charset designators), then one final byte.
         while (i < combined.length && combined[i] >= 0x20 && combined[i] <= 0x2f) i += 1;
         if (i >= combined.length) break;
+        // 被中止的两字节序列后紧跟新 ESC：不吞它，从新 ESC 重新分类——
+        // 否则紧随的 ESC]7; 的 `]7;` 会落回 ground 被当可见文本，提示帧漏判。
+        if (combined[i] === ESC) {
+          escapeStart = i;
+          mode = "escape";
+          i += 1;
+          continue;
+        }
         i += 1;
         mode = "ground";
         escapeStart = -1;
@@ -110,8 +118,17 @@ export class PromptNewlineTransformer {
         // with suppressInsert anyway.
         while (i < combined.length && combined[i] >= 0x20 && combined[i] <= 0x3f) i += 1;
         if (i >= combined.length) break;
-        // Final byte ends the sequence; anything else is malformed — consume
-        // one byte and resynchronize instead of sticking forever.
+        // Final byte ends the sequence. Anything else is malformed: an ESC
+        // restarts classification (see escape mode), CAN/SUB abort the
+        // sequence per ECMA-48 — consume the abort byte and resynchronize
+        // instead of sticking forever or swallowing the next sequence's ESC.
+        const stop = combined[i];
+        if (stop === ESC) {
+          escapeStart = i;
+          mode = "escape";
+          i += 1;
+          continue;
+        }
         i += 1;
         mode = "ground";
         escapeStart = -1;
@@ -124,6 +141,10 @@ export class PromptNewlineTransformer {
           pieces.push(CRLF);
           emit = escapeStart;
           inserted = true;
+          // 插入的 CRLF 已把光标送到行首：置位让紧随的第二个提示帧（远端
+          // dotfile 自带 OSC 7 时一次提示符双发射）不再重复插入——否则每个
+          // 提示符前恒多一个空行。任何后续可见字节会照常把它翻回 false。
+          this.atLineStart = true;
         }
         i += 1;
         mode = "ground";
@@ -136,6 +157,8 @@ export class PromptNewlineTransformer {
           pieces.push(CRLF);
           emit = escapeStart;
           inserted = true;
+          // 同上：双发射去重。
+          this.atLineStart = true;
         }
         i += 2;
         mode = "ground";

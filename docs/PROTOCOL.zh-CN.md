@@ -54,6 +54,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `ssh/session/open`、`ssh/session/close` | 创建、关闭 PTY 会话（`open` 可选 `requestedSessionId`、`reuseAuthenticatedTransport` + `reuseAuthenticatedSessionId`、`spawnCommand`，`requestedSessionId` 供前端在长 RPC 返回前按预分配 id 接收终端首帧，sidecar 在注册表冲突或缺省时回退服务端 UUID；复用指定同连接存活会话的认证 transport 并新开独立 channel；显式 ID 不可用时 fail closed，只有布尔参数时兼容选择同连接最早存活会话；复用会继承来源会话已解析的 sudo 编排快照；连接 `remote_command` 非空时 exec 该命令替代 shell，`spawnCommand` 非空时以单引号转义的 `sh -c` exec 覆盖两者（WezTerm spawn 对标，见「同 transport 命令会话」节），`set_env` 随会话注入；连接配置 `triggers` 时挂载自动交互触发器引擎，命中发 `ssh/trigger` 事件，见「自动交互触发器（Expect）与外部密码管理器」节；`startup_commands` 偏好启用的连接在 shell 建立后按序自动键入预置命令并发 `ssh/startup` 事件，见「启动命令（Login scripts 对标）」节） |
 | `ssh/session/attach` | 按 `connectionId + workbenchId` 在**存活**会话中回附（工作台重建第二入口，与 `ssh/session/open` 的复用参数互补）：`{connectionId, workbenchId, afterSequence?}` → `{sessionId, connectionId, workbenchId, connected: true, sequence, replay, chunkSize}`，并按 `afterSequence` 在 `ssh/terminal/out` 补发缺口帧；无匹配存活会话报 `No live SSH session is attached to this workbench`（绝不按连接抢占另一标签页的会话，与 `*/list` 族同一红线） |
 | `ssh/terminal/resize` | 调整 PTY 行列 |
+| `ssh/terminal/directoryTracking` | 目录跟踪开关（保留兼容）：`{sessionId, enabled}`。钩子自「不再拆除」起对会话全生命周期生效，`enabled:false` 为纯前端语义（只停 SFTP 导航跟随），不改变远端状态 |
 | `ssh/terminal/replay` | 从指定序号补发终端输出 |
 | `ssh/host-key/resolve` | 处理工作台内的主机密钥确认 |
 | `ssh/exec` | 在会话连接上执行远程命令，可选 Quick Sudo 提权 |

@@ -98,8 +98,10 @@ describe("PromptNewlineTransformer", () => {
     expect(text(out)).toBe(junk);
     // Fail-open leaves ground state "not at line start": the next real frame
     // still gets its newline, and no bytes were dropped or duplicated.
-    expect(transformer.push(bytes(OSC7_BEL))).toBeInstanceOf(Uint8Array);
     expect(text(transformer.push(bytes(OSC7_BEL)))).toBe(`\r\n${OSC7_BEL}`);
+    // 连续第二帧（中间无可见输出）已落在行首：双发射不再重复插入。
+    expect(text(transformer.push(bytes(OSC7_BEL)))).toBe(OSC7_BEL);
+    expect(text(transformer.push(bytes(OSC7_ST)))).toBe(OSC7_ST);
   });
 
   it("reset drops carry and restores the initial line-start state", () => {
@@ -119,6 +121,43 @@ describe("PromptNewlineTransformer", () => {
     // moves the cursor mid-line, so the second frame gets its CRLF in front.
     const stream = bytes(`\n${OSC7_BEL}$ ls${OSC7_BEL}`);
     expect(text(transformer.push(stream))).toBe(`\n${OSC7_BEL}$ ls\r\n${OSC7_BEL}`);
+  });
+
+  it("inserts only once when the remote emits two prompt frames back to back", () => {
+    const transformer = new PromptNewlineTransformer();
+    // 双发射（用户 dotfile 自带 OSC 7 + 钩子自己的帧）：插入的 CRLF 已把光标
+    // 送到行首，第二帧不得再插——否则每个提示符前恒多一个空行。
+    expect(text(transformer.push(bytes(`mid${OSC7_BEL}${OSC7_BEL}`)))).toBe(
+      `mid\r\n${OSC7_BEL}${OSC7_BEL}`,
+    );
+    // 跨 chunk 同理：置位持续到任何可见字节通过才复位。
+    expect(text(transformer.push(bytes(OSC7_BEL)))).toBe(OSC7_BEL);
+    expect(text(transformer.push(bytes(OSC7_ST)))).toBe(OSC7_ST);
+    // 真实输出之后恢复常规判定。
+    expect(text(transformer.push(bytes("$ ls")))).toBe("$ ls");
+    expect(text(transformer.push(bytes(OSC7_BEL)))).toBe(`\r\n${OSC7_BEL}`);
+  });
+
+  it("resynchronizes when a truncated CSI is followed by a new sequence", () => {
+    const transformer = new PromptNewlineTransformer();
+    // 被截断的 CSI（无 final byte）后紧跟新 ESC：旧序列按中止处理，不吞新
+    // ESC——否则 ESC]7; 的 `]7;` 落回 ground 被当可见文本，该次不补换行。
+    const out = transformer.push(bytes(`mid${ESC}[38;5${OSC7_BEL}`));
+    expect(text(out)).toBe(`mid${ESC}[38;5\r\n${OSC7_BEL}`);
+  });
+
+  it("resumes tracking after a CAN aborts a CSI sequence", () => {
+    const transformer = new PromptNewlineTransformer();
+    // CAN (0x18) 按 ECMA-48 中止序列：吞掉中止字节回到 ground，后续可见
+    // 输出照常翻置行首标志。
+    const out = transformer.push(bytes(`mid${ESC}[38;5\u0018tail${OSC7_BEL}`));
+    expect(text(out)).toBe(`mid${ESC}[38;5\u0018tail\r\n${OSC7_BEL}`);
+  });
+
+  it("resynchronizes a two-byte escape aborted by a new ESC", () => {
+    const transformer = new PromptNewlineTransformer();
+    const out = transformer.push(bytes(`mid${ESC}(${OSC7_BEL}`));
+    expect(text(out)).toBe(`mid${ESC}(\r\n${OSC7_BEL}`);
   });
 });
 

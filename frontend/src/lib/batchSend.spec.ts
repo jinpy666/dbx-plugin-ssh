@@ -138,6 +138,14 @@ describe("deriveBatchCommandName", () => {
   it("returns empty for blank commands", () => {
     expect(deriveBatchCommandName("   ")).toBe("");
   });
+
+  it("truncates by code point so surrogate pairs stay intact", () => {
+    // 32 个 emoji（64 个 UTF-16 code unit）：按 code unit 截断会把代理对劈成
+    // 乱码；按 code point 截断后省略号前最后一个字符仍是完整 emoji。
+    const name = deriveBatchCommandName("🚀".repeat(32));
+    expect(Array.from(name.slice(0, -1)).length).toBe(29);
+    expect(name.endsWith("…")).toBe(true);
+  });
 });
 
 describe("quickPickCommandById", () => {

@@ -416,9 +416,14 @@ pub async fn read_file(
     length: u64,
 ) -> Result<Value, String> {
     let path = normalize_remote_path(path)?;
-    // length=0（读到结尾）钳到上限：无上限的 `cat | base64` 会把整个 root
-    // 文件吞进 exec 输出直到 OOM。多出的部分照既有 truncated 语义上报。
-    let length = if length == 0 { MAX_READ_BYTES } else { length };
+    // length=0（读到结尾）钳到上限；显式 length 同样钳制——传 u64::MAX 会让
+    // `head -c` 变成全文件读取，经 exec String + base64 解码/再编码约 4 倍
+    // 文件大小的内存。超出部分照既有 truncated 语义上报。
+    let length = if length == 0 {
+        MAX_READ_BYTES
+    } else {
+        length.min(MAX_READ_BYTES)
+    };
     // tail counts from byte 1, so +1 converts a zero-based offset.
     let head = if offset == 0 {
         format!(
@@ -613,102 +618,6 @@ pub async fn rename(
         .await
         .map(|_| ())
 }
-
-// ---------------------------------------------------------------------------
-// main.rs registration (reference only — nothing in this file is wired up
-// until these arms are added; the module also needs `mod sudo_fs;` next to
-// the other `mod` declarations at the top of backend/src/main.rs).
-//
-// "sudo/stat" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     self.runtime
-//         .block_on(sudo_fs::stat(&self.ssh, session_id, &path))
-// }
-// "sudo/exists" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     let exists = self
-//         .runtime
-//         .block_on(sudo_fs::exists(&self.ssh, session_id, &path))?;
-//     Ok(json!({ "exists": exists }))
-// }
-// "sudo/touch" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     self.runtime
-//         .block_on(sudo_fs::touch(&self.ssh, session_id, &path))?;
-//     Ok(json!({ "success": true }))
-// }
-// "sudo/listDir" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     self.runtime
-//         .block_on(sudo_fs::list_dir(&self.ssh, session_id, &path))
-// }
-// "sudo/readFile" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
-//     let length = params.get("length").and_then(Value::as_u64).unwrap_or(0);
-//     self.runtime.block_on(sudo_fs::read_file(
-//         &self.ssh,
-//         session_id,
-//         &path,
-//         offset,
-//         length,
-//     ))
-// }
-// "sudo/writeFile" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     let data_base64 = required_string(&params, "dataBase64")?;
-//     self.runtime.block_on(sudo_fs::write_file(
-//         &self.ssh,
-//         session_id,
-//         &path,
-//         data_base64,
-//     ))?;
-//     Ok(json!({ "success": true }))
-// }
-// "sudo/mkdir" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     self.runtime
-//         .block_on(sudo_fs::mkdir(&self.ssh, session_id, &path))?;
-//     Ok(json!({ "success": true }))
-// }
-// "sudo/remove" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     self.runtime
-//         .block_on(sudo_fs::remove(&self.ssh, session_id, &path))?;
-//     Ok(json!({ "success": true }))
-// }
-// "sudo/removeAll" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     self.runtime
-//         .block_on(sudo_fs::remove_all(&self.ssh, session_id, &path))?;
-//     Ok(json!({ "success": true }))
-// }
-// "sudo/chmod" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let path = required_string(&params, "path")?;
-//     let mode = required_string(&params, "mode")?;
-//     self.runtime
-//         .block_on(sudo_fs::chmod(&self.ssh, session_id, &path, mode))?;
-//     Ok(json!({ "success": true }))
-// }
-// "sudo/rename" => {
-//     let session_id = required_string(&params, "sessionId")?;
-//     let source = required_string(&params, "sourcePath")?;
-//     let target = required_string(&params, "targetPath")?;
-//     self.runtime
-//         .block_on(sudo_fs::rename(&self.ssh, session_id, &source, &target))?;
-//     Ok(json!({ "success": true }))
-// }
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
