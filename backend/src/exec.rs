@@ -60,6 +60,10 @@ const PASSWORD_PROMPT_PATTERS: &[&str] = &[
     "[sudo] password for",
     "密码:",
     "密码：",
+    // 「口令」与既有「密码」同构（评审 round-3 经确认补录）；两档冒号宽度
+    // 与「密码」一致。带冒号限定避免误中「口令错误：」这类失败消息。
+    "口令:",
+    "口令：",
 ];
 
 const TOTP_PROMPT_PATTERS: &[&str] = &[

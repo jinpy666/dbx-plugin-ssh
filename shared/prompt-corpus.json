@@ -1,5 +1,5 @@
 {
-  "$comment": "提示词判定统一语料（架构评审 WATCH：前后端词表防漂移）。backend 期望对应 exec.rs classify_auth_prompt 的返回（password/totp/combined/none），frontend 数组对应 interactivePromptGuard 三个判定器命中项（auth/password/selection，可多值）。backend/src/exec.rs 的 cargo test 与 frontend/src/lib/promptCorpus.spec.ts 加载同一份文件——改任一侧词表必须同步本文件，否则对应测试失败。已知漂移记录：后端自动应答词表缺「口令:」（补录属认证路径，待人工评审），前端经本语料补录 authentication code / 一次性密码。combined 说明：同时命中密码表与 OTP 表（如「One-Time Password:」含 password: 子串）即 Combined，是分类器既有语义。",
+  "$comment": "提示词判定统一语料（架构评审 WATCH：前后端词表防漂移）。backend 期望对应 exec.rs classify_auth_prompt 的返回（password/totp/combined/none），frontend 数组对应 interactivePromptGuard 三个判定器命中项（auth/password/selection，可多值）。backend/src/exec.rs 的 cargo test 与 frontend/src/lib/promptCorpus.spec.ts 加载同一份文件——改任一侧词表必须同步本文件，否则对应测试失败。前端经本语料补录 authentication code / 一次性密码 / pass phrase（带空格写法）；后端经确认补录「口令:」（与「密码:」同构，round-3）。combined 说明：同时命中密码表与 OTP 表（如「One-Time Password:」含 password: 子串）即 Combined，是分类器既有语义。已知不对称：「口令错误：」后端不中（紧凑子串）、前端密码判定中（关键词到冒号间允许任意非冒号文本，为 [sudo] password for user: 所必需）——错误行多一次浮层抑制属低影响 fail-safe。",
   "cases": [
     {
       "text": "Password:",
@@ -52,6 +52,20 @@
     },
     {
       "text": "口令:",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "口令：",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "口令错误：",
       "backend": "none",
       "frontend": [
         "password"
