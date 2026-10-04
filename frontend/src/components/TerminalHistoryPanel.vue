@@ -91,18 +91,17 @@ const style = computed(() => {
   const containerHeight = el?.parentElement?.clientHeight || hostHeight;
   const spaceViewport = hostHeight || containerHeight;
   const cellHeight = anchor.cellHeight ?? 0;
-  const naturalHeight = el?.scrollHeight ?? 0;
   const placement = chooseHistoryPanelPlacement(anchor.y, cellHeight, spaceViewport, undefined, lastPlacement ?? undefined);
   lastPlacement = placement;
   const available = overlayMaxHeight(placement, anchor.y, cellHeight, spaceViewport);
-  const maxHeight = available > 0 && naturalHeight > 0 && available < naturalHeight ? { maxHeight: `${available}px` } : undefined;
+  // max-height 恒按放置侧可用空间设置：内容矮则盒子自然矮，内容高则列表内部
+  // 滚动。不做 available < naturalHeight 的条件化（flex 内滚后 scrollHeight ≈
+  // 盒高，比较失真会漏钳，落到 CSS 70% 兜底上——那不看光标位置，顶部铬层被
+  // 裁掉，#152 反馈截图实录）。也删除旧版按 naturalHeight 二次钳 bottom 的
+  // 逻辑：内容偏高时它把面板整块下推钉到窗格底，反过来盖住光标行。
+  const maxHeight = available > 0 ? { maxHeight: `${available}px` } : undefined;
   if (placement === "above") {
-    // 视口钳制（体验回归修复）：锚点可能取自布局未稳的瞬间（回显尚未 settle
-    // 时 y 偏大），bottom 会把整块面板推出视口顶且在下一次锚点刷新前不可点。
-    // 以「容器高 − 面板自然高」为 bottom 上限，保证面板至少完整落在容器内、
-    // 可点击；锚点 settle 后按新值自然收敛回贴行位置。
-    let bottom = flippedOverlayBottom(anchor.y, containerHeight);
-    if (naturalHeight > 0) bottom = Math.min(bottom, Math.max(0, containerHeight - naturalHeight));
+    const bottom = flippedOverlayBottom(anchor.y, containerHeight);
     return { bottom: `${bottom}px`, ...maxHeight };
   }
   return { top: `${overlayBelowTop(anchor.y, cellHeight)}px`, ...maxHeight };
