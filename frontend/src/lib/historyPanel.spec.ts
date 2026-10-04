@@ -241,6 +241,38 @@ describe("chooseHistoryPanelPlacement (Warp 版式：优先输入行上方)", ()
     expect(chooseHistoryPanelPlacement(130, 17, 300)).toBe("below");
   });
 
+  // 体验回归（#152 反馈）：光标在视口中部的刀锋线附近时，回填换行使锚点
+  // 单行抖动，无迟滞的决策会随每次 ↑↓ 导航反复翻面（忽上忽下）。打开期间
+  // 传入 previous 后，跌破绝对下限（铬层高）之前一律维持原侧。
+  it("hysteresis: keeps the current side through single-row anchor jitter", () => {
+    // 初始上方（y=150，上方 144 ≥ minHeight），长命令回填使光标上移一行
+    // （y=133，上方 127 < minHeight 但 ≥ flipFloor）→ 不翻。
+    expect(chooseHistoryPanelPlacement(150, 17, 300, undefined, undefined, "above")).toBe("above");
+    expect(chooseHistoryPanelPlacement(133, 17, 300, undefined, undefined, "above")).toBe("above");
+    // 已在下侧时同样的抖动也保持下侧。
+    expect(chooseHistoryPanelPlacement(150, 17, 300, undefined, undefined, "below")).toBe("below");
+    expect(chooseHistoryPanelPlacement(133, 17, 300, undefined, undefined, "below")).toBe("below");
+    // 往返扫描刀锋线（minHeight=140 与 flipFloor=96 之间的迟滞带）：无迟滞时
+    // 该带内 above/below 随锚点行交替，带迟滞恒为初始侧；跌破 96 仍会翻。
+    for (let y = 115; y <= 200; y += 7) {
+      expect(chooseHistoryPanelPlacement(y, 17, 300, undefined, undefined, "above"), `y=${y}`).toBe("above");
+    }
+    expect(chooseHistoryPanelPlacement(100, 17, 300, undefined, undefined, "above")).toBe("below");
+  });
+
+  it("hysteresis still flips when the current side truly cannot host the panel", () => {
+    // 上侧只剩铬层以下的空间（y 贴近视口顶）且下侧严格更大 → 翻。
+    expect(chooseHistoryPanelPlacement(60, 17, 300, undefined, undefined, "above")).toBe("below");
+    expect(chooseHistoryPanelPlacement(20, 17, 900, undefined, undefined, "above")).toBe("below");
+    // 翻到新侧后新侧成为当前侧，立即获得同样的迟滞保护（不回翻）。
+    expect(chooseHistoryPanelPlacement(60, 17, 300, undefined, undefined, "below")).toBe("below");
+  });
+
+  it("viewportless input keeps the previous side (defaults to above)", () => {
+    expect(chooseHistoryPanelPlacement(150, 17, 0)).toBe("above");
+    expect(chooseHistoryPanelPlacement(150, 17, 0, undefined, undefined, "below")).toBe("below");
+  });
+
   it("keeps above when the viewport is unmeasurable", () => {
     expect(chooseHistoryPanelPlacement(300, 17, 0)).toBe("above");
   });
