@@ -1165,7 +1165,7 @@
       "actions": [
         {
           "id": "import-private-key",
-          "label": "Import private key from file",
+          "label": "Import private key",
           "description": "Pick a private key file on this machine; its content fills the key content field and is stored in the vault on save. Desktop only.",
           "variant": "outline",
           "when": "always",
@@ -1548,7 +1548,7 @@
           },
           "actions": {
             "import-private-key": {
-              "label": "Importar clave privada desde archivo",
+              "label": "Importar clave privada",
               "description": "Elige un archivo de clave privada en este equipo; su contenido rellena el campo de contenido de la clave y se guarda en la bóveda al guardar. Solo escritorio."
             },
             "import-sessions": {
@@ -1832,7 +1832,7 @@
           },
           "actions": {
             "import-private-key": {
-              "label": "Importa chiave privata da file",
+              "label": "Importa chiave privata",
               "description": "Scegli un file di chiave privata su questo computer; il contenuto riempie il campo del contenuto della chiave e viene salvato nel vault al salvataggio. Solo desktop."
             },
             "import-sessions": {
@@ -2116,7 +2116,7 @@
           },
           "actions": {
             "import-private-key": {
-              "label": "ファイルから秘密鍵をインポート",
+              "label": "秘密鍵をインポート",
               "description": "このマシン上の秘密鍵ファイルを選択すると、内容がキー内容フィールドに入力され、保存時に vault に保存されます。デスクトップのみ。"
             },
             "import-sessions": {
@@ -2400,7 +2400,7 @@
           },
           "actions": {
             "import-private-key": {
-              "label": "Importar chave privada de arquivo",
+              "label": "Importar chave privada",
               "description": "Escolha um arquivo de chave privada nesta máquina; o conteúdo preenche o campo de conteúdo da chave e é salvo no cofre ao salvar. Somente desktop."
             },
             "import-sessions": {
@@ -2684,7 +2684,7 @@
           },
           "actions": {
             "import-private-key": {
-              "label": "从文件导入私钥",
+              "label": "导入私钥",
               "description": "选择本机私钥文件，内容将填入「私钥内容」字段，保存后存入密钥库。仅桌面端可用。"
             },
             "import-sessions": {
@@ -2968,7 +2968,7 @@
           },
           "actions": {
             "import-private-key": {
-              "label": "從檔案匯入私鑰",
+              "label": "匯入私鑰",
               "description": "選擇本機私鑰檔案，內容將填入「私鑰內容」欄位，保存後存入金鑰庫。僅桌面端可用。"
             },
             "import-sessions": {
