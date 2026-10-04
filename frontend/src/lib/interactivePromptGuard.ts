@@ -24,11 +24,13 @@ export function isAuthChallengeLine(text: string): boolean {
 }
 
 // ② 选择/确认提示（堡垒机服务器菜单、shell read/select、y/n 确认等）：
-//    - 英文 select/choose/pick 与 enter 类祈使句 + 行尾冒号/问号；
-//    - 中文「请选择/请输入/请确认」「输入序号」「^选择…:」+ 行尾冒号/问号；
+//    - 英文 select/choose/pick 与 enter 类祈使句 + 冒号/问号（冒号后允许
+//      已键入的应答/回显尾巴——用户敲了数字或 tty 回显了控制键之后提示行
+//      不再以冒号收尾，交互态不能因此漏判）；
+//    - 中文「请选择/请输入/请确认」「输入序号」「^选择…:」同上；
 //    - 行尾 y/n 括号（(y/n)、[Y/n]、(yes/no): 等）与 [Y]/[n] 单字符菜单括号。
 const SELECTION_PROMPT_PATTERN =
-  /(?:^(?:please\s+)?(?:select|choose|pick)\b[^:：\n?？]{0,40}|^enter\b[^:：\n?？]{0,40}|请(?:选择|输入|确认)|输入(?:序号|编号|选项)|^选择)[^:：\n?？]{0,40}[:：?？]\s*$|\[[YyNn]\]|\[[Yy]\/[Nn]\]|\((?:[Yy]\/[Nn]|[Nn]\/[Yy]|[Yy]es\/[Nn]o|[Nn]o\/[Yy]es)\)(?:\s*[:：])?\s*$/i;
+  /(?:^(?:please\s+)?(?:select|choose|pick)\b[^:：\n?？]{0,40}|^enter\b[^:：\n?？]{0,40}|请(?:选择|输入|确认)|输入(?:序号|编号|选项)|^选择)[^:：\n?？]{0,40}[:：?？]|\[[YyNn]\]|\[[Yy]\/[Nn]\]|\((?:[Yy]\/[Nn]|[Nn]\/[Yy]|[Yy]es\/[Nn]o|[Nn]o\/[Yy]es)\)(?:\s*[:：])?\s*$/i;
 
 /** 该行是否为选择/确认提示（trimEnd 后判定；空串恒 false）。 */
 export function isSelectionPromptLine(text: string): boolean {
@@ -37,12 +39,22 @@ export function isSelectionPromptLine(text: string): boolean {
   return SELECTION_PROMPT_PATTERN.test(trimmed);
 }
 
-/** 该行是否为「远端询问输入/要求选择」的交互提示行：动态码 ∪ 密码输入
- *  （复用 prompt hints 的密码行启发，单一事实源）∪ 选择/确认。 */
+// 规范模式（canonical）tty 会把控制键按 caret 记法回显成可打印文本：↑ 落成
+// 字面 `^[[A`、Esc 落成 `^[`、Ctrl+C 落成 `^C`、Del 落成 `^?`。这些尾巴拼在
+// 提示行尾部（宝塔 `bt` 菜单实测：`请输入命令编号：^[[A`），若不剥离，第一次
+// ↑ 被抑制后回显落地，第二次 ↑ 的行采样就不再命中——面板漏拦。判定前剥掉
+// 行尾的连续 caret 回显。
+const CARET_ECHO_TAIL = /(?:\^\[\[[0-9;]*[A-Za-z~]|\^\[[A-Za-z]|\^\?|\^[A-Z])+$/;
+
+/** 剥离行尾的 caret 回显噪声后再做提示判定。 */
 export function isInteractivePromptLine(text: string): boolean {
-  const trimmed = (text ?? "").trimEnd();
+  const trimmed = stripCaretEchoTail((text ?? "").trimEnd());
   if (!trimmed) return false;
   return isAuthChallengeLine(trimmed) || isPasswordPromptLine(trimmed) || isSelectionPromptLine(trimmed);
+}
+
+function stripCaretEchoTail(text: string): string {
+  return text.replace(CARET_ECHO_TAIL, "").trimEnd();
 }
 
 /** 光标行及其上一行的提示采样（与密码提示启发同窗）：getLineText 由调用方

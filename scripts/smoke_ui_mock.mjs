@@ -787,6 +787,25 @@ try {
   await guardPage.keyboard.press("ArrowUp");
   await guardPage.waitForTimeout(300);
   check("#150 server menu: ↑ opens no history panel", (await guardPage.locator(".terminal-history-panel").count()) === 0, "panel count");
+  // 宝塔 bt 菜单场景（#150 实测反馈）：canonical tty 把 ↑ 回显成字面 caret
+  // 记法 `^[[A` 拼在提示行尾（第一次 ↑ 被抑制后回显落地），行采样不得因此
+  // 漏判——回显叠加与已键入应答两种污染态都按住面板。每个状态都用清屏重开：
+  // mock 会把真实 ↑ 的 ESC[A 字节原样回显，xterm 将其解释为光标上移，不复位
+  // 会让后续状态采错行。
+  await guardPage.evaluate((prefix) => window.__dbxMockEmitTerminal(`${prefix}请输入命令编号：`), clearScreen);
+  await guardPage.waitForTimeout(250);
+  await guardPage.evaluate(() => window.__dbxMockEmitTerminal("^[[A^[[A"));
+  await guardPage.waitForTimeout(150);
+  await guardPage.keyboard.press("ArrowUp");
+  await guardPage.waitForTimeout(300);
+  check("#150 bt menu with caret echo: ↑ opens no history panel", (await guardPage.locator(".terminal-history-panel").count()) === 0, "panel count");
+  await guardPage.evaluate((prefix) => window.__dbxMockEmitTerminal(`${prefix}请输入命令编号：5`), clearScreen);
+  await guardPage.waitForTimeout(250);
+  await guardPage.keyboard.press("ArrowUp");
+  await guardPage.waitForTimeout(300);
+  check("#150 bt menu with typed answer: ↑ opens no history panel", (await guardPage.locator(".terminal-history-panel").count()) === 0, "panel count");
+  await guardPage.screenshot({ path: `${SHOT_DIR}/08c-interactive-prompt-guard-bt.png`, fullPage: false }).catch(() => undefined);
+  console.log("  screenshot: docs/screenshots-ui-mock/08c-interactive-prompt-guard-bt.png");
   // 对照组：回到普通提示符（提示行滚出采样窗口）→ ↑ 照常开面板。
   await guardPage.evaluate((prefix) => window.__dbxMockEmitTerminal(`${prefix}user@server:~$ `), clearScreen);
   await guardPage.waitForTimeout(250);
