@@ -150,31 +150,28 @@ export function relativeHistoryAge(ts: number | null | undefined, now: number): 
   return { kind: "days", count: Math.floor(elapsedHours / 24) };
 }
 
-/** 面板向上展开的最小可用高度：低于它且下方更大才翻到输入行下方。 */
-export const HISTORY_PANEL_MIN_HEIGHT = 140;
-
-/** 打开期间翻面的绝对下限：低于它面板铬层（标题+搜索+键位提示，≈90px）
- *  已挤掉列表区，翻面才有意义。迟滞用它而非 minHeight——刀锋线附近锚点的
- *  单行抖动（回填换行）幅度小于两者之差，以 minHeight 为迟滞线仍会来回
- *  强制翻面；以铬层下限为线，中线以上一律保持原侧。 */
+/** 打开期间翻面/初判的绝对下限：低于它面板铬层（标题+搜索+键位提示，≈90px）
+ *  已挤掉列表区，该侧视为不可用。朝向决策只用这道下限——高度挤压不再参与
+ *  （体验反馈：挤压阈值在矮视格里落在视口中部，锚点单行抖动就让朝向来回翻；
+ *  面板高度改为随可用空间收窄、列表内部滚动，顶部与搜索框恒完整）。 */
 export const HISTORY_PANEL_FLIP_FLOOR = 96;
 
 /**
  * Warp 版式放置侧：优先在输入行上方展开（底边贴光标行顶）；上方可用高度
- * 不足最小值且下方更大时（光标贴近视口顶部，如刚 clear 的提示符）翻到下方。
- * 视口不可测时保持上方（CSS max-height 兜底）。纯几何，不依赖内容测量——
+ * 跌破下限才考虑下方，下限之下取空间更大的一侧。纯几何，不依赖内容测量——
  * DOM scrollHeight 在测试/渲染器就绪前不可得，放置决策不能挂在它上面。
+ * 面板自身按放置侧可用空间 max-height 收窄、列表内部滚动（铬层恒完整），
+ * 朝向因此与内容高度解耦。
  *
  * previous 为面板当前的放置侧（打开期间传入即启用迟滞）：锚点像素级抖动
  * （回显 settle 前后、长命令回填换行使光标行 ±1）不应让面板反复翻面——
- * 仅当当前侧可用高度跌破绝对下限且另一侧严格更大时才翻，否则维持原侧。
+ * 仅当当前侧可用高度跌破下限且另一侧严格更大时才翻，否则维持原侧。
  */
 export function chooseHistoryPanelPlacement(
   anchorTopY: number,
   cellHeight: number,
   viewportHeight: number,
   gap = OVERLAY_GAP,
-  minHeight = HISTORY_PANEL_MIN_HEIGHT,
   previous?: "above" | "below",
   flipFloor = HISTORY_PANEL_FLIP_FLOOR,
 ): "above" | "below" {
@@ -187,7 +184,9 @@ export function chooseHistoryPanelPlacement(
     if (spaceCurrent >= flipFloor || spaceCurrent >= spaceOther) return previous;
     return previous === "above" ? "below" : "above";
   }
-  return spaceAbove >= minHeight || spaceAbove >= spaceBelow ? "above" : "below";
+  if (spaceAbove >= flipFloor) return "above";
+  if (spaceBelow >= flipFloor) return "below";
+  return spaceAbove >= spaceBelow ? "above" : "below";
 }
 
 /**

@@ -92,7 +92,7 @@ const style = computed(() => {
   const spaceViewport = hostHeight || containerHeight;
   const cellHeight = anchor.cellHeight ?? 0;
   const naturalHeight = el?.scrollHeight ?? 0;
-  const placement = chooseHistoryPanelPlacement(anchor.y, cellHeight, spaceViewport, undefined, undefined, lastPlacement ?? undefined);
+  const placement = chooseHistoryPanelPlacement(anchor.y, cellHeight, spaceViewport, undefined, lastPlacement ?? undefined);
   lastPlacement = placement;
   const available = overlayMaxHeight(placement, anchor.y, cellHeight, spaceViewport);
   const maxHeight = available > 0 && naturalHeight > 0 && available < naturalHeight ? { maxHeight: `${available}px` } : undefined;
@@ -217,7 +217,9 @@ function onRowMousedown(event: MouseEvent) {
 }
 
 .terminal-history-row {
+  /* 铬层恒完整：钳高时只有列表收缩滚动，标题/搜索/键位提示不参与压缩。 */
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -262,7 +264,9 @@ function onRowMousedown(event: MouseEvent) {
 }
 
 .terminal-history-search {
+  /* 铬层恒完整：钳高时只有列表收缩滚动，标题/搜索/键位提示不参与压缩。 */
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 6px;
   border-bottom: 1px solid var(--border);
@@ -298,6 +302,11 @@ function onRowMousedown(event: MouseEvent) {
   overflow-y: auto;
   padding: 4px;
   list-style: none;
+  /* max-height 钳高时由列表吸收收缩（flex 项默认 min-height:auto 拒绝收缩，
+     会把行溢出面板底边盖住光标行——体验反馈实录）；顶部/搜索/键位提示恒
+     完整，超出部分列表内部滚动。 */
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
 .terminal-history-hit {
@@ -380,7 +389,9 @@ function onRowMousedown(event: MouseEvent) {
 }
 
 .terminal-history-hint {
+  /* 铬层恒完整：钳高时只有列表收缩滚动，标题/搜索/键位提示不参与压缩。 */
   display: flex;
+  flex-shrink: 0;
   flex-wrap: wrap;
   gap: 4px 14px;
   border-top: 1px solid var(--border);

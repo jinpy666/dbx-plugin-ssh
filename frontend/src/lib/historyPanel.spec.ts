@@ -227,50 +227,48 @@ describe("relativeHistoryAge", () => {
 });
 
 describe("chooseHistoryPanelPlacement (Warp 版式：优先输入行上方)", () => {
-  it("prefers above whenever the space there is usable", () => {
+  it("prefers above whenever the space there clears the chrome floor", () => {
     expect(chooseHistoryPanelPlacement(500, 17, 900)).toBe("above");
     expect(chooseHistoryPanelPlacement(200, 17, 900)).toBe("above");
   });
 
-  it("flips below only when above is unusable and below has more room", () => {
+  it("flips below only when above cannot host the chrome (floor-based, not height-squeeze)", () => {
     // 光标贴视口顶部（如刚 clear）：上方 14px 不可用，下方充足。
     expect(chooseHistoryPanelPlacement(20, 17, 900)).toBe("below");
-    // 上方不足最小高度但下方更小（矮视口）：保持上方（内部滚动收窄）。
+    // 两侧都跌破下限（矮视口）：取空间更大的一侧（面板收窄 + 内部滚动）。
     expect(chooseHistoryPanelPlacement(100, 17, 120)).toBe("above");
-    // 上方不足且下方更大：翻到下方。
-    expect(chooseHistoryPanelPlacement(130, 17, 300)).toBe("below");
+    // 上方 124px ≥ 下限 96：即便按旧挤压规则会翻，现在保持上方（朝向与
+    // 高度挤压解耦——2026-10-04 体验反馈）。
+    expect(chooseHistoryPanelPlacement(130, 17, 300)).toBe("above");
   });
 
   // 体验回归（#152 反馈）：光标在视口中部的刀锋线附近时，回填换行使锚点
   // 单行抖动，无迟滞的决策会随每次 ↑↓ 导航反复翻面（忽上忽下）。打开期间
-  // 传入 previous 后，跌破绝对下限（铬层高）之前一律维持原侧。
+  // 传入 previous 后，跌破铬层下限之前一律维持原侧。
   it("hysteresis: keeps the current side through single-row anchor jitter", () => {
-    // 初始上方（y=150，上方 144 ≥ minHeight），长命令回填使光标上移一行
-    // （y=133，上方 127 < minHeight 但 ≥ flipFloor）→ 不翻。
-    expect(chooseHistoryPanelPlacement(150, 17, 300, undefined, undefined, "above")).toBe("above");
-    expect(chooseHistoryPanelPlacement(133, 17, 300, undefined, undefined, "above")).toBe("above");
-    // 已在下侧时同样的抖动也保持下侧。
-    expect(chooseHistoryPanelPlacement(150, 17, 300, undefined, undefined, "below")).toBe("below");
-    expect(chooseHistoryPanelPlacement(133, 17, 300, undefined, undefined, "below")).toBe("below");
-    // 往返扫描刀锋线（minHeight=140 与 flipFloor=96 之间的迟滞带）：无迟滞时
-    // 该带内 above/below 随锚点行交替，带迟滞恒为初始侧；跌破 96 仍会翻。
+    // 长命令回填使光标行 ±1（y 在 133↔150 间抖动）：两侧都远高于下限，恒保持原侧。
+    expect(chooseHistoryPanelPlacement(150, 17, 300, undefined, "above")).toBe("above");
+    expect(chooseHistoryPanelPlacement(133, 17, 300, undefined, "above")).toBe("above");
+    expect(chooseHistoryPanelPlacement(150, 17, 300, undefined, "below")).toBe("below");
+    expect(chooseHistoryPanelPlacement(133, 17, 300, undefined, "below")).toBe("below");
+    // 往返扫描刀锋带：带内恒为初始侧；跌破下限仍会翻。
     for (let y = 115; y <= 200; y += 7) {
-      expect(chooseHistoryPanelPlacement(y, 17, 300, undefined, undefined, "above"), `y=${y}`).toBe("above");
+      expect(chooseHistoryPanelPlacement(y, 17, 300, undefined, "above"), `y=${y}`).toBe("above");
     }
-    expect(chooseHistoryPanelPlacement(100, 17, 300, undefined, undefined, "above")).toBe("below");
+    expect(chooseHistoryPanelPlacement(100, 17, 300, undefined, "above")).toBe("below");
   });
 
   it("hysteresis still flips when the current side truly cannot host the panel", () => {
     // 上侧只剩铬层以下的空间（y 贴近视口顶）且下侧严格更大 → 翻。
-    expect(chooseHistoryPanelPlacement(60, 17, 300, undefined, undefined, "above")).toBe("below");
-    expect(chooseHistoryPanelPlacement(20, 17, 900, undefined, undefined, "above")).toBe("below");
+    expect(chooseHistoryPanelPlacement(60, 17, 300, undefined, "above")).toBe("below");
+    expect(chooseHistoryPanelPlacement(20, 17, 900, undefined, "above")).toBe("below");
     // 翻到新侧后新侧成为当前侧，立即获得同样的迟滞保护（不回翻）。
-    expect(chooseHistoryPanelPlacement(60, 17, 300, undefined, undefined, "below")).toBe("below");
+    expect(chooseHistoryPanelPlacement(60, 17, 300, undefined, "below")).toBe("below");
   });
 
   it("viewportless input keeps the previous side (defaults to above)", () => {
     expect(chooseHistoryPanelPlacement(150, 17, 0)).toBe("above");
-    expect(chooseHistoryPanelPlacement(150, 17, 0, undefined, undefined, "below")).toBe("below");
+    expect(chooseHistoryPanelPlacement(150, 17, 0, undefined, "below")).toBe("below");
   });
 
   it("keeps above when the viewport is unmeasurable", () => {
