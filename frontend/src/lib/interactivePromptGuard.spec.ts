@@ -65,6 +65,18 @@ describe("isSelectionPromptLine", () => {
     }
   });
 
+  it("keeps matching after an answer or echo lands after the colon (bt 菜单实测)", () => {
+    for (const line of [
+      "请输入命令编号：^[[A", // canonical tty 把 ↑ 回显成字面 caret 记法(#150 反馈)
+      "请输入命令编号：^[[A^[[A", // 连按多次,回显叠加
+      "请输入命令编号：5", // 已键入应答
+      "请输入命令编号：5^[[A", // 应答 + 回显
+      "Select server:12",
+    ]) {
+      expect(isSelectionPromptLine(line), line).toBe(true);
+    }
+  });
+
   it("matches y/n confirm brackets at the input position", () => {
     for (const line of ["Continue? (y/n)", "Proceed (yes/no):", "Overwrite? [Y/n]", "[Y]es or [N]o", "[y]"]) {
       expect(isSelectionPromptLine(line), line).toBe(true);
@@ -76,8 +88,8 @@ describe("isSelectionPromptLine", () => {
       "root@bastion:~$",
       "docker compose ps",
       "selected 3 of 10 rows", // 英文动词过去式，非祈使提示
-      " please select the files you want", // 无行尾冒号/问号的叙述句
-      "注意事项：请确认网络连通后重试", // 无行尾冒号的说明文字
+      " please select the files you want", // 无冒号/问号的叙述句(前导空格也非行首)
+      "注意事项：请确认网络连通后重试", // 提示词后无冒号/问号的说明文字
       "total 3 entries",
       "",
     ]) {
@@ -95,6 +107,12 @@ describe("isInteractivePromptLine", () => {
     expect(isInteractivePromptLine("[sudo] password for ops:")).toBe(true);
     expect(isInteractivePromptLine("请输入口令:")).toBe(true);
     expect(isInteractivePromptLine("Select server:")).toBe(true);
+  });
+
+  it("strips a trailing caret-echo tail before judging (#150 反馈:回显不吞提示判定)", () => {
+    expect(isInteractivePromptLine("请输入命令编号：^[[A")).toBe(true);
+    expect(isInteractivePromptLine("Password: ^[[A")).toBe(true);
+    expect(isInteractivePromptLine("[OTP Code]: ^[[A")).toBe(true);
   });
 
   it("stays quiet on an ordinary prompt line", () => {
