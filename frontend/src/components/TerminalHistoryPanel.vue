@@ -74,16 +74,26 @@ function onPanelKeydown(event: KeyboardEvent) {
 // （terminal-pane）实测高度（batch 条/标记条让位时 host 比 pane 矮）。
 // maxHeight 按放置侧可用高度收窄（内部滚动）；naturalHeight 不可测（0）时
 // 不设限，交给 CSS max-height 兜底。
+// 放置侧迟滞（体验回归：光标在视口中部的「刀锋线」附近时，锚点像素级抖动
+// ——回显 settle 前后、长命令回填换行使光标行 ±1——会让面板反复翻面）。
+// 打开期间记住当前侧并传给 chooseHistoryPanelPlacement，仅当当前侧真放不下
+// 时才翻；变量非响应式（只随 computed 的既有依赖重算被读写），面板随
+// v-if 卸载即复位，下次打开按纯几何重新决策。
+let lastPlacement: "above" | "below" | null = null;
 const style = computed(() => {
   const anchor = props.anchor;
-  if (!anchor) return undefined;
+  if (!anchor) {
+    lastPlacement = null;
+    return undefined;
+  }
   const el = rootEl.value;
   const hostHeight = props.viewport?.height || 0;
   const containerHeight = el?.parentElement?.clientHeight || hostHeight;
   const spaceViewport = hostHeight || containerHeight;
   const cellHeight = anchor.cellHeight ?? 0;
   const naturalHeight = el?.scrollHeight ?? 0;
-  const placement = chooseHistoryPanelPlacement(anchor.y, cellHeight, spaceViewport);
+  const placement = chooseHistoryPanelPlacement(anchor.y, cellHeight, spaceViewport, undefined, undefined, lastPlacement ?? undefined);
+  lastPlacement = placement;
   const available = overlayMaxHeight(placement, anchor.y, cellHeight, spaceViewport);
   const maxHeight = available > 0 && naturalHeight > 0 && available < naturalHeight ? { maxHeight: `${available}px` } : undefined;
   if (placement === "above") {

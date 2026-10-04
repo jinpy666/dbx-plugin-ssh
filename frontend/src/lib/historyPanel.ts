@@ -153,11 +153,21 @@ export function relativeHistoryAge(ts: number | null | undefined, now: number): 
 /** 面板向上展开的最小可用高度：低于它且下方更大才翻到输入行下方。 */
 export const HISTORY_PANEL_MIN_HEIGHT = 140;
 
+/** 打开期间翻面的绝对下限：低于它面板铬层（标题+搜索+键位提示，≈90px）
+ *  已挤掉列表区，翻面才有意义。迟滞用它而非 minHeight——刀锋线附近锚点的
+ *  单行抖动（回填换行）幅度小于两者之差，以 minHeight 为迟滞线仍会来回
+ *  强制翻面；以铬层下限为线，中线以上一律保持原侧。 */
+export const HISTORY_PANEL_FLIP_FLOOR = 96;
+
 /**
  * Warp 版式放置侧：优先在输入行上方展开（底边贴光标行顶）；上方可用高度
  * 不足最小值且下方更大时（光标贴近视口顶部，如刚 clear 的提示符）翻到下方。
  * 视口不可测时保持上方（CSS max-height 兜底）。纯几何，不依赖内容测量——
  * DOM scrollHeight 在测试/渲染器就绪前不可得，放置决策不能挂在它上面。
+ *
+ * previous 为面板当前的放置侧（打开期间传入即启用迟滞）：锚点像素级抖动
+ * （回显 settle 前后、长命令回填换行使光标行 ±1）不应让面板反复翻面——
+ * 仅当当前侧可用高度跌破绝对下限且另一侧严格更大时才翻，否则维持原侧。
  */
 export function chooseHistoryPanelPlacement(
   anchorTopY: number,
@@ -165,10 +175,18 @@ export function chooseHistoryPanelPlacement(
   viewportHeight: number,
   gap = OVERLAY_GAP,
   minHeight = HISTORY_PANEL_MIN_HEIGHT,
+  previous?: "above" | "below",
+  flipFloor = HISTORY_PANEL_FLIP_FLOOR,
 ): "above" | "below" {
-  if (!(viewportHeight > 0)) return "above";
+  if (!(viewportHeight > 0)) return previous ?? "above";
   const spaceAbove = anchorTopY - gap;
   const spaceBelow = viewportHeight - anchorTopY - cellHeight - gap;
+  if (previous === "above" || previous === "below") {
+    const spaceCurrent = previous === "above" ? spaceAbove : spaceBelow;
+    const spaceOther = previous === "above" ? spaceBelow : spaceAbove;
+    if (spaceCurrent >= flipFloor || spaceCurrent >= spaceOther) return previous;
+    return previous === "above" ? "below" : "above";
+  }
   return spaceAbove >= minHeight || spaceAbove >= spaceBelow ? "above" : "below";
 }
 
