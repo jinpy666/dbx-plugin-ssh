@@ -163,7 +163,7 @@ import { isPasswordPromptLine, loadPromptHintsDismissed, loadPromptHintsEnabled,
 import { interactivePromptNearCursor, isInteractivePromptPending } from "./lib/interactivePromptGuard";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
-import { ARBITER_PRIORITIES, resolveKeyOwners, type ClaimKey, type KeyOwners, type OverlayId } from "./lib/overlayArbiter";
+import { ARBITER_PRIORITIES, resolveKeyOwners, type ArbiterClaim, type ClaimKey, type KeyOwners, type OverlayId } from "./lib/overlayArbiter";
 // AI 助手（Warp AI 对齐批，IMPL_PLAN_WARP_AI_TERMINAL）：宿主 AI 通道封装 +
 // `#` 命令搜索状态机 + 失败修复（输出采集/脱敏）+ 请求构造。插件零密钥，
 // provider/模型全在宿主 Settings → AI；能力缺失全链路降级。
@@ -2142,8 +2142,18 @@ function handleTerminalKey(event: KeyboardEvent) {
   // 命令建议浮层开启时优先消费导航/回填键；Tab 仅在延伸/显式选中时回填，
   // 其余关闭浮层放行 shell 补全（issue #138）。结构化补全浮层（线 2）优先级
   // 更高，按键语义相同（↑↓/Tab/Enter/Esc）。
-  if (completionOpen.value && handleCompletionKey(event)) return consume();
-  if (suggestionOpen.value && handleSuggestionKey(event)) return consume();
+  if (
+    completionOpen.value &&
+    overlayOwnsKey(terminalOverlayKeyOwners(), event, "completion") &&
+    handleCompletionKey(event)
+  )
+    return consume();
+  if (
+    suggestionOpen.value &&
+    overlayOwnsKey(terminalOverlayKeyOwners(), event, "suggestion") &&
+    handleSuggestionKey(event)
+  )
+    return consume();
   // Warp 式 history 面板（↑ 唤起）：面板开启时优先消费导航/回填键（↑↓ 移动、
   // Enter/Tab 回填、Esc 关闭），其余按键原样放行——焦点回到终端时打字仍会
   // 走 onData 链刷新锚点。未开启时裸 ↑ 经仲裁器唤起门打开全量视图（过滤交给
@@ -2175,18 +2185,23 @@ function handleTerminalKey(event: KeyboardEvent) {
       return consume();
     }
   }
-  if (event.key === "Escape" && searchOpen.value) {
+  if (event.key === "Escape" && terminalOverlayKeyOwners().escape === "search") {
     closeTerminalSearch();
     return consume();
   }
   // ghost 键位胶囊菜单开着时 Esc 先收菜单，不落远端（批 4e）。
-  if (event.key === "Escape" && ghostKeycapMenuOpen.value) {
+  if (event.key === "Escape" && terminalOverlayKeyOwners().escape === "ghost") {
     ghostKeycapMenuOpen.value = false;
     return consume();
   }
   // Quick Select 浮层按键（WT-1）：↑↓ 移动、Enter 复制当前项、Esc 关闭。
   // 浮层是被动的（焦点留在终端、不接管键盘），未命中的按键原样放行远端 shell。
-  if (quickSelectOpen.value && handleQuickSelectKey(event)) return consume();
+  if (
+    quickSelectOpen.value &&
+    overlayOwnsKey(terminalOverlayKeyOwners(), event, "quickSelect") &&
+    handleQuickSelectKey(event)
+  )
+    return consume();
   const combo = keyComboFromEvent(event);
   if (!combo) return true;
   switch (matchTerminalHotkey(terminalHotkeys.value, combo)) {
@@ -2413,37 +2428,73 @@ function historyPanelGateOpen(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 浮层键权仲裁器接线（docs/IMPL_PLAN_OVERLAY_KEY_ARBITER.zh-CN.md，S2 批）：
+// 浮层键权仲裁器接线（docs/IMPL_PLAN_OVERLAY_KEY_ARBITER.zh-CN.md）：
 // claims 的可见性沿用各浮层既有判定（can*/gate/open 布尔），判定零迁移——
 // 仲裁器只把「这个键维度此刻归谁」收口为查表。惰性求值：仅浮层分支到达时
 // 才构建/采样（普通键入不读 buffer，热路径零增量）。优先级一律取
-// ARBITER_PRIORITIES 表，接线处不写数字。S3 批迁入 ghost/补全/建议/
-// quick-select/search 各 claim。
+// ARBITER_PRIORITIES 表，接线处不写数字。ghost 的 → 族接受分支不查表（其
+// 组合键条件即让位编码的另一半，见 overlayArbiter.ts ClaimKey 注）。
 function priority(key: ClaimKey, overlay: OverlayId): number {
   return ARBITER_PRIORITIES[key][overlay] ?? 0;
 }
 
 function terminalOverlayKeyOwners(): KeyOwners {
   const panelOpen = historyPanelOpen.value;
-  const gate = priority("arrowUp", "historyPanel");
   return resolveKeyOwners([
     // 历史面板：开着全占导航/接受/Esc；关着仅持有裸 ↑ 的唤起——gate 判
     // false 即不可见，↑ 归远端（#150 交互提示待答态由此编码）。
-    { overlay: "historyPanel", key: "arrowUp", priority: gate, visible: panelOpen || historyPanelGateOpen() },
-    { overlay: "historyPanel", key: "arrowDown", priority: gate, visible: panelOpen },
-    { overlay: "historyPanel", key: "accept", priority: gate, visible: panelOpen },
-    { overlay: "historyPanel", key: "escape", priority: gate, visible: panelOpen },
+    ...panelClaims(panelOpen),
     // 引导条锚点：唯一锚点 claimant；其他浮层在场时其自身 overlayOpen 门
     // （shouldShowPromptHints）已置不可见，仲裁器兜底不双持。
     { overlay: "promptHints", key: "anchor", priority: priority("anchor", "promptHints"), visible: promptHintsVisible.value },
+    // ghost：→ 族词块/整段接受（让位建议浮层——数据分工；运行中/传输占用
+    // 在分支内复查回车竞态）与键位胶囊菜单的 Esc；Tab 接受仅在开关开启且
+    // 菜单未开时可见（对 completion 让位）。→ 族分支本体不查表（其组合键
+    // 条件即让位编码的另一半），Tab/Esc 维度由 handleSuggestionKey 等查表。
+    { overlay: "ghost", key: "tab", priority: priority("tab", "ghost"), visible: !!ghostMatch.value && !suggestionOpen.value && ghostTabAccept.value && !completionOpen.value },
+    { overlay: "ghost", key: "accept", priority: priority("accept", "ghost"), visible: !!ghostMatch.value && !suggestionOpen.value },
+    { overlay: "ghost", key: "escape", priority: priority("escape", "ghost"), visible: ghostKeycapMenuOpen.value },
+    // 补全/建议/quick-select/搜索：开着即声明各自键域（判定在各 handler
+    // 内，查表只决定轮不轮到它）。
+    ...fourKeyClaims("completion", completionOpen.value),
+    ...fourKeyClaims("suggestion", suggestionOpen.value),
+    { overlay: "quickSelect", key: "arrowUp", priority: priority("arrowUp", "quickSelect"), visible: quickSelectOpen.value },
+    { overlay: "quickSelect", key: "arrowDown", priority: priority("arrowDown", "quickSelect"), visible: quickSelectOpen.value },
+    { overlay: "quickSelect", key: "enter", priority: priority("enter", "quickSelect"), visible: quickSelectOpen.value },
+    { overlay: "quickSelect", key: "escape", priority: priority("escape", "quickSelect"), visible: quickSelectOpen.value },
+    { overlay: "search", key: "escape", priority: priority("escape", "search"), visible: searchOpen.value },
   ]);
+}
+
+/** 面板 claims：开 = 导航/Enter/Tab/Esc 全占；关 = 仅裸 ↑ 的唤起门。 */
+function panelClaims(panelOpen: boolean): ArbiterClaim[] {
+  const gate = priority("arrowUp", "historyPanel");
+  return [
+    { overlay: "historyPanel", key: "arrowUp", priority: gate, visible: panelOpen || historyPanelGateOpen() },
+    { overlay: "historyPanel", key: "arrowDown", priority: gate, visible: panelOpen },
+    { overlay: "historyPanel", key: "enter", priority: priority("enter", "historyPanel"), visible: panelOpen },
+    { overlay: "historyPanel", key: "tab", priority: priority("tab", "historyPanel"), visible: panelOpen },
+    { overlay: "historyPanel", key: "escape", priority: priority("escape", "historyPanel"), visible: panelOpen },
+  ];
+}
+
+/** 导航类浮层（补全/建议）的标准四键 claims：↑↓/Enter/Tab/Esc。 */
+function fourKeyClaims(overlay: OverlayId, visible: boolean): ArbiterClaim[] {
+  return (["arrowUp", "arrowDown", "enter", "tab", "escape"] as const).map((key) => ({
+    overlay,
+    key,
+    priority: priority(key, overlay),
+    visible,
+  }));
 }
 
 /** 事件 → 键维度；不映射的按键（字母/修饰系）不参与浮层仲裁。 */
 function keyEventClaimKey(event: KeyboardEvent): ClaimKey | null {
   if (event.key === "ArrowUp") return "arrowUp";
   if (event.key === "ArrowDown") return "arrowDown";
-  if (event.key === "Enter" || event.key === "Tab" || event.key === "ArrowRight") return "accept";
+  if (event.key === "Enter") return "enter";
+  if (event.key === "Tab") return "tab";
+  if (event.key === "ArrowRight") return "accept";
   if (event.key === "Escape") return "escape";
   return null;
 }
