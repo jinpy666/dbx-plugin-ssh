@@ -1799,7 +1799,15 @@ window.dbxPlugin = {
       const echoed = new TextDecoder().decode(bytes.subarray(8));
       // 真实 PTY 的 onlcr 会把 \r 转成 \r\n；夹具直发 \r 只会让光标回到行首、
       // 后续回显互相覆盖（建议命令/批量发送走查时表现为"命令消失"）。
-      const display = echoed.endsWith("\r") ? `${echoed.slice(0, -1)}\r\n` : echoed;
+      // canonical 行规程把控制键按 caret 记法回显成可打印文本（↑ → 字面
+      // "^[[A"，光标不动，#150 堡垒机实测形态）：原样回显 ESC 字节会被 xterm
+      // 解释成光标移动/控制效果，与真实 bastion 相悖，也让交互提示守卫的
+      // 回归夹具失真（提示行被光标上移搅乱）。
+      const caretEcho = echoed
+        .replace(/\u001b\[[0-9;]*[A-Za-z~]/g, (sequence) => `^[${sequence.slice(1)}`)
+        .replace(/\u001bO([A-Za-z0-9])/g, "^[O$1")
+        .replace(/\u001b/g, "^[");
+      const display = caretEcho.endsWith("\r") ? `${caretEcho.slice(0, -1)}\r\n` : caretEcho;
       // ?aifix=1（Warp AI 对齐批）：逐键回显进行缓冲，回车整行改道「E/C →
       // 失败输出（含敏感值）→ D exit 2 → 提示符」633 全链路——E 帧必须带完整
       // 命令行，否则 App 侧 commandMarker 残留上一条命令、D 码张冠李戴。

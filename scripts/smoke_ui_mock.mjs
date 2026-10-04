@@ -283,6 +283,13 @@ try {
   await sleep(2_500);
   await historyPage.bringToFront();
   await historyPage.click(".terminal-host");
+  // 夹具自带失败命令的 AI 修复条悬浮在终端区顶部（该段光标就在视口顶部，
+  // 面板搜索框会与之重叠）：与被测面板无关，先关闭消除遮挡；关闭后焦点
+  // 会留在 ✕ 按钮上，点回终端把键盘还给它。
+  const fixBarClose = historyPage.locator(".terminal-ai-fix-close");
+  if (await fixBarClose.count()) await fixBarClose.click({ timeout: 3_000 }).catch(() => undefined);
+  await sleep(150);
+  await historyPage.click(".terminal-host");
 
   // 空提示符快捷键引导条：静置空行显示 → 键入隐藏 → 退格清行恢复；随后
   // ↑ 开面板即「用过即散」（面板关闭后不再出现，旗标持久化）。
@@ -759,8 +766,8 @@ try {
   // __dbxMockEmitTerminal 摆出堡垒机式提示行（光标邻域两行窗口命中），断言
   // 交互待答期 ↑ 不开历史面板、键入应答不开建议/补全浮层；再回到普通提示符
   // 做对照——↑ 照常开面板，证明守卫随提示行滚出采样窗口而放行、原行为不变。
-  // 每个场景都以「清屏 + 光标归位」开头：mock 会把 ↑ 的 ESC[A 字节原样回显，
-  // 回显本身会移动光标，清屏保证每个场景的采样窗口确定性。
+  // mock 的 SSH 回显按 canonical 行规程把控制键折算成 caret 记法（↑ → 字面
+  // "^[[A"，光标不动），与真实堡垒机一致，提示行不会被回显搅乱。
   console.log("==> issue #150 interactive prompt guard");
   const guardPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   guardPage.on("pageerror", (err) => pageError.push(String(err)));
@@ -789,9 +796,8 @@ try {
   check("#150 server menu: ↑ opens no history panel", (await guardPage.locator(".terminal-history-panel").count()) === 0, "panel count");
   // 宝塔 bt 菜单场景（#150 实测反馈）：canonical tty 把 ↑ 回显成字面 caret
   // 记法 `^[[A` 拼在提示行尾（第一次 ↑ 被抑制后回显落地），行采样不得因此
-  // 漏判——回显叠加与已键入应答两种污染态都按住面板。每个状态都用清屏重开：
-  // mock 会把真实 ↑ 的 ESC[A 字节原样回显，xterm 将其解释为光标上移，不复位
-  // 会让后续状态采错行。
+  // 漏判——回显叠加与已键入应答两种污染态都按住面板。每个状态都用清屏重开，
+  // 保证采样窗口确定性。
   await guardPage.evaluate((prefix) => window.__dbxMockEmitTerminal(`${prefix}请输入命令编号：`), clearScreen);
   await guardPage.waitForTimeout(250);
   await guardPage.evaluate(() => window.__dbxMockEmitTerminal("^[[A^[[A"));
@@ -804,6 +810,16 @@ try {
   await guardPage.keyboard.press("ArrowUp");
   await guardPage.waitForTimeout(300);
   check("#150 bt menu with typed answer: ↑ opens no history panel", (await guardPage.locator(".terminal-history-panel").count()) === 0, "panel count");
+  // 真实连按 ↑（用户反馈的"一直闪"路径）：守卫逐次按住，按键漏到远端成为
+  // caret 回显（与真实 canonical tty 一致），面板全程不出现。
+  await guardPage.evaluate((prefix) => window.__dbxMockEmitTerminal(`${prefix}请输入命令编号： `), clearScreen);
+  await guardPage.waitForTimeout(250);
+  for (let i = 0; i < 3; i += 1) {
+    await guardPage.keyboard.press("ArrowUp");
+    await guardPage.waitForTimeout(200);
+  }
+  check("#150 bt menu: repeated real ↑ never opens the panel", (await guardPage.locator(".terminal-history-panel").count()) === 0, "panel count");
+  check("#150 bt menu: leaked ↑ reached the PTY as caret echo", ((await guardPage.locator(".xterm-rows").textContent())?.includes("^[[")) === true, "echo check");
   await guardPage.screenshot({ path: `${SHOT_DIR}/08c-interactive-prompt-guard-bt.png`, fullPage: false }).catch(() => undefined);
   console.log("  screenshot: docs/screenshots-ui-mock/08c-interactive-prompt-guard-bt.png");
   // 对照组：回到普通提示符（提示行滚出采样窗口）→ ↑ 照常开面板。
@@ -814,6 +830,70 @@ try {
   await guardPage.screenshot({ path: `${SHOT_DIR}/08b-interactive-prompt-guard-release.png`, fullPage: false }).catch(() => undefined);
   console.log("  screenshot: docs/screenshots-ui-mock/08b-interactive-prompt-guard-release.png");
   await guardPage.close();
+
+  // --- issue #150 跟进：高历史 + 光标中下部的贴行定位（用户三状态截图复现）---
+  // 50 条历史的内容高远超窗格：面板必须 ① 贴光标上方（bottom 锚定，不得被
+  // 旧版「容器高−内容高」钳制钉到窗格底），② 盒高收进本侧（max-height 恒按
+  // 可用空间设置，顶部标题/搜索不被视口上缘裁掉），③ 不遮挡光标行（列表
+  // min-height:0 内部滚动）。DOM 断言 + 截图双佐证。
+  console.log("==> issue #150 tall-history placement");
+  const tallPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  tallPage.on("pageerror", (err) => pageError.push(String(err)));
+  await tallPage.addInitScript(() => {
+    // legacy 扁平数组形态（sanitize 迁入 legacyScope 桶）：40 条长命令，内容高远超窗格。
+    const lines = [];
+    for (let i = 0; i < 40; i += 1) {
+      lines.push(i % 4 === 0
+        ? `kubectl get pods -n production-namespace --field-selector spec.nodeName=worker-${i} -o wide`
+        : `deploy step ${i} -- systemctl restart app-${i}.service`);
+    }
+    localStorage.setItem("ssh-command-history", JSON.stringify(lines));
+  });
+  await tallPage.goto(`${baseUrl}?render=dom&noanim=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  await sleep(2_500);
+  await tallPage.bringToFront();
+  await tallPage.click(".terminal-host");
+  const FILLER_LINES = 28; // 光标推到视口中下部（0-based 行号即 28）
+  await tallPage.evaluate(({ prefix, filler }) => {
+    const lines = Array.from({ length: filler }, (_, i) => `log line ${i}: fill the screen down to mid-lower area`).join("\r\n");
+    window.__dbxMockEmitTerminal(`${prefix}${lines}\r\nuser@server:~$ `);
+  }, { prefix: clearScreen, filler: FILLER_LINES });
+  await tallPage.waitForTimeout(400);
+  await tallPage.keyboard.press("ArrowUp");
+  await tallPage.waitForTimeout(500);
+  const placement = await tallPage.evaluate(({ filler }) => {
+    const panel = document.querySelector(".terminal-history-panel");
+    if (!panel) return null;
+    const screen = document.querySelector(".xterm-screen")?.getBoundingClientRect();
+    const host = document.querySelector(".terminal-host")?.getBoundingClientRect();
+    const rowEl = document.querySelector(".xterm-rows")?.children?.[0];
+    const cellHeight = rowEl ? rowEl.getBoundingClientRect().height : 0;
+    const rect = panel.getBoundingClientRect();
+    const screenTop = screen?.top ?? 0;
+    return {
+      styleBottom: panel.style.bottom || null,
+      rectTop: Math.round(rect.top), rectBottom: Math.round(rect.bottom),
+      screenTop: Math.round(screenTop),
+      hostTop: Math.round(host?.top ?? 0),
+      cursorLineTop: Math.round(screenTop + filler * cellHeight),
+      titleVisible: !!panel.querySelector(".terminal-history-title"),
+      searchVisible: !!panel.querySelector(".terminal-history-search-input"),
+    };
+  }, { filler: FILLER_LINES });
+  if (!placement) {
+    failures.push("#150 tall history: panel did not open at a normal prompt");
+    console.log("  FAIL #150 tall history: no panel");
+  } else {
+    check("#150 tall history: panel is above-anchored (bottom set, not parked at pane bottom)", !!placement.styleBottom && placement.styleBottom !== "0px", `style.bottom=${placement.styleBottom}`);
+    // 定位包含块是 terminal-pane:面板顶允许到 host 顶（screen 有内边距，比
+    // host 低几像素),只要不钻进工具条后方即为完整可见。
+    check("#150 tall history: panel top stays inside the terminal viewport (header not clipped)", placement.rectTop >= placement.hostTop - 1, `rectTop=${placement.rectTop} hostTop=${placement.hostTop}`);
+    check("#150 tall history: panel does not cover the cursor line", placement.rectBottom <= placement.cursorLineTop + 2, `rectBottom=${placement.rectBottom} cursorTop=${placement.cursorLineTop}`);
+    check("#150 tall history: title and search rows render", placement.titleVisible && placement.searchVisible, "chrome rows");
+  }
+  await tallPage.screenshot({ path: `${SHOT_DIR}/08d-tall-history-placement.png`, fullPage: false }).catch(() => undefined);
+  console.log("  screenshot: docs/screenshots-ui-mock/08d-tall-history-placement.png");
+  await tallPage.close();
 
   if (pageError.length) {
     failures.push(`page errors: ${pageError.slice(0, 3).join(" | ")}`);
