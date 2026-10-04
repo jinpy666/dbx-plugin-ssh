@@ -163,6 +163,7 @@ import { isPasswordPromptLine, loadPromptHintsDismissed, loadPromptHintsEnabled,
 import { interactivePromptNearCursor, isInteractivePromptPending } from "./lib/interactivePromptGuard";
 import { cursorAbsoluteRow } from "./lib/terminalAnchor";
 import { evaluateGhost } from "./lib/terminalGhostSuggest";
+import { ARBITER_PRIORITIES, resolveKeyOwners, type ClaimKey, type KeyOwners, type OverlayId } from "./lib/overlayArbiter";
 // AI 助手（Warp AI 对齐批，IMPL_PLAN_WARP_AI_TERMINAL）：宿主 AI 通道封装 +
 // `#` 命令搜索状态机 + 失败修复（输出采集/脱敏）+ 请求构造。插件零密钥，
 // provider/模型全在宿主 Settings → AI；能力缺失全链路降级。
@@ -2145,17 +2146,22 @@ function handleTerminalKey(event: KeyboardEvent) {
   if (suggestionOpen.value && handleSuggestionKey(event)) return consume();
   // Warp 式 history 面板（↑ 唤起）：面板开启时优先消费导航/回填键（↑↓ 移动、
   // Enter/Tab 回填、Esc 关闭），其余按键原样放行——焦点回到终端时打字仍会
-  // 走 onData 链刷新锚点。未开启时裸 ↑ 经 gate 打开全量视图（过滤交给面板内
-  // 搜索框，不读行缓冲）；alternate 屏（vim/htop 靠 ↑ 导航）、命令运行中、
+  // 走 onData 链刷新锚点。未开启时裸 ↑ 经仲裁器唤起门打开全量视图（过滤交给
+  // 面板内搜索框，不读行缓冲）；alternate 屏（vim/htop 靠 ↑ 导航）、命令运行中、
   // 传输占用、既有浮层开启时不抢 ↑，shell 原生 readline 历史在那些场景依旧可达。
-  if (historyPanelOpen.value && handleHistoryPanelKey(event)) return consume();
+  if (
+    historyPanelOpen.value &&
+    overlayOwnsKey(terminalOverlayKeyOwners(), event, "historyPanel") &&
+    handleHistoryPanelKey(event)
+  )
+    return consume();
   if (
     event.type === "keydown" &&
     event.key === "ArrowUp" &&
     !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) &&
     !event.isComposing &&
     event.keyCode !== 229 &&
-    historyPanelGateOpen()
+    terminalOverlayKeyOwners().arrowUp === "historyPanel"
   ) {
     openHistoryPanel();
     return consume();
@@ -2404,6 +2410,47 @@ function historyPanelGateOpen(): boolean {
     transferBusy: terminalTransferBusy.value,
     interactivePromptPending: interactivePromptGatePending(),
   });
+}
+
+// ---------------------------------------------------------------------------
+// 浮层键权仲裁器接线（docs/IMPL_PLAN_OVERLAY_KEY_ARBITER.zh-CN.md，S2 批）：
+// claims 的可见性沿用各浮层既有判定（can*/gate/open 布尔），判定零迁移——
+// 仲裁器只把「这个键维度此刻归谁」收口为查表。惰性求值：仅浮层分支到达时
+// 才构建/采样（普通键入不读 buffer，热路径零增量）。优先级一律取
+// ARBITER_PRIORITIES 表，接线处不写数字。S3 批迁入 ghost/补全/建议/
+// quick-select/search 各 claim。
+function priority(key: ClaimKey, overlay: OverlayId): number {
+  return ARBITER_PRIORITIES[key][overlay] ?? 0;
+}
+
+function terminalOverlayKeyOwners(): KeyOwners {
+  const panelOpen = historyPanelOpen.value;
+  const gate = priority("arrowUp", "historyPanel");
+  return resolveKeyOwners([
+    // 历史面板：开着全占导航/接受/Esc；关着仅持有裸 ↑ 的唤起——gate 判
+    // false 即不可见，↑ 归远端（#150 交互提示待答态由此编码）。
+    { overlay: "historyPanel", key: "arrowUp", priority: gate, visible: panelOpen || historyPanelGateOpen() },
+    { overlay: "historyPanel", key: "arrowDown", priority: gate, visible: panelOpen },
+    { overlay: "historyPanel", key: "accept", priority: gate, visible: panelOpen },
+    { overlay: "historyPanel", key: "escape", priority: gate, visible: panelOpen },
+    // 引导条锚点：唯一锚点 claimant；其他浮层在场时其自身 overlayOpen 门
+    // （shouldShowPromptHints）已置不可见，仲裁器兜底不双持。
+    { overlay: "promptHints", key: "anchor", priority: priority("anchor", "promptHints"), visible: promptHintsVisible.value },
+  ]);
+}
+
+/** 事件 → 键维度；不映射的按键（字母/修饰系）不参与浮层仲裁。 */
+function keyEventClaimKey(event: KeyboardEvent): ClaimKey | null {
+  if (event.key === "ArrowUp") return "arrowUp";
+  if (event.key === "ArrowDown") return "arrowDown";
+  if (event.key === "Enter" || event.key === "Tab" || event.key === "ArrowRight") return "accept";
+  if (event.key === "Escape") return "escape";
+  return null;
+}
+
+function overlayOwnsKey(owners: KeyOwners, event: KeyboardEvent, overlay: OverlayId): boolean {
+  const dimension = keyEventClaimKey(event);
+  return dimension !== null && owners[dimension] === overlay;
 }
 
 /** focusSearch（批 3d）：热键唤起（⌘⇧H / Ctrl+Shift+H）传 true——打开即

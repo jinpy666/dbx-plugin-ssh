@@ -18,10 +18,10 @@ function owners(claims: ArbiterClaim[]) {
 describe("overlayArbiter priority table snapshot", () => {
   it("pins the table derived from the 2026-10 key routing chain", () => {
     expect(ARBITER_PRIORITIES).toEqual({
-      arrowUp: { historyPanel: 400, completion: 300, suggestion: 250, quickSelect: 200 },
-      arrowDown: { historyPanel: 400, completion: 300, suggestion: 250, quickSelect: 200 },
-      accept: { ghost: 500, historyPanel: 400, completion: 300, suggestion: 250, quickSelect: 200 },
-      escape: { search: 500, ghost: 490, historyPanel: 400, completion: 300, suggestion: 250, quickSelect: 200 },
+      arrowUp: { completion: 400, suggestion: 300, historyPanel: 200, quickSelect: 100 },
+      arrowDown: { completion: 400, suggestion: 300, historyPanel: 200, quickSelect: 100 },
+      accept: { ghost: 500, completion: 400, suggestion: 300, historyPanel: 200, quickSelect: 100 },
+      escape: { completion: 400, suggestion: 300, historyPanel: 200, search: 150, ghost: 140, quickSelect: 100 },
       anchor: { promptHints: 100 },
     });
   });
@@ -109,17 +109,19 @@ describe("resolveKeyOwners scenarios (issue #150/#152 regression set)", () => {
     expect(result.escape).toBe("quickSelect");
   });
 
-  it("terminal search open: Esc closes search ahead of an open history panel", () => {
-    const result = owners([claim("search", "escape"), claim("historyPanel", "escape")]);
-    expect(result.escape).toBe("search");
+  it("search close: the open panel takes Esc first; search wins only when no panel is open", () => {
+    // 链序：面板分支先于搜索关闭分支——两者同场（面板开着时又开了搜索）时
+    // Esc 先收面板。
+    expect(owners([claim("historyPanel", "escape"), claim("search", "escape")]).escape).toBe("historyPanel");
+    expect(owners([claim("search", "escape")]).escape).toBe("search");
   });
 
-  it("ghost keycap menu: Esc collapses the menu ahead of the history panel", () => {
-    const result = owners([claim("ghost", "escape"), claim("historyPanel", "escape")]);
-    expect(result.escape).toBe("ghost");
+  it("ghost keycap menu: takes Esc when open, unless the panel outranks it", () => {
+    expect(owners([claim("ghost", "escape")]).escape).toBe("ghost");
+    expect(owners([claim("ghost", "escape"), claim("historyPanel", "escape")]).escape).toBe("historyPanel");
   });
 
-  it("panel open beats completion/suggestion/quick-select on shared keys (chain order)", () => {
+  it("completion/suggestion outrank the open panel on shared keys (chain: they are judged first)", () => {
     const result = owners([
       claim("historyPanel", "accept"),
       claim("completion", "accept"),
@@ -130,8 +132,31 @@ describe("resolveKeyOwners scenarios (issue #150/#152 regression set)", () => {
       claim("suggestion", "arrowUp"),
       claim("quickSelect", "arrowUp"),
     ]);
-    expect(result.accept).toBe("historyPanel");
+    expect(result.accept).toBe("completion");
+    expect(result.arrowUp).toBe("completion");
+  });
+
+  it("the open panel beats quick-select on shared keys (chain order)", () => {
+    const result = owners([
+      claim("historyPanel", "arrowUp"),
+      claim("historyPanel", "accept"),
+      claim("historyPanel", "escape"),
+      claim("quickSelect", "arrowUp"),
+      claim("quickSelect", "accept"),
+      claim("quickSelect", "escape"),
+    ]);
     expect(result.arrowUp).toBe("historyPanel");
+    expect(result.accept).toBe("historyPanel");
+    expect(result.escape).toBe("historyPanel");
+  });
+
+  it("the open panel takes Esc ahead of search close and the ghost keycap menu (chain order)", () => {
+    const result = owners([
+      claim("historyPanel", "escape"),
+      claim("search", "escape"),
+      claim("ghost", "escape"),
+    ]);
+    expect(result.escape).toBe("historyPanel");
   });
 
   it("promptHints anchor: owned only while no other overlay is open", () => {
