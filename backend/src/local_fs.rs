@@ -567,15 +567,23 @@ fn pick_file_dialog(
             .to_string();
         return Ok(if path.is_empty() { None } else { Some(path) });
     }
-    // zenity 不在时回落 kdialog（过滤器语法 `*.pat|Name`）。
+    // zenity 不在时回落 kdialog（Qt 过滤器语法：pattern 空格分隔、`|` 后标题）。
     let kdialog_dir = default
         .map(|dir| dir.to_string_lossy().into_owned())
         .unwrap_or_else(|| ".".to_string());
     let mut command = std::process::Command::new("kdialog");
     command.arg("--getopenfilename").arg(&kdialog_dir);
     if let Some(filter) = filter {
-        if let Some(first) = filter.extensions.first() {
-            command.arg(format!("*.{first}|{}", filter.name));
+        // Qt 过滤器语法：单条目内多 pattern 空格分隔——与 zenity 同一扩展名
+        // 集合，不再只取第一个（同功能跨平台过滤范围一致）。
+        if !filter.extensions.is_empty() {
+            let patterns = filter
+                .extensions
+                .iter()
+                .map(|extension| format!("*.{extension}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            command.arg(format!("{patterns}|{}", filter.name));
         }
     }
     match command.output() {

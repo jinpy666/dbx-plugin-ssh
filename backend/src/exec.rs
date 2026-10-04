@@ -2044,6 +2044,32 @@ mod tests {
     }
 
     #[test]
+    fn shared_prompt_corpus_matches_backend_vocab() {
+        // 架构评审 WATCH：前后端提示词词表防漂移——语料在 shared/prompt-corpus.json，
+        // 前端 promptCorpus.spec.ts 加载同一份；改词表必须同步语料，任一侧先改
+        // 即在此失败。
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../../shared/prompt-corpus.json"))
+                .expect("shared/prompt-corpus.json parses");
+        let auth = SudoAuth::default();
+        for case in corpus["cases"].as_array().expect("cases array") {
+            let text = case["text"].as_str().expect("case text");
+            let expected = match case["backend"].as_str().expect("backend expectation") {
+                "password" => Some(PromptKind::Password),
+                "totp" => Some(PromptKind::Totp),
+                "combined" => Some(PromptKind::Combined),
+                "none" => None,
+                other => panic!("unknown backend expectation: {other}"),
+            };
+            assert_eq!(
+                classify_auth_prompt(text, &auth),
+                expected,
+                "case {text:?} diverges from the shared prompt corpus"
+            );
+        }
+    }
+
+    #[test]
     fn auth_flow_mode_parse_falls_back_for_adversarial_values() {
         // Unknown / hostile values degrade to the default flow instead of
         // panicking or producing an invalid mode.

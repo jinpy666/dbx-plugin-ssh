@@ -1,0 +1,214 @@
+{
+  "$comment": "提示词判定统一语料（架构评审 WATCH：前后端词表防漂移）。backend 期望对应 exec.rs classify_auth_prompt 的返回（password/totp/combined/none），frontend 数组对应 interactivePromptGuard 三个判定器命中项（auth/password/selection，可多值）。backend/src/exec.rs 的 cargo test 与 frontend/src/lib/promptCorpus.spec.ts 加载同一份文件——改任一侧词表必须同步本文件，否则对应测试失败。已知漂移记录：后端自动应答词表缺「口令:」（补录属认证路径，待人工评审），前端经本语料补录 authentication code / 一次性密码。combined 说明：同时命中密码表与 OTP 表（如「One-Time Password:」含 password: 子串）即 Combined，是分类器既有语义。",
+  "cases": [
+    {
+      "text": "Password:",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "password: ",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "[sudo] password for jinpy:",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "sudo passphrase:",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "pass phrase:",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "密码:",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "密码：",
+      "backend": "password",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "口令:",
+      "backend": "none",
+      "frontend": [
+        "password"
+      ]
+    },
+    {
+      "text": "Enter password:",
+      "backend": "password",
+      "frontend": [
+        "password",
+        "selection"
+      ]
+    },
+    {
+      "text": "Verification code:",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "[OTP Code]:",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "otp:",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "totp:",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "mfa:",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "Please Enter MFA Code.",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "Please Input Mfa Code (SMS):",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "2FA code:",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "One-Time Password:",
+      "backend": "combined",
+      "frontend": [
+        "auth",
+        "password"
+      ]
+    },
+    {
+      "text": "one time password:",
+      "backend": "combined",
+      "frontend": [
+        "auth",
+        "password"
+      ]
+    },
+    {
+      "text": "Authentication Code:",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "动态密码:",
+      "backend": "combined",
+      "frontend": [
+        "auth",
+        "password"
+      ]
+    },
+    {
+      "text": "验证码:",
+      "backend": "totp",
+      "frontend": [
+        "auth"
+      ]
+    },
+    {
+      "text": "一次性密码:",
+      "backend": "combined",
+      "frontend": [
+        "auth",
+        "password"
+      ]
+    },
+    {
+      "text": "Two-Step Verification required",
+      "backend": "none",
+      "frontend": []
+    },
+    {
+      "text": "please select a server:",
+      "backend": "none",
+      "frontend": [
+        "selection"
+      ]
+    },
+    {
+      "text": "请选择要登录的服务器:",
+      "backend": "none",
+      "frontend": [
+        "selection"
+      ]
+    },
+    {
+      "text": "Do you want to continue? [y/n]",
+      "backend": "none",
+      "frontend": [
+        "selection"
+      ]
+    },
+    {
+      "text": "continue connecting (yes/no)?",
+      "backend": "none",
+      "frontend": [
+        "selection"
+      ]
+    },
+    {
+      "text": "$ ",
+      "backend": "none",
+      "frontend": []
+    },
+    {
+      "text": "user@host:~$",
+      "backend": "none",
+      "frontend": []
+    }
+  ]
+}

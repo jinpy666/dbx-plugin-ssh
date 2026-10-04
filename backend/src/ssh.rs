@@ -3587,7 +3587,11 @@ impl SshRuntime {
         )
         .await;
         session.transport_lease.release().await;
-        self.cleanup_session_transfers(session_id).await?;
+        // 清理失败不得吞掉关闭结果：会话此刻已移出注册表、transport 已释放，
+        // 对外就是「已关闭」——上抛只会让调用方重试并吃到 not found。
+        if let Err(error) = self.cleanup_session_transfers(session_id).await {
+            eprintln!("close_session: transfer cleanup for {session_id} failed: {error}");
+        }
         if let Ok(mut cache) = self.metrics_cache.lock() {
             cache.remove(session_id);
         }

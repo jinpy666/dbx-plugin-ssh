@@ -91,7 +91,10 @@ export function shouldShowPromptHints(gates: PromptHintsGates): boolean {
 // —— 密码提示启发（2026-10-02 真机反馈）：`Password:`/`[sudo] password` 这类
 // 凭据输入行长得和"空行提示符静置"一模一样（行缓冲口径恒空），但 ↑ 历史/
 // 补全引导在密码输入处毫无意义还可能泄操作。采样文本命中即抑制引导条。
-const PASSWORD_PROMPT_PATTERN = /(?:pass(?:word|wd|phrase)|口令|密码)[^:：]*[:：]\s*$|^enter password\b/i;
+// `pass\s?phrase` 由 shared/prompt-corpus.json 语料对齐后端词表补录
+// （「pass phrase:」带空格写法，改词表必须同步语料，见 promptCorpus.spec.ts）。
+const PASSWORD_PROMPT_PATTERN =
+  /(?:pass(?:word|wd|\s?phrase)|口令|密码)[^:：]*[:：]\s*$|^enter password\b/i;
 
 /** 该行文本是否为凭据输入提示（trimEnd 后判定；空串恒 false）。 */
 export function isPasswordPromptLine(text: string): boolean {

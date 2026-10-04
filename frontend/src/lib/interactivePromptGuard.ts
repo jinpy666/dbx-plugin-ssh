@@ -13,8 +13,10 @@ import { isPasswordPromptLine } from "./terminalPromptHints";
 // ① 登录期动态码/验证提示。两种形态：关键词 + 冒号收尾（光标所在的待输入
 //    行，如 koko「[OTP Code]:」「验证码:」「One-Time Password:」）；祈使句
 //    提示（说明行形态，冒号可有可无，如 koko 的「Please Enter MFA Code.」）。
+//    authentication code / 一次性密码 由 shared/prompt-corpus.json 语料与后端
+//    词表对齐补录（改词表必须同步语料，见 promptCorpus.spec.ts）。
 const AUTH_CHALLENGE_LINE_PATTERN =
-  /(?:otp|mfa|2fa|one[-\s]?time(?:\s+(?:password|passcode|code))?|two[-\s]?factor|verification(?:\s+code)?|验证码|动态[口令密码]|双因子|二次验证)[^:：\n]{0,32}[:：]\s*$|(?:please\s+)?enter\s+(?:the\s+)?(?:mfa|otp|2fa|verification(?:\s+code)?|one[-\s]?time|动态[口令密码]|验证码)/i;
+  /(?:otp|mfa|2fa|one[-\s]?time(?:\s+(?:password|passcode|code))?|two[-\s]?factor|verification(?:\s+code)?|authentication\s+code|验证码|动态[口令密码]|一次性密码|双因子|二次验证)[^:：\n]{0,32}[:：]\s*$|(?:please\s+)?enter\s+(?:the\s+)?(?:mfa|otp|2fa|verification(?:\s+code)?|one[-\s]?time|动态[口令密码]|验证码)/i;
 
 /** 该行是否为登录期动态码/验证提示（trimEnd 后判定；空串恒 false）。 */
 export function isAuthChallengeLine(text: string): boolean {
@@ -30,7 +32,7 @@ export function isAuthChallengeLine(text: string): boolean {
 //    - 中文「请选择/请输入/请确认」「输入序号」「^选择…:」同上；
 //    - 行尾 y/n 括号（(y/n)、[Y/n]、(yes/no): 等）与 [Y]/[n] 单字符菜单括号。
 const SELECTION_PROMPT_PATTERN =
-  /(?:^(?:please\s+)?(?:select|choose|pick)\b[^:：\n?？]{0,40}|^enter\b[^:：\n?？]{0,40}|请(?:选择|输入|确认)|输入(?:序号|编号|选项)|^选择)[^:：\n?？]{0,40}[:：?？]|\[[YyNn]\]|\[[Yy]\/[Nn]\]|\((?:[Yy]\/[Nn]|[Nn]\/[Yy]|[Yy]es\/[Nn]o|[Nn]o\/[Yy]es)\)(?:\s*[:：])?\s*$/i;
+  /(?:^(?:please\s+)?(?:select|choose|pick)\b[^:：\n?？]{0,40}|^enter\b[^:：\n?？]{0,40}|请(?:选择|输入|确认)|输入(?:序号|编号|选项)|^选择)[^:：\n?？]{0,40}[:：?？]|\[[YyNn]\]|\[[Yy]\/[Nn]\]|\((?:[Yy]\/[Nn]|[Nn]\/[Yy]|[Yy]es\/[Nn]o|[Nn]o\/[Yy]es)\)(?:\s*[:：?？])?\s*$/i;
 
 /** 该行是否为选择/确认提示（trimEnd 后判定；空串恒 false）。 */
 export function isSelectionPromptLine(text: string): boolean {
