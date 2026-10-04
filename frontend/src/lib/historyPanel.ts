@@ -247,12 +247,16 @@ export interface HistoryPanelGates {
   commandRunning: boolean;
   /** zmodem/trzsz 传输占用输入流。 */
   transferBusy: boolean;
+  /** 登录期认证挑战待答（issue #150，MFA/OTP 待码输入或挑战弹窗未决）：
+   *  ↑/↓ 留给远端交互（堡垒机选目标服务器），面板不抢。 */
+  interactivePromptPending: boolean;
 }
 
 /**
  * 裸 ↑ 是否可被面板拦截：任一既有浮层占用按键、alternate 屏（全屏程序
- * 靠 ↑ 导航）、命令运行中或传输占用时不抢——shell 原生 readline 历史在
- * 面板未拦截的场景依旧可达。
+ * 靠 ↑ 导航）、命令运行中、传输占用或终端交互提示待答（询问输入/选择，
+ * issue #150 及其反馈扩展）时不抢——shell 原生 readline 历史在面板未拦截
+ * 的场景依旧可达。
  */
 export function canOpenHistoryPanel(gates: HistoryPanelGates): boolean {
   return (
@@ -262,7 +266,8 @@ export function canOpenHistoryPanel(gates: HistoryPanelGates): boolean {
     !gates.searchOpen &&
     !gates.alternateActive &&
     !gates.commandRunning &&
-    !gates.transferBusy
+    !gates.transferBusy &&
+    !gates.interactivePromptPending
   );
 }
 

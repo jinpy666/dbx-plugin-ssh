@@ -1922,5 +1922,12 @@ let mockOpenWorkbenchSeq = 0;
   for (const listener of eventListeners) listener({ method: "local/session/state", params: { sessionId, state: "exited", exitCode: 127 } });
 };
 
+// mock 专有调试入口：向 SSH 可视会话注入一段终端输出（issue #150 交互提示
+// 守卫走查用——在页面里摆出 MFA/验证码/选择菜单等远端提示行，验证 ↑/↓ 与
+// 建议/ghost 浮层让位远端）。语义与真实 PTY 输出一致（走既有 binary 帧）。
+(window as unknown as { __dbxMockEmitTerminal?: (text: string) => void }).__dbxMockEmitTerminal = (text: string) => {
+  emitTerminal(text);
+};
+
 // 供单元测试（mockDbxHost.spec.ts）以模块形式动态导入并重置状态。
 export {};
