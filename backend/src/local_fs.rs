@@ -217,6 +217,9 @@ impl FilePickFilter {
         !self.extensions.is_empty()
     }
 
+    // 唯一调用点在 macOS 门控的 pick_file_dialog 里；其余平台为本方法死代码
+    // （与 has_extensions 同一处理）。
+    #[allow(dead_code)]
     fn has_macos_types(&self) -> bool {
         !self.macos_types.is_empty()
     }
@@ -231,7 +234,7 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
 
     // WinForms 单选列表（复用 OpenFileDialog 同款 STA + EncodedCommand 管线）：
     // 第一项默认选中，OK 返回选中项文本，关闭窗口静默取消。
-    let mut script = String::from(
+    let mut script = String::from(concat!(
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;",
         "Add-Type -AssemblyName System.Windows.Forms;",
         "$f=New-Object System.Windows.Forms.Form;",
@@ -240,7 +243,7 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
         "$l=New-Object System.Windows.Forms.Label;",
         "$l.Text='Choose the source of the sessions to import:';$l.SetBounds(12,10,340,20);$f.Controls.Add($l);",
         "$radios=@();",
-    );
+    ));
     for (index, label) in labels.iter().enumerate() {
         script.push_str(&format!(
             "$r{index}=New-Object System.Windows.Forms.RadioButton;$r{index}.Text='{label}';$r{index}.SetBounds(16,{y},340,24);$f.Controls.Add($r{index});$radios+=$r{index};",
@@ -250,10 +253,10 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
         ));
     }
     script.push_str("$radios[0].Checked=$true;");
-    script.push_str(
+    script.push_str(concat!(
         "$ok=New-Object System.Windows.Forms.Button;$ok.Text='OK';$ok.DialogResult='OK';$ok.SetBounds(270,360,80,26);$f.Controls.Add($ok);$f.AcceptButton=$ok;",
         "if($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){$sel=$radios | Where-Object {$_.Checked} | Select-Object -First 1;[Console]::Out.Write($sel.Text)}",
-    );
+    ));
     let mut utf16le = Vec::with_capacity(script.len() * 2);
     for unit in script.encode_utf16() {
         utf16le.extend_from_slice(&unit.to_le_bytes());
@@ -300,7 +303,6 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
         // 两者输出都映射回 label 交给统一解析。
         for program in ["zenity", "kdialog"] {
             let mut command = std::process::Command::new(program);
-            let uses_tags = program == "kdialog";
             if program == "zenity" {
                 command
                     .arg("--list")
@@ -370,11 +372,11 @@ fn pick_file_dialog(
 
     // OpenFileDialog 需要 STA；默认目录不存在时退回用户目录；
     // -EncodedCommand 传 base64(UTF-16LE) 规避引号转义，输出 UTF-8。
-    let mut script = String::from(
+    let mut script = String::from(concat!(
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;",
         "Add-Type -AssemblyName System.Windows.Forms;",
         "$d=New-Object System.Windows.Forms.OpenFileDialog;",
-    );
+    ));
     match default_dir {
         Some(dir) => script.push_str(&format!(
             "$d.InitialDirectory='{}';",
