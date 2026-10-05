@@ -8,6 +8,11 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 （无 / nothing）
 
+## [0.7.4] — 2026-10-05
+
+- **0.7.4 正式版**。内容与 [0.7.4-beta.1](#074-beta1--2026-10-05) 完全一致（sz 自动接收 + 终端/导入/批量发送加固 + 键权仲裁器工程项），经 beta 验证后仅版本号转正；manifest 版本从 `0.7.4-beta.1` 提升为 `0.7.4`，RDP client_build 编码恢复按 patch 段计算（704）。
+  **0.7.4 stable.** Content is identical to [0.7.4-beta.1](#074-beta1--2026-10-05) (automatic sz receive + terminal/import/batch-send hardening + the key-arbiter engineering work), promoted after beta validation with only the version number finalized; the manifest version moves `0.7.4-beta.1` → `0.7.4` and the RDP client_build encoding returns to the plain patch segment (704).
+
 ## [0.7.4-beta.1] — 2026-10-05
 
 - **ZMODEM 下载（sz）自动接收**。远端跑 `sz` 时终端自动接管收流：进度浮条（文件名/百分比/多文件计数/速度）+ 取消按钮，落盘与 trzsz 下载同一三段式——宿主 fileTransfer 逐块流式写入（不在内存攒整文件）、本机 sidecar 落盘（支持下载目录设置/每次询问/撞名冲突处理，完成后可一键「在文件夹中显示」）、web/docker 模式浏览器 saveFile 兜底（512 MiB 上限）。远端提供的文件名经净化处理（剥离路径段防 `../../` 逃逸、Windows 保留名/非法字符），上传期间或 trzsz 传输中的 `sz` 请求自动拒绝（远端干净退出）。检测器从「拦截协议帧」改为「透传+事件窗口」——协议帧必须原样到达前端 sentry 才能开接收会话；原「请改用 SFTP 面板」提示退役。会话录制文件将包含 sz 协议帧（与 trzsz 现状一致）。

@@ -3555,7 +3555,7 @@ mod tests {
 
     #[test]
     fn client_build_encodes_the_package_version() {
-        assert_eq!(client_build(), 700); // 0.7.4-beta.1：第三段 "4-beta" 非纯数字按 0 计
+        assert_eq!(client_build(), 704); // 0.7.4
     }
 
     #[test]
