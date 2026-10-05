@@ -59,6 +59,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `ssh/host-key/resolve` | 处理工作台内的主机密钥确认 |
 | `ssh/exec` | 在会话连接上执行远程命令，可选 Quick Sudo 提权 |
 | `ssh/exec/cancel` | 中止进行中的远程命令（按 `execId`） |
+| `task/validate`、`task/execute`、`task/start`、`task/stop`、`task/status` | Scheduler Task Provider（`io.dbx.ssh.tasks`，冻结契约固定 RPC 面，调用方是宿主 Scheduler，详见「Scheduler Task Provider（task/\* 固定 RPC）」节） |
 | `completion/execute` | FIG 补全引擎的 generator 命令执行（local / ssh 双 target、超时竞速、输出上限、只读拒绝，见「completion/execute（补全 generator 执行）」节） |
 | `ssh/forward/interfaces` | 本机网卡地址探测（供端口映射面板的监听地址选择器）：无参 → `{interfaces: [{name, addr, isLoopback}]}`，回环优先、v4 先于 v6、按 IP 去重；探测失败返回空数组（选择器隐藏，手输不受影响）。`if-addrs`（getifaddrs）实现，无会话依赖 |
 | `ssh/forward/list`、`ssh/forward/start`、`ssh/forward/stop` | 用户级端口映射（ssh(1) -L/-R/-D，见「端口映射」节）：`list` 按 `{connectionId?}`/`{sessionId?}` 过滤返回 `{forwards: [row]}`；`start` `{sessionId?\|connectionId?, kind: "local"\|"remote"\|"dynamic", listenHost?, listenPort, targetHost?, targetPort?}`（至少一个归属 id；`dynamic` 无固定目标，省略 target 字段；`listenHost` 缺省 127.0.0.1；`listenPort: 0` 自动挑选，`boundPort` 回报实际端口）→ `{forward: row}`；`stop` `{id}` → `{success, forward}`，未知 id 报错。独立映射的 `sessionId` 为 `""`。row 字段 camelCase：`id/sessionId/connectionId/kind/listenHost/listenPort/boundPort/targetHost/targetPort/state("starting"\|"active"\|"stopped"\|"error")/error?/connectionsTotal/connectionsActive/bytesUp/bytesDown`。状态迁移发 `ssh/forward/state`（notify）`{id, sessionId, connectionId, state, error?}`。管理界面的端口映射预设按连接保存在宿主 `host.storage` 键 `ssh-tunnel-profiles`，不改变运行态 RPC 及其清理语义。 |
@@ -1361,3 +1362,44 @@ wave-1 不做 `completion/listDirectory`、`completion/environment`（wave 2+）
   策略（`dbx_plugin_tools`/`dbx_plugin_call`）+ 会话 scope 触达插件工具——
   旧「Scoped AI 会话禁用 dbx_call_plugin_tool」记载过时，工具名已演进为
   `dbx_plugin_list`/`dbx_plugin_tools`/`dbx_plugin_call`。
+
+## Scheduler Task Provider（task/\* 固定 RPC）
+
+manifest `task-provider` 贡献点（`io.dbx.ssh.tasks`，依赖 `io.dbx.ssh.connection`）声明两个
+trigger：`execute`（mode=run，一次性命令执行）与 `resident`（mode=resident，常驻命令，
+语义如 `tail -F`）。实现位于 `backend/src/task_provider.rs`，冻结契约
+（`integration/docs/adr/scheduler-task-contract.md` §6）只允许以下五个方法，
+**没有** `ssh/runScheduledCommand` 之类 provider-specific RPC：
+
+| 方法 | 请求 → 响应 |
+| --- | --- |
+| `task/validate` | `{task: {providerId, triggerId, connectionId, configVersion, config}}` → `{valid, errors[], warnings[]}`（纯配置检查，不拨号、不触碰 secret） |
+| `task/execute` | `{task: {taskId, runId, triggerId, connectionId, config}, run: {runId, attempt}, connection, runtime}` → `{success, exitCode?, message, artifacts}`；命令输出走 `task/log` 事件流 |
+| `task/start` | 同 execute 请求 → `{sessionId, state: "starting"}`；同任务已有存活会话按契约 Replace 语义先停旧 |
+| `task/stop` | `{runId?, sessionId?, reason?}` → `{}`；run 模式按 runId 取消，resident 按 sessionId 停止（等待真实拆链后再返回，上限 10s） |
+| `task/status` | `{sessionId?, taskId?}` → `{state, heartbeatAt, restartCount}`；未知 sessionId 报 `stopped`（sidecar 重启后宿主 reconcile 收敛） |
+
+语义要点：
+
+- **连接集成**：凭据只经既有 `connection/connect` 生命周期进入连接注册表，
+  task config 只携带 `connectionId`（红线：secret 永不进 task config / 日志 /
+  事件）。执行传输优先复用该连接的存活会话 handle；无存活会话时经
+  `connect_authenticated` 独立拨号（含 ProxyJump 链），run 结束即断开。
+- **事件**：`task/log {event, taskId, runId, seq, stream, level, message, timestamp}`
+  （seq 按 run 从 1 单调；stream ∈ stdout/stderr/system；stdout=info、
+  stderr=warn、system 按语义）；`task/state {event, taskId, runId, state}`
+  （run 模式：running→success/failed/cancelled/timeout；resident：
+  starting/running/stopping/stopped/crashed/degraded）；`task/progress`
+  （execute 起止 0/100）。所有日志行在出进程前过连接凭据脱敏器。
+- **Cancel/Timeout 真实终止**：`task/stop` 与配置超时都在 await 点退出后
+  显式 `EOF+CLOSE` 关闭 channel，由 sshd 回收远端进程（与
+  `exec_plain_cancellable` 同一不变量：裸 drop 不发 SSH_MSG_CHANNEL_CLOSE，
+  sudo timestamp 锁会残留）。
+- **有界 restart**：resident 崩溃按 `max_restarts`（钳 0..=50，默认 5）/
+  `restart_backoff_seconds`（钳 1..=3600，默认 10）/`restart_window_seconds`
+  （缺省 = 进程生命周期）滑动窗口计数，超限进入 `degraded`，禁止无限
+  crash loop；心跳（输出块 + 20s ticker）推进 `heartbeatAt` 供宿主监管。
+- **脚本编排**：`environment` 以 `export K='V'` 前置（POSIX 单引号转义，
+  不依赖服务端 AcceptEnv）；`working_directory` 以 `cd '<dir>' || exit 125`
+  守卫后另起一行执行命令（`cd X && cmd` 会把多行命令的后续语句泄出目录）。
+  传 WS 服务器（cmd.exe 远端 shell）不受支持，见既有 `remote_command` 同款限制。

@@ -47,6 +47,7 @@ mod sudo_allowlist;
 mod sudo_download;
 mod sudo_fs;
 mod sudo_profiles;
+mod task_provider;
 mod telnet_session;
 mod transfer_compress;
 mod transfer_history;
@@ -92,6 +93,10 @@ struct Plugin {
     /// 非 SSH 连接（telnet/vnc/rdp）的已存凭据暂存：connection/connect 生命周期
     /// 存、*\/start 合并、connection/disconnect 清（见 non_ssh_credentials 模块）。
     non_ssh_creds: non_ssh_credentials::NonSshCredentials,
+    /// Scheduler Task Provider（io.dbx.ssh.tasks）：固定 task/* RPC 面
+    /// （validate/execute/start/stop/status）与常驻会话监管，见
+    /// src/task_provider.rs 与冻结契约 ADR §6。
+    tasks: Arc<task_provider::TaskProvider>,
 }
 
 impl Plugin {
@@ -122,6 +127,7 @@ impl Plugin {
             watcher: Arc::new(file_watch::WatchRuntime::new()),
             connection_import: connection_import::ImportStream::default(),
             non_ssh_creds: non_ssh_credentials::NonSshCredentials::new(),
+            tasks: Arc::new(task_provider::TaskProvider::new()),
         })
     }
 
@@ -486,6 +492,23 @@ impl Plugin {
                     .block_on(self.vnc.close_connection(connection_id));
                 Ok(json!({ "success": true }))
             }
+            // Scheduler Task Provider（io.dbx.ssh.tasks）：冻结契约只允许这
+            // 五个固定方法（ADR §6.2）；禁止 ssh/runScheduledCommand 之类的
+            // provider-specific RPC。凭据只经既有 connection/connect 生命周
+            // 期进入连接注册表，task config 只携带 connectionId。
+            "task/validate" => task_provider::TaskProvider::validate_request(&params),
+            "task/execute" => {
+                self.runtime
+                    .block_on(self.tasks.execute(&self.ssh, &params, emitter.clone()))
+            }
+            "task/start" => {
+                let tasks = self.tasks.clone();
+                let ssh = self.ssh.clone();
+                self.runtime
+                    .block_on(tasks.start_resident(ssh, params, emitter.clone()))
+            }
+            "task/stop" => self.runtime.block_on(self.tasks.stop(&params)),
+            "task/status" => self.tasks.status(&params),
             "ssh/session/open" => {
                 let operation_id = operation_id(&params);
                 let request: SessionOpenRequest = parse(params)?;
