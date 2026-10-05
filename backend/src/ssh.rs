@@ -1856,6 +1856,51 @@ fn compare_history_rows(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
+/// Execution transport for the scheduler task provider: either the live
+/// session's shared authenticated handle (borrowed lifetime of the session)
+/// or a dedicated headless dial (owned; disconnected on release).
+pub(crate) enum TaskTransport {
+    Session {
+        handle: Arc<Handle<SshClient>>,
+    },
+    Dedicated {
+        handle: Handle<SshClient>,
+        jumps: Vec<Handle<SshClient>>,
+    },
+}
+
+impl TaskTransport {
+    pub(crate) fn handle(&self) -> &Handle<SshClient> {
+        match self {
+            Self::Session { handle } => handle,
+            Self::Dedicated { handle, .. } => handle,
+        }
+    }
+
+    /// Tears down a dedicated dial (jump chain included). Session-borrowed
+    /// transports are left alone — the workbench owns their lifecycle.
+    pub(crate) async fn release(self) {
+        if let Self::Dedicated { handle, jumps } = self {
+            let _ = handle
+                .disconnect(
+                    Disconnect::ByApplication,
+                    "DBX scheduled task finished",
+                    "English",
+                )
+                .await;
+            for jump in jumps {
+                let _ = jump
+                    .disconnect(
+                        Disconnect::ByApplication,
+                        "DBX scheduled task jump closed",
+                        "English",
+                    )
+                    .await;
+            }
+        }
+    }
+}
+
 pub struct SshRuntime {
     connections: RwLock<HashMap<String, StoredConnection>>,
     sessions: Arc<AsyncRwLock<HashMap<String, Arc<SessionEntry>>>>,
@@ -2896,7 +2941,7 @@ impl SshRuntime {
     /// Dials the ProxyJump chain (if any) and returns the authenticated
     /// target handle plus the jump-host handles that must stay alive for the
     /// target tunnel to keep working. Ported from tiny-rdm's dialThroughJump.
-    async fn connect_authenticated(
+    pub(crate) async fn connect_authenticated(
         &self,
         connection: &StoredConnection,
         operation_id: &str,
@@ -4096,6 +4141,56 @@ impl SshRuntime {
             });
         select_primary_session(candidates)
             .ok_or_else(|| "No active SSH session exists for this connection".to_string())
+    }
+
+    /// Stored (hydrated) connection by id — the task provider's credential
+    /// source. Secrets stay inside the plugin: the caller uses them for the
+    /// dial and for log redaction, never for echo-back or task config.
+    pub(crate) async fn stored_connection(
+        &self,
+        connection_id: &str,
+    ) -> Result<StoredConnection, String> {
+        self.connections
+            .read()
+            .map_err(|_| "Connection registry is poisoned".to_string())?
+            .get(connection_id)
+            .cloned()
+            .ok_or_else(|| format!("Connection {connection_id} is not active; reopen it from DBX"))
+    }
+
+    /// True when at least one authenticated live session exists for the
+    /// connection — the task provider's "session reuse covers the missing
+    /// stored connection" check.
+    pub(crate) async fn has_live_session(&self, connection_id: &str) -> bool {
+        self.sessions.read().await.values().any(|session| {
+            session.connection_id == connection_id && session.connected.load(Ordering::Acquire)
+        })
+    }
+
+    /// `task_transport`: execution transport for the scheduler task provider
+    /// (`src/task_provider.rs`). Prefers the live session's authenticated
+    /// handle (zero extra auth); falls back to a dedicated headless dial
+    /// through the full jump chain so a scheduled task runs even when no
+    /// workbench tab is open. Callers must `release()` the transport when
+    /// done so dedicated dials disconnect instead of leaking.
+    pub(crate) async fn task_transport(
+        &self,
+        connection_id: &str,
+        operation_id: &str,
+        emitter: Option<PluginEmitter>,
+    ) -> Result<TaskTransport, String> {
+        if let Ok(session_id) = self.session_id_for_connection(connection_id).await {
+            if let Ok(session) = self.session(&session_id).await {
+                return Ok(TaskTransport::Session {
+                    handle: session.handle.clone(),
+                });
+            }
+        }
+        let connection = self.stored_connection(connection_id).await?;
+        let (handle, jumps) = self
+            .connect_authenticated(&connection, operation_id, emitter)
+            .await?;
+        Ok(TaskTransport::Dedicated { handle, jumps })
     }
 
     /// `ssh/agent/mode/get`: connection-scoped agent terminal mode probe for

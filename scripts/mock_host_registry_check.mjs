@@ -108,6 +108,7 @@ const SKIP_PREFIXES = [
   "mcp/*", // MCP 工具面是给 AI 的执行面，工作台经设置页管理而非逐方法调用
   "rdp/*", // RDP 会话域：GUI 冒烟无 RDP 服务，连不上即不会触达
   "serial/*", // 串口域：CI 无串口硬件
+  "task/*", // Scheduler Task Provider 固定 RPC 面（ADR §6.2）：调用方是宿主 Scheduler，插件 webview 不触达（scripts/smoke_task_provider.py 直连真机验证）
   "telnet/*", // Telnet 域：冒烟走 SSH 容器
   "vnc/*", // VNC 域：冒烟无 VNC 服务
 ];

@@ -1189,6 +1189,117 @@
       ]
     },
     {
+      "type": "task-provider",
+      "id": "io.dbx.ssh.tasks",
+      "label": "Scheduled SSH commands",
+      "description": "Run commands on SSH connections from the task scheduler: one-shot executions with streamed stdout/stderr, or resident commands (tail -F style) supervised with a bounded restart policy.",
+      "connection_providers": ["io.dbx.ssh.connection"],
+      "capabilities": ["run", "resident", "cancel", "logs", "progress"],
+      "triggers": [
+        {
+          "id": "execute",
+          "label": "Execute command",
+          "mode": "run",
+          "risk": "high",
+          "fields": [
+            {
+              "key": "command",
+              "label": "Command",
+              "type": "textarea",
+              "binding": "config",
+              "required": true,
+              "default": "",
+              "placeholder": "df -h && free -m"
+            },
+            {
+              "key": "working_directory",
+              "label": "Working directory",
+              "type": "text",
+              "binding": "config",
+              "default": "",
+              "placeholder": "/opt/app"
+            },
+            {
+              "key": "environment",
+              "label": "Environment",
+              "type": "textarea",
+              "binding": "config",
+              "default": "",
+              "placeholder": "LANG=zh_CN.UTF-8\nDEPLOY_ENV=staging"
+            },
+            {
+              "key": "timeout_seconds",
+              "label": "Timeout (seconds)",
+              "type": "number",
+              "binding": "config",
+              "default": 300
+            },
+            {
+              "key": "pty",
+              "label": "Request PTY",
+              "type": "boolean",
+              "binding": "config",
+              "default": false
+            }
+          ]
+        },
+        {
+          "id": "resident",
+          "label": "Resident command",
+          "mode": "resident",
+          "risk": "high",
+          "fields": [
+            {
+              "key": "command",
+              "label": "Command",
+              "type": "textarea",
+              "binding": "config",
+              "required": true,
+              "default": "",
+              "placeholder": "tail -F /var/log/app.log"
+            },
+            {
+              "key": "working_directory",
+              "label": "Working directory",
+              "type": "text",
+              "binding": "config",
+              "default": "",
+              "placeholder": "/opt/app"
+            },
+            {
+              "key": "environment",
+              "label": "Environment",
+              "type": "textarea",
+              "binding": "config",
+              "default": "",
+              "placeholder": "LOG_LEVEL=info"
+            },
+            {
+              "key": "max_restarts",
+              "label": "Max restarts",
+              "type": "number",
+              "binding": "config",
+              "default": 5
+            },
+            {
+              "key": "restart_backoff_seconds",
+              "label": "Restart backoff (seconds)",
+              "type": "number",
+              "binding": "config",
+              "default": 10
+            },
+            {
+              "key": "restart_window_seconds",
+              "label": "Restart window (seconds)",
+              "type": "number",
+              "binding": "config",
+              "placeholder": "empty = process lifetime"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "type": "workbench",
       "id": "io.dbx.ssh.workbench",
       "label": "Terminal",
