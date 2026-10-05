@@ -42,7 +42,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from sidecar_client import SidecarClient, SidecarError, lifecycle_params
+from sidecar_client import FRAME_JSON, SidecarClient, SidecarError, lifecycle_params
 
 TASK_PROVIDER_ID = "io.dbx.ssh.tasks"
 
@@ -263,9 +263,19 @@ def main() -> None:
 
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
+        # The runner thread owns the pipe pump (SidecarClient is not
+        # thread-safe), so cancel requests are written raw: their responses
+        # land in the runner's pump as unrelated messages and are stashed.
+        def raw_send_stop():
+            # Protocol request ids are non-negative in the sidecar SDK
+            # (Option<u64>); a negative id is dropped before dispatch.
+            message = {"jsonrpc": "2.0", "id": 424242, "method": "task/stop",
+                       "params": {"runId": run_id, "reason": "smoke"}}
+            client._send_raw(FRAME_JSON, json.dumps(message).encode())
+
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and thread.is_alive():
-            client.request("task/stop", {"runId": run_id, "reason": "smoke"})
+            raw_send_stop()
             time.sleep(0.2)
         thread.join(timeout=30)
         expect("error" in outcome and outcome["error"].startswith("cancelled:"),
