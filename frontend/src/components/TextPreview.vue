@@ -36,8 +36,10 @@ function previewTheme() {
     ".cm-gutters": { backgroundColor: colors.muted, color: colors.mutedForeground, borderRightColor: colors.border },
     ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: colors.accent },
     // 选区色随明暗切换，与终端 xterm selectionBackground 保持同一观感。
+    // 透明度 0x88 的旧值在亮色白底上混合后对比度仅 ~1.2:1（issue #155：
+    // 选区与背景几乎一样），提高到 0xad 并加深色相，选中区域清晰可辨。
     ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
-      backgroundColor: props.appearance.colorScheme === "dark" ? "#5f6f8a88" : "#93b4e088",
+      backgroundColor: props.appearance.colorScheme === "dark" ? "#6481b8ad" : "#7cabecad",
     },
   }, { dark: props.appearance.colorScheme === "dark" });
 }
