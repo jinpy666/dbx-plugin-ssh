@@ -461,6 +461,12 @@ const mockTree: MockNode = mockDir("/", [
     mockDir("demo", [
       mockDir(".config"),
       mockDir("projects"),
+      // 大目录夹具(issue #151):2000 个文件锁定虚拟滚动的窗口化行为——
+      // 滚动到底可达、行高与 30px 常数一致、spacer 总高与真实内容一致。
+      mockDir(
+        "bigdir",
+        Array.from({ length: 2000 }, (_, index) => mockFile(`file-${String(index + 1).padStart(4, "0")}.txt`, index * 137 + 11)),
+      ),
       mockFile("deploy.sh", 2481, "0755"),
       mockFile("docker-compose.yml", 8192),
       mockFile("server.log", 741248),

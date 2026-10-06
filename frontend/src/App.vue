@@ -9097,11 +9097,14 @@ watch(historyScope, () => {
                 <span v-if="visibleColumns.includes('permissions')" class="col-wrap">{{ t("permissions") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('permissions', e)" /></span>
               </div>
               <div v-if="loadingFiles" class="empty"><Loader2 class="spinning" />{{ t("loading") }}</div>
-              <!-- 窗口化 spacer：撑起视口外行的总高，滚动条比例保持真实 -->
+              <!-- 窗口化 spacer：撑起视口外行的总高，滚动条比例保持真实。
+                   注意 spacer 与行列表是「并存」关系不是「二选一」：这里绝不能
+                   写 v-else——v-else 会绑定到紧邻的 padTop spacer 上，滚动过
+                   前几行（padTop>0）后整个行列表就不再渲染，列表随即空白
+                   （issue #151：文件多时滚动失效、列表展示不全）。 -->
               <div v-if="!loadingFiles && virtualFileWindow.padTop" :style="{ height: `${virtualFileWindow.padTop}px` }" aria-hidden="true"></div>
               <button
                 v-for="entry in windowedEntries"
-                v-else
                 :key="entry.uri"
                 class="file-row"
                 :class="{ selected: selectedPath === entry.uri || selectedUriSet.has(entry.uri) }"

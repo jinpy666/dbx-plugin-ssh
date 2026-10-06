@@ -922,3 +922,21 @@ describe("issue #93 download fallback policy", () => {
     expect(trzszBody).toContain("if (!target)");
   });
 });
+
+// SFTP 文件列表「spacer 与行并存」结构防线（issue #151）：窗口化虚拟滚动的
+// padTop spacer 曾被行列表 v-for 的 v-else 错误配对——滚动过前几行
+// （padTop>0）后整个行列表不再渲染，大目录表现为「滚动失效、列表展示不全」
+// （2000 行夹具实测：滚到底 renderedRows=0）。行 v-for 禁止 v-else：
+// spacer 与行列表必须并存，而非互斥。
+it("keeps the SFTP file-list v-for independent of the pad-top spacer (no v-else)", () => {
+  const start = appTemplate.indexOf('ref="fileRowsEl"');
+  expect(start).toBeGreaterThan(-1);
+  const triggerEnd = appTemplate.indexOf("</ContextMenuTrigger>", start);
+  const block = appTemplate.slice(start, triggerEnd > -1 ? triggerEnd : appTemplate.length);
+  const spacerIdx = block.indexOf("virtualFileWindow.padTop");
+  expect(spacerIdx).toBeGreaterThan(-1);
+  const vForIdx = block.indexOf('v-for="entry in windowedEntries"', spacerIdx);
+  expect(vForIdx).toBeGreaterThan(-1);
+  const tagOpen = block.slice(block.lastIndexOf("<button", vForIdx), block.indexOf(">", vForIdx) + 1);
+  expect(tagOpen).not.toContain("v-else");
+});
