@@ -8,6 +8,15 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 （无 / nothing）
 
+## [0.7.5-beta.1] — 2026-10-07
+
+- **SFTP 大目录滚动修复**。文件较多时鼠标滚动失效、列表展示不全——虚拟滚动的窗口 spacer 与行列表被 v-else 写成了互斥：滚动过前几行（spacer 开始撑高）后整个行列表就不再渲染（2000 文件夹具实测：滚到底行数为 0）。现在 spacer 与行并存，滚到底最后一个文件可见；新增 2000 行大目录 mock 夹具与 App.vue 源码结构守卫用例防回归。
+  **SFTP large-directory scrolling fix.** With many files, wheel scrolling died and the list was cut off — the virtual-scroll window spacer and the row list were wrongly paired with v-else, so past the first few rows (once the spacer started growing) the entire row list stopped rendering (measured with a 2000-file fixture: zero rows rendered at the bottom). Spacer and rows now coexist and the last file is reachable, with a 2000-row mock fixture and an App.vue source-structure guard test to prevent regressions.
+- **弹窗窄视口溢出修复**。窗口较窄时弹窗右半偏出屏幕（最宽的审计日志 680px 弹窗最先暴露）——DialogContent 定位器是 grid 但未定义轨道，弹窗 `width: min(680px, 100%)` 的百分比按内容尺寸解析、收缩失效。定位器显式 `minmax(0, 1fr)` 列/行轨道后，所有弹窗在窄视口正确收缩并保持居中，宽视口行为不变；新增定位器结构守卫用例。
+  **Narrow-viewport dialog overflow fix.** On narrower windows dialogs (the widest, Audit log at 680px, first to show it) had their right half pushed off-screen — the DialogContent positioner was a grid with no explicit tracks, so the dialog's `width: min(680px, 100%)` resolved its percentage against content size and never clamped. The positioner now pins `minmax(0, 1fr)` columns/rows; every dialog shrinks and stays centered on narrow viewports, unchanged at wide ones, with a positioner structure guard test.
+- **文本预览选区色加深**。打开文本文件后鼠标选取的高亮与背景几乎无法区分（亮色主题下对比度仅 ~1.2:1）——明暗两套选区色加深并提高不透明度（light `#93b4e088`→`#7cabecad`、dark `#5f6f8a88`→`#6481b8ad`），选中范围清晰可辨。
+  **Text-preview selection color deepened.** The mouse-selection highlight in an opened text file was nearly indistinguishable from the background (~1.2:1 contrast on the light theme) — both light and dark selection colors are deepened with higher opacity (light `#93b4e088`→`#7cabecad`, dark `#5f6f8a88`→`#6481b8ad`) so selections read clearly.
+
 ## [0.7.4] — 2026-10-05
 
 - **0.7.4 正式版**。内容与 [0.7.4-beta.1](#074-beta1--2026-10-05) 完全一致（sz 自动接收 + 终端/导入/批量发送加固 + 键权仲裁器工程项），经 beta 验证后仅版本号转正；manifest 版本从 `0.7.4-beta.1` 提升为 `0.7.4`，RDP client_build 编码恢复按 patch 段计算（704）。
