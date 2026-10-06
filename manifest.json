@@ -1192,6 +1192,7 @@
       "type": "task-provider",
       "id": "io.dbx.ssh.tasks",
       "label": "Scheduled SSH commands",
+      "allow_multiple_connections": true,
       "connection_providers": ["io.dbx.ssh.connection"],
       "capabilities": ["run", "resident", "cancel", "logs", "progress"],
       "triggers": [
@@ -2551,6 +2552,32 @@
       "name": "终端",
       "description": "面向服务器运维的终端：交互式会话、SFTP 文件传输、远程命令和受控运维操作集中在一个界面。",
       "contributions": {
+        "io.dbx.ssh.tasks": {
+          "label": "定时 SSH 命令",
+          "triggers": {
+            "execute": {
+              "label": "执行命令",
+              "fields": {
+                "command": { "label": "命令" },
+                "working_directory": { "label": "工作目录" },
+                "environment": { "label": "环境变量" },
+                "timeout_seconds": { "label": "超时（秒）" },
+                "pty": { "label": "请求伪终端（PTY）" }
+              }
+            },
+            "resident": {
+              "label": "常驻命令",
+              "fields": {
+                "command": { "label": "命令" },
+                "working_directory": { "label": "工作目录" },
+                "environment": { "label": "环境变量" },
+                "max_restarts": { "label": "最大重启次数" },
+                "restart_backoff_seconds": { "label": "重启退避（秒）" },
+                "restart_window_seconds": { "label": "重启计数窗口（秒）" }
+              }
+            }
+          }
+        },
         "io.dbx.ssh.connection": {
           "label": "SSH 服务器",
           "description": "支持密码、私钥、SSH Agent 或无认证的 SSH/SFTP 连接。",
@@ -2832,9 +2859,35 @@
       }
     },
     "zh-TW": {
-      "name": "終端",
-      "description": "為 DBX 提供終端、SFTP 檔案傳輸與受控遠端維運工作流程。",
+      "name": "終端機",
+      "description": "面向伺服器維運的終端機：互動式工作階段、SFTP 檔案傳輸、遠端命令與受控維運操作集中在一個介面。",
       "contributions": {
+        "io.dbx.ssh.tasks": {
+          "label": "排程 SSH 命令",
+          "triggers": {
+            "execute": {
+              "label": "執行命令",
+              "fields": {
+                "command": { "label": "命令" },
+                "working_directory": { "label": "工作目錄" },
+                "environment": { "label": "環境變數" },
+                "timeout_seconds": { "label": "逾時（秒）" },
+                "pty": { "label": "請求偽終端（PTY）" }
+              }
+            },
+            "resident": {
+              "label": "常駐命令",
+              "fields": {
+                "command": { "label": "命令" },
+                "working_directory": { "label": "工作目錄" },
+                "environment": { "label": "環境變數" },
+                "max_restarts": { "label": "最大重啟次數" },
+                "restart_backoff_seconds": { "label": "重啟退避（秒）" },
+                "restart_window_seconds": { "label": "重啟計數視窗（秒）" }
+              }
+            }
+          }
+        },
         "io.dbx.ssh.connection": {
           "label": "SSH 伺服器",
           "description": "支援密碼、私鑰、SSH Agent 或無認證的 SSH 與 SFTP 連線。",
