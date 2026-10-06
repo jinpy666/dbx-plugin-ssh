@@ -1192,7 +1192,6 @@
       "type": "task-provider",
       "id": "io.dbx.ssh.tasks",
       "label": "Scheduled SSH commands",
-      "description": "Run commands on SSH connections from the task scheduler: one-shot executions with streamed stdout/stderr, or resident commands (tail -F style) supervised with a bounded restart policy.",
       "connection_providers": ["io.dbx.ssh.connection"],
       "capabilities": ["run", "resident", "cancel", "logs", "progress"],
       "triggers": [
