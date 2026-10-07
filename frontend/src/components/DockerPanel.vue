@@ -733,11 +733,24 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   min-width: 0;
   /* 列多超出面板宽时横向滚动兜底（面板本身可拖宽，见 App.vue 的 docker divider）。 */
   overflow-x: auto;
+  /* 内容过宽时用户找不到滚动入口——全局 `*::-webkit-scrollbar{display:none}`
+     把 wrap 的滚动条也藏了。这里作为例外显式恢复（同 .file-rows 模式）：
+     横向溢出时滚动条可见可拖。 */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--foreground) 25%, transparent) transparent;
 }
+
+.docker-table-wrap::-webkit-scrollbar { display: block; height: 10px; width: 10px; }
+.docker-table-wrap::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--foreground) 25%, transparent); border-radius: 5px; }
+.docker-table-wrap::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--foreground) 40%, transparent); }
+.docker-table-wrap::-webkit-scrollbar-track { background: transparent; }
 
 .docker-table {
   width: 100%;
-  border-collapse: collapse;
+  /* 粘性列需要 separate：collapse 下 Firefox 的粘性单元格边框不随滚动绘制。
+     行分隔线本就只画在各 cell 的 border-bottom 上，spacing 0 视觉等价。 */
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 12px;
 }
 
@@ -764,6 +777,18 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 粘性首列（容器名）：横向滚动时固定靠左，滚动出的内容从其右缘滑过。
+   实底取浮层同款 --popover（下层内容透出会误读成两列重叠）；右缘 1px
+   分隔让滚动时的层叠关系可见。表头同规则，滚动中表头保持一致。 */
+.docker-table th:first-child,
+.docker-table td.docker-cell-name {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--popover);
+  box-shadow: 1px 0 0 var(--border, rgba(128, 128, 128, 0.25));
 }
 
 .docker-cell-image {
@@ -799,6 +824,18 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   min-width: 44px;
   white-space: nowrap;
   text-align: right;
+}
+
+/* 粘性末列（操作按钮）：横向滚动时固定靠右，下拉触发器永不被内容推出
+   视口（issue：列内容过大时下拉按钮被遮挡）。实底同浮层底色，左缘 1px
+   分隔；z-index 与首列同级。 */
+.docker-table th.docker-col-actions,
+.docker-table td.docker-col-actions {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background: var(--popover);
+  box-shadow: -1px 0 0 var(--border, rgba(128, 128, 128, 0.25));
 }
 
 /* 行操作悬浮下拉：触发器（⌄，终端回填成功短暂显示 ✓）+ hover 菜单。 */

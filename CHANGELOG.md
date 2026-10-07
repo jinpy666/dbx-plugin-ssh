@@ -8,6 +8,11 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 （无 / nothing）
 
+## [0.7.5-beta.3] — 2026-10-07
+
+- **Docker 面板表格布局修复**。列内容过宽时横向滚动条被全局隐藏规则吞掉、操作列的下拉按钮被内容推出视口。现横向溢出时滚动条显式可见可拖(.file-rows 同款例外);容器名首列与操作按钮末列改为粘性列——滚动中名称固定靠左、操作按钮固定靠右永不被遮挡,粘性列带浮层同底色与 1px 分隔缘;表格切 separate 边框模型(Firefox 粘性单元格边框正确随滚动绘制,视觉等价)。
+  **Docker panel table layout fix.** With wide content the horizontal scrollbar was swallowed by the global scrollbar-hiding rule and the row actions' dropdown trigger was pushed out of view. The scrollbar is now explicitly visible on horizontal overflow (same exception pattern as .file-rows); the container-name first column and the actions last column are sticky — the name stays pinned left and the dropdown trigger stays pinned right while scrolled content slides beneath, each on an opaque popover background with a 1px separator edge. The table switched to the separate border model so Firefox paints sticky-cell borders correctly (visually identical).
+
 ## [0.7.5-beta.2] — 2026-10-07
 
 基于 0.7.4 的三个 bug 修复预发布(不含 0.7.5 调度任务功能;该功能需宿主侧配套,待 DBX 支持后另行发版)。
