@@ -8,6 +8,11 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 （无 / nothing）
 
+## [0.7.5] — 2026-10-07
+
+- **0.7.5 正式版**。内容与 [0.7.5-beta.2](#075-beta2--2026-10-07) / [0.7.5-beta.3](#075-beta3--2026-10-07) 两个预发布完全一致（#151 SFTP 大目录滚动、#153 弹窗窄视口溢出、#155 文本预览选区色、Docker 面板表格布局共四处修复，经 beta 验证后仅版本号转正）；manifest 版本从 `0.7.5-beta.3` 提升为 `0.7.5`，RDP client_build 编码恢复按 patch 段计算（705）。不含 scheduler 任务功能——该功能需宿主侧配套，待 DBX 支持后在 main 上另行发版。
+  **0.7.5 stable.** Content is identical to the [0.7.5-beta.2](#075-beta2--2026-10-07) / [0.7.5-beta.3](#075-beta3--2026-10-07) pre-releases (four fixes: #151 SFTP large-directory scrolling, #153 narrow-viewport dialog overflow, #155 text-preview selection color, and the Docker panel table layout — promoted after beta validation with only the version number finalized); the manifest version moves `0.7.5-beta.3` → `0.7.5` and the RDP client_build encoding returns to the plain patch segment (705). No scheduler feature — that needs matching host support and ships later from main.
+
 ## [0.7.5-beta.3] — 2026-10-07
 
 - **Docker 面板表格布局修复**。列内容过宽时横向滚动条被全局隐藏规则吞掉、操作列的下拉按钮被内容推出视口。现横向溢出时滚动条显式可见可拖(.file-rows 同款例外);容器名首列与操作按钮末列改为粘性列——滚动中名称固定靠左、操作按钮固定靠右永不被遮挡,粘性列带浮层同底色与 1px 分隔缘;表格切 separate 边框模型(Firefox 粘性单元格边框正确随滚动绘制,视觉等价)。
