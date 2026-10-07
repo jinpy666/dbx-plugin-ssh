@@ -3555,7 +3555,7 @@ mod tests {
 
     #[test]
     fn client_build_encodes_the_package_version() {
-        assert_eq!(client_build(), 704); // 0.7.4
+        assert_eq!(client_build(), 700); // 0.7.5-beta.2:patch 段含非数字后缀,按 0 计
     }
 
     #[test]
