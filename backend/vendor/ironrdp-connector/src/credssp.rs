@@ -91,12 +91,19 @@ impl CredsspSequence {
     }
 
     /// `server_name` must be the actual target server hostname (as opposed to the proxy)
+    ///
+    /// `channel_bindings` carries the `tls-server-end-point` binding (RFC 5929)
+    /// computed from the TLS server certificate; when set, it is forwarded to
+    /// the CredSSP client so the NTLM AUTHENTICATE message includes the
+    /// `MsvAvChannelBindings` AV pair (required by servers with Extended
+    /// Protection for Authentication).
     pub fn init(
         credentials: Credentials,
         domain: Option<&str>,
         protocol: nego::SecurityProtocol,
         server_name: ServerName,
         server_public_key: Vec<u8>,
+        channel_bindings: Option<sspi::channel_bindings::ChannelBindings>,
         kerberos_config: Option<KerberosConfig>,
     ) -> ConnectorResult<(Self, credssp::TsRequest)> {
         let credentials: sspi::Credentials = match &credentials {
@@ -163,6 +170,11 @@ impl CredsspSequence {
             service_principal_name,
         )
         .map_err(|e| ConnectorError::new("CredSSP", ConnectorErrorKind::Credssp(e)))?;
+
+        let mut client = client;
+        if let Some(channel_bindings) = channel_bindings {
+            client.set_channel_bindings(channel_bindings);
+        }
 
         let sequence = Self {
             client,

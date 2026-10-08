@@ -454,6 +454,16 @@ impl Ntlm {
                 let input_token = SecurityBuffer::find_buffer(input, BufferType::Token)?;
                 let output_token = SecurityBuffer::find_buffer_mut(builder.output, BufferType::Token)?;
 
+                // Client-side counterpart of the server branch in
+                // `accept_security_context_impl`: pick up the channel bindings
+                // supplied by the caller (CredSSP forwards the
+                // `tls-server-end-point` binding here) so that
+                // `get_authenticate_target_info` embeds the
+                // `MsvAvChannelBindings` AV pair into the AUTHENTICATE message.
+                if let Ok(sec_buffer) = SecurityBuffer::find_buffer(input, BufferType::ChannelBindings) {
+                    self.channel_bindings = Some(ChannelBindings::from_bytes(&sec_buffer.buffer)?);
+                }
+
                 client::read_challenge(self, input_token.buffer.as_slice())?;
 
                 client::write_authenticate(

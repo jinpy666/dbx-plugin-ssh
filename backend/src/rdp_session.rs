@@ -2070,8 +2070,14 @@ async fn handle_output_event(
             None
         }
         RdpOutputEvent::ConnectionFailure(error) => {
-            let (kind, retryable) = classify_connector_error_text(&format!("{error:?}"));
-            let message = connector_error_message(kind, &format!("{error:?}"));
+            let error_text = format!("{error:?}");
+            let (kind, retryable) = classify_connector_error_text(&error_text);
+            let message = connector_error_message(kind, &error_text);
+            // 诊断通道（stderr 走 sidecar-exit 宿主日志，不进事件流）：vendored
+            // 连接器的原始错误文本。认证类错误对用户只暴露统一文案（§红线），
+            // 但运维排障需要区分 CredSSP 拒绝码（如 CBT/EPA vs 凭据错误）。
+            // 连接器错误不含凭据（凭据只进 Zeroizing），可安全记录。
+            eprintln!("[ssh-sftp-plugin] rdp connection raw error: {error_text}");
             eprintln!(
                 "[ssh-sftp-plugin] rdp connection failed ({}): {}",
                 kind.as_str(),

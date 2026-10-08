@@ -85,9 +85,23 @@ pub(super) fn get_authenticate_target_info(
 
     av_pairs.retain(|av_pair| av_pair.as_u16() != AV_PAIR_EOL);
 
-    // use_mic always true, when ntlm_v2 is true
-    let flags_av_pair = AvPair::Flags(MsvAvFlags::MESSAGE_INTEGRITY_CHECK.bits());
-    av_pairs.push(flags_av_pair);
+    // use_mic always true, when ntlm_v2 is true.
+    // MS-NLMP 3.2.5.1.2: the client copies the MsvAvFlags from the CHALLENGE
+    // message and adds the MESSAGE_INTEGRITY_CHECK bit, instead of emitting a
+    // second (duplicate) MsvAvFlags pair that would shadow the server's flags.
+    let server_flags = av_pairs
+        .iter_mut()
+        .find(|av_pair| av_pair.as_u16() == AV_PAIR_FLAGS)
+        .and_then(|av_pair| match av_pair {
+            AvPair::Flags(value) => {
+                *value |= MsvAvFlags::MESSAGE_INTEGRITY_CHECK.bits();
+                Some(*value)
+            }
+            _ => None,
+        });
+    if server_flags.is_none() {
+        av_pairs.push(AvPair::Flags(MsvAvFlags::MESSAGE_INTEGRITY_CHECK.bits()));
+    }
 
     if send_single_host_data {
         let single_host_av_pair = AvPair::SingleHost(*SINGLE_HOST_DATA);

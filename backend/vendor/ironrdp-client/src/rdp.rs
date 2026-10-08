@@ -546,6 +546,9 @@ async fn connect_rdcleanpath_transport(
         &mut ReqwestNetworkClient::new(),
         (&config.destination).into(),
         server_public_key,
+        // RDCleanPath terminates TLS at the proxy; the endpoint certificate is
+        // not seen locally, so no `tls-server-end-point` binding is available.
+        None,
         config.kerberos_config.clone(),
     )
     .await?;
@@ -573,7 +576,7 @@ where
 
     let (initial_stream, leftover_bytes) = framed.into_inner();
 
-    let (tls_stream, tls_cert) = ironrdp_tls::upgrade(initial_stream, config.destination.name())
+    let (tls_stream, (tls_cert, tls_cert_raw_der)) = ironrdp_tls::upgrade(initial_stream, config.destination.name())
         .await
         .map_err(|e| ironrdp_connector::custom_err!("TLS upgrade", e))?;
 
@@ -586,6 +589,12 @@ where
         .ok_or_else(|| ironrdp_connector::general_err!("unable to extract tls server public key"))?
         .to_owned();
 
+    // `tls-server-end-point` channel binding (RFC 5929) computed over the raw
+    // DER exactly as received in the TLS certificate message. CredSSP forwards
+    // it to NTLM so the AUTHENTICATE message carries `MsvAvChannelBindings`,
+    // which Windows servers with Extended Protection for Authentication require.
+    let channel_bindings = compute_tls_server_end_point(&tls_cert, &tls_cert_raw_der)?;
+
     verify_server_certificate(config, tls_cert)
         .await
         .map_err(|e| ironrdp_connector::custom_err!("server certificate verification", std::io::Error::other(e)))?;
@@ -597,11 +606,31 @@ where
         &mut ReqwestNetworkClient::new(),
         (&config.destination).into(),
         server_public_key,
+        channel_bindings,
         config.kerberos_config.clone(),
     )
     .await?;
 
     Ok((connection_result, upgraded_framed))
+}
+
+/// Computes the `tls-server-end-point` channel binding (RFC 5929 §4) for the
+/// peer certificate: `"tls-server-end-point:"` prefix + hash of the raw DER
+/// exactly as received. The digest is the certificate's signature hash
+/// algorithm, with MD5 and SHA-1 upgraded to SHA-256 per RFC 5929 §4.1.
+fn compute_tls_server_end_point(
+    cert: &x509_cert::Certificate,
+    raw_der: &[u8],
+) -> ConnectorResult<Option<ironrdp_connector::sspi::channel_bindings::ChannelBindings>> {
+    let signature_oid = cert.signature_algorithm.oid.to_string();
+    let bindings = ironrdp_connector::sspi::channel_bindings::ChannelBindings::tls_server_end_point(
+        raw_der,
+        &signature_oid,
+    )
+    .map_err(|e| {
+        ironrdp_connector::reason_err!("tls-server-end-point", "failed to build channel bindings: {e}")
+    })?;
+    Ok(Some(bindings))
 }
 
 async fn verify_server_certificate(config: &Config, cert: x509_cert::Certificate) -> Result<(), String> {

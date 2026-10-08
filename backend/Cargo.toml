@@ -121,12 +121,16 @@ keyring = "4"
 # The RDP fork chain (vendor/) is patched the same way. ALL SIX entries below
 # form one lockstep set — ironrdp (umbrella 0.17) must move in the same round
 # as client 0.1.0 / connector 0.10.0, and picky/sspi/ironrdp-tls ride along.
-# Never bump a single entry; scripts/check_vendor_lockstep.py fails CI on
-# drift between this list and the vendored manifests. Registration table:
+# ironrdp-async is vendored as a seventh member: the CredSSP channel-binding
+# fix needs a new parameter on `connect_finalize` (threaded from the TLS
+# handshake in ironrdp-client down to CredsspSequence::init). Never bump a
+# single entry; scripts/check_vendor_lockstep.py fails CI on drift between
+# this list and the vendored manifests. Registration table:
 # backend/vendor/README.md.
 [patch.crates-io]
 dbx-plugin-sdk = { path = "../shared/sdk/rust/dbx-plugin-sdk" }
 ironrdp = { path = "vendor/ironrdp" }
+ironrdp-async = { path = "vendor/ironrdp-async" }
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
 ironrdp-client = { path = "vendor/ironrdp-client" }
 ironrdp-tls = { path = "vendor/ironrdp-tls" }

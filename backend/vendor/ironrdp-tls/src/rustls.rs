@@ -6,7 +6,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 
 pub type TlsStream<S> = tokio_rustls::client::TlsStream<S>;
 
-pub async fn upgrade<S>(stream: S, server_name: &str) -> io::Result<(TlsStream<S>, x509_cert::Certificate)>
+pub async fn upgrade<S>(stream: S, server_name: &str) -> io::Result<(TlsStream<S>, (x509_cert::Certificate, Vec<u8>))>
 where
     S: Unpin + AsyncRead + AsyncWrite,
 {
@@ -45,7 +45,12 @@ where
             .and_then(|certificates| certificates.first())
             .ok_or_else(|| io::Error::other("peer certificate is missing"))?;
 
-        x509_cert::Certificate::from_der(cert).map_err(io::Error::other)?
+        // Keep the raw DER alongside the parsed certificate: RFC 5929 §4
+        // hashes the exact bytes of the certificate message, and re-encoding
+        // a parsed certificate is not guaranteed to be byte-identical.
+        let raw_der = cert.as_ref().to_vec();
+        let parsed = x509_cert::Certificate::from_der(cert).map_err(io::Error::other)?;
+        (parsed, raw_der)
     };
 
     Ok((tls_stream, tls_cert))

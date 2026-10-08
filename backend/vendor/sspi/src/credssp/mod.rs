@@ -212,6 +212,11 @@ pub struct CredSspClient {
     ts_request_version: u32,
     client_mode: Option<ClientMode>,
     service_principal_name: String,
+    /// Optional `tls-server-end-point` channel bindings (RFC 5929). When set,
+    /// the CredSSP client forwards them to the inner security package as a
+    /// `SECBUFFER_CHANNEL_BINDINGS` buffer, so the AUTHENTICATE message
+    /// carries the `MsvAvChannelBindings` AV pair (MS-NLMP 3.2.5.1.2).
+    channel_bindings: Option<crate::channel_bindings::ChannelBindings>,
 }
 
 impl CredSspClient {
@@ -236,7 +241,35 @@ impl CredSspClient {
             ts_request_version: TS_REQUEST_VERSION,
             client_mode: Some(client_mode),
             service_principal_name,
+            channel_bindings: None,
         })
+    }
+
+    /// Sets the `tls-server-end-point` channel bindings forwarded to the inner
+    /// security package (NTLM/Negotiate). Must be called before the first
+    /// [`CredSspClient::process`] call.
+    pub fn set_channel_bindings(&mut self, channel_bindings: crate::channel_bindings::ChannelBindings) {
+        self.channel_bindings = Some(channel_bindings);
+    }
+
+    /// Serializes channel bindings into the `SEC_CHANNEL_BINDINGS` wire form
+    /// (32-byte header with little-endian length/offset fields followed by the
+    /// application data), matching what `ChannelBindings::from_bytes` and
+    /// Windows Schannel expect in a `SECBUFFER_CHANNEL_BINDINGS` buffer.
+    fn serialize_channel_bindings(channel_bindings: &crate::channel_bindings::ChannelBindings) -> Vec<u8> {
+        const HEADER_SIZE: usize = 32;
+
+        let mut buffer = Vec::with_capacity(HEADER_SIZE + channel_bindings.application_data.len());
+        buffer.extend_from_slice(&channel_bindings.initiator_addr_type.to_le_bytes());
+        buffer.extend_from_slice(&0_u32.to_le_bytes()); // cbInitiatorLength
+        buffer.extend_from_slice(&0_u32.to_le_bytes()); // dwInitiatorOffset
+        buffer.extend_from_slice(&channel_bindings.acceptor_addr_type.to_le_bytes());
+        buffer.extend_from_slice(&0_u32.to_le_bytes()); // cbAcceptorLength
+        buffer.extend_from_slice(&0_u32.to_le_bytes()); // dwAcceptorOffset
+        buffer.extend_from_slice(&(channel_bindings.application_data.len() as u32).to_le_bytes());
+        buffer.extend_from_slice(&(HEADER_SIZE as u32).to_le_bytes()); // dwApplicationDataOffset
+        buffer.extend_from_slice(&channel_bindings.application_data);
+        buffer
     }
 
     pub fn new_with_version(
@@ -261,6 +294,7 @@ impl CredSspClient {
             ts_request_version,
             client_mode: Some(client_mode),
             service_principal_name,
+            channel_bindings: None,
         })
     }
 
@@ -314,10 +348,21 @@ impl CredSspClient {
 
         match self.state {
             CredSspState::NegoToken => {
-                let mut input_token = [SecurityBuffer::new(
+                let mut input_token = vec![SecurityBuffer::new(
                     ts_request.nego_tokens.take().unwrap_or_default(),
                     BufferType::Token,
                 )];
+                // Forward the `tls-server-end-point` channel bindings (RFC 5929) to the
+                // inner security package, so the NTLM AUTHENTICATE message carries the
+                // `MsvAvChannelBindings` AV pair (MS-NLMP 3.2.5.1.2). Windows servers
+                // with Extended Protection for Authentication require this AV pair and
+                // reject NTLM AUTHENTICATE messages without it.
+                if let Some(channel_bindings) = &self.channel_bindings {
+                    input_token.push(SecurityBuffer::new(
+                        Self::serialize_channel_bindings(channel_bindings),
+                        BufferType::ChannelBindings,
+                    ));
+                }
                 let mut output_token = vec![SecurityBuffer::new(Vec::with_capacity(1024), BufferType::Token)];
 
                 let mut credentials_handle = self.credentials_handle.take();

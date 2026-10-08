@@ -4,7 +4,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 
 pub type TlsStream<S> = tokio_native_tls::TlsStream<S>;
 
-pub async fn upgrade<S>(stream: S, server_name: &str) -> io::Result<(TlsStream<S>, x509_cert::Certificate)>
+pub async fn upgrade<S>(stream: S, server_name: &str) -> io::Result<(TlsStream<S>, (x509_cert::Certificate, Vec<u8>))>
 where
     S: Unpin + AsyncRead + AsyncWrite,
 {
@@ -32,7 +32,11 @@ where
             .ok_or_else(|| io::Error::other("peer certificate is missing"))?;
         let cert = cert.to_der().map_err(io::Error::other)?;
 
-        x509_cert::Certificate::from_der(&cert).map_err(io::Error::other)?
+        // native-tls only exposes the re-encoded DER; keep it as the raw copy
+        // so the `tls-server-end-point` hash has a stable input on this backend.
+        let raw_der = cert.clone();
+        let parsed = x509_cert::Certificate::from_der(&cert).map_err(io::Error::other)?;
+        (parsed, raw_der)
     };
 
     Ok((tls_stream, tls_cert))

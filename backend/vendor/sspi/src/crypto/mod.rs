@@ -6,13 +6,13 @@ use hmac::KeyInit;
 use md4::Md4;
 use md5::{Digest as _, Md5};
 pub(crate) use rc4::Rc4;
-use sha2::Sha256;
+use sha2::{Sha256, Sha384, Sha512};
 
 use crate::channel_bindings::ChannelBindings;
 
 pub(crate) const HASH_SIZE: usize = 16;
 
-const SHA256_SIZE: usize = 32;
+pub(crate) const SHA256_SIZE: usize = 32;
 
 pub(crate) fn compute_md4(data: &[u8]) -> [u8; HASH_SIZE] {
     use md4::Digest as _;
@@ -60,6 +60,27 @@ pub(crate) fn compute_md5_channel_bindings_hash(channel_bindings: &ChannelBindin
 pub(crate) fn compute_sha256(data: &[u8]) -> [u8; SHA256_SIZE] {
     let mut context = Sha256::new();
     let mut result = [0x00; SHA256_SIZE];
+    context.update(data);
+    result.clone_from_slice(&context.finalize());
+
+    result
+}
+
+pub(crate) const SHA384_SIZE: usize = 48;
+pub(crate) const SHA512_SIZE: usize = 64;
+
+pub(crate) fn compute_sha384(data: &[u8]) -> [u8; SHA384_SIZE] {
+    let mut context = Sha384::new();
+    let mut result = [0x00; SHA384_SIZE];
+    context.update(data);
+    result.clone_from_slice(&context.finalize());
+
+    result
+}
+
+pub(crate) fn compute_sha512(data: &[u8]) -> [u8; SHA512_SIZE] {
+    let mut context = Sha512::new();
+    let mut result = [0x00; SHA512_SIZE];
     context.update(data);
     result.clone_from_slice(&context.finalize());
 
