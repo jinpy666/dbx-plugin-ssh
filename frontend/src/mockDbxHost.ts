@@ -55,6 +55,9 @@ if (fixtureParams.get("noanim") === "1") {
 // Connectionless local-terminal tab (HOST_PLUGIN_UI_SPEC §4/§7.1 passthrough): no
 // connectionId/connection. workbenchId/restored/surface are injected by the host (mock).
 const localOnlyContext = fixtureParams.get("local") === "1";
+// ?proto=rdp 模拟宿主连接表单 protocol=rdp：RDP 连接级门控走查（工具条 SSH-only
+// 控件整类隐藏）。mock 的 rdp/start 夹具（:1574 起）会推桌面帧，可直连完成。
+const protoFixture = fixtureParams.get("proto");
 // ?local=1&restored=1 simulates a host-restored local-terminal tab: restore semantics (spec §7.6/§8.4)
 // requires restore-without-replay — no automatic shell, just the exit shell until the user explicitly starts one.
 const restoredFixture = fixtureParams.get("restored") === "1";
@@ -138,7 +141,9 @@ const context = localOnlyContext
   restored: false,
   surface: surfaceFixture,
   workbenchState: { sftpPath: "/home/demo", splitRatio: 58, paneOrder: "terminal-left", visibleColumns: ["size", "modified", "owner", "group", "permissions"] },
-  connection: { name: "Production SSH", host: "192.168.1.64", port: 22, username: "user", color: "#3b82f6", readOnly: !writable, ...(autoAuthActive ? { authentication: "auto" } : {}) },
+  // ?proto=rdp 模拟宿主连接表单 protocol=rdp（RDP 连接级 UI 门控走查：
+  // SSH/SFTP 专属工具条整类隐藏，连接协议由 openSession 路由到 RDP 会话）。
+  connection: { name: protoFixture === "rdp" ? "Production RDP" : "Production SSH", host: protoFixture === "rdp" ? "rdp.demo.internal" : "192.168.1.64", port: protoFixture === "rdp" ? 3389 : 22, username: "user", color: "#3b82f6", readOnly: !writable, ...(protoFixture ? { protocol: protoFixture } : {}), ...(autoAuthActive ? { authentication: "auto" } : {}) },
 };
 // ?tunnels=1 and ?tunnels=quick model a connection right-click workbench.
 if (fixtureParams.has("tunnels")) {
@@ -246,6 +251,13 @@ let rdpCertGate: (() => void) | null = null;
 // 报错；120s 未决 fail-closed 超时。
 let rdpCertChallengeId = "";
 let rdpCertTimeoutTimer = 0;
+
+// ?autordp=1（配合 ?proto=rdp）：夹具预拨一个活的 RDP 会话，让页面加载时
+// 走真实的 rdp/list 重接路径（模拟"DBX 重启后恢复活会话"的走查入口）。
+if (fixtureParams.get("proto") === "rdp" && fixtureParams.get("autordp") === "1" && !rdpSessionId) {
+  rdpSessionId = `visual-rdp-pre${Math.random().toString(36).slice(2, 6)}`;
+  rdpDial(rdpSessionId);
+}
 
 function emitRdpState(state: string, extra: Record<string, unknown> = {}) {
   if (!rdpSessionId) return;

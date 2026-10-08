@@ -26,6 +26,8 @@ import {
   Bot,
   Braces,
   ClipboardPaste,
+  Scan,
+  StretchHorizontal,
   Columns3,
   Copy,
   Download,
@@ -1269,6 +1271,38 @@ const rdpSurface = ref<InstanceType<typeof RdpSurface> | null>(null);
 const rdpClipboardChunks = new Map<string, { parts: string[]; received: number }>();
 const isRdpMode = computed(() => rdpSession.value !== null);
 const rdpTarget = computed(() => (rdpSession.value ? `${rdpSession.value.host}:${rdpSession.value.port}` : ""));
+// —— RDP 专属工具组（缩放 + 大文本粘贴）：SSH 工具在 RDP 连接上整类隐藏后，
+// 这里补上远程桌面自己需要的能力。缩放复用 RdpSurface 的 fit/actual/stretch
+// 三档（与连接表单同一组文案）；大文本粘贴双通道：写入远端剪贴板（快，远端
+// Ctrl+V）或按键注入（慢，剪贴板被禁时兜底，4k 字符/次为后端上限，分片发送）。
+const rdpPasteOpen = ref(false);
+const rdpPasteText = ref("");
+const rdpTypingBusy = ref(false);
+const rdpTypingSent = ref(0);
+const rdpTypingTotal = ref(0);
+async function rdpWriteRemoteClipboard() {
+  const text = rdpPasteText.value;
+  if (!text) return;
+  sendRdpClipboard(text);
+}
+async function rdpTypeAsKeystrokes() {
+  const text = rdpPasteText.value;
+  if (!text || rdpTypingBusy.value) return;
+  rdpTypingBusy.value = true;
+  rdpTypingSent.value = 0;
+  rdpTypingTotal.value = text.length;
+  const chunkSize = 512;
+  try {
+    for (let offset = 0; offset < text.length; offset += chunkSize) {
+      if (!isRdpMode.value) break;
+      sendRdpInput({ kind: "unicode", text: text.slice(offset, offset + chunkSize) });
+      rdpTypingSent.value = Math.min(offset + chunkSize, text.length);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+  } finally {
+    rdpTypingBusy.value = false;
+  }
+}
 const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value || isVncMode.value || isRdpMode.value);
 // —— 本地终端偏好（sidecar preferences.json 持久化；iframe 沙箱无 localStorage）——
 // shell 空串 = 跟随自动探测；integration 缺省开。
@@ -1510,6 +1544,11 @@ const connectionProtocol = computed<"ssh" | "telnet" | "vnc" | "serial" | "rdp">
   const protocol = connection.value.protocol;
   return protocol === "telnet" || protocol === "vnc" || protocol === "serial" || protocol === "rdp" ? protocol : "ssh";
 });
+// RDP 连接（宿主表单 protocol=rdp）：SSH/SFTP/主机运维整类能力在 RDP 连接上
+// 无处生效，工具条、面板与覆盖层按连接协议整体隐藏（而非置灰）——与 localUiMode
+// 的"local 模式隐藏 SSH 专属动作"惯例一致。区别于 isRdpMode（仅 RDP 会话激活
+// 期），连接级门控让断开态下残留的 SSH 入口也不再出现。
+const isRdpConnection = computed(() => connectionProtocol.value === "rdp");
 const canWrite = computed(() => !connection.value.readOnly && !connectionReadOnly.value);
 const selectedEntry = computed(() => entries.value.find((entry) => entry.uri === selectedPath.value));
 const connected = computed(() => terminalState.value === "connected" && !!session.value);
@@ -4081,6 +4120,10 @@ async function startSerialFromConnection(): Promise<boolean> {
 async function startRdpFromConnection(): Promise<boolean> {
   const conn = connection.value;
   if (!conn.host) return false;
+  // RDP 连接不渲染 SFTP 面板/分栏/批量发送栏：若同 tab 之前是 SSH 会话残留
+  // 的开启态，进入 RDP 会话前收掉，避免隐藏门控下的幽灵分栏占位。
+  if (sftpPaneOpen.value) sftpPaneOpen.value = false;
+  if (batchBarOpen.value) batchBarOpen.value = false;
   return startRdpSession({
     host: conn.host,
     port: conn.port && conn.port > 0 ? conn.port : 3389,
@@ -7112,6 +7155,7 @@ function closeToolbarPopovers() {
   sessionMenuShellOpen.value = false;
   localShellSurfaceOpen.value = false;
   panelPaletteOpen.value = false;
+  rdpPasteOpen.value = false;
 }
 
 function closeMenus() {
@@ -7913,12 +7957,40 @@ watch(historyScope, () => {
         </Popover>
       </div>
       <div v-if="!panelSurface" class="toolbar-actions">
-        <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :aria-label="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
+        <button v-if="!isRdpConnection" class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :aria-label="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
         <!-- Local terminal UI hides SSH-only actions outright (not disabled): the local
-             shell has no SSH session to act on. -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
-        <button class="icon-button" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
-        <button class="icon-button" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
+             shell has no SSH session to act on. RDP 连接同理：SFTP/分栏/字体缩放
+             在远程桌面上无处生效，按连接协议整体隐藏。 -->
+        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
+        <!-- RDP 专属工具组（isRdpMode 会话激活期）：缩放三档 + 大文本粘贴 +
+             断开。SSH 工具整类隐藏后，这是远程桌面自己需要的操作面。 -->
+        <template v-if="isRdpMode">
+          <div class="rdp-scale-group" role="group" :aria-label="t('rdp.scaleMode')">
+            <button class="icon-button rdp-scale-button" :class="{ 'is-active': rdpScaleMode === 'fit' }" :title="t('rdp.scaleMode.fit')" :aria-label="t('rdp.scaleMode.fit')" :aria-pressed="rdpScaleMode === 'fit'" @click="rdpScaleMode = 'fit'"><Scan /></button>
+            <button class="icon-button rdp-scale-button" :class="{ 'is-active': rdpScaleMode === 'actual' }" :title="t('rdp.scaleMode.actual')" :aria-label="t('rdp.scaleMode.actual')" :aria-pressed="rdpScaleMode === 'actual'" @click="rdpScaleMode = 'actual'"><span class="font-step-label" aria-hidden="true">1:1</span></button>
+            <button class="icon-button rdp-scale-button" :class="{ 'is-active': rdpScaleMode === 'stretch' }" :title="t('rdp.scaleMode.stretch')" :aria-label="t('rdp.scaleMode.stretch')" :aria-pressed="rdpScaleMode === 'stretch'" @click="rdpScaleMode = 'stretch'"><StretchHorizontal /></button>
+          </div>
+          <div>
+            <Popover :open="rdpPasteOpen" @update:open="(open) => { if (!open) rdpPasteOpen = false; }">
+              <PopoverAnchor as-child>
+                <button class="icon-button icon-cyan" :class="{ 'is-active': rdpPasteOpen }" :title="t('rdp.paste.title')" :aria-label="t('rdp.paste.title')" :aria-expanded="rdpPasteOpen" @click.stop="rdpPasteOpen = !rdpPasteOpen"><ClipboardPaste /></button>
+              </PopoverAnchor>
+              <PopoverContent class="popover rdp-paste-popover" align="start" :side-offset="5">
+                <h3>{{ t("rdp.paste.title") }}</h3>
+                <textarea v-model="rdpPasteText" class="rdp-paste-text mono" :placeholder="t('rdp.paste.placeholder')" rows="8" spellcheck="false" />
+                <div class="rdp-paste-actions">
+                  <button class="primary-button" :disabled="!rdpPasteText" @click="rdpWriteRemoteClipboard">{{ t("rdp.paste.toClipboard") }}</button>
+                  <button class="link-button" :disabled="!rdpPasteText || rdpTypingBusy" @click="rdpTypeAsKeystrokes">{{ t("rdp.paste.type") }}</button>
+                </div>
+                <p class="muted rdp-paste-hint">{{ t("rdp.paste.toClipboardHint") }}</p>
+                <p v-if="rdpTypingTotal > 0" class="muted rdp-paste-hint">{{ rdpTypingBusy ? t("rdp.paste.typing", { sent: rdpTypingSent, total: rdpTypingTotal }) : t("rdp.paste.typeDone", { count: rdpTypingSent }) }}</p>
+              </PopoverContent>
+            </Popover>
+          </div>
+          <button class="icon-button icon-emerald" :title="t('rdp.disconnect')" :aria-label="t('rdp.disconnect')" @click="closeRdpSession"><PlugZap /></button>
+        </template>
+        <button v-if="!isRdpMode" class="icon-button" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
+        <button v-if="!isRdpMode" class="icon-button" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
         <!-- 工具条语义分组：视图 / 会话 / 运维 / 命令 / 记录与设置 / SFTP 工具（分隔线避开 local 模式两侧皆隐藏的位置） -->
         <span class="toolbar-separator" aria-hidden="true" />
         <!-- 会话下拉：新建 / 复制 / 命令会话 / 本地终端 / Shell 选项收敛为单入口，
@@ -7932,9 +8004,9 @@ watch(historyScope, () => {
             <PopoverContent class="popover session-menu-popover" :class="{ 'session-menu-shell': sessionMenuShellOpen }" align="start" :side-offset="5">
               <template v-if="!sessionMenuShellOpen">
                 <h3>{{ t("sessionMenu.title") }}</h3>
-                <button v-if="!localUiMode" class="session-menu-item" :disabled="!connectionId" @click="sessionMenuOpen = false; openNewSessionTab();"><SquarePlus />{{ t("newSessionTab") }}</button>
-                <button v-if="!localUiMode" class="session-menu-item" :disabled="!connectionId || !connected" @click="sessionMenuOpen = false; openCopiedSessionTab();"><Copy />{{ t("copySessionTab") }}</button>
-                <button v-if="!localUiMode" class="session-menu-item" :disabled="!connectionId || !connected" @click="sessionMenuOpen = false; openCommandSessionTab();"><TerminalIcon />{{ t("spawnSessionTab") }}</button>
+                <button v-if="!localUiMode && !isRdpConnection" class="session-menu-item" :disabled="!connectionId" @click="sessionMenuOpen = false; openNewSessionTab();"><SquarePlus />{{ t("newSessionTab") }}</button>
+                <button v-if="!localUiMode && !isRdpConnection" class="session-menu-item" :disabled="!connectionId || !connected" @click="sessionMenuOpen = false; openCopiedSessionTab();"><Copy />{{ t("copySessionTab") }}</button>
+                <button v-if="!localUiMode && !isRdpConnection" class="session-menu-item" :disabled="!connectionId || !connected" @click="sessionMenuOpen = false; openCommandSessionTab();"><TerminalIcon />{{ t("spawnSessionTab") }}</button>
                 <template v-if="!localUiMode"><hr class="session-menu-separator" /></template>
                 <!-- 本地终端：sidecar 所在机器的登录 shell。与 SSH 会话互斥展示，
                      已连接时经确认先关 SSH；退出态由终端覆盖层提供重开出口。
@@ -8008,27 +8080,27 @@ watch(historyScope, () => {
         </div>
         <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
         <button v-if="isSerialMode" class="icon-button icon-emerald" :title="t('serial.upload.open')" :aria-label="t('serial.upload.open')" :disabled="serialUploadBusy" @click="serialUploadDialogOpen = true"><FileUp /></button>
-        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('reconnect')" :aria-label="t('reconnect')" :disabled="terminalState === 'connecting' && !reconnectPending" @click="reconnectNow"><PlugZap /></button>
+        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-emerald" :title="t('reconnect')" :aria-label="t('reconnect')" :disabled="terminalState === 'connecting' && !reconnectPending" @click="reconnectNow"><PlugZap /></button>
         <!-- 一键 sudo -v：向当前 PTY 写入命令刷新 sudo 凭据缓存；quick sudo 自动应答
              是否启用由连接设置决定（设置弹窗），工作台不再提供开关。 -->
-        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('sudoRefresh.title')" :aria-label="t('sudoRefresh.title')" :disabled="!connected" @click="sendSudoRefresh"><ShieldCheck /></button>
+        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-emerald" :title="t('sudoRefresh.title')" :aria-label="t('sudoRefresh.title')" :disabled="!connected" @click="sendSudoRefresh"><ShieldCheck /></button>
         <!-- quick sudo profiles 管理入口（M32-A）已归位设置·sudo：工具条不再放
              管理类按钮，sudoRefresh 保留为会话内即时动作。 -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
+        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
+        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
         <!-- Docker 浮层（鲸鱼 logo 独立入口，metrics-float 同款右上浮层）：
              SFTP 面板关闭时也可达；local 模式保留——本机 daemon（Docker
              Desktop/OrbStack）场景照常可用。面板自治，关闭即卸载停轮询。 -->
-        <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
-        <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
+        <button v-if="!isRdpConnection" class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
+        <label v-if="!localUiMode && !isRdpConnection" class="follow-directory-control" :title="t('followTerminal')">
           <Switch size="sm" :model-value="followDirectory" :disabled="!connected || panelSurface" @update:model-value="setDirectoryTracking" />
           <span>{{ t("followTerminal") }}</span>
         </label>
         <span class="toolbar-separator" aria-hidden="true" />
-        <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('commandTitle')" :aria-label="t('commandTitle')" :disabled="!connected" @click="openCommandDialog"><SquareTerminal /></button>
-        <button v-if="!localUiMode && !panelSurface" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
-        <div v-if="!localUiMode">
+        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-neutral" :title="t('commandTitle')" :aria-label="t('commandTitle')" :disabled="!connected" @click="openCommandDialog"><SquareTerminal /></button>
+        <button v-if="!localUiMode && !panelSurface && !isRdpConnection" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
+        <div v-if="!localUiMode && !isRdpConnection">
           <Popover :open="quickMenuOpen" @update:open="(open) => { if (!open) quickMenuOpen = false; }">
             <PopoverAnchor as-child>
               <button class="icon-button icon-amber" :title="t('quickCommands')" :aria-label="t('quickCommands')" :disabled="!connected" @click.stop="toggleQuickMenu"><Zap /></button>
@@ -8065,7 +8137,7 @@ watch(historyScope, () => {
             </PopoverContent>
           </Popover>
         </div>
-        <div>
+        <div v-if="!isRdpConnection">
           <Popover :open="agentModeOpen" @update:open="(open) => { if (!open) agentModeOpen = false; }">
             <PopoverAnchor as-child>
               <button class="icon-button" :class="agentMode === 'off' ? 'icon-neutral' : 'icon-emerald is-active'" :title="t('agentTerminalQuickHint')" :aria-label="t('agentTerminalQuickHint')" :aria-pressed="agentMode !== 'off'" :disabled="!connected" @click.stop="toggleAgentModeMenu"><Bot /></button>
@@ -8083,13 +8155,13 @@ watch(historyScope, () => {
         <!-- 高亮规则管理（M32-A2）已归位设置·终端（HighlightRulesSection）：
              工具条不再放配置编辑器，渲染扫描（compiledHighlightRules）仍在。 -->
         <span class="toolbar-separator" aria-hidden="true" />
-        <button class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-label="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
-        <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
-        <button class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-label="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
+        <button v-if="!isRdpConnection" class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-label="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
+        <button v-if="!isRdpConnection" class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
+        <button v-if="!isRdpConnection" class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-label="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
         <button class="icon-button icon-violet" :title="t('settings')" :aria-label="t('settings')" @click="openSettings"><Settings /></button>
         <button class="icon-button icon-amber" :title="t('auditLog.title')" :aria-label="t('auditLog.title')" @click="openAuditLog"><FileText /></button>
         <span class="toolbar-separator" aria-hidden="true" />
-        <div>
+        <div v-if="!isRdpConnection">
           <Popover :open="columnsOpen" @update:open="(open) => { if (!open) columnsOpen = false; }">
             <PopoverAnchor as-child>
               <button class="icon-button icon-violet" :title="t('customizeColumns')" :aria-label="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
@@ -8101,7 +8173,7 @@ watch(historyScope, () => {
             </PopoverContent>
           </Popover>
         </div>
-        <div>
+        <div v-if="!isRdpConnection">
           <!-- 历史卡右键菜单（ContextMenu）打开时忽略弹层的外点关闭请求：
                菜单项 pointerdown 相对弹层是"外部"，不加守卫会在 select 前把宿主弹层
                连同菜单一起卸载，动作丢失。 -->
@@ -8127,14 +8199,14 @@ watch(historyScope, () => {
            设置与工具条收起，密度对齐底部栏（紧凑 30px 工具条 + 透明 ghost 按钮）。 -->
       <div v-if="panelSurface" class="toolbar-actions panel-actions">
         <!-- 在 tab 打开当前连接（宿主 openWorkbench → 新 tab，panel 自己保持轻量）。 -->
-        <button v-if="!localUiMode" class="icon-button compact" :title="t('newSessionTab')" :aria-label="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><ExternalLink /></button>
+        <button v-if="!localUiMode && !isRdpConnection" class="icon-button compact" :title="t('newSessionTab')" :aria-label="t('newSessionTab')" :disabled="!connectionId" @click="openNewSessionTab"><ExternalLink /></button>
         <!-- SFTP 文件面板开关：dock 默认不开，手动开合（连接后列表已就绪）。 -->
-        <button v-if="!localUiMode" class="icon-button compact" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
-        <button class="icon-button compact" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
-        <button class="icon-button compact" :title="t('transfers')" :aria-label="t('transfers')" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
-        <button class="icon-button compact" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
-        <button class="icon-button compact" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
-        <Popover :open="panelPaletteOpen" @update:open="(open) => { if (!open) panelPaletteOpen = false; }">
+        <button v-if="!localUiMode && !isRdpConnection" class="icon-button compact" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
+        <button v-if="!isRdpConnection" class="icon-button compact" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
+        <button v-if="!isRdpConnection" class="icon-button compact" :title="t('transfers')" :aria-label="t('transfers')" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
+        <button v-if="!isRdpMode" class="icon-button compact" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
+        <button v-if="!isRdpMode" class="icon-button compact" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
+        <Popover v-if="!isRdpMode" :open="panelPaletteOpen" @update:open="(open) => { if (!open) panelPaletteOpen = false; }">
           <PopoverAnchor as-child>
             <button class="icon-button compact icon-violet" :class="{ 'is-active': panelPaletteOpen }" :title="t('terminalAppearance.schemeSection')" :aria-label="t('terminalAppearance.schemeSection')" :aria-expanded="panelPaletteOpen" @click.stop="panelPaletteOpen = !panelPaletteOpen"><Palette /></button>
           </PopoverAnchor>
@@ -8387,7 +8459,7 @@ watch(historyScope, () => {
           <button type="button" class="terminal-ai-fix-btn" @click="aiFixFromBar">{{ t("aiFix.barAction") }}</button>
           <button type="button" class="terminal-ai-fix-close" :title="t('aiFix.barClose')" :aria-label="t('aiFix.barClose')" @click="aiFixBar = null; clearFixRecommendation()">✕</button>
         </div>
-        <div v-if="terminalDragActive || (dragActive && !sftpPaneOpen)" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
+        <div v-if="!isRdpConnection && (terminalDragActive || (dragActive && !sftpPaneOpen))" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
         <TerminalSearchPanel
           v-if="searchOpen"
           :locale="locale"
@@ -8455,7 +8527,7 @@ watch(historyScope, () => {
              预拨号、面板直出终端区域），但 FAILED/disconnected 是死路态——
              连接卡（错误文案 + 重连出口）在面板内同样要呈现，否则面板读作空白。 -->
         <div
-          v-if="(!panelSurface || terminalState === 'error' || terminalState === 'disconnected') && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && terminalState !== 'connected' && !reconnectPending"
+          v-if="(!panelSurface || terminalState === 'error' || terminalState === 'disconnected') && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && !isRdpConnection && terminalState !== 'connected' && !reconnectPending"
           class="terminal-overlay"
         >
           <ConnectingCard
@@ -8799,7 +8871,7 @@ watch(historyScope, () => {
           </section>
         </div>
         <!-- 批量发送结果浮条：显示在命令条上方，可手动关闭。 -->
-        <div v-if="connected && batchBarOpen && (batchSummary || batchError)" class="batch-bar-status" role="status">
+        <div v-if="connected && batchBarOpen && !isRdpConnection && (batchSummary || batchError)" class="batch-bar-status" role="status">
           <template v-if="batchSummary">
             <p :class="batchSummary.failed ? 'task-error' : 'muted'">
               {{ batchSummary.failed ? t("batchSendPartial", { sent: batchSummary.sent, failed: batchSummary.failed }) : t("batchSendSent", { count: batchSummary.sent }) }}
@@ -8815,7 +8887,7 @@ watch(historyScope, () => {
         </div>
         <!-- 批量发送命令条（Electerm quick-command bar）：贴终端底部，回车即发送；
              目标选择/快速命令切换/保存为快速命令均在条上完成。 -->
-        <section v-if="connected && batchBarOpen" class="batch-bar" @contextmenu.stop @mousedown.stop @click.stop>
+        <section v-if="connected && batchBarOpen && !isRdpConnection" class="batch-bar" @contextmenu.stop @mousedown.stop @click.stop>
           <div>
             <!-- 底部条上的 popover 向上展开（reka side="top"，旧绝对定位会被裁切）。 -->
             <Popover :open="batchTargetsOpen" @update:open="(open) => { if (!open) batchTargetsOpen = false; }">
@@ -8925,7 +8997,7 @@ watch(historyScope, () => {
       </ContextMenu>
 
       <div
-        v-if="sftpPaneOpen"
+        v-if="sftpPaneOpen && !isRdpConnection"
         class="divider"
         role="separator"
         aria-orientation="vertical"
@@ -8938,7 +9010,7 @@ watch(historyScope, () => {
         @keydown="onDividerKeydown($event, nudgeSplitDivider)"
       />
 
-      <section v-if="sftpPaneOpen" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave.self="dragActive = false" @drop.prevent="onDrop">
+      <section v-if="sftpPaneOpen && !isRdpConnection" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave.self="dragActive = false" @drop.prevent="onDrop">
         <div class="path-toolbar">
           <button class="icon-button" :title="t('parentFolder')" :aria-label="t('parentFolder')" :disabled="currentPath === '/'" @click="goParent"><ArrowUp /></button>
           <button class="icon-button icon-amber" :title="t('home')" :aria-label="t('home')" :disabled="!connected" @click="loadHome"><Home /></button>
@@ -9993,6 +10065,33 @@ watch(historyScope, () => {
 /* 快速命令栏（工具栏下拉）：M32-A3 后只剩"列表 + 搜索 + 执行"；
    新建/编辑/导入样式随管理视图迁入 QuickCommandsSection。 */
 .quick-commands-popover h3 { margin: 2px 4px 6px; font-size: 12px; }
+
+/* RDP 缩放三档按钮组（isRdpMode 工具组）：与 icon-button 同密度，激活态
+   走 primary 描边与 icon-emerald 同款强调。 */
+.rdp-scale-group { display: flex; align-items: center; gap: 1px; }
+.rdp-scale-button.is-active { color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, transparent); }
+.rdp-scale-button .font-step-label { font-size: 10px; letter-spacing: .02em; }
+
+/* RDP 大文本粘贴面板（工具栏下拉）：textarea 主输入 + 双通道投递动作。 */
+.rdp-paste-popover h3 { margin: 2px 4px 8px; font-size: 12px; }
+.rdp-paste-text {
+  width: 100%;
+  min-height: 140px;
+  max-height: 260px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--foreground);
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  outline: none;
+}
+.rdp-paste-text:focus { border-color: color-mix(in srgb, var(--primary) 70%, var(--border)); }
+.rdp-paste-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.rdp-paste-hint { margin: 6px 4px 0; font-size: 11px; }
+
 /* 搜索行：图标 + 无边框输入（容器边框即输入框）。 */
 .quick-search { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 4px; padding: 0 8px; background: var(--background); }
 .quick-search:focus-within { border-color: color-mix(in srgb, var(--primary) 70%, var(--border)); }
