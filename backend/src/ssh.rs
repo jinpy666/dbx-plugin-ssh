@@ -10282,8 +10282,10 @@ async fn authenticate_auto(
 
 /// Tries password authentication first, then keyboard-interactive. The
 /// `offered` result of the preceding auth attempt tells which methods the
-/// server still accepts, reconciled against the leading none probe's
-/// advertisement (`advertised_none` — see [`reconcile_advertised`]).
+/// server still accepts. The initial method choice is reconciled against the
+/// leading none probe (`advertised_none` — see [`reconcile_advertised`]), but
+/// a successful first factor may cause the server to advertise a new MFA
+/// method that was absent from the initial list.
 /// Keyboard-interactive rounds are auto-answered from
 /// the Quick Sudo orchestration config, covering PAM 2FA/TOTP logins.
 async fn authenticate_password_or_interactive(
@@ -10304,7 +10306,10 @@ async fn authenticate_password_or_interactive(
         if result.success() {
             return Ok(());
         }
-        if reconcile_advertised(advertised_none, &result, MethodKind::KeyboardInteractive) {
+        // A password accepted as the first factor can unlock keyboard-interactive
+        // MFA. Trust the password step's current advertisement here: intersecting
+        // it with the earlier none probe would reject newly advertised MFA.
+        if method_offered(&result, MethodKind::KeyboardInteractive) {
             eprintln!(
                 "[ssh-trace] auth: falling back to keyboard-interactive (partial_success={})",
                 auth_partial_success(&result)
