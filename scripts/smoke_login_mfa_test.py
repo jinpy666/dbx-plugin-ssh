@@ -24,6 +24,8 @@ Why a mock server instead of the usual docker container: koko 的登录流程是
  13. 阿里云短信 MFA（官方提问原文）+ off                 -> 宿主密文弹窗输入短信码后登录成功
  14. 阿里云短信 MFA + 私钥（publickey partial success）  -> 弹窗输入短信码后登录成功
  15. 阿里云 OTP 提问 + 已配 TOTP 密钥                    -> 官方文案免提示词自动回码
+ 16. none 阶段仅声明 password，密码通过后才声明 KI MFA     -> 密文弹窗输入动态码
+ 17. 同一延后声明 MFA 的形态打开终端并复制会话             -> 只认证一次
 
 paramiko 未安装、或旧 sidecar 未注册 `connection/test` 时 SKIP（不判失败）。
 主机密钥/私钥均为本机运行时生成，不涉及任何真实凭据或生产主机。
@@ -68,6 +70,7 @@ ALIYUN_MFA_PROMPT = "Please Input Mfa Code (SMS):"
 
 # mock 堡垒机的认证形态（与 backend/src/ssh.rs 的 koko_login::Shape 对应）。
 PASSWORD_THEN_MFA = "password_then_mfa"
+PASSWORD_THEN_LATE_MFA = "password_then_late_mfa"
 KI_PASSWORD_THEN_MFA = "ki_password_then_mfa"
 KI_MFA_ONLY = "ki_mfa_only"
 KI_COMBINED = "ki_combined"
@@ -173,7 +176,10 @@ class MockKoko:
                 self.round = 0
 
             def check_auth_password(self, username, password):
-                if outer.shape == PASSWORD_THEN_MFA and password == LOGIN_PASSWORD:
+                if (
+                    outer.shape in (PASSWORD_THEN_MFA, PASSWORD_THEN_LATE_MFA)
+                    and password == LOGIN_PASSWORD
+                ):
                     # koko: 第一因子通过 → PartialSuccessError(KeyboardInteractive)
                     self.partial = True
                     return paramiko.AUTH_PARTIALLY_SUCCESSFUL
@@ -187,6 +193,10 @@ class MockKoko:
             def get_allowed_auths(self, username):
                 if self.partial:
                     return "keyboard-interactive"
+                if outer.shape == PASSWORD_THEN_LATE_MFA:
+                    # Some bastions advertise the second factor only after
+                    # accepting the password; the initial none probe sees no KI.
+                    return "password"
                 if outer.shape == PASSWORD_THEN_MFA:
                     return "password,publickey,keyboard-interactive"
                 # 只开 KI 的形态：客户端走 keyboard-interactive 分支
@@ -364,9 +374,13 @@ def run_scenario(
         server.stop()
 
 
-def run_duplicate_session_scenario(binary: str) -> tuple[bool, str]:
+def run_duplicate_session_scenario(
+    binary: str,
+    shape: str = PASSWORD_THEN_MFA,
+    auth_flow_mode: str = "off",
+) -> tuple[bool, str]:
     """Open two independent PTYs while authenticating the transport once."""
-    server = MockKoko(PASSWORD_THEN_MFA, "请输入6位数字。", "[MFA认证]：")
+    server = MockKoko(shape, "请输入6位数字。", "[MFA认证]：")
     client = None
     prompts_seen: list[dict] = []
     handler = host_interaction(MFA_CODE, prompts_seen)
@@ -378,7 +392,7 @@ def run_duplicate_session_scenario(binary: str) -> tuple[bool, str]:
         payload = connection_payload(
             server.port,
             {},
-            {"authentication": "password", "auth_flow_mode": "off"},
+            {"authentication": "password", "auth_flow_mode": auth_flow_mode},
         )
         client.request("connection/connect", lifecycle_params(payload), timeout=15)
         first = client.request(
@@ -617,6 +631,18 @@ def scenario_matrix() -> list[Scenario]:
             instruction=ALIYUN_MFA_INSTRUCTION,
             prompt=ALIYUN_MFA_PROMPT,
         ),
+        Scenario(
+            "16. 密码后才声明 MFA：手动动态令牌必须弹窗",
+            PASSWORD_THEN_LATE_MFA,
+            {},
+            dict(password_then_otp),
+            True,
+            expect_answers=[MFA_CODE],
+            instruction="请输入6位数字。",
+            prompt="[MFA认证]：",
+            manual_answer=MFA_CODE,
+            expect_manual_prompt="[MFA认证]：",
+        ),
     ]
 
 
@@ -716,6 +742,17 @@ def main() -> None:
         report.note_skip(duplicate_title, "session reuse is not registered (older sidecar)")
     else:
         report.note_fail(duplicate_title, duplicate_message)
+
+    late_title = "17. 密码后才声明 MFA：终端会话打开并复用认证 transport"
+    late_ok, late_message = run_duplicate_session_scenario(
+        binary, PASSWORD_THEN_LATE_MFA, "password_then_otp"
+    )
+    if late_ok:
+        report.note_pass(late_title)
+    elif is_method_missing(late_message):
+        report.note_skip(late_title, "session reuse is not registered (older sidecar)")
+    else:
+        report.note_fail(late_title, late_message)
 
     elapsed = time.monotonic() - started
     print(
