@@ -1365,9 +1365,10 @@ wave-1 不做 `completion/listDirectory`、`completion/environment`（wave 2+）
 
 ## Scheduler Task Provider（task/\* 固定 RPC）
 
-manifest `task-provider` 贡献点（`io.dbx.ssh.tasks`，依赖 `io.dbx.ssh.connection`）声明两个
-trigger：`execute`（mode=run，一次性命令执行）与 `resident`（mode=resident，常驻命令，
-语义如 `tail -F`）。实现位于 `backend/src/task_provider.rs`，冻结契约
+manifest `task-provider` 贡献点（`io.dbx.ssh.tasks`，依赖 `io.dbx.ssh.connection` 与
+`io.dbx.ssh.local`）声明两个 trigger：`execute`（mode=run，一次性命令/脚本执行）与
+`resident`（mode=resident，常驻命令，语义如 `tail -F`）。实现位于
+`backend/src/task_provider.rs`，冻结契约
 （`integration/docs/adr/scheduler-task-contract.md` §6）只允许以下五个方法，
 **没有** `ssh/runScheduledCommand` 之类 provider-specific RPC：
 
@@ -1385,6 +1386,21 @@ trigger：`execute`（mode=run，一次性命令执行）与 `resident`（mode=r
   task config 只携带 `connectionId`（红线：secret 永不进 task config / 日志 /
   事件）。执行传输优先复用该连接的存活会话 handle；无存活会话时经
   `connect_authenticated` 独立拨号（含 ProxyJump 链），run 结束即断开。
+- **本地 Shell 目标**（`io.dbx.ssh.local`，见 `src/local_target.rs`）：宿主在
+  `connection/connect` 生命周期 payload 里盖章 `provider.id`，插件据此把无凭据的
+  本地目标登记进 `SshRuntime::local_targets`（`connection/disconnect` 清除）。
+  task 执行按该注册表判定本地/SSH（禁止按 connection id 字符串猜测）：本地目标
+  用 `tokio::process::Command` 直接 spawn 连接表单的 Shell（空 = 本地终端同一
+  默认 Shell 解析链），环境/工作目录走进程级 `envs`/`current_dir`，流式日志、
+  取消、超时与 SSH 同契约；取消/超时对进程组先 TERM、1.5s 后升级 SIGKILL
+  （`process_group(0)` + 外部 `kill` 工具，零新增依赖）；`pty` 字段本地路径忽略。
+- **脚本文件（`script_path`）**：与 `command` 互斥、至少其一（`task/validate`
+  拒绝双填/双空）。运行开始读取本机脚本文件（≤4 MiB，同机同信任域）：SSH 目标
+  经任务传输自己的 handle 开 SFTP 会话上传到远端 `mktemp`（0600），以
+  `bash <tmp>`（无 bash 回退 `sh <tmp>`）作为 build_script 的末行执行——
+  environment/cd 框架照旧；temp 文件在所有路径（完成/取消/超时/出错）run 后
+  `rm -f` 清理。本地目标直接 `shell <script>` 执行文件（无需可执行位），文件
+  不存在在 spawn 前精确报错。
 - **事件**：`task/log {event, taskId, runId, seq, stream, level, message, timestamp}`
   （seq 按 run 从 1 单调；stream ∈ stdout/stderr/system；stdout=info、
   stderr=warn、system 按语义）；`task/state {event, taskId, runId, state}`

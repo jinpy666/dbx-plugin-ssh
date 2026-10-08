@@ -1903,6 +1903,13 @@ impl TaskTransport {
 
 pub struct SshRuntime {
     connections: RwLock<HashMap<String, StoredConnection>>,
+    /// Hydrated `io.dbx.ssh.local` targets (`src/local_target.rs`), keyed by
+    /// connection id — the scheduler task provider's "is this connection a
+    /// local shell target" source of truth. Same lifecycle as `connections`:
+    /// stored on `connection/connect`, dropped on `connection/disconnect`,
+    /// in-memory only (the host rehydrates by opening the connection before
+    /// dispatching a task).
+    local_targets: RwLock<HashMap<String, crate::local_target::LocalTarget>>,
     sessions: Arc<AsyncRwLock<HashMap<String, Arc<SessionEntry>>>>,
     uploads: Mutex<HashMap<String, UploadState>>,
     finishing_uploads: Mutex<HashMap<String, FinishingUpload>>,
@@ -1972,6 +1979,7 @@ impl SshRuntime {
         sweep_stale_transfer_temps(&transfer_dir);
         Self {
             connections: RwLock::new(HashMap::new()),
+            local_targets: RwLock::new(HashMap::new()),
             sessions: Arc::new(AsyncRwLock::new(HashMap::new())),
             uploads: Mutex::new(HashMap::new()),
             finishing_uploads: Mutex::new(HashMap::new()),
@@ -4156,6 +4164,42 @@ impl SshRuntime {
             .get(connection_id)
             .cloned()
             .ok_or_else(|| format!("Connection {connection_id} is not active; reopen it from DBX"))
+    }
+
+    /// Registers a hydrated `io.dbx.ssh.local` target (`connection/connect`
+    /// lifecycle). Re-connecting over an existing entry replaces it, exactly
+    /// like [`Self::store_connection`].
+    pub(crate) fn store_local_target(
+        &self,
+        target: crate::local_target::LocalTarget,
+    ) -> Result<(), String> {
+        let id = target.id.clone();
+        self.local_targets
+            .write()
+            .map_err(|_| "Local target registry is poisoned".to_string())?
+            .insert(id, target);
+        Ok(())
+    }
+
+    /// Drops a local target registration (`connection/disconnect`). Unknown
+    /// ids are a no-op so SSH disconnects stay untouched.
+    pub(crate) fn drop_local_target(&self, connection_id: &str) {
+        if let Ok(mut targets) = self.local_targets.write() {
+            targets.remove(connection_id);
+        }
+    }
+
+    /// Hydrated local shell target by id — `None` means the connection is
+    /// not a local target (SSH provider, or never connected in this process).
+    pub(crate) async fn local_target(
+        &self,
+        connection_id: &str,
+    ) -> Option<crate::local_target::LocalTarget> {
+        self.local_targets
+            .read()
+            .ok()?
+            .get(connection_id)
+            .cloned()
     }
 
     /// True when at least one authenticated live session exists for the
@@ -16177,6 +16221,53 @@ matrix-ed25519";
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             broker.clear_challenge_raised();
             assert!(!broker.challenge_was_raised());
+        }
+
+        #[test]
+        fn local_target_registry_follows_the_connection_lifecycle() {
+            let dir = std::env::temp_dir().join(format!("dbx-ssh-local-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let runtime = SshRuntime::new(dir);
+            // Unknown ids (SSH connections included) read as "not local" so
+            // the task provider keeps its SSH path untouched.
+            let runtime_ref = &runtime;
+            let runtime_handle = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            assert!(runtime_handle
+                .block_on(runtime_ref.local_target("conn-local-1"))
+                .is_none());
+
+            runtime
+                .store_local_target(crate::local_target::LocalTarget {
+                    id: "conn-local-1".to_string(),
+                    name: Some("ops".to_string()),
+                    shell: "/bin/bash".to_string(),
+                })
+                .unwrap();
+            let target = runtime_handle
+                .block_on(runtime_ref.local_target("conn-local-1"))
+                .expect("stored target");
+            assert_eq!(target.shell, "/bin/bash");
+            // Re-connect replaces the registration in place.
+            runtime
+                .store_local_target(crate::local_target::LocalTarget {
+                    id: "conn-local-1".to_string(),
+                    name: None,
+                    shell: String::new(),
+                })
+                .unwrap();
+            let replaced = runtime_handle
+                .block_on(runtime_ref.local_target("conn-local-1"))
+                .unwrap();
+            assert_eq!(replaced.shell, String::new());
+            // Disconnect clears it; an SSH disconnect id is a harmless no-op.
+            runtime.drop_local_target("conn-local-1");
+            runtime.drop_local_target("some-ssh-connection");
+            assert!(runtime_handle
+                .block_on(runtime_ref.local_target("conn-local-1"))
+                .is_none());
         }
     }
 }

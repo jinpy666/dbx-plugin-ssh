@@ -1189,11 +1189,43 @@
       ]
     },
     {
+      "type": "connection-provider",
+      "id": "io.dbx.ssh.local",
+      "label": "Local shell",
+      "icon": "assets/plugin.svg",
+      "database_type": "local",
+      "description": "Run scheduled commands on the machine running DBX itself through a local shell. No network endpoint and no credentials; the shell resolves from the connection form or the DBX default-shell chain.",
+      "fields": [
+        {
+          "key": "display_name",
+          "label": "Connection name",
+          "type": "text",
+          "binding": "name",
+          "required": true,
+          "default": "Local shell"
+        },
+        {
+          "key": "shell",
+          "label": "Shell",
+          "type": "text",
+          "binding": "config",
+          "default": "",
+          "placeholder": "/bin/bash",
+          "description": "Absolute shell path used to run the task's commands. Leave empty to use the DBX default shell (the same chain the local terminal uses)."
+        }
+      ],
+      "capabilities": [
+        "test",
+        "connect",
+        "disconnect"
+      ]
+    },
+    {
       "type": "task-provider",
       "id": "io.dbx.ssh.tasks",
       "label": "Scheduled SSH commands",
       "allow_multiple_connections": true,
-      "connection_providers": ["io.dbx.ssh.connection"],
+      "connection_providers": ["io.dbx.ssh.connection", "io.dbx.ssh.local"],
       "capabilities": ["run", "resident", "cancel", "logs", "progress"],
       "triggers": [
         {
@@ -1203,12 +1235,23 @@
           "risk": "high",
           "fields": [
             {
+              "key": "script_path",
+              "label": "Script file",
+              "type": "text",
+              "binding": "config",
+              "default": "",
+              "picker": { "kind": "file" },
+              "description": "Optional local script file to run instead of the command text. SSH targets upload it to a remote temp file (removed afterwards); local-shell targets execute it directly. Mutually exclusive with Command.",
+              "placeholder": "/opt/scripts/deploy.sh"
+            },
+            {
               "key": "command",
               "label": "Command",
               "type": "textarea",
               "binding": "config",
-              "required": true,
+              "required": false,
               "default": "",
+              "empty_label": "command or script file, exactly one",
               "placeholder": "df -h && free -m"
             },
             {
@@ -1250,12 +1293,23 @@
           "risk": "high",
           "fields": [
             {
+              "key": "script_path",
+              "label": "Script file",
+              "type": "text",
+              "binding": "config",
+              "default": "",
+              "picker": { "kind": "file" },
+              "description": "Optional local script file to run instead of the command text. SSH targets upload it to a remote temp file (removed afterwards); local-shell targets execute it directly. Mutually exclusive with Command.",
+              "placeholder": "/opt/scripts/worker.sh"
+            },
+            {
               "key": "command",
               "label": "Command",
               "type": "textarea",
               "binding": "config",
-              "required": true,
+              "required": false,
               "default": "",
+              "empty_label": "command or script file, exactly one",
               "placeholder": "tail -F /var/log/app.log"
             },
             {
@@ -1392,6 +1446,7 @@
       "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
       "contributions": {
         "io.dbx.ssh.connection": {},
+        "io.dbx.ssh.local": {},
         "io.dbx.ssh.open-local-terminal": {
           "label": "Terminal",
           "description": "Open a terminal on this machine."
@@ -1416,6 +1471,19 @@
       "name": "Terminal",
       "description": "Terminal SSH, gestor SFTP y operaciones remotas en DBX.",
       "contributions": {
+        "io.dbx.ssh.local": {
+          "label": "Shell local",
+          "description": "Ejecuta comandos programados en la propia máquina donde corre DBX mediante un shell local. Sin endpoint de red ni credenciales; el shell se resuelve desde el formulario de conexión o la cadena de shell predeterminado de DBX.",
+          "fields": {
+            "display_name": {
+              "label": "Nombre de conexión"
+            },
+            "shell": {
+              "label": "Shell",
+              "description": "Ruta absoluta del shell que ejecutará los comandos de la tarea. Déjelo vacío para usar el shell predeterminado de DBX (la misma cadena que el terminal local)."
+            }
+          }
+        },
         "io.dbx.ssh.connection": {
           "label": "Servidor SSH",
           "description": "Conexión SSH y SFTP con contraseña, clave privada, agente o sin autenticación.",
@@ -1700,6 +1768,19 @@
       "name": "Terminal",
       "description": "Terminale SSH, gestore SFTP e operazioni remote in DBX.",
       "contributions": {
+        "io.dbx.ssh.local": {
+          "label": "Shell locale",
+          "description": "Esegue i comandi pianificati sulla macchina che esegue DBX stessa tramite una shell locale. Nessun endpoint di rete e nessuna credenziale; la shell viene risolta dal modulo di connessione o dalla catena della shell predefinita di DBX.",
+          "fields": {
+            "display_name": {
+              "label": "Nome connessione"
+            },
+            "shell": {
+              "label": "Shell",
+              "description": "Percorso assoluto della shell che esegue i comandi dell'attività. Lasciare vuoto per usare la shell predefinita di DBX (la stessa catena del terminale locale)."
+            }
+          }
+        },
         "io.dbx.ssh.connection": {
           "label": "Server SSH",
           "description": "Connessione SSH e SFTP con password, chiave privata, agent o senza autenticazione.",
@@ -1984,6 +2065,19 @@
       "name": "Terminal",
       "description": "SSH ターミナル、SFTP ファイル管理、リモート運用をまとめた DBX プラグイン。",
       "contributions": {
+        "io.dbx.ssh.local": {
+          "label": "ローカルシェル",
+          "description": "DBX が動作しているマシン上でローカルシェルを介してスケジュール済みコマンドを実行します。ネットワークエンドポイントも資格情報も不要です。シェルは接続フォームまたは DBX のデフォルトシェル解決チェーンから決定されます。",
+          "fields": {
+            "display_name": {
+              "label": "接続名"
+            },
+            "shell": {
+              "label": "シェル",
+              "description": "タスクのコマンドを実行するシェルの絶対パス。空欄にすると DBX のデフォルトシェル（ローカルターミナルと同じ解決チェーン）を使用します。"
+            }
+          }
+        },
         "io.dbx.ssh.connection": {
           "label": "SSH サーバー",
           "description": "パスワード、秘密鍵、エージェント、または認証なしの SSH/SFTP 接続。",
@@ -2268,6 +2362,19 @@
       "name": "Terminal",
       "description": "Terminal SSH, gestor SFTP e operações remotas no DBX.",
       "contributions": {
+        "io.dbx.ssh.local": {
+          "label": "Shell local",
+          "description": "Executa comandos agendados na própria máquina onde o DBX está em execução, por meio de um shell local. Sem endpoint de rede e sem credenciais; o shell é resolvido pelo formulário de conexão ou pela cadeia do shell padrão do DBX.",
+          "fields": {
+            "display_name": {
+              "label": "Nome da conexão"
+            },
+            "shell": {
+              "label": "Shell",
+              "description": "Caminho absoluto do shell que executará os comandos da tarefa. Deixe vazio para usar o shell padrão do DBX (a mesma cadeia do terminal local)."
+            }
+          }
+        },
         "io.dbx.ssh.connection": {
           "label": "Servidor SSH",
           "description": "Conexão SSH e SFTP com senha, chave privada, agente ou sem autenticação.",
@@ -2558,6 +2665,10 @@
             "execute": {
               "label": "执行命令",
               "fields": {
+                "script_path": {
+                  "label": "脚本文件",
+                  "description": "可选：用本机脚本文件代替命令文本运行。SSH 连接会先把它上传到远端临时文件（运行后删除）；本地 Shell 连接直接执行该文件。与「命令」互斥，只能填一个。"
+                },
                 "command": { "label": "命令" },
                 "working_directory": { "label": "工作目录" },
                 "environment": { "label": "环境变量" },
@@ -2568,6 +2679,10 @@
             "resident": {
               "label": "常驻命令",
               "fields": {
+                "script_path": {
+                  "label": "脚本文件",
+                  "description": "可选：用本机脚本文件代替命令文本运行。SSH 连接会先把它上传到远端临时文件（运行后删除）；本地 Shell 连接直接执行该文件。与「命令」互斥，只能填一个。"
+                },
                 "command": { "label": "命令" },
                 "working_directory": { "label": "工作目录" },
                 "environment": { "label": "环境变量" },
@@ -2575,6 +2690,19 @@
                 "restart_backoff_seconds": { "label": "重启退避（秒）" },
                 "restart_window_seconds": { "label": "重启计数窗口（秒）" }
               }
+            }
+          }
+        },
+        "io.dbx.ssh.local": {
+          "label": "本地 Shell",
+          "description": "通过本地 Shell 在运行 DBX 的机器上执行定时命令。无网络端点、无需凭据；Shell 由连接表单或 DBX 默认 Shell 解析链决定。",
+          "fields": {
+            "display_name": {
+              "label": "连接名称"
+            },
+            "shell": {
+              "label": "Shell",
+              "description": "运行任务命令所用的 Shell 绝对路径。留空则使用 DBX 默认 Shell（与本地终端同一解析链）。"
             }
           }
         },
@@ -2868,6 +2996,10 @@
             "execute": {
               "label": "執行命令",
               "fields": {
+                "script_path": {
+                  "label": "指令檔",
+                  "description": "可選：用本機指令檔代替命令文字執行。SSH 連線會先把它上傳到遠端暫存檔（執行後刪除）；本地 Shell 連線直接執行該檔案。與「命令」互斥，只能填一個。"
+                },
                 "command": { "label": "命令" },
                 "working_directory": { "label": "工作目錄" },
                 "environment": { "label": "環境變數" },
@@ -2878,6 +3010,10 @@
             "resident": {
               "label": "常駐命令",
               "fields": {
+                "script_path": {
+                  "label": "指令檔",
+                  "description": "可選：用本機指令檔代替命令文字執行。SSH 連線會先把它上傳到遠端暫存檔（執行後刪除）；本地 Shell 連線直接執行該檔案。與「命令」互斥，只能填一個。"
+                },
                 "command": { "label": "命令" },
                 "working_directory": { "label": "工作目錄" },
                 "environment": { "label": "環境變數" },
@@ -2885,6 +3021,19 @@
                 "restart_backoff_seconds": { "label": "重啟退避（秒）" },
                 "restart_window_seconds": { "label": "重啟計數視窗（秒）" }
               }
+            }
+          }
+        },
+        "io.dbx.ssh.local": {
+          "label": "本地 Shell",
+          "description": "透過本地 Shell 在執行 DBX 的機器上執行排程命令。無網路端點、無需憑證；Shell 由連線表單或 DBX 預設 Shell 解析鏈決定。",
+          "fields": {
+            "display_name": {
+              "label": "連線名稱"
+            },
+            "shell": {
+              "label": "Shell",
+              "description": "執行任務命令所用的 Shell 絕對路徑。留空則使用 DBX 預設 Shell（與本地終端機同一解析鏈）。"
             }
           }
         },

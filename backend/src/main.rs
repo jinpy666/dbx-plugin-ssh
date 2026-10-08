@@ -17,6 +17,7 @@ mod keys;
 mod local_downloads;
 mod local_editors;
 mod local_fs;
+mod local_target;
 mod local_terminal;
 mod mcp;
 mod mcp_safety;
@@ -407,6 +408,20 @@ impl Plugin {
                 }))
             }
             "connection/test" => {
+                // 本地 Shell 连接目标（io.dbx.ssh.local）：无 TCP 语义，可达性
+                // 无从探测；Shell 路径合法性留到任务真正 spawn 时校验（此时
+                // 才做默认 Shell 解析），test 阶段如实放行并回显登记结果。
+                if let Some(target) = crate::local_target::LocalTarget::from_lifecycle_params(&params)? {
+                    let shell = if target.shell.is_empty() {
+                        "the DBX default shell (resolved when the task runs)".to_string()
+                    } else {
+                        format!("shell {}", target.shell)
+                    };
+                    return Ok(json!({
+                        "success": true,
+                        "message": format!("Local shell target registered ({})", shell),
+                    }));
+                }
                 let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
                 // 串口无 TCP 语义（M32-B）：本地设备的可达性只能真开串口时校验，
                 // 测试阶段直接放行提示；rdp 与 telnet/vnc 同走 TCP probe。
@@ -452,6 +467,13 @@ impl Plugin {
                 )
             }
             "connection/connect" => {
+                // 本地 Shell 连接目标（io.dbx.ssh.local）：无凭据可存，登记
+                // 进 SshRuntime 的 local_targets 注册表（调度任务执行时按
+                // connection id 判定走本地分支的依据）。
+                if let Some(target) = crate::local_target::LocalTarget::from_lifecycle_params(&params)? {
+                    self.ssh.store_local_target(target)?;
+                    return Ok(json!({ "success": true }));
+                }
                 let endpoint = RuntimeEndpoint::from_lifecycle_params(&params)?;
                 // 非 SSH 会话协议（telnet/vnc/serial/rdp）不走 SSH 连接存储：
                 // 会话生命周期由各自的 * / start 方法族与前端路由驱动。表单
@@ -484,6 +506,9 @@ impl Plugin {
                     .and_then(Value::as_str)
                     .ok_or("Missing connection id")?;
                 self.non_ssh_creds.drop_connection(connection_id);
+                // 本地 Shell 目标的登记随断开清除；SSH/telnet/vnc 连接 id 不在
+                // local_targets 里，此调用为空操作。
+                self.ssh.drop_local_target(connection_id);
                 self.runtime
                     .block_on(self.ssh.disconnect_connection(connection_id))?;
                 self.runtime

@@ -28,15 +28,31 @@
 //! with the final `{success, exitCode, message, artifacts}` payload, and the
 //! host's own execution-policy timeout plus `task/stop` remain the external
 //! cancel paths.
+//!
+//! Bound-connection providers: besides SSH connections the provider accepts
+//! `io.dbx.ssh.local` targets (`src/local_target.rs`) so scheduled commands
+//! can run on the machine running DBX itself. The local-vs-SSH decision is
+//! the stored connection's provider marker (the host rehydrates local
+//! targets through `connection/connect`, the plugin registers them in
+//! `SshRuntime::local_targets`); on a local target the run spawns the
+//! connection's shell through `tokio::process::Command` — no TCP, no
+//! credential pipeline — with the same streaming, cancel (process-group
+//! kill), timeout, env and working-directory semantics as the SSH path.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::exec::exec_plain;
+use crate::local_target::LocalTarget;
 use dbx_plugin_sdk::PluginEmitter;
 use russh::client::Handle;
 use russh::ChannelMsg;
+use russh_sftp::client::SftpSession;
 use serde_json::{json, Value};
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::ssh::{SshClient, SshRuntime};
@@ -66,6 +82,11 @@ const HARD_MAX_RESTARTS: u32 = 50;
 /// Backoff floor: an immediate restart storm on a dead endpoint is worse
 /// than a slightly slow one.
 const MIN_RESTART_BACKOFF_SECS: u64 = 1;
+/// Local script uploads (and their SSH temp-file round-trip) are small by
+/// nature — a scheduler task bootstrap script, not a data transfer. The cap
+/// keeps one fat `script_path` from stalling the channel for minutes; real
+/// file movement belongs on the SFTP surface.
+const SCRIPT_UPLOAD_LIMIT: usize = 4 * 1024 * 1024;
 
 fn task_error(code: &str, message: impl std::fmt::Display) -> String {
     format!("{code}: {message}")
@@ -80,7 +101,13 @@ fn task_error(code: &str, message: impl std::fmt::Display) -> String {
 /// forwards the form values verbatim inside `task.config`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskConfig {
+    /// Inline command text. Empty when the run uses `script_path` instead —
+    /// the two are mutually exclusive and at least one must be set.
     pub command: String,
+    /// Local script file (the plugin's own machine) executed instead of
+    /// `command`. SSH targets upload it to a remote `mktemp` file first;
+    /// local-shell targets execute the file directly. Empty = command mode.
+    pub script_path: String,
     pub working_directory: String,
     pub environment: Vec<(String, String)>,
     /// Run-mode only: plugin-side wall-clock deadline. Absent means the host
@@ -207,8 +234,27 @@ fn validate_task_config(trigger_id: &str, config: &Value) -> (Vec<String>, Vec<S
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
-    if command.is_empty() {
-        errors.push("command is required".to_string());
+    // `script_path` is the second (mutually exclusive) way to name what runs.
+    // Type check first so a mistyped value surfaces as its own error instead
+    // of silently counting as "empty".
+    if let Some(script_path) = config.get("script_path") {
+        if !script_path.is_null() && script_path.as_str().is_none() {
+            errors.push("script_path must be a string".to_string());
+        }
+    }
+    let script_path = config
+        .get("script_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if command.is_empty() && script_path.is_empty() {
+        errors.push("either command or script_path is required".to_string());
+    } else if !command.is_empty() && !script_path.is_empty() {
+        // Deliberately a hard error, not a precedence rule: silently picking
+        // one side would run something the author did not review.
+        errors.push(
+            "command and script_path are mutually exclusive; set exactly one".to_string(),
+        );
     }
     if let Some(environment) = config.get("environment").and_then(Value::as_str) {
         for line in environment.lines() {
@@ -285,6 +331,12 @@ impl TaskConfig {
             .collect();
         Ok(Self {
             command,
+            script_path: config
+                .get("script_path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             working_directory: config
                 .get("working_directory")
                 .and_then(Value::as_str)
@@ -315,6 +367,13 @@ fn shell_single_quote(text: &str) -> String {
 /// status is the command's own. Multi-line on purpose — `cd X && cmd`
 /// would leak later statements out of the directory.
 fn build_script(config: &TaskConfig) -> String {
+    build_script_with(config, &config.command)
+}
+
+/// [`build_script`] with the trailing statement supplied by the caller —
+/// the script-file path replaces the inline command with an interpreter
+/// invocation while keeping the env/cd framing identical.
+fn build_script_with(config: &TaskConfig, final_statement: &str) -> String {
     let mut lines = Vec::new();
     for (key, value) in &config.environment {
         lines.push(format!("export {}={}", key, shell_single_quote(value)));
@@ -327,8 +386,87 @@ fn build_script(config: &TaskConfig) -> String {
             shell_single_quote(&config.working_directory)
         ));
     }
-    lines.push(config.command.clone());
+    lines.push(final_statement.to_string());
     lines.join("\n")
+}
+
+/// Interpreter invocation for an uploaded script file. `bash` when the
+/// server has one (most scripts assume bashisms), `sh` as the POSIX
+/// fallback; the temp path is single-quoted verbatim.
+fn script_command_line(has_bash: bool, temp_path: &str) -> String {
+    let interpreter = if has_bash { "bash" } else { "sh" };
+    format!("{interpreter} {}", shell_single_quote(temp_path))
+}
+
+// ---------------------------------------------------------------------------
+// Local shell targets (io.dbx.ssh.local)
+// ---------------------------------------------------------------------------
+
+/// Command-flag spelling for the connection's shell: `cmd.exe` takes `/C`,
+/// every POSIX shell (and PowerShell's `-c` alias) takes `-c`. Compares the
+/// basename case-insensitively (Windows paths are case-insensitive) so
+/// `C:\WINDOWS\system32\cmd.EXE` matches too.
+fn local_command_flag(shell: &str) -> &'static str {
+    let basename = shell
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    let basename = basename.strip_suffix(".exe").unwrap_or(&basename);
+    if basename == "cmd" { "/C" } else { "-c" }
+}
+
+/// What a local spawn executes: in command mode the raw command text after
+/// the shell flag; in script mode the file path itself as the shell's single
+/// argument — `shell <script>` runs a non-executable file without a content
+/// round-trip through argv and without chmod. Unlike the SSH path there is
+/// no in-script `export`/`cd` framing: environment and working directory
+/// apply at the process level (`Command::envs`/`current_dir`), so values
+/// never need shell quoting.
+fn local_spawn_args(shell: &str, config: &TaskConfig) -> Vec<String> {
+    if config.script_path.is_empty() {
+        vec![local_command_flag(shell).to_string(), config.command.clone()]
+    } else {
+        vec![config.script_path.clone()]
+    }
+}
+
+/// Cancellation/timeout teardown for a local child: TERM the whole process
+/// group (the spawn created one, so `shell -c` compound commands cannot
+/// leave grandchildren behind), give it a short grace window, then escalate
+/// to SIGKILL — both the group (best-effort, via the external `kill`
+/// utility, keeping this libc-free) and the leader unconditionally through
+/// `start_kill`. Reaping stays with the caller.
+#[cfg(unix)]
+async fn terminate_local_process(child: &mut tokio::process::Child) {
+    let Some(pid) = child.id() else {
+        return; // already exited and reaped by a previous pass
+    };
+    let group = format!("-{pid}");
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&group)
+        .status();
+    let deadline = Instant::now() + Duration::from_millis(1_500);
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(&group)
+        .status();
+    let _ = child.start_kill();
+}
+
+/// Windows has no POSIX process groups; `kill_on_drop` plus the direct
+/// `TerminateProcess` behind `start_kill` is the best available teardown
+/// for the spawned shell itself.
+#[cfg(not(unix))]
+async fn terminate_local_process(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +738,245 @@ async fn run_streaming(
     }
     flush_buffers!();
     Ok(RunEnd::Completed(exit_code))
+}
+
+/// Local-shell counterpart of [`run_streaming`]: spawns `shell args` on the
+/// machine running DBX (no PTY — the `pty` field is SSH-protocol specific
+/// and ignored here), pipes stdout/stderr through the same line buffering
+/// into `on_log`, and honors cancel plus an optional deadline. Cancel and
+/// timeout kill the whole process group, not just the shell leader. The
+/// heartbeat tick mirrors the SSH path so resident supervision keeps
+/// advancing `heartbeatAt` while a quiet process holds the pipes open.
+async fn run_local_streaming(
+    shell: &str,
+    args: &[String],
+    working_directory: &str,
+    environment: &[(String, String)],
+    timeout: Option<Duration>,
+    cancel: &mut watch::Receiver<bool>,
+    mut on_log: impl FnMut(LogStream, String),
+    mut on_tick: Option<&mut (dyn FnMut() + Send)>,
+) -> Result<RunEnd, String> {
+    let mut command = tokio::process::Command::new(shell);
+    command
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // Backstop: a dropped (abandoned) future must not leak the process.
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    if !working_directory.is_empty() {
+        // A missing directory surfaces as the spawn error below with the OS
+        // message — the local analogue of the SSH path's `exit 125`.
+        command.current_dir(working_directory);
+    }
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    if *cancel.borrow_and_update() {
+        return Ok(RunEnd::Cancelled);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to spawn local shell {shell:?}: {error}"))?;
+    // Pipe readers feed one channel; the single select loop below keeps
+    // emission ordered and closure-owned (no shared mutable logger). Each
+    // pump owns its reader task; both sides share the log channel.
+    let (sender, mut receiver) = mpsc::unbounded_channel::<(LogStream, Vec<u8>)>();
+    fn pump_stream<R>(
+        pipe: Option<R>,
+        stream: LogStream,
+        sender: &mpsc::UnboundedSender<(LogStream, Vec<u8>)>,
+    ) where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
+        let Some(pipe) = pipe else {
+            return;
+        };
+        let sender = sender.clone();
+        let mut reader = tokio::io::BufReader::new(pipe);
+        tokio::spawn(async move {
+            let mut buffer = Vec::with_capacity(512);
+            loop {
+                buffer.clear();
+                match reader.read_until(b'\n', &mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if sender.send((stream, buffer.clone())).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    pump_stream(child.stdout.take(), LogStream::Stdout, &sender);
+    pump_stream(child.stderr.take(), LogStream::Stderr, &sender);
+    drop(sender);
+    let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(RESIDENT_HEARTBEAT_SECS));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut stdout = LineBuffer::default();
+    let mut stderr = LineBuffer::default();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = wait_cancelled(cancel) => {
+                terminate_local_process(&mut child).await;
+                stdout.flush(&mut |line| on_log(LogStream::Stdout, line));
+                stderr.flush(&mut |line| on_log(LogStream::Stderr, line));
+                return Ok(RunEnd::Cancelled);
+            }
+            _ = heartbeat.tick() => {
+                if let Some(on_tick) = on_tick.as_deref_mut() {
+                    on_tick();
+                }
+                continue;
+            }
+            waited = async {
+                match deadline {
+                    Some(deadline) => tokio::time::timeout_at(deadline, receiver.recv())
+                        .await
+                        .map_err(|_| ()),
+                    None => Ok(receiver.recv().await),
+                }
+            } => match waited {
+                Ok(chunk) => chunk,
+                Err(()) => {
+                    terminate_local_process(&mut child).await;
+                    stdout.flush(&mut |line| on_log(LogStream::Stdout, line));
+                    stderr.flush(&mut |line| on_log(LogStream::Stderr, line));
+                    return Ok(RunEnd::TimedOut);
+                }
+            },
+        };
+        let Some((stream, bytes)) = chunk else {
+            // Both pipe readers finished: the child closed its streams.
+            break;
+        };
+        match stream {
+            LogStream::Stdout => stdout.push(&bytes, |line| on_log(LogStream::Stdout, line)),
+            _ => stderr.push(&bytes, |line| on_log(LogStream::Stderr, line)),
+        }
+    }
+    stdout.flush(&mut |line| on_log(LogStream::Stdout, line));
+    stderr.flush(&mut |line| on_log(LogStream::Stderr, line));
+    let status = tokio::select! {
+        biased;
+        _ = wait_cancelled(cancel) => {
+            terminate_local_process(&mut child).await;
+            child.wait().await
+        }
+        waited = child.wait() => waited,
+    };
+    let exit_code = status
+        .ok()
+        .and_then(|status| status.code())
+        // Terminated by a signal (or a platform without exit codes): report
+        // the SSH-path sentinel for "no exit status".
+        .unwrap_or(-1);
+    Ok(RunEnd::Completed(Some(exit_code)))
+}
+
+// ---------------------------------------------------------------------------
+// SSH script-file runs (script_path → remote mktemp round-trip)
+// ---------------------------------------------------------------------------
+
+/// Reads the task's local script file. The plugin and the file share one
+/// trust domain (the file was picked on this machine), so content is read
+/// verbatim; size is capped at [`SCRIPT_UPLOAD_LIMIT`].
+fn read_script_file(script_path: &str) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(script_path)
+        .map_err(|error| format!("script_path {script_path:?} is not readable: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!("script_path {script_path:?} is not a regular file"));
+    }
+    if metadata.len() as usize > SCRIPT_UPLOAD_LIMIT {
+        return Err(format!(
+            "script_path {script_path:?} exceeds the {} MiB script limit",
+            SCRIPT_UPLOAD_LIMIT / (1024 * 1024)
+        ));
+    }
+    std::fs::read(script_path)
+        .map_err(|error| format!("Failed to read script_path {script_path:?}: {error}"))
+}
+
+/// Uploads script bytes to a fresh remote `mktemp` file (mode 0600 by
+/// mktemp semantics) over an SFTP session opened on the task transport's
+/// own handle — no workbench session is involved. Returns the temp path.
+async fn ssh_upload_script(
+    handle: &Handle<SshClient>,
+    bytes: &[u8],
+) -> Result<String, String> {
+    let temp_path = exec_plain(
+        handle,
+        "mktemp",
+        Duration::from_secs(30),
+        &[],
+    )
+    .await
+    .map_err(|error| format!("Failed to create remote temp file: {error}"))
+    .and_then(|outcome| {
+        if outcome.exit_code == 0 {
+            let path = outcome.output.trim().to_string();
+            if path.is_empty() {
+                Err("Remote mktemp returned an empty path".to_string())
+            } else {
+                Ok(path)
+            }
+        } else {
+            Err(format!(
+                "Remote mktemp failed with exit code {}",
+                outcome.exit_code
+            ))
+        }
+    })?;
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("Failed to open SFTP channel: {error}"))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|error| format!("Failed to start SFTP: {error}"))?;
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|error| format!("Failed to initialize SFTP: {error}"))?;
+    let upload = async {
+        let mut file = sftp
+            .create(&temp_path)
+            .await
+            .map_err(|error| format!("SFTP script upload failed: {error}"))?;
+        file.write_all(bytes)
+            .await
+            .map_err(|error| format!("SFTP script upload failed: {error}"))?;
+        file.flush()
+            .await
+            .map_err(|error| format!("SFTP script upload failed: {error}"))?;
+        Ok::<(), String>(())
+    }
+    .await;
+    let _ = sftp.close().await;
+    upload?;
+    Ok(temp_path)
+}
+
+/// Removes an uploaded script temp file. Best-effort by design: it runs on
+/// every path after the script run (completed, cancelled, timed out, or
+/// failed), and a failed cleanup must never mask the run's real outcome.
+async fn ssh_remove_script_file(handle: &Handle<SshClient>, temp_path: &str) {
+    let command = format!("rm -f {}", shell_single_quote(temp_path));
+    let _ = exec_plain(handle, &command, Duration::from_secs(15), &[]).await;
+}
+
+/// Whether the remote server has `bash` — the uploaded script runs under
+/// bash when available, `sh` otherwise (Alpine-style images).
+async fn ssh_has_bash(handle: &Handle<SshClient>) -> bool {
+    matches!(
+        exec_plain(handle, "command -v bash", Duration::from_secs(15), &[]).await,
+        Ok(outcome) if outcome.exit_code == 0 && !outcome.output.trim().is_empty()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -903,14 +1280,20 @@ impl TaskProvider {
             ));
         }
         let config = TaskConfig::parse(&request.trigger_id, &request.config)?;
-        // Fail fast with the contract's connection_missing code when neither
-        // a stored (hydrated) connection nor a live session exists — a
-        // scheduled run against a dropped connection must not masquerade as
-        // a transport failure (ADR §5.4: connection_missing is
-        // non-retryable).
-        let redactor = match Self::resolve_redactor(ssh, &request.connection_id).await {
-            Ok(redactor) => redactor,
-            Err(error) => return Err(error),
+        // Resolve the bound connection's provider marker first: a local
+        // shell target skips the SSH credential pipeline entirely (there is
+        // no secret material to redact on one). Everything else keeps the
+        // fail-fast `connection_missing` behavior — a scheduled run against
+        // a dropped connection must not masquerade as a transport failure
+        // (ADR §5.4: connection_missing is non-retryable).
+        let local_target = ssh.local_target(&request.connection_id).await;
+        let redactor = if local_target.is_some() {
+            Redactor::default()
+        } else {
+            match Self::resolve_redactor(ssh, &request.connection_id).await {
+                Ok(redactor) => redactor,
+                Err(error) => return Err(error),
+            }
         };
         let mut cancel = self.register_run(&request.run_id);
         self.emit_state(&emitter, &request, "running");
@@ -924,9 +1307,13 @@ impl TaskProvider {
             "info",
             &redactor.scrub(&format!("Starting command on {}", request.connection_id)),
         );
-        let outcome = self
-            .run_command(ssh, &request, &config, &redactor, &mut cancel, &emitter)
-            .await;
+        let outcome = if let Some(target) = local_target {
+            self.run_local(&target, &request, &config, &mut cancel, &emitter)
+                .await
+        } else {
+            self.run_command(ssh, &request, &config, &redactor, &mut cancel, &emitter)
+                .await
+        };
         self.finish_run(&request.run_id);
         match outcome {
             Ok(RunEnd::Completed(Some(0))) => {
@@ -988,6 +1375,13 @@ impl TaskProvider {
         cancel: &mut watch::Receiver<bool>,
         emitter: &PluginEmitter,
     ) -> Result<RunEnd, String> {
+        // Script mode reads the local file before dialing: a bad
+        // `script_path` must fail the run without burning a transport dial.
+        let script_bytes = if config.script_path.is_empty() {
+            None
+        } else {
+            Some(read_script_file(&config.script_path)?)
+        };
         let transport = ssh
             .task_transport(
                 &request.connection_id,
@@ -996,7 +1390,22 @@ impl TaskProvider {
             )
             .await
             .map_err(|error| redactor.scrub(&error))?;
-        let script = build_script(config);
+        // Script runs upload the file once and execute it through the
+        // existing framing (env exports, guarded cd, interpreter call as the
+        // trailing statement so the exit status is the script's own). The
+        // temp file is removed on every path below — including cancel,
+        // timeout and exec errors — so a crashed run never litters /tmp.
+        let (script, uploaded_temp) = match script_bytes {
+            None => (build_script(config), None),
+            Some(bytes) => {
+                let temp_path = ssh_upload_script(transport.handle(), &bytes)
+                    .await
+                    .map_err(|error| redactor.scrub(&error))?;
+                let has_bash = ssh_has_bash(transport.handle()).await;
+                let line = script_command_line(has_bash, &temp_path);
+                (build_script_with(config, &line), Some(temp_path))
+            }
+        };
         let outcome = run_streaming(
             transport.handle(),
             &script,
@@ -1018,8 +1427,60 @@ impl TaskProvider {
             None,
         )
         .await;
+        if let Some(temp_path) = uploaded_temp {
+            ssh_remove_script_file(transport.handle(), &temp_path).await;
+        }
         transport.release().await;
         outcome
+    }
+
+    /// Local-shell run (`io.dbx.ssh.local` target): spawn the connection's
+    /// shell on this machine with process-level env/cwd and the same
+    /// streaming/cancel/timeout contract as the SSH path. Script mode
+    /// verifies the file here (before spawn) so a stale path fails the run
+    /// with a precise message instead of a shell usage error.
+    async fn run_local(
+        &self,
+        target: &LocalTarget,
+        request: &TaskRequest,
+        config: &TaskConfig,
+        cancel: &mut watch::Receiver<bool>,
+        emitter: &PluginEmitter,
+    ) -> Result<RunEnd, String> {
+        if !config.script_path.is_empty() {
+            let path = std::path::Path::new(&config.script_path);
+            if !path.is_file() {
+                return Err(format!(
+                    "script_path {:?} does not exist or is not a file",
+                    config.script_path
+                ));
+            }
+        }
+        let shell = target.shell_or(&crate::local_terminal::resolve_default_shell(
+            &crate::plugin_data_dir(),
+        ));
+        let args = local_spawn_args(&shell, config);
+        run_local_streaming(
+            &shell,
+            &args,
+            &config.working_directory,
+            &config.environment,
+            config.timeout_seconds.map(Duration::from_secs),
+            cancel,
+            |stream, message| {
+                self.emit_log(
+                    emitter,
+                    &request.task_id,
+                    &request.run_id,
+                    self.next_seq(&request.run_id),
+                    stream,
+                    stream.default_level(),
+                    &message,
+                );
+            },
+            None,
+        )
+        .await
     }
 
     // -- task/start (resident) ----------------------------------------------
@@ -1046,7 +1507,12 @@ impl TaskProvider {
         let config = TaskConfig::parse(&request.trigger_id, &request.config)?;
         // Fail fast before a supervisor is spawned: a missing connection
         // would otherwise burn its restart budget crashing on dial errors.
-        Self::resolve_redactor(&ssh, &request.connection_id).await?;
+        // Local shell targets have no credential pipeline to verify —
+        // presence in the local-target registry was the connectionMissing
+        // check (an unknown id means the host never connected it).
+        if ssh.local_target(&request.connection_id).await.is_none() {
+            Self::resolve_redactor(&ssh, &request.connection_id).await?;
+        }
         // Replace: signal every live session of this task; their supervisor
         // loops observe the cancel and land on `stopped` on their own.
         {
@@ -1105,78 +1571,119 @@ impl TaskProvider {
         emitter: PluginEmitter,
     ) {
         // start_resident already verified presence; an empty redactor only
-        // means the secrets were never pushed this process run.
+        // means the secrets were never pushed this process run (or the
+        // target is a local shell with no credentials at all).
         let redactor = Self::resolve_redactor(&ssh, &request.connection_id)
             .await
             .unwrap_or_default();
+        // A local target spawns on this machine; SSH targets keep dialing a
+        // transport per restart attempt. The decision re-reads the registry
+        // each iteration so a mid-life disconnect+reconnect (possibly as a
+        // different provider binding) is honored like any other dial.
+        let local_target = ssh.local_target(&request.connection_id).await;
         let script = build_script(&config);
         let mut restarts: Vec<Instant> = Vec::new();
         loop {
-            // Dial (live session handle or dedicated headless transport).
-            let transport = match ssh
-                .task_transport(
-                    &request.connection_id,
-                    &format!("task-{}", request.run_id),
-                    Some(emitter.clone()),
-                )
-                .await
-            {
-                Ok(transport) => transport,
-                Err(error) => {
-                    let degraded = self
-                        .resident_crash_step(
-                            &request,
-                            &config,
-                            &session_id,
-                            &emitter,
-                            &mut restarts,
-                            &mut cancel,
-                            &redactor.scrub(&format!("connect failed: {error}")),
-                        )
-                        .await;
-                    if degraded {
-                        return;
-                    }
-                    continue;
-                }
-            };
-            self.resident_set_state(&session_id, ResidentState::Running);
-            self.emit_resident_state(
-                &emitter,
-                &request.task_id,
-                &request.run_id,
-                &session_id,
-                ResidentState::Running,
-            );
             let session_for_tick = session_id.clone();
             let provider_for_tick = Arc::clone(&self);
-            let outcome = run_streaming(
-                transport.handle(),
-                &script,
-                config.pty,
-                // Contract: timeout_seconds governs run executions and the
-                // resident start phase only — the resident loop itself is
-                // supervised by the restart policy, not a wall clock.
-                None,
-                &mut cancel,
-                |stream, message| {
-                    let message = redactor.scrub(&message);
-                    provider_for_tick.emit_log(
-                        &emitter,
-                        &request.task_id,
-                        &request.run_id,
-                        provider_for_tick.next_seq(&request.run_id),
-                        stream,
-                        stream.default_level(),
-                        &message,
-                    );
-                },
-                Some(&mut || {
-                    provider_for_tick.resident_heartbeat(&session_for_tick);
-                }),
-            )
-            .await;
-            transport.release().await;
+            let mut on_log = |stream: LogStream, message: String| {
+                let message = redactor.scrub(&message);
+                provider_for_tick.emit_log(
+                    &emitter,
+                    &request.task_id,
+                    &request.run_id,
+                    provider_for_tick.next_seq(&request.run_id),
+                    stream,
+                    stream.default_level(),
+                    &message,
+                );
+            };
+            let mut on_tick = || {
+                provider_for_tick.resident_heartbeat(&session_for_tick);
+            };
+            let outcome = if let Some(target) = local_target.as_ref() {
+                // Local shell target: nothing to dial — running starts at the
+                // spawn, so the state flip happens right before it.
+                self.resident_set_state(&session_id, ResidentState::Running);
+                self.emit_resident_state(
+                    &emitter,
+                    &request.task_id,
+                    &request.run_id,
+                    &session_id,
+                    ResidentState::Running,
+                );
+                let shell = target.shell_or(&crate::local_terminal::resolve_default_shell(
+                    &crate::plugin_data_dir(),
+                ));
+                let args = local_spawn_args(&shell, &config);
+                run_local_streaming(
+                    &shell,
+                    &args,
+                    &config.working_directory,
+                    &config.environment,
+                    // Contract: timeout_seconds governs run executions and
+                    // the resident start phase only — the resident loop
+                    // itself is supervised by the restart policy, not a
+                    // wall clock.
+                    None,
+                    &mut cancel,
+                    &mut on_log,
+                    Some(&mut on_tick),
+                )
+                .await
+            } else {
+                // Dial (live session handle or dedicated headless transport).
+                let transport = match ssh
+                    .task_transport(
+                        &request.connection_id,
+                        &format!("task-{}", request.run_id),
+                        Some(emitter.clone()),
+                    )
+                    .await
+                {
+                    Ok(transport) => transport,
+                    Err(error) => {
+                        let degraded = self
+                            .resident_crash_step(
+                                &request,
+                                &config,
+                                &session_id,
+                                &emitter,
+                                &mut restarts,
+                                &mut cancel,
+                                &redactor.scrub(&format!("connect failed: {error}")),
+                            )
+                            .await;
+                        if degraded {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+                self.resident_set_state(&session_id, ResidentState::Running);
+                self.emit_resident_state(
+                    &emitter,
+                    &request.task_id,
+                    &request.run_id,
+                    &session_id,
+                    ResidentState::Running,
+                );
+                let outcome = run_streaming(
+                    transport.handle(),
+                    &script,
+                    config.pty,
+                    // Contract: timeout_seconds governs run executions and the
+                    // resident start phase only — the resident loop itself is
+                    // supervised by the restart policy, not a wall clock.
+                    None,
+                    &mut cancel,
+                    &mut on_log,
+                    Some(&mut on_tick),
+                )
+                .await;
+                transport.release().await;
+                outcome
+            };
             match outcome {
                 Ok(RunEnd::Cancelled) => {
                     self.resident_set_state(&session_id, ResidentState::Stopped);
@@ -1539,7 +2046,9 @@ mod tests {
         assert_eq!(response["valid"], false, "{response}");
         let errors = strings(&response["errors"]);
         assert!(
-            errors.iter().any(|e| e.contains("command is required")),
+            errors
+                .iter()
+                .any(|e| e.contains("either command or script_path is required")),
             "{errors:?}"
         );
         assert!(errors.iter().any(|e| e.contains("bad key")), "{errors:?}");
@@ -1604,6 +2113,76 @@ mod tests {
             .any(|warning| warning.as_str().unwrap().contains("merged")));
     }
 
+    // -- script_path vs command ------------------------------------------------
+
+    #[test]
+    fn validate_accepts_a_script_only_task() {
+        for trigger in ["execute", "resident"] {
+            let response = TaskProvider::validate_request(&json!({
+                "task": {
+                    "providerId": "io.dbx.ssh.tasks",
+                    "triggerId": trigger,
+                    "connectionId": "conn-1",
+                    "config": { "script_path": "/opt/scripts/deploy.sh" },
+                }
+            }))
+            .expect("validate");
+            assert_eq!(response["valid"], true, "{trigger}: {response}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_command_and_script_path_together() {
+        let response = TaskProvider::validate_request(&json!({
+            "task": {
+                "providerId": "io.dbx.ssh.tasks",
+                "triggerId": "execute",
+                "connectionId": "conn-1",
+                "config": {
+                    "command": "echo hi",
+                    "script_path": "/opt/scripts/deploy.sh",
+                },
+            }
+        }))
+        .expect("validate");
+        assert_eq!(response["valid"], false, "{response}");
+        let errors = strings(&response["errors"]);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("mutually exclusive; set exactly one")),
+            "{errors:?}"
+        );
+        // Strict parse surfaces the same rule as a non-retryable config error.
+        let error = TaskConfig::parse(
+            "execute",
+            &json!({ "command": "echo hi", "script_path": "/x.sh" }),
+        )
+        .expect_err("both set must fail");
+        assert!(error.starts_with("invalid_config:"), "{error}");
+    }
+
+    #[test]
+    fn validate_rejects_non_string_script_path() {
+        let response = TaskProvider::validate_request(&json!({
+            "task": {
+                "providerId": "io.dbx.ssh.tasks",
+                "triggerId": "execute",
+                "connectionId": "conn-1",
+                "config": { "script_path": 42 },
+            }
+        }))
+        .expect("validate");
+        assert_eq!(response["valid"], false, "{response}");
+        assert!(
+            strings(&response["errors"])
+                .iter()
+                .any(|e| e.contains("script_path must be a string")),
+            "{:?}",
+            response["errors"]
+        );
+    }
+
     // -- config parsing & script building ------------------------------------
 
     #[test]
@@ -1629,6 +2208,7 @@ mod tests {
     fn build_script_exports_env_then_guards_cd_then_runs_command() {
         let script = build_script(&TaskConfig {
             command: "make deploy\nmake notify".to_string(),
+            script_path: String::new(),
             working_directory: "/opt/app my dir".to_string(),
             environment: vec![
                 ("FOO".to_string(), "it's".to_string()),
@@ -1656,6 +2236,7 @@ mod tests {
     fn build_script_without_optional_parts_is_just_the_command() {
         let script = build_script(&TaskConfig {
             command: "uptime".to_string(),
+            script_path: String::new(),
             working_directory: String::new(),
             environment: Vec::new(),
             timeout_seconds: None,
@@ -1663,6 +2244,81 @@ mod tests {
             restart: RestartPolicy::default(),
         });
         assert_eq!(script, "uptime");
+    }
+
+    #[test]
+    fn build_script_with_swaps_the_trailing_statement_for_script_runs() {
+        let config = TaskConfig {
+            command: String::new(),
+            script_path: "/tmp/uploaded.sh".to_string(),
+            working_directory: String::new(),
+            environment: vec![("FOO".to_string(), "1".to_string())],
+            timeout_seconds: None,
+            pty: false,
+            restart: RestartPolicy::default(),
+        };
+        let script = build_script_with(&config, &script_command_line(true, "/tmp/uploaded.sh"));
+        assert_eq!(script, "export FOO='1'\nbash '/tmp/uploaded.sh'");
+    }
+
+    #[test]
+    fn script_command_line_picks_bash_or_sh_and_quotes_the_path() {
+        assert_eq!(
+            script_command_line(true, "/tmp/a b.sh"),
+            "bash '/tmp/a b.sh'"
+        );
+        assert_eq!(script_command_line(false, "/tmp/x.sh"), "sh '/tmp/x.sh'");
+    }
+
+    // -- local shell targets ---------------------------------------------------
+
+    #[test]
+    fn local_command_flag_only_matches_cmd_exe() {
+        assert_eq!(local_command_flag("/bin/bash"), "-c");
+        assert_eq!(local_command_flag("/usr/bin/zsh"), "-c");
+        assert_eq!(local_command_flag("pwsh"), "-c");
+        assert_eq!(local_command_flag("cmd"), "/C");
+        assert_eq!(local_command_flag("cmd.exe"), "/C");
+        assert_eq!(local_command_flag("C:\\WINDOWS\\system32\\cmd.EXE"), "/C");
+    }
+
+    fn local_config_fixture() -> TaskConfig {
+        TaskConfig {
+            command: "echo hi".to_string(),
+            script_path: String::new(),
+            working_directory: String::new(),
+            environment: Vec::new(),
+            timeout_seconds: None,
+            pty: false,
+            restart: RestartPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn local_spawn_args_run_the_command_via_the_shell_flag() {
+        let config = local_config_fixture();
+        assert_eq!(
+            local_spawn_args("/bin/bash", &config),
+            vec!["-c".to_string(), "echo hi".to_string()]
+        );
+        // cmd.exe spells its flag differently but still gets the raw text.
+        assert_eq!(
+            local_spawn_args("cmd.exe", &config),
+            vec!["/C".to_string(), "echo hi".to_string()]
+        );
+    }
+
+    #[test]
+    fn local_spawn_args_script_mode_hands_the_file_to_the_shell_directly() {
+        let mut config = local_config_fixture();
+        config.script_path = "/opt/scripts/deploy.sh".to_string();
+        // The path becomes the shell's single argument — no content round-trip
+        // through argv, and no command text alongside it (validation keeps
+        // command and script_path mutually exclusive).
+        assert_eq!(
+            local_spawn_args("/bin/bash", &config),
+            vec!["/opt/scripts/deploy.sh".to_string()]
+        );
     }
 
     // -- restart budget -------------------------------------------------------
@@ -1834,5 +2490,193 @@ mod tests {
         }))
         .expect("request");
         assert_eq!(request.run_id, "run-42");
+    }
+
+    // -- local streaming runs (real /bin/sh spawns) ------------------------------
+
+    /// Collects one local run's streams. Unix-gated: the spawn tests drive a
+    /// real `/bin/sh`, which Windows runners do not have.
+    #[cfg(unix)]
+    async fn local_run(
+        command: &str,
+        working_directory: &str,
+        environment: &[(String, String)],
+        timeout: Option<Duration>,
+        cancel: watch::Receiver<bool>,
+    ) -> (RunEnd, Vec<String>, Vec<String>) {
+        let config = TaskConfig {
+            command: command.to_string(),
+            script_path: String::new(),
+            working_directory: working_directory.to_string(),
+            environment: environment.to_vec(),
+            timeout_seconds: None,
+            pty: false,
+            restart: RestartPolicy::default(),
+        };
+        let args = local_spawn_args("/bin/sh", &config);
+        let mut stdout_lines = Vec::new();
+        let mut stderr_lines = Vec::new();
+        let mut cancel = cancel;
+        let outcome = run_local_streaming(
+            "/bin/sh",
+            &args,
+            working_directory,
+            environment,
+            timeout,
+            &mut cancel,
+            |stream, line| match stream {
+                LogStream::Stdout => stdout_lines.push(line),
+                LogStream::Stderr => stderr_lines.push(line),
+                LogStream::System => {}
+            },
+            None,
+        )
+        .await;
+        (outcome.expect("local run"), stdout_lines, stderr_lines)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_streaming_reports_output_streams_and_exit_code() {
+        let (_cancel, cancel_rx) = watch::channel(false);
+        let (end, stdout, stderr) = local_run(
+            "printf 'a\\nb\\n'; printf 'oops\\n' >&2",
+            "",
+            &[],
+            None,
+            cancel_rx,
+        )
+        .await;
+        assert_eq!(end, RunEnd::Completed(Some(0)));
+        assert_eq!(stdout, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(stderr, vec!["oops".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_streaming_applies_process_env_and_working_directory() {
+        let dir = std::env::temp_dir();
+        let (_cancel, cancel_rx) = watch::channel(false);
+        let (end, stdout, _stderr) = local_run(
+            "printf \"$DBX_TASK_PROBE|%s\" \"$(pwd)\"",
+            &dir.to_string_lossy(),
+            &[("DBX_TASK_PROBE".to_string(), "ok".to_string())],
+            None,
+            cancel_rx,
+        )
+        .await;
+        assert_eq!(end, RunEnd::Completed(Some(0)), "stdout: {stdout:?}");
+        let (probe, cwd) = stdout[0].split_once('|').expect("probe|cwd");
+        assert_eq!(probe, "ok");
+        // macOS /tmp is a symlink to /private/tmp — compare canonical forms.
+        assert_eq!(
+            std::path::Path::new(cwd).canonicalize().ok(),
+            dir.canonicalize().ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_streaming_reports_nonzero_exit_and_timeout() {
+        let (_cancel, cancel_rx) = watch::channel(false);
+        let (end, _stdout, _stderr) =
+            local_run("exit 7", "", &[], None, cancel_rx).await;
+        assert_eq!(end, RunEnd::Completed(Some(7)));
+
+        // A silent process past its deadline ends as TimedOut (the deadline
+        // fires on the log channel, not the process exit).
+        let (_cancel, cancel_rx) = watch::channel(false);
+        let (end, _stdout, _stderr) = local_run(
+            "sleep 5",
+            "",
+            &[],
+            Some(Duration::from_millis(150)),
+            cancel_rx,
+        )
+        .await;
+        assert_eq!(end, RunEnd::TimedOut);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_streaming_cancel_kills_the_run_promptly() {
+        let (cancel, cancel_rx) = watch::channel(false);
+        let config = TaskConfig {
+            command: "sleep 30".to_string(),
+            script_path: String::new(),
+            working_directory: String::new(),
+            environment: Vec::new(),
+            timeout_seconds: None,
+            pty: false,
+            restart: RestartPolicy::default(),
+        };
+        let args = local_spawn_args("/bin/sh", &config);
+        let cancel = cancel;
+        let mut cancel_rx = cancel_rx;
+        let run = tokio::spawn(async move {
+            run_local_streaming(
+                "/bin/sh",
+                &args,
+                "",
+                &[],
+                None,
+                &mut cancel_rx,
+                |stream, line| {
+                    let _ = (stream, line);
+                },
+                None,
+            )
+            .await
+        });
+        // Land the cancel mid-run; the teardown (group TERM + grace +
+        // escalation) must resolve the run well inside the sleep's lifetime.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = cancel.send(true);
+        let outcome = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("cancel must not hang on a sleeping process")
+            .expect("join")
+            .expect("local run");
+        assert_eq!(outcome, RunEnd::Cancelled);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_run_honors_a_cancel_signal_before_spawn() {
+        let (cancel, cancel_rx) = watch::channel(true);
+        let (end, _stdout, _stderr) = local_run("echo hi", "", &[], None, cancel_rx).await;
+        assert_eq!(end, RunEnd::Cancelled);
+        drop(cancel);
+    }
+
+    // -- script_path file reading -------------------------------------------------
+
+    #[test]
+    fn read_script_file_rejects_missing_paths_and_directories() {
+        let error = read_script_file("/definitely/not/here/task.sh")
+            .expect_err("missing script must fail");
+        assert!(error.contains("is not readable"), "{error}");
+        let error = read_script_file("/tmp").expect_err("directory must fail");
+        assert!(error.contains("not a regular file"), "{error}");
+    }
+
+    #[test]
+    fn read_script_file_enforces_the_upload_cap() {
+        let path = std::env::temp_dir().join(format!("dbx-task-script-{}", uuid::Uuid::new_v4()));
+        let big = vec![b'#'; SCRIPT_UPLOAD_LIMIT + 1];
+        std::fs::write(&path, &big).expect("write oversized fixture");
+        let error = read_script_file(path.to_string_lossy().as_ref())
+            .expect_err("oversized script must fail");
+        std::fs::remove_file(&path).ok();
+        assert!(error.contains("script limit"), "{error}");
+    }
+
+    #[test]
+    fn read_script_file_returns_exact_bytes() {
+        let path = std::env::temp_dir().join(format!("dbx-task-script-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"#!/bin/sh\necho hi\n").expect("write fixture");
+        let bytes = read_script_file(path.to_string_lossy().as_ref()).expect("read");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(bytes, b"#!/bin/sh\necho hi\n");
     }
 }
