@@ -48,6 +48,8 @@ describe("ssh pluginStore wiring", () => {
         // 「Tab 接受建议」开关 + 建议黑名单（ghost/suggestions 批次）。
         "ssh-ghost-tab-accept",
         "ssh-suggestion-blocklist",
+        // 历史面板功能开关（issue #169，SettingsDialog 自治读写，默认开）。
+        "ssh-history-panel-enabled",
         // AI 助手三开关 + AI 修复「不再询问」授权位（Warp AI 对齐批）。
         "ssh-ai-assist",
         // Docker/Podman 引擎连接设置（单键 JSON 映射，dockerEngine.ts 自治）。

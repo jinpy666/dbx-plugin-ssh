@@ -153,7 +153,7 @@ import {
   type SftpCompressMode,
 } from "./lib/preferencesMirror";
 import { mergeShellHistory, parseShellHistoryText, persistableCommandHistoryBuckets, pushCommandHistory, sanitizeCommandHistoryBuckets } from "./lib/commandHistory";
-import { canCaptureEnterLine, echoConfirmsLine } from "./lib/terminalEnterCapture";
+import { canCaptureEnterLine, echoConfirmsLine, extractEchoedCommand } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
 import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, saveGhostTabAccept } from "./lib/ghostAcceptKey";
 import { isPasswordPromptLine, loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
@@ -980,6 +980,22 @@ const searchResultCount = ref(0);
 // 留在命令行（#138 交互跟进），↑↓/Enter/Tab/Esc 由 App 的面板分支统一消费；
 // 搜索框点击聚焦后字符键实时过滤，其余按键放行。
 const historyPanelOpen = ref(false);
+// 历史面板功能开关（issue #169）：默认开（现状）；关闭后提示符下的 ↑ 与
+// Ctrl+R / Ctrl+Shift+H 热键都归还远端 shell（↑/Ctrl+R 走 shell 原生历史与
+// 反向搜索），面板整体不可唤起。命令历史采集与建议浮层是独立功能（各有
+// 开关），不受此键影响。SettingsDialog 开关行自治持久化（pluginStore:
+// ssh-history-panel-enabled），这里只握内存权威态（两端各自水合同一键）。
+const historyPanelEnabled = ref(loadHistoryPanelEnabledPref());
+function loadHistoryPanelEnabledPref(): boolean {
+  try {
+    return pluginStore.getItem("ssh-history-panel-enabled") !== "0";
+  } catch {
+    return true;
+  }
+}
+function setHistoryPanelEnabled(next: boolean) {
+  historyPanelEnabled.value = next;
+}
 // 热键唤起时置 true（挂载即聚焦搜索框，批 3d）；裸 ↑ 唤起恒 false。
 const historyPanelFocusSearch = ref(false);
 // 面板内搜索框的 query（点击聚焦后打字即过滤；关闭随面板清空）。
@@ -2216,6 +2232,9 @@ function handleTerminalKey(event: KeyboardEvent) {
       // ↑ 裸键之外的补充唤起（可配置键位，默认含 Ctrl+R——Warp Command Search
       // 的默认键 workspace:show_command_search）：同一 gate，开↔关 toggle；
       // 热键入口聚焦搜索框（批 3d）——热键用户要的就是 Warp Ctrl+R 式搜索流。
+      // 功能开关关闭（issue #169）时不 consume：Ctrl+R 原样透传远端 shell，
+      // readline 原生反向搜索照常可用。
+      if (!historyPanelEnabled.value) return true;
       if (historyPanelOpen.value) closeHistoryPanel();
       else if (historyPanelGateOpen()) openHistoryPanel(true);
       return consume();
@@ -2466,11 +2485,14 @@ function terminalOverlayKeyOwners(): KeyOwners {
   ]);
 }
 
-/** 面板 claims：开 = 导航/Enter/Tab/Esc 全占；关 = 仅裸 ↑ 的唤起门。 */
+/** 面板 claims：开 = 导航/Enter/Tab/Esc 全占；关 = 仅裸 ↑ 的唤起门。
+ *  唤起门叠加 issue #169 的功能开关：关闭后 gate 不可见，↑ 归远端 shell
+ *  原生历史；热键入口（Ctrl+R，见 command-history 分支）同样受开关控制。 */
 function panelClaims(panelOpen: boolean): ArbiterClaim[] {
   const gate = priority("arrowUp", "historyPanel");
+  const arrowUpGate = panelOpen || (historyPanelGateOpen() && historyPanelEnabled.value);
   return [
-    { overlay: "historyPanel", key: "arrowUp", priority: gate, visible: panelOpen || historyPanelGateOpen() },
+    { overlay: "historyPanel", key: "arrowUp", priority: gate, visible: arrowUpGate },
     { overlay: "historyPanel", key: "arrowDown", priority: gate, visible: panelOpen },
     { overlay: "historyPanel", key: "enter", priority: priority("enter", "historyPanel"), visible: panelOpen },
     { overlay: "historyPanel", key: "tab", priority: priority("tab", "historyPanel"), visible: panelOpen },
@@ -2526,7 +2548,11 @@ function openHistoryPanel(focusSearch = false) {
   // shell ↑ 语义:初始高亮最底部(最新执行的命令),↑ 一直往上翻更旧的;
   // 打开即回填——按下 ↑ 的瞬间输入行就出现最新一条,与 shell 完全一致。
   historyPanelActiveIndex.value = clampHistoryPanelIndex(next.length - 1, next.length);
-  historyPanelOriginalLine = pendingTerminalInput;
+  // 打开前输入行快照要做屏幕对账（issue #169）：模型行失真（Tab 补全后停在
+  // 前缀）时直接存模型行，Esc 取消导航会把 `cd blen` 写回屏幕上本已是
+  // `cd blender/` 的行，补全结果被吞。以回显提取的真实行为快照；屏幕不可
+  // 测时回落模型行。
+  historyPanelOriginalLine = extractEchoedCommand(readEchoTextBeforeCursor(), pendingTerminalInput) ?? pendingTerminalInput;
   syncHistoryPanelLine();
   historyPanelAnchor.value = readTerminalSuggestionAnchor();
   hideGhostSuggestion();
@@ -2886,8 +2912,12 @@ function captureEnterLine(line: string) {
   ) {
     return;
   }
-  if (!echoConfirmsLine(readEchoTextBeforeCursor(), line)) return;
-  pushTerminalCommandHistory(line);
+  const echo = readEchoTextBeforeCursor();
+  if (!echoConfirmsLine(echo, line)) return;
+  // 以屏幕回显提取的命令入史（issue #169）：模型行只含键入前缀，Tab 补全/
+  // 历史展开后的真实命令（`cd blen` → `cd blender/`）只在回显里；提取失败
+  // （屏幕不可测）回落模型行，不劣于旧行为。
+  pushTerminalCommandHistory(extractEchoedCommand(echo, line) ?? line);
 }
 
 /**
@@ -9620,6 +9650,7 @@ watch(historyScope, () => {
       @update:gutter="updateGutterSettings"
       @update:ctx-search-engines="updateCtxSearchEngines"
       @update:ghost-suggest="setGhostEnabled"
+      @update:history-panel-enabled="setHistoryPanelEnabled"
       :ghost-tab-accept="ghostTabAccept"
       @update:ghost-tab-accept="setGhostTabAccept"
       :ai-settings="aiSettingsState"
