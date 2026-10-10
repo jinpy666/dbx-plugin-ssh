@@ -1216,6 +1216,31 @@ impl TaskProvider {
                         return;
                     }
                 }
+                Ok(RunEnd::Completed(Some(0))) => {
+                    // A clean exit is a completed session, not a crash: a
+                    // resident command that finishes successfully settles the
+                    // session as `stopped`, so the host's probe marks the run
+                    // successful instead of burning the restart budget on
+                    // short commands.
+                    self.resident_set_state(&session_id, ResidentState::Stopped);
+                    self.emit_resident_state(
+                        &emitter,
+                        &request.task_id,
+                        &request.run_id,
+                        &session_id,
+                        ResidentState::Stopped,
+                    );
+                    let _ = self.emit_log(
+                        &emitter,
+                        &request.task_id,
+                        &request.run_id,
+                        self.next_seq(&request.run_id),
+                        LogStream::System,
+                        "info",
+                        "Resident command completed",
+                    );
+                    return;
+                }
                 Ok(RunEnd::Completed(exit_code)) => {
                     let detail = match exit_code {
                         Some(code) => format!("exited with code {code}"),
