@@ -629,11 +629,15 @@ function handleSuggestionKey(event: KeyboardEvent): boolean {
   return false;
 }
 
-/** 把当前输入行替换为建议命令（退格抹掉已敲字符后按键盘语义重新写入）。 */
+/** 把当前输入行替换为建议命令（readline 清行后重新写入）。清行用 Ctrl+U
+ *  （\u0015，bash/zsh/busybox/fish 均默认绑定为删至行首）而非按模型长度发
+ *  N 个退格：pendingTerminalInput 是纯键入模型，Tab 补全/历史展开等回显改写
+ *  不进模型，按模型长度退格会擦不干净或擦过头，回填与「Esc 恢复原输入行」
+ *  因此破坏屏幕上真实的行（issue #169）；Ctrl+U 让远端 readline 自己删，天然
+ *  与屏幕一致。 */
 function replaceTerminalLineWith(nextLine: string, pressEnter: boolean) {
   if (!terminalGet()) return;
-  const erase = "\u007f".repeat(getPendingTerminalInput().length);
-  const payload = erase + nextLine + (pressEnter ? "\r" : "");
+  const payload = "\u0015" + nextLine + (pressEnter ? "\r" : "");
   setPendingTerminalInput(pressEnter ? "" : nextLine);
   if (pressEnter) {
     lastTerminalCommand.value = nextLine;

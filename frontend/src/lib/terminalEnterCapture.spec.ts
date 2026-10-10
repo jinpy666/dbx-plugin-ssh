@@ -1,8 +1,9 @@
 // 回车行兜底采集的纯判定测试：门过滤（空行/整屏程序/传输占用/命令运行中）
-// 与回显对照（关回显的凭据输入绝不放行；屏幕含模型行才放行；屏幕不可测放行）。
+// 与回显对照（关回显的凭据输入绝不放行；屏幕含模型行才放行；屏幕不可测放行）
+// 及回显提取（issue #169：Tab 补全后的真实命令以屏幕为准）。
 // 对应 App.vue trackPendingInput 回车分支 → captureEnterLine 的接线。
 import { describe, expect, it } from "vitest";
-import { canCaptureEnterLine, echoConfirmsLine, type EnterCaptureGates } from "./terminalEnterCapture";
+import { canCaptureEnterLine, echoConfirmsLine, extractEchoedCommand, type EnterCaptureGates } from "./terminalEnterCapture";
 
 const openGates: EnterCaptureGates = { alternateActive: false, transferBusy: false, shellCommandActive: false };
 
@@ -53,5 +54,37 @@ describe("echoConfirmsLine", () => {
 
   it("rejects blank model lines even when the screen has text", () => {
     expect(echoConfirmsLine("user@host:~$ ", "")).toBe(false);
+  });
+});
+
+describe("extractEchoedCommand (issue #169: capture what the shell actually runs)", () => {
+  it("returns the completed command, not the typed prefix", () => {
+    // 键入 `cd blen` + Tab：模型停在 `cd blen`，屏幕上已是补全结果。
+    expect(extractEchoedCommand("user@host:~$ cd blender/", "cd blen")).toBe("cd blender/");
+  });
+
+  it("returns the model line as-is when nothing extended it", () => {
+    expect(extractEchoedCommand("user@host:~$ kubectl get pods", "kubectl get pods")).toBe("kubectl get pods");
+  });
+
+  it("anchors at the first occurrence so prompt text before the command is dropped", () => {
+    expect(extractEchoedCommand("user@host:~$ ls file.txt", "ls ")).toBe("ls file.txt");
+  });
+
+  it("trims trailing whitespace the completion left before the cursor", () => {
+    expect(extractEchoedCommand("user@host:~$ git status  ", "git status")).toBe("git status");
+  });
+
+  it("falls back to null when the screen is unreadable (caller keeps the model line)", () => {
+    expect(extractEchoedCommand(null, "ls -la")).toBeNull();
+  });
+
+  it("falls back to null on blank model lines", () => {
+    expect(extractEchoedCommand("user@host:~$ ", "")).toBeNull();
+    expect(extractEchoedCommand("user@host:~$ ", "   ")).toBeNull();
+  });
+
+  it("defensively returns null when the line is not on the screen (gate should have rejected)", () => {
+    expect(extractEchoedCommand("user@host:~$ something else", "kubectl get pods")).toBeNull();
   });
 });

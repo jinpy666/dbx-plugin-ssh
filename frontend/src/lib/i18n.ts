@@ -8248,54 +8248,101 @@ const terminalGhostMessages: Record<string, Record<string, string>> = {
   es: {
     "terminalGhost.sectionTitle": "Sugerencias en línea",
     "terminalGhost.label": "Autosugerencia en línea (fantasma)",
-    "terminalGhost.tabAccept": "用 Tab 接受建议",
-    "terminalGhost.tabAcceptHint": "开启后 Tab 改为接受行内建议（而非交给远端 shell 补全）；结构化补全菜单开着时 Tab 仍归菜单候选。",
-    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E 整段接受 · Ctrl+→ 逐词接受",
+    "terminalGhost.tabAccept": "Usar Tab para aceptar",
+    "terminalGhost.tabAcceptHint": "Activado: Tab acepta la sugerencia en línea en vez del completado del shell. El menú de completado conserva Tab para sus candidatos.",
+    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E aceptan · Ctrl+→ palabra a palabra",
     "terminalGhost.hint": "Al escribir al final de la línea del indicador, el resto del comando coincidente del historial o de los comandos rápidos se muestra en gris tras el cursor. Pulsa → para aceptarlo de una vez. No aparece mientras se ejecuta un comando remoto, durante la composición del IME ni al pegar.",
   },
   it: {
     "terminalGhost.sectionTitle": "Suggerimenti in linea",
     "terminalGhost.label": "Suggerimenti automatici in linea (ghost)",
-    "terminalGhost.tabAccept": "用 Tab 接受建議",
-    "terminalGhost.tabAcceptHint": "開啟後 Tab 改為接受行內建議（而非交給遠端 shell 補全）；結構化補全選單開啟時 Tab 仍歸選單候選。",
-    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E 整段接受 · Ctrl+→ 逐詞接受",
+    "terminalGhost.tabAccept": "Usa Tab per accettare",
+    "terminalGhost.tabAcceptHint": "Attivo: Tab accetta il suggerimento inline invece del completamento della shell. Il menu di completamento mantiene Tab per i propri candidati.",
+    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E accettano · Ctrl+→ parola per parola",
     "terminalGhost.hint": "Mentre digiti alla fine della riga del prompt, la parte rimanente di un comando corrispondente (cronologia o comandi rapidi) appare in grigio dopo il cursore. Premi → per accettarlo in un passaggio. Nascosto durante l'esecuzione di un comando remoto, con la composizione IME o durante l'incolla.",
   },
   ja: {
     "terminalGhost.sectionTitle": "行内自動補完",
     "terminalGhost.label": "行内ゴースト自動補完",
-    "terminalGhost.tabAccept": "Usar Tab para aceptar",
-    "terminalGhost.tabAcceptHint": "Activado: Tab acepta la sugerencia en línea en vez del completado del shell. El menú de completado conserva Tab para sus candidatos.",
-    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E aceptan · Ctrl+→ palabra a palabra",
+    "terminalGhost.tabAccept": "Tab で確定",
+    "terminalGhost.tabAcceptHint": "オンにすると、Tab がシェル補完の代わりに行内候補を確定します。補完メニューが開いている間は Tab はメニュー候補に使われます。",
+    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E で確定 · Ctrl+→ で単語単位",
     "terminalGhost.hint": "プロンプト行の末尾で入力すると、履歴とクイックコマンドから一致する残り部分が灰色でカーソルの後に表示されます。→ で一括確定。リモートコマンドの実行中、IME 変換中、貼り付け中は表示されません。",
   },
   "pt-BR": {
     "terminalGhost.sectionTitle": "Sugestões em linha",
     "terminalGhost.label": "Sugestão automática em linha (fantasma)",
-    "terminalGhost.tabAccept": "Usa Tab per accettare",
-    "terminalGhost.tabAcceptHint": "Attivo: Tab accetta il suggerimento inline invece del completamento della shell. Il menu di completamento mantiene Tab per i propri candidati.",
-    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E accettano · Ctrl+→ parola per parola",
+    "terminalGhost.tabAccept": "Usar Tab para aceitar",
+    "terminalGhost.tabAcceptHint": "Ativado: Tab aceita a sugestão em linha em vez do completamento do shell. O menu de completamento mantém Tab para seus candidatos.",
+    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E aceitam · Ctrl+→ palavra por palavra",
     "terminalGhost.hint": "Ao digitar no fim da linha do prompt, o restante do comando correspondente do histórico ou dos comandos rápidos aparece em cinza após o cursor. Pressione → para aceitar de uma vez. Não aparece enquanto um comando remoto está em execução, durante a composição do IME ou ao colar.",
   },
   "zh-CN": {
     "terminalGhost.sectionTitle": "行内自动建议",
     "terminalGhost.label": "行内自动建议（ghost）",
-    "terminalGhost.tabAccept": "Tab で確定",
-    "terminalGhost.tabAcceptHint": "オンにすると、Tab がシェル補完の代わりに行内候補を確定します。補完メニューが開いている間は Tab はメニュー候補に使われます。",
-    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E で確定 · Ctrl+→ で単語単位",
+    "terminalGhost.tabAccept": "用 Tab 接受建议",
+    "terminalGhost.tabAcceptHint": "开启后 Tab 改为接受行内建议（而非交给远端 shell 补全）；结构化补全菜单开着时 Tab 仍归菜单候选。",
+    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E 整段接受 · Ctrl+→ 逐词接受",
     "terminalGhost.hint": "在提示符行尾键入时，以灰色在光标后内联展示历史与快速命令中匹配项的剩余部分，按 → 一次接受；远端命令执行中、输入法组合中或粘贴时不出现。",
   },
   "zh-TW": {
     "terminalGhost.sectionTitle": "行內自動建議",
     "terminalGhost.label": "行內自動建議（ghost）",
-    "terminalGhost.tabAccept": "Usar Tab para aceitar",
-    "terminalGhost.tabAcceptHint": "Ativado: Tab aceita a sugestão em linha em vez do completamento do shell. O menu de completamento mantém Tab para seus candidatos.",
-    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E aceitam · Ctrl+→ palavra por palavra",
+    "terminalGhost.tabAccept": "用 Tab 接受建議",
+    "terminalGhost.tabAcceptHint": "開啟後 Tab 改為接受行內建議（而非交給遠端 shell 補全）；結構化補全選單開啟時 Tab 仍歸選單候選。",
+    "terminalGhost.keysSummary": "→ / Ctrl+F / Ctrl+E 整段接受 · Ctrl+→ 逐詞接受",
     "terminalGhost.hint": "在提示字元行尾鍵入時，以灰色在游標後內聯顯示歷史與快速命令中相符項的剩餘部分，按 → 一次接受；遠端命令執行中、輸入法組字中或貼上時不出現。",
   },
 };
 for (const locale of Object.keys(terminalGhostMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...terminalGhostMessages[locale] };
+}
+
+// ---------------------------------------------------------------------------
+// history 面板功能开关（issue #169）：默认开；关闭后面板整体不可唤起——
+// 提示符下的 ↑ 与 Ctrl+R / Ctrl+Shift+H 都归还远端 shell（原生历史与反向
+// 搜索照常响应）。命令历史采集与建议浮层是独立功能，不受影响。
+// 七语键集完全一致（workbench.spec / i18nKeyReferences.spec 双向校验）。
+// ---------------------------------------------------------------------------
+const historyPanelSettingsMessages: Record<string, Record<string, string>> = {
+  en: {
+    "historyPanelSettings.sectionTitle": "Command history panel",
+    "historyPanelSettings.enabledLabel": "Enable the command history panel",
+    "historyPanelSettings.enabledHint": "On: ↑ at an idle prompt opens the command history panel, and Ctrl+R / Ctrl+Shift+H open it with search focused. Off: ↑ and Ctrl+R are passed to the remote shell, so its native history and reverse search (which record commands as completed by Tab) respond instead. Command history collection and suggestion popups are separate features and keep working.",
+  },
+  es: {
+    "historyPanelSettings.sectionTitle": "Panel de historial de comandos",
+    "historyPanelSettings.enabledLabel": "Activar el panel de historial de comandos",
+    "historyPanelSettings.enabledHint": "Activado: ↑ con el prompt en reposo abre el panel de historial, y Ctrl+R / Ctrl+Shift+H lo abren con el buscador enfocado. Desactivado: ↑ y Ctrl+R se envían al shell remoto, que responde con su historial nativo y su búsqueda inversa (registran los comandos tal como quedaron tras el completado con Tab). La recolección de historial y las sugerencias son funciones independientes y siguen activas.",
+  },
+  it: {
+    "historyPanelSettings.sectionTitle": "Pannello cronologia comandi",
+    "historyPanelSettings.enabledLabel": "Attiva il pannello della cronologia comandi",
+    "historyPanelSettings.enabledHint": "Attivo: ↑ con il prompt inattivo apre il pannello della cronologia, e Ctrl+R / Ctrl+Shift+H lo aprono con la ricerca attiva. Disattivo: ↑ e Ctrl+R vengono inviati alla shell remota, che risponde con la cronologia nativa e la ricerca inversa (registrano i comandi come risultano dopo il completamento con Tab). Raccolta della cronologia e suggerimenti sono funzioni indipendenti e continuano a funzionare.",
+  },
+  ja: {
+    "historyPanelSettings.sectionTitle": "コマンド履歴パネル",
+    "historyPanelSettings.enabledLabel": "コマンド履歴パネルを有効にする",
+    "historyPanelSettings.enabledHint": "オン: プロンプト待機中に ↑ でコマンド履歴パネルが開き、Ctrl+R / Ctrl+Shift+H は検索フォーカス付きで開きます。オフ: ↑ と Ctrl+R はリモートシェルに渡され、ネイティブ履歴とインクリメンタル検索（Tab 補完後のコマンドをそのまま記録）が応答します。履歴の収集とサジェストは独立した機能のため、影響を受けません。",
+  },
+  "pt-BR": {
+    "historyPanelSettings.sectionTitle": "Painel de histórico de comandos",
+    "historyPanelSettings.enabledLabel": "Ativar o painel de histórico de comandos",
+    "historyPanelSettings.enabledHint": "Ativado: ↑ com o prompt ocioso abre o painel de histórico, e Ctrl+R / Ctrl+Shift+H o abrem com a busca focada. Desativado: ↑ e Ctrl+R são enviados ao shell remoto, que responde com o histórico nativo e a busca reversa (registram os comandos como ficaram após o completamento com Tab). A coleta de histórico e as sugestões são funções independentes e continuam funcionando.",
+  },
+  "zh-CN": {
+    "historyPanelSettings.sectionTitle": "命令历史面板",
+    "historyPanelSettings.enabledLabel": "启用命令历史面板",
+    "historyPanelSettings.enabledHint": "开启：提示符空闲时按 ↑ 打开命令历史面板，Ctrl+R / Ctrl+Shift+H 打开并聚焦搜索。关闭：↑ 和 Ctrl+R 直接透传远端 shell，由其原生历史与反向搜索（记录的是 Tab 补全后实际执行的命令）响应；命令历史采集与建议浮层是独立功能，不受影响。",
+  },
+  "zh-TW": {
+    "historyPanelSettings.sectionTitle": "命令歷史面板",
+    "historyPanelSettings.enabledLabel": "啟用命令歷史面板",
+    "historyPanelSettings.enabledHint": "開啟：提示字元閒置時按 ↑ 開啟命令歷史面板，Ctrl+R / Ctrl+Shift+H 開啟並聚焦搜尋。關閉：↑ 和 Ctrl+R 直接透傳遠端 shell，由其原生歷史與反向搜尋（記錄的是 Tab 補全後實際執行的命令）回應；命令歷史採集與建議浮層是獨立功能，不受影響。",
+  },
+};
+for (const locale of Object.keys(historyPanelSettingsMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...historyPanelSettingsMessages[locale] };
 }
 
 // ---------------------------------------------------------------------------
