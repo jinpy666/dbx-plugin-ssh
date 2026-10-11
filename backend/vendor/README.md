@@ -8,11 +8,12 @@
 | crate | 版本 | 上游 | 来源 | 许可证 |
 | --- | --- | --- | --- | --- |
 | `ironrdp`（umbrella） | 0.17.0 | Devolutions/IronRDP | crates.io 0.17.0 tarball sha256 `0f910b8dc8e7b8e001c61fd742be442e8604fb2499ded713cadf911e7645ade4`（2026-09 下载件逐文件比对一致，无补丁）；树 tree-sha256 `08008fd58cd8fde8c67ef65a2a5d4f3a6fe82c6619b4a0476cc42a07fb514ab2` | MIT OR Apache-2.0 |
-| `ironrdp-client` | 0.1.0 | Devolutions/IronRDP | crates.io 0.1.0 tarball sha256 `e2a3b44f8af101cf5a8cc5bf80470d64099c95c553d5597dec55ff38a821243e` + NyaTerm 补丁（实际差异面见下文逐 crate 登记）；树 tree-sha256 `731b7117e873f0bdcc955dd1c78b98a82d570db3efa86146e3a1e09cd51873d2` | MIT OR Apache-2.0 |
-| `ironrdp-connector` | 0.10.0 | Devolutions/IronRDP | crates.io 0.10.0 tarball sha256 `d5898b3f1fcaca0f9b923b1463e158aeb64dfdec4ac361b7c086492466ff341c` + NyaTerm 副本差异（见下文）；树 tree-sha256 `6e890b11787cf7cfd37da259debb04acab26f6ea527881295549148f23df3751` | MIT OR Apache-2.0 |
-| `ironrdp-tls` | 0.2.2 | Devolutions/IronRDP | crates.io 0.2.2 tarball sha256 `ea5f0bb732e33159834f06a687f5415dae1a82c71c123c1c3a3689d41ed47645` + NyaTerm 副本差异（含 TLS 主机名校验放宽，见下文）；树 tree-sha256 `9e4f39ae77c47668aa821284175933b8456914d9fb2d0c5feb3e5c213e0bf3bf` | MIT OR Apache-2.0 |
+| `ironrdp-async` | 0.10.0 | Devolutions/IronRDP | crates.io 0.10.0 tarball sha256 `bea12d80384007fe321eb6b36c9225be9559c655fd581458a6a1386c1774d729`（2026-10 下载件比对，见下文补丁清单）；树 tree-sha256 `e728e68e608b3d603cee02d36964c758dcee33bed019ee84845461585720a3ae` | MIT OR Apache-2.0 |
+| `ironrdp-client` | 0.1.0 | Devolutions/IronRDP | crates.io 0.1.0 tarball sha256 `e2a3b44f8af101cf5a8cc5bf80470d64099c95c553d5597dec55ff38a821243e` + NyaTerm 补丁（实际差异面见下文逐 crate 登记）；树 tree-sha256 `7951ad6b8f5c441342736c0d5335d2f9b34e9cb49d67418a1b77fbe9a97eeae7` | MIT OR Apache-2.0 |
+| `ironrdp-connector` | 0.10.0 | Devolutions/IronRDP | crates.io 0.10.0 tarball sha256 `d5898b3f1fcaca0f9b923b1463e158aeb64dfdec4ac361b7c086492466ff341c` + NyaTerm 副本差异（见下文）；树 tree-sha256 `e6d35b48b1df61fdaec6059717d5ca03a3acf7a589185b4f651ab364d8a14ce6` | MIT OR Apache-2.0 |
+| `ironrdp-tls` | 0.2.2 | Devolutions/IronRDP | crates.io 0.2.2 tarball sha256 `ea5f0bb732e33159834f06a687f5415dae1a82c71c123c1c3a3689d41ed47645` + NyaTerm 副本差异（含 TLS 主机名校验放宽，见下文）；树 tree-sha256 `24e8fb91fed71198ade471114824e3a5a3b16dfda2e7fb374651d682a723f67c` | MIT OR Apache-2.0 |
 | `picky` | 7.0.0-rc.25 | Devolutions/picky-rs | crates.io 7.0.0-rc.25 tarball sha256 `c1ae9cd78eb1d61be4790713d28368cf71c844218fcd91542768805423f02666` + NyaTerm 副本差异（见下文）；树 tree-sha256 `a413a5693b1aaf66a639000d39c869d3e27083ed611dc0a2de9447b947465160` | MIT OR Apache-2.0 |
-| `sspi` | 0.21.0 | Devolutions/sspi-rs | crates.io 0.21.0 tarball sha256 `3db83308ba07f6c54141f7e34a167353f81250fe8ccab87e90c323f4390b0fb0` + NyaTerm 副本差异（见下文）；树 tree-sha256 `b15ec1b1851b32429eeaaa041b67fda958c713f0fec1dcb5b8aa338fe7377db6` | MIT OR Apache-2.0 |
+| `sspi` | 0.21.0 | Devolutions/sspi-rs | crates.io 0.21.0 tarball sha256 `3db83308ba07f6c54141f7e34a167353f81250fe8ccab87e90c323f4390b0fb0` + NyaTerm 副本差异（见下文）；树 tree-sha256 `ed6df5ed345cad981eb28ea4af322bdee90ee7b92a7ee2854738d70c78a1c59b` | MIT OR Apache-2.0 |
 
 `tree-sha256` 是**补丁后 vendored 树**的确定性内容哈希（文件按相对路径排序、
 内容按 LF 规范化后流入 SHA-256），由 `verify_rdp_vendor_integrity.py` 默认校验：
@@ -71,6 +72,10 @@ TLS 后端：非 Windows = rustls（`cfg(not(windows))` feature），Windows = n
      依赖。
   3. `src/lib.rs`：剪贴板模块从 `all(windows, clipboard)` 放开为非 Windows 也随
      `clipboard` feature 暴露。
+  4. CredSSP 补丁（2026-10，a3eb0bda，安全评审见
+     `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）：`src/rdp.rs` 把
+     CredSSP 阶段产出的通道绑定哈希接入 active session 更新——域机 EPA
+     （扩展保护）强制下 NTLM 认证不再结构性被域控拒绝。
   （原登记把工厂类型落在 `src/clipboard.rs`；比对证实该文件与发布件一致，已修正。
   `.cargo-ok` 为 cargo vendor 流程产物。）
 - 上游回灌：补丁 1/2 有上游 FIXME 背书（上游自认"应支持外插 CliprdrBackendFactory"），
@@ -80,12 +85,27 @@ TLS 后端：非 Windows = rustls（`cfg(not(windows))` feature），Windows = n
   upstream monorepo 的 `ironrdp-connector` 包副本补齐 `LICENSE-APACHE` / `LICENSE-MIT`
   （IronRDP 全仓同源同许可）。
 
+### ironrdp-async
+
+- 上游仓库 / 钉定：Devolutions/IronRDP，crates.io 0.10.0 发布包（第七个
+  lockstep 成员，2026-10 随 CredSSP 补丁引入）。
+- 本地补丁清单（2026-10 与 crates.io 0.10.0 下载件逐文件比对核定）：
+  `src/connector.rs` 的 `ClientConnector`/`connect_finalize` 增加可选
+  `channel_bindings` 参数并透传给 connector 阶段——`tls-server-end-point`
+  通道绑定的进入点（域机 EPA 强制所需）；其余为打包流程差异
+  (`.cargo-ok`/`Cargo.lock`/`Cargo.toml.orig`/`CHANGELOG.md`）。
+- 升级解除条件：无独立解除项（跟随整链）。
+
 ### ironrdp-connector
 
 - 上游仓库 / 钉定：Devolutions/IronRDP，crates.io 0.10.0 发布包。
 - 本地补丁清单（2026-09 比对核定，原"无补丁"声明已修正）：`src/connection.rs`
   移除 `#[expect(single_use_lifetimes)]` 属性（旧工具链兼容）；`Cargo.toml` 把
   picky 钉版收紧为 `=0.21.0`；`CHANGELOG.md` 随 NyaTerm 发布流程差异。
+- CredSSP 补丁（2026-10，a3eb0bda，安全评审见
+  `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）：`src/credssp.rs` 在
+  `CredSspClientState::EarlyAuthRequest` 阶段补发 `tls-server-end-point`
+  通道绑定哈希——域机 EPA（扩展保护）强制下 NTLM 认证不再结构性被域控拒绝。
 - 升级解除条件：无独立解除项（跟随整链）。
 
 ### ironrdp-tls
@@ -97,6 +117,9 @@ TLS 后端：非 Windows = rustls（`cfg(not(windows))` feature），Windows = n
   该后端被放宽，服务器身份改由 ironrdp-client 补丁 1 注入的
   `ServerCertificateVerifier` 承担；本仓库证书策略（fail-closed、prompt/remember）
   必须始终覆盖该路径。已纳入 CredSSP 评审清单范围。
+- CredSSP 补丁（2026-10，a3eb0bda）：三个后端（native-tls/rustls/stub）把
+  TLS 层证书哈希经 `ClientConfig` 透传给 CredSSP 客户端，供
+  `tls-server-end-point` 通道绑定计算（域机 EPA 强制所需）。
 - 升级解除条件：上游提供等价校验器注入点后随整链升级删除。
 
 ### picky
@@ -116,6 +139,11 @@ TLS 后端：非 Windows = rustls（`cfg(not(windows))` feature），Windows = n
 - 本地补丁清单（2026-09 比对核定，原"无补丁"声明已修正）：`src/auth_identity.rs`
   为 NTLM 凭据补 UPN / DownLevelLogonName 用户名格式的 domain 提取分支；
   `Cargo.toml` 把 picky / connector 等依赖钉版同步到链内版本。
+- CredSSP 补丁（2026-10，a3eb0bda，安全评审见
+  `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`）：`src/channel_bindings.rs` 新增
+  `tls-server-end-point` 哈希装配；`credssp/mod.rs` 把通道绑定与 TLS 证书哈希
+  接入 AS Request；`ntlm` 的 `computations.rs` 把 `ChannelBindings` 摘要纳入
+  `MIC` 计算——通道绑定缺失即 EPA 域控拒绝的根因。
 - 升级解除条件：无独立解除项（跟随整链）。CredSSP 安全评审见
   `docs/RDP_CREDSSP_REVIEW_CHECKLIST.zh-CN.md`。
 

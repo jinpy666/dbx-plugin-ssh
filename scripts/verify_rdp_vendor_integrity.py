@@ -19,6 +19,7 @@ VENDOR = REPO_ROOT / "backend" / "vendor"
 README = VENDOR / "README.md"
 CHAIN = (
     "ironrdp",
+    "ironrdp-async",
     "ironrdp-client",
     "ironrdp-connector",
     "ironrdp-tls",

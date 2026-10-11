@@ -30,6 +30,7 @@ CARGO_LOCK = BACKEND / "Cargo.lock"
 # the umbrella 0.17 generation is bound to client 0.1.0 / connector 0.10.0.
 RDP_LOCKSTEP_CHAIN = (
     "ironrdp",
+    "ironrdp-async",
     "ironrdp-client",
     "ironrdp-connector",
     "ironrdp-tls",
