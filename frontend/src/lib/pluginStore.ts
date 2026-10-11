@@ -107,6 +107,13 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 单键 JSON（editorRules.ts 拆装净化），纯前端消费——打开时把解析结果
   // 传给 sidecar `local/open-with`，sidecar 不读此配置。
   "ssh-editor-config",
+  // 空提示符快捷键引导的两键（issue #176-3）：曾漏注册——写入宿主 storage
+  // 但启动从不水合，消散旗标每次重开丢失，引导条每次都弹。
+  "ssh-terminal-prompt-hints-enabled",
+  "ssh-terminal-prompt-hints-dismissed",
+  // 工作台 UI 布局镜像（issue #178，workbenchUiMirror.ts 拆装）：宿主缺
+  // workbenchState 桥时的持久兜底（paneOrder/表头/面板开合/列宽/排序等）。
+  "ssh-workbench-ui",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);

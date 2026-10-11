@@ -57,6 +57,11 @@ describe("ssh pluginStore wiring", () => {
         // 外部编辑器配置（编辑器映射增强，editorRules.ts 自治）。
         "ssh-editor-config",
         "ssh-tunnel-profiles",
+        // 空提示符快捷键引导两键（issue #176-3：漏注册 = 消散旗标每次重开丢）。
+        "ssh-terminal-prompt-hints-enabled",
+        "ssh-terminal-prompt-hints-dismissed",
+        // 工作台 UI 布局镜像（issue #178，宿主缺 workbenchState 桥时的兜底）。
+        "ssh-workbench-ui",
         // 存储迁移批 1（IMPL_PLAN_STORAGE_SYNC）：全局偏好三域权威键，
         // sidecar JSON 降级为一次性搬迁种子。
         "ssh-quick-commands",

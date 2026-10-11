@@ -160,6 +160,7 @@ import { canCaptureEnterLine, echoConfirmsLine, extractEchoedCommand } from "./l
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
 import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, saveGhostTabAccept } from "./lib/ghostAcceptKey";
 import { isPasswordPromptLine, loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
+import { readWorkbenchUiMirror, writeWorkbenchUiMirror } from "./lib/workbenchUiMirror";
 // 终端交互提示守卫（issue #150 及其反馈扩展）：远端询问输入/要求选择（MFA/
 // 验证码/密码待输入、选择菜单、y/n 确认）时，↑/↓ 留给远端交互，不唤起历史
 // 面板；键入应答不开建议/ghost 浮层。
@@ -485,6 +486,10 @@ interface WorkbenchState {
   /** RDP 会话内用户选择的桌面尺寸（P0-2）：恢复 tab 时优先于连接表单 rdp_resolution。 */
   rdpWidth?: number;
   rdpHeight?: number;
+  /** SFTP 隐藏文件显隐（issue #178）：此前完全未持久化。 */
+  sftpShowHidden?: boolean;
+  /** SFTP 列表排序规则（issue #178）：此前完全未持久化。 */
+  sftpSort?: { column: SftpSortColumn; direction: "asc" | "desc" };
 }
 
 interface RuntimeEndpoint {
@@ -1704,7 +1709,10 @@ function initialState(): WorkbenchState {
 }
 
 function restoreUiState() {
-  const state = initialState();
+  // 布局恢复的合并方向（issue #178）：镜像作底层默认、initialState 作权威
+  // 覆盖——宿主缺 workbenchState 桥时 initialState 恒空对象，镜像整组生效；
+  // 桥在时每工作台状态照旧优先，镜像只补它没有的键（如新加的 showHidden）。
+  const state = { ...readWorkbenchUiMirror(), ...initialState() };
   currentPath.value = typeof state.sftpPath === "string" ? normalizeRemotePath(state.sftpPath) : "/";
   splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : 58;
   paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : "terminal-left";
@@ -1728,6 +1736,12 @@ function restoreUiState() {
     sftpColumnWidths[col] = Math.max(COLUMN_MIN_WIDTHS[col], Math.min(COLUMN_WIDTH_MAX, num));
   }
   sftpNameWidth.value = typeof state.sftpNameWidth === "number" ? Math.max(NAME_COLUMN_MIN, Math.min(NAME_COLUMN_MAX, state.sftpNameWidth)) : null;
+  // 隐藏文件显隐与排序规则（issue #178）：此前无任何持久化，重开必丢。
+  sftpShowHidden.value = state.sftpShowHidden === true;
+  const savedSort = state.sftpSort;
+  sort.value = savedSort && (savedSort.column === "name" || savedSort.column === "size" || savedSort.column === "modified")
+    ? { column: savedSort.column, direction: savedSort.direction === "desc" ? "desc" : "asc" }
+    : { column: "name", direction: "asc" };
   lastSequence = typeof state.terminalSequence === "number" ? state.terminalSequence : 0;
   // RDP 会话内选择的桌面尺寸（P0-2）：仅在契约门限内采用。
   const rdpSavedWidth = typeof state.rdpWidth === "number" ? state.rdpWidth : 0;
@@ -1738,9 +1752,7 @@ function restoreUiState() {
 }
 
 function writeWorkbenchState() {
-  return window.dbxPlugin.workbenchState?.set({
-    sessionId: session.value?.sessionId,
-    terminalSequence: lastSequence,
+  const uiMirror = {
     sftpPath: currentPath.value,
     followDirectory: followDirectory.value,
     sudoMode: sudoMode.value,
@@ -1749,8 +1761,19 @@ function writeWorkbenchState() {
     sftpPaneOpen: sftpPaneOpen.value,
     visibleColumns: visibleColumns.value,
     columnsV2: true,
-    sftpColumnWidths: { ...sftpColumnWidths },
+    sftpColumnWidths: { ...sftpColumnWidths } as Record<string, number>,
     sftpNameWidth: sftpNameWidth.value,
+    sftpShowHidden: sftpShowHidden.value,
+    sftpSort: { column: sort.value.column, direction: sort.value.direction },
+  };
+  // 布局镜像双写（issue #178）：宿主缺 workbenchState 桥时它是唯一持久层；
+  // 桥在时镜像只作恢复兜底（见 restoreUiState 的合并方向）。
+  writeWorkbenchUiMirror(uiMirror);
+  return window.dbxPlugin.workbenchState?.set({
+    sessionId: session.value?.sessionId,
+    terminalSequence: lastSequence,
+    ...uiMirror,
+    sftpColumnWidths: { ...sftpColumnWidths },
     ...(rdpPersistedSize.value ? { rdpWidth: rdpPersistedSize.value.width, rdpHeight: rdpPersistedSize.value.height } : {}),
   }).catch(() => undefined);
 }
@@ -7635,6 +7658,10 @@ async function initialize() {
   ]);
   transportReuseState = createSessionTransportReuseState(hostContext.value);
   locale.value = api.locale || "zh-CN";
+  // UI 状态恢复必须等 pluginStore 水合（宿主 storage 白名单键异步灌入）：
+  // 否则 workbenchUi 镜像与 setup 期的 sftp-pane-open 等键全部读到空档，
+  // 布局偏好整组"不持久"（issue #178 的半个根因，另一半是宿主缺桥）。
+  await pluginStore.ready.catch(() => undefined);
   restoreUiState();
   const appearanceAppliedAtBoot = Boolean(api.appearance || api.theme);
   // 外观偏好的 CSS 部分（终端内边距变量）与宿主是否推送 appearance 无关，
@@ -7814,7 +7841,7 @@ async function reattachProtocolSession(): Promise<boolean> {
   return true;
 }
 
-watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns], persistState, { deep: true });
+watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns, sftpShowHidden, sort], persistState, { deep: true });
 
 // ---------------------------------------------------------------------------
 // MCP 设置镜像（存储迁移批 1，IMPL_PLAN_STORAGE_SYNC）：sidecar 在 MCP serve
