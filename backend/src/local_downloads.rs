@@ -281,11 +281,20 @@ pub fn reveal_target(recorded: &Path, download_dir: &Path) -> PathBuf {
     download_dir.to_path_buf()
 }
 
-/// The download directory the reveal fallback opens: the configured
-/// `downloadDir` preference when it resolves, else the resolved default
-/// (`downloads_base_dir`). Both are created on demand so the revealed
-/// folder always exists.
-pub fn reveal_download_dir(data_dir: &Path) -> PathBuf {
+/// The downloads base every remote-edit round-trip leg must share: the
+/// configured `downloadDir` preference when it resolves, else
+/// [`downloads_base_dir`]. The frontend computes the external-edit download
+/// target from this same preference (and `local/capabilities` reports it),
+/// so the sidecar-side path gate (`validate_remote_edit_path`) has to
+/// resolve the identical base — a custom download dir with the gate falling
+/// back to the env/USERPROFILE default made every "open with"/upload
+/// validation fail with "not inside the remote-edit directory" (#175).
+/// Preference wins over the env override here (unlike `downloads_base_dir`)
+/// because the frontend only ever reads the preference.
+pub fn effective_downloads_base(
+    lookup: impl Fn(&str) -> Option<OsString>,
+    data_dir: &Path,
+) -> PathBuf {
     let configured = crate::preferences::load_preferences(data_dir)
         .get("downloadDir")
         .and_then(Value::as_str)
@@ -296,7 +305,15 @@ pub fn reveal_download_dir(data_dir: &Path) -> PathBuf {
             return dir;
         }
     }
-    let dir = downloads_base_dir(|key| std::env::var_os(key), data_dir);
+    downloads_base_dir(lookup, data_dir)
+}
+
+/// The download directory the reveal fallback opens: the configured
+/// `downloadDir` preference when it resolves, else the resolved default
+/// (`downloads_base_dir`). Both are created on demand so the revealed
+/// folder always exists.
+pub fn reveal_download_dir(data_dir: &Path) -> PathBuf {
+    let dir = effective_downloads_base(|key| std::env::var_os(key), data_dir);
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

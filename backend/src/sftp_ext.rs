@@ -1264,7 +1264,10 @@ pub(crate) fn validate_remote_edit_path(
     data_dir: &Path,
     lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Result<PathBuf, String> {
-    let downloads = crate::local_downloads::downloads_base_dir(lookup, data_dir);
+    // 与前端下载目标同源（downloadDir 偏好优先）：自定义下载目录时若回落
+    // env/USERPROFILE 基址，remote-edit 根在该基址下不存在，打开/回传校验
+    // 全部必然失败（#175）。
+    let downloads = crate::local_downloads::effective_downloads_base(lookup, data_dir);
     validate_remote_edit_root(local_path, &downloads)
 }
 
@@ -1430,6 +1433,49 @@ async fn push_local_file_raw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// remote-edit 校验基址与前端下载目标同源（#175 回归）：downloadDir
+    /// 偏好指向自定义目录时，`<偏好>/remote-edit/` 下的文件必须通过校验，
+    /// 即使 env 覆盖指向别处（前端只读偏好，偏好必须赢）。
+    #[test]
+    fn remote_edit_validation_follows_download_dir_preference() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let custom = tempfile::tempdir().expect("custom dir");
+        // 偏好写自定义下载目录；文件落在 <自定义>/remote-edit/stamp/a.txt。
+        crate::preferences::save_preferences(
+            data_dir.path(),
+            &serde_json::json!({ "downloadDir": custom.path().to_string_lossy() }),
+        )
+        .expect("save preference");
+        let stamp = custom.path().join("remote-edit").join("20261011000000");
+        std::fs::create_dir_all(&stamp).expect("mkdir stamp");
+        let file = stamp.join("a.txt");
+        std::fs::write(&file, b"x").expect("write fixture");
+        // env 覆盖指向另一个目录（旧实现会解析到它并失败）。
+        let env_override = tempfile::tempdir().expect("env dir");
+        let validated = validate_remote_edit_path(&file, data_dir.path(), |key| {
+            if key == crate::local_downloads::DOWNLOAD_DIR_ENV {
+                Some(std::ffi::OsString::from(env_override.path()))
+            } else {
+                std::env::var_os(key)
+            }
+        })
+        .expect("preference-based base must validate");
+        assert_eq!(validated, file.canonicalize().expect("canonicalize"));
+
+        // 无偏好（全新 data_dir）：回落 env/USERPROFILE 基址，跨目录文件
+        // 依旧被拒（守卫仍在）。
+        let clean_data_dir = tempfile::tempdir().expect("clean data dir");
+        let error = validate_remote_edit_path(&file, clean_data_dir.path(), |key| {
+            if key == crate::local_downloads::DOWNLOAD_DIR_ENV {
+                Some(std::ffi::OsString::from(env_override.path()))
+            } else {
+                std::env::var_os(key)
+            }
+        })
+        .expect_err("cross-base file must stay rejected");
+        assert!(error.contains("remote-edit"), "{error}");
+    }
 
     #[test]
     fn shell_quote_wraps_and_escapes_single_quotes() {
