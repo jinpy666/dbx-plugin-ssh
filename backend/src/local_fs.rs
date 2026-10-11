@@ -23,7 +23,9 @@ impl DialogFlightGuard {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map(|_| DialogFlightGuard)
             .map_err(|_| {
-                "A native file dialog is already open — finish or cancel it first".to_string()
+                // 守卫命中时对话框多半还开着（Windows 上可能被主窗挡住）：
+                // 文案必须给出出路，而不是一条死路的报错（#160）。
+                "A native file dialog is already open — finish or cancel it first (it may be behind this window), then retry".to_string()
             })
     }
 }
@@ -460,9 +462,18 @@ fn pick_file_dialog(
         }
         _ => script.push_str("$d.Filter='All files (*.*)|*.*';"),
     }
-    script.push_str(
-        "if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Out.Write($d.FileName)}",
-    );
+    // OpenFileDialog 无 TopMost 属性：以一个不可见置顶 owner 表单挂靠
+    // （ShowDialog(owner) 继承 owner 的 Z 序），否则对话框常弹在 DBX 主窗
+    // 后面——用户以为导入没执行而重试，撞上 single-flight 守卫报
+    // "already open"（#160 的完整复现链）。
+    script.push_str(concat!(
+        "Add-Type -AssemblyName System.Drawing;",
+        "$o=New-Object System.Windows.Forms.Form;",
+        "$o.TopMost=$true;$o.ShowInTaskbar=$false;$o.FormBorderStyle='None';$o.Size=New-Object System.Drawing.Size(1,1);$o.StartPosition='Manual';$o.Location=New-Object System.Drawing.Point(-2000,-2000);",
+        "$o.Show();",
+        "if($d.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Out.Write($d.FileName)};",
+        "$o.Close();",
+    ));
     let mut utf16le = Vec::with_capacity(script.len() * 2);
     for unit in script.encode_utf16() {
         utf16le.extend_from_slice(&unit.to_le_bytes());
