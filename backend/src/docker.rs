@@ -215,7 +215,11 @@ pub fn list_body(engine: &EngineConfig) -> String {
          if command -v {cli} >/dev/null 2>&1; then echo docker-found; else echo docker-missing; fi\n\
          if {cli} info >/dev/null 2>&1; then echo daemon-ok; else echo daemon-denied; fi\n\
          echo DBXDOCKER_PS\n\
-         {cli} ps -a --no-trunc --format '{PS_FORMAT}' 2>/dev/null\n",
+         ps_out=$({cli} ps -a --no-trunc --format '{PS_FORMAT}' 2>/dev/null)\n\
+         if [ -n \"$ps_out\" ]; then printf '%s\\n' \"$ps_out\"; else\n\
+           echo DBXDOCKER_PS_LEGACY\n\
+           {cli} ps -a --no-trunc --format '{PS_FORMAT_LEGACY}' 2>/dev/null\n\
+         fi\n",
         export = engine.env_prefix(),
         cli = engine.cli,
     )
@@ -269,6 +273,21 @@ pub fn needs_windows_fallback(output: &str) -> bool {
 /// collection paths cannot drift apart.
 pub const PS_FORMAT: &str =
     "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.State}}\\t{{.Status}}\\t{{.Ports}}\\t{{.CreatedAt}}";
+
+/// Pre-1.13 fallback template: `{{.State}}` entered `docker ps --format`
+/// with Docker 1.13 (API 1.25); older CLIs (CentOS 7 extras ships 1.12)
+/// fail the whole template with a parsing error whose stderr the collector
+/// swallows — the panel then showed an empty list with no hint (issue
+/// #168). The legacy set keeps the same column ORDER minus State; the
+/// parser derives state from the Status text. It runs only as a second
+/// in-script attempt when the modern format produced no rows.
+pub const PS_FORMAT_LEGACY: &str =
+    "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.CreatedAt}}";
+
+/// The section marker emitted right before the legacy-format retry. The
+/// parser splits the `DBXDOCKER_PS` section on it; absent means the modern
+/// attempt produced rows (or the host is empty).
+pub const PS_LEGACY_MARKER: &str = "DBXDOCKER_PS_LEGACY";
 
 /// PATH hardening prepended to every remote collector heredoc (same
 /// well-known install dirs as the local CLI discovery below). Actions keep
@@ -485,15 +504,83 @@ pub fn parse_ps_section(section: &str) -> Vec<ContainerRow> {
     rows
 }
 
+/// Derives the machine state from the human Status text of a pre-1.13
+/// `docker ps` row (no `.State` column): "Up 3 hours" → running,
+/// "Exited (0) 2 days ago" → exited, and so on. Unrecognized text degrades
+/// to "unknown" — the panel's state badge, not control flow, consumes it.
+fn legacy_state_from_status(status: &str) -> String {
+    let status = status.trim();
+    let lowered = status.to_ascii_lowercase();
+    if lowered.starts_with("up") {
+        // Paused containers render "Up 2 hours (Paused)".
+        if lowered.contains("(paused)") {
+            return "paused".to_string();
+        }
+        return "running".to_string();
+    }
+    if lowered.starts_with("exited") {
+        return "exited".to_string();
+    }
+    if lowered.starts_with("created") {
+        return "created".to_string();
+    }
+    if lowered.starts_with("restarting") {
+        return "restarting".to_string();
+    }
+    if lowered.starts_with("dead") {
+        return "dead".to_string();
+    }
+    if lowered.starts_with("removing") {
+        return "removing".to_string();
+    }
+    "unknown".to_string()
+}
+
+/// Parses the pre-1.13 fallback section (6 tab-separated columns — no
+/// State). Same malformed-row tolerance as [`parse_ps_section`].
+pub fn parse_ps_section_legacy(section: &str) -> Vec<ContainerRow> {
+    let mut rows = Vec::new();
+    for line in section.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 6 || fields[0].trim().is_empty() {
+            continue;
+        }
+        let status = fields[3].trim().to_string();
+        rows.push(ContainerRow {
+            id: fields[0].trim().to_string(),
+            name: fields[1].trim().to_string(),
+            image: fields[2].trim().to_string(),
+            state: legacy_state_from_status(&status),
+            status,
+            ports: fields[4].trim().to_string(),
+            created_at: fields[5].trim().to_string(),
+        });
+    }
+    rows
+}
+
 /// Assembles the `docker/list` payload from raw script output:
 /// `{available, needsSudo, containers}`. `needsSudo` is the found-but-
 /// denied combination (docker CLI present, daemon socket refused) — the
-/// actions still have a path via the Quick Sudo fallback.
+/// actions still have a path via the Quick Sudo fallback. A
+/// [`PS_LEGACY_MARKER`] inside the ps section splits off the pre-1.13
+/// fallback rows (6 columns, state derived from Status text).
 pub fn list_payload(output: &str) -> Value {
     let probe = parse_probe(output);
     let available = probe.docker_found && probe.daemon_ok;
     let needs_sudo = probe.docker_found && !probe.daemon_ok;
-    let containers = parse_ps_section(marker_section(output, "DBXDOCKER_PS", None));
+    let section = marker_section(output, "DBXDOCKER_PS", None);
+    let (modern, legacy) = match section.find(PS_LEGACY_MARKER) {
+        Some(index) => (
+            &section[..index],
+            Some(&section[index + PS_LEGACY_MARKER.len()..]),
+        ),
+        None => (section, None),
+    };
+    let mut containers = parse_ps_section(modern);
+    if let Some(legacy_section) = legacy {
+        containers.extend(parse_ps_section_legacy(legacy_section));
+    }
     json!({
         "available": available,
         "needsSudo": needs_sudo,
@@ -856,8 +943,22 @@ pub async fn collect_list_local(engine: &EngineConfig) -> Result<Value, String> 
         engine.endpoint.as_deref(),
     )
     .await?;
+    // 与远端 heredoc 同一兜底：老 CLI（<1.13）的 .State 模板报错时输出为
+    // 空，改跑 legacy 占位符集并打标记（issue #168）。
+    let section = if ps_output.trim().is_empty() {
+        let (_, legacy_output) = run_local(
+            &cli,
+            &["ps", "-a", "--no-trunc", "--format", PS_FORMAT_LEGACY],
+            LIST_TIMEOUT,
+            engine.endpoint.as_deref(),
+        )
+        .await?;
+        format!("{PS_LEGACY_MARKER}\n{legacy_output}")
+    } else {
+        ps_output
+    };
     Ok(list_payload(&format!(
-        "DBXDOCKER_PROBE\ndocker-found\ndaemon-ok\nDBXDOCKER_PS\n{ps_output}"
+        "DBXDOCKER_PROBE\ndocker-found\ndaemon-ok\nDBXDOCKER_PS\n{section}"
     )))
 }
 
@@ -1072,6 +1173,60 @@ d4a7c9f1e2b3\tweb-nginx\tnginx:1.27\trunning\tUp 3 days\t0.0.0.0:8080->80/tcp\t2
         assert_eq!(payload["containers"][0]["id"], "d4a7c9f1e2b3");
     }
 
+    /// 旧版（<1.13）回退臂（#168）：legacy 段 6 列（无 State），state 由
+    /// Status 文本推导；modern 段优先、legacy 段拼接其后。
+    #[test]
+    fn list_payload_parses_legacy_fallback_rows() {
+        let legacy_row = "9f8e7d6c5b4a\tcache\tredis:7\tExited (0) 2 days ago\t\t2026-09-18 21:30:00 +0000 UTC";
+        let output = format!(
+            "DBXDOCKER_PROBE\ndocker-found\ndaemon-ok\nDBXDOCKER_PS\n{PS_LEGACY_MARKER}\n{legacy_row}\n"
+        );
+        let payload = list_payload(&output);
+        assert_eq!(payload["available"], true);
+        let rows = payload["containers"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "cache");
+        assert_eq!(rows[0]["state"], "exited");
+        assert_eq!(rows[0]["status"], "Exited (0) 2 days ago");
+        assert_eq!(rows[0]["createdAt"], "2026-09-18 21:30:00 +0000 UTC");
+    }
+
+    #[test]
+    fn legacy_state_derives_from_status_text() {
+        assert_eq!(legacy_state_from_status("Up 3 hours"), "running");
+        assert_eq!(legacy_state_from_status("Up 2 hours (Paused)"), "paused");
+        assert_eq!(legacy_state_from_status("Up 5 minutes (unhealthy)"), "running");
+        assert_eq!(legacy_state_from_status("Exited (137) 9 minutes ago"), "exited");
+        assert_eq!(legacy_state_from_status("Created"), "created");
+        assert_eq!(legacy_state_from_status("Restarting (1) 12 seconds ago"), "restarting");
+        assert_eq!(legacy_state_from_status("Dead"), "dead");
+        assert_eq!(legacy_state_from_status("Something New"), "unknown");
+    }
+
+    #[test]
+    fn modern_rows_win_over_and_mix_with_legacy_section() {
+        let modern = "d4a7c9f1e2b3\tweb-nginx\tnginx:1.27\trunning\tUp 3 hours\t0.0.0.0:8080->80/tcp\t2026-09-01 08:15:04 +0000 UTC";
+        let legacy = "9f8e7d6c5b4a\tcache\tredis:7\tExited (0)\t\t2026-09-18 21:30:00 +0000 UTC";
+        let output = format!(
+            "DBXDOCKER_PROBE\ndocker-found\ndaemon-ok\nDBXDOCKER_PS\n{modern}\n{PS_LEGACY_MARKER}\n{legacy}\n"
+        );
+        let rows = list_payload(&output)["containers"].as_array().unwrap().clone();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["state"], "running");
+        assert_eq!(rows[1]["state"], "exited");
+    }
+
+    /// 远端 heredoc 与本地直连两条采集路径都必须带 legacy 兜底臂（#168）：
+    /// 一个丢掉就会在老 CLI 上回到空列表无报错的静默失败。
+    #[test]
+    fn list_collectors_carry_the_legacy_fallback_arm() {
+        let engine = crate::docker::EngineConfig::default();
+        let body = list_body(&engine);
+        assert!(body.contains(PS_FORMAT));
+        assert!(body.contains(PS_LEGACY_MARKER));
+        assert!(body.contains(PS_FORMAT_LEGACY));
+    }
+
     #[test]
     fn list_payload_marks_missing_docker_unavailable() {
         let output = "DBXDOCKER_PROBE\ndocker-missing\ndaemon-denied\nDBXDOCKER_PS\n";
@@ -1171,7 +1326,11 @@ d4a7c9f1e2b3\tweb-nginx\tnginx:1.27\trunning\tUp 3 days\t0.0.0.0:8080->80/tcp\t2
         "if command -v docker >/dev/null 2>&1; then echo docker-found; else echo docker-missing; fi\n",
         "if docker info >/dev/null 2>&1; then echo daemon-ok; else echo daemon-denied; fi\n",
         "echo DBXDOCKER_PS\n",
-        "docker ps -a --no-trunc --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.State}}\\t{{.Status}}\\t{{.Ports}}\\t{{.CreatedAt}}' 2>/dev/null\n",
+        "ps_out=$(docker ps -a --no-trunc --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.State}}\\t{{.Status}}\\t{{.Ports}}\\t{{.CreatedAt}}' 2>/dev/null)\n",
+        "if [ -n \"$ps_out\" ]; then printf '%s\\n' \"$ps_out\"; else\n",
+        "echo DBXDOCKER_PS_LEGACY\n",
+        "docker ps -a --no-trunc --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}\\t{{.CreatedAt}}' 2>/dev/null\n",
+        "fi\n",
     );
 
     #[test]

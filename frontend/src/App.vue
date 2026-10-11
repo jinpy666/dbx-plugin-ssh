@@ -9015,7 +9015,7 @@ watch(historyScope, () => {
             <h2>{{ t("docker.toolbarTitle") }}</h2>
             <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="dockerPanelOpen = false"><X /></button>
           </header>
-          <DockerPanel :t="t" />
+          <DockerPanel :t="t" :session-id="session?.sessionId ?? ''" :connection-id="connectionId" />
         </section>
         <!-- 回放弹窗：xterm 重放 + 倍速/进度/GIF 导出 -->
         <div v-if="replayState" class="replay-overlay" @click.self="closeReplay">

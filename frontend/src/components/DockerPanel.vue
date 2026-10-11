@@ -45,6 +45,11 @@ import { createRowMenuController } from "../lib/dockerRowMenu";
 
 const props = defineProps<{
   t: (key: string, values?: Record<string, string | number>) => string;
+  /** 工作台当前连接的 SSH 会话（App 传入）：多台服务器同时有存活会话时，
+   * “全局最新会话”猜测会把面板绑到别的机器（#168 错乱主因）；绑定一律以
+   * 工作台会话为准，缺省时才回落旧启发式。 */
+  sessionId?: string;
+  connectionId?: string;
 }>();
 
 interface DockerContainer {
@@ -154,6 +159,16 @@ function applyEngineSettings(): void {
 }
 
 async function resolveMode(): Promise<PanelMode> {
+  // 工作台绑定会话优先（#168）：有 sessionId prop 就严格绑定本工作台的
+  // 连接，绝不按“全局最新会话”抢别人的机器；连接变化时下一次轮询重绑。
+  if (props.sessionId) {
+    if (props.sessionId !== sessionId.value) {
+      sessionId.value = props.sessionId;
+      mode.value = "ssh";
+      adoptConnection(props.connectionId || "");
+    }
+    return "ssh";
+  }
   if (mode.value === "ssh" && sessionId.value) return "ssh";
   try {
     const response = await window.dbxPlugin.invoke<{ sessions: unknown }>("ssh/sessions/list");
