@@ -6,7 +6,7 @@ import { createTarChunkSource, shouldFolderArchive } from "../lib/folderArchive"
 import { planHostFileDrop } from "../lib/hostFileDrop";
 import { displayPathToWire } from "../lib/sftpName";
 import { canAcceptTerminalDrop, canAcceptFileDrop, normalizeDropTargetDir, resolveDropTargetDir } from "../lib/terminalInteraction";
-import { runTransfers } from "../lib/transferQueue";
+import { runTransfers, summarizeBatchUpload } from "../lib/transferQueue";
 import { X } from "@lucide/vue";
 
 // 拖入条目/上传重复弹窗的最小结构（App.vue 的 FolderUploadEntry/
@@ -36,7 +36,9 @@ export function useUploadChain(options: {
   terminalDragActive: Ref<boolean>;
   sftpPaneOpen: Ref<boolean>;
   terminalTransferBusy: Ref<boolean>;
-  uploadSource: (name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean }) => Promise<boolean>;
+  uploadSource: (name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean; batchId?: string }) => Promise<boolean>;
+  /** 传输任务账本（issue #165）：批次字节进度按 batchId 聚合。 */
+  transferTasks: Record<string, import("../lib/transferQueue").TransferTask>;
   loadTransferConcurrency: () => number;
   loadTransferMaxActive: () => number;
   loadTransferDuplicatePolicy: () => "rename" | "ask" | "overwrite";
@@ -50,7 +52,7 @@ export function useUploadChain(options: {
    * 目标目录（如 /root）对登录用户不可读时 SFTP 探测/建目录必失败。 */
   sudoUpload: () => boolean;
 }) {
-  const { t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath, terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy, uploadSource, loadTransferConcurrency, loadTransferMaxActive, loadTransferDuplicatePolicy, transferDuplicateState, terminal: terminalGet, loadDirectory, openTransferPanel, joinRemote, sudoUpload } = options;
+  const { t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath, terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy, uploadSource, loadTransferConcurrency, loadTransferMaxActive, loadTransferDuplicatePolicy, transferDuplicateState, terminal: terminalGet, loadDirectory, openTransferPanel, joinRemote, sudoUpload, transferTasks } = options;
 
   // 批次并发与会话深度取小（评审 L-4）：批次上限（1..10）超过会话深度
   // （1..8，sidecar 权威）时，超出的任务会在 upload/start 被 "already has
@@ -63,6 +65,25 @@ const folderUploadInput = ref<HTMLInputElement>();
 const folderUploadSupported = ref(false);
 // 文件夹批量上传的聚合进度（复用传输面板展示；目录 X/Y · 文件 N/M）。
 const folderUploadProgress = ref<FolderUploadProgress>();
+
+// 普通多文件上传的批次聚合（issue #165）：一次选择/拖拽/粘贴的多文件在
+// 传输面板聚成一张「文件 N/M · 字节」进度卡——逐文件卡在并发受限与文件
+// 交接的间隙会整卡消失（完成卡即转入历史），用户感知为"传完就没然后
+// 突然又来几个进度条"；批次卡在整批期间常驻填补空窗。单文件不显示。
+const fileBatch = ref<{ batchId: string; filesTotal: number; totalBytes: number }>();
+function beginFileBatch(files: ReadonlyArray<{ size: number }>): string {
+  const batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (files.length > 1) {
+    fileBatch.value = { batchId, filesTotal: files.length, totalBytes: files.reduce((sum, file) => sum + file.size, 0) };
+  }
+  return batchId;
+}
+/** 批次进度卡数据：文件数随任务账本结算推进，字节按 batchId 聚合。 */
+const fileBatchProgress = computed(() => {
+  const batch = fileBatch.value;
+  if (!batch) return undefined;
+  return summarizeBatchUpload(Object.values(transferTasks), batch.batchId, batch.filesTotal, batch.totalBytes);
+});
 
 const dropUploadPrompt = ref<{ files: Array<{ name: string }> }>();
 const dropUploadTarget = ref<"cwd" | "custom">("cwd");
@@ -121,6 +142,7 @@ async function chooseUpload() {
 async function uploadHandleFiles(files: Array<{ handleId: string; name: string; size: number }>, targetDir?: string): Promise<number> {
   if (!window.dbxPlugin.fileTransfer || !files.length) return 0;
   uploadDuplicateBatchDecision = undefined;
+  const batchId = beginFileBatch(files);
   let uploaded = 0;
   await runTransfers(files, batchTransferLimit(), {
     id: (file) => file.handleId,
@@ -129,7 +151,7 @@ async function uploadHandleFiles(files: Array<{ handleId: string; name: string; 
         const done = await uploadSource(file.name, file.size, async (offset, length) => {
           const result = await window.dbxPlugin.fileTransfer!.read(file.handleId, offset, length);
           return window.dbxPlugin.decodeBase64(result.dataBase64);
-        }, undefined, targetDir);
+        }, undefined, targetDir, { batchId });
         if (done) uploaded += 1;
       } catch (cause) {
         // 桥接读盘错误转成可理解的提示；uploadSource 已补 upload-read-failed 代码，
@@ -230,11 +252,12 @@ async function uploadLocalFiles(files: readonly File[], targetDir?: string) {
   uploadDuplicateBatchDecision = undefined;
   // File 对象没有稳定 id：包一层带序号的 key 再交给调度器。
   const entries = files.map((file, index) => ({ file, key: `local-${index}` }));
+  const batchId = beginFileBatch(files);
   let uploaded = 0;
   await runTransfers(entries, batchTransferLimit(), {
     id: (entry) => entry.key,
     run: async (entry) => {
-      const done = await uploadSource(entry.file.name, entry.file.size, async (offset, length) => new Uint8Array(await entry.file.slice(offset, offset + length).arrayBuffer()), undefined, targetDir);
+      const done = await uploadSource(entry.file.name, entry.file.size, async (offset, length) => new Uint8Array(await entry.file.slice(offset, offset + length).arrayBuffer()), undefined, targetDir, { batchId });
       if (done) uploaded += 1;
     },
   });
@@ -638,6 +661,7 @@ function resolveDropUpload(choice: "cancel" | "cwd" | { dir: string }) {
     folderUploadInput,
     folderUploadSupported,
     folderUploadProgress,
+    fileBatchProgress,
     dropUploadPrompt,
     dropUploadTarget,
     dropCwdTarget,

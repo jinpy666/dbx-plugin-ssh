@@ -31,6 +31,50 @@ export interface TransferTask {
   currentFile?: string;
   failedCount?: number;
   failureSample?: string;
+  // 多文件上传批次标记（issue #165）：同一批（一次选择/拖拽/粘贴）的
+  // 任务共享一个 batchId，面板聚合成「文件 N/M + 总字节」进度卡。事件
+  // 从不携带该键，updateTransfer 透传已有记录上的值。
+  batchId?: string;
+}
+
+/** 一批多文件上传的聚合视图（issue #165）：文件计数由批次编排器（已知
+ * 总数）给出，字节进度按 batchId 从任务账本聚合。纯函数，可单测。 */
+export interface BatchUploadSummary {
+  filesDone: number;
+  filesTotal: number;
+  bytesDone: number;
+  totalBytes: number;
+  currentFile?: string;
+}
+
+export function summarizeBatchUpload(
+  tasks: TransferTask[],
+  batchId: string,
+  filesTotal: number,
+  totalBytes: number,
+): BatchUploadSummary {
+  let filesDone = 0;
+  let bytesDone = 0;
+  let currentFile: string | undefined;
+  for (const task of tasks) {
+    if (task.batchId !== batchId) continue;
+    if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+      filesDone += 1;
+    }
+    bytesDone += Math.min(task.transferred, task.size || task.transferred);
+    if (!currentFile && (task.status === "running" || task.status === "queued")) {
+      currentFile = task.fileName;
+    }
+  }
+  return { filesDone, filesTotal, bytesDone, totalBytes, currentFile };
+}
+
+/** 批次聚合卡百分比（issue #165）：字节进度为准；总字节未知（全 0，尚未
+ * 见到任何任务行）时回落文件数占比，避免恒 0 的死条。 */
+export function batchUploadPercent(summary: BatchUploadSummary): number {
+  if (summary.totalBytes > 0) return Math.min(100, Math.round((summary.bytesDone / summary.totalBytes) * 100));
+  if (summary.filesTotal > 0) return Math.round((summary.filesDone / summary.filesTotal) * 100);
+  return 0;
 }
 // 传输并发调度（P1-5）：把 App 里"固定 3 路并发"的硬编码抽成可配置的
 // 调度策略。槽位语义：running 与 paused 都占位（暂停中的任务不释放并发

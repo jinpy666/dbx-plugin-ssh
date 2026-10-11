@@ -184,7 +184,7 @@ import { prepareAiOutputSnapshot, stripAnsiEscapes } from "./lib/outputRedaction
 // pass-through（菜单关、Tab 交 shell），不造假候选。
 import type { CompletionItem } from "./lib/completion/core/types";
 import { sanitizeNameEncoding, type SftpNameEncoding } from "./lib/sftpName";
-import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy, type TransferTask,
+import { batchUploadPercent, clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, runTransfers, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy, type TransferTask,
 } from "./lib/transferQueue";
 import { filterQuickCommands, QUICK_COMMANDS_LIMIT } from "./lib/quickCommands";
 import { flippedOverlayBottom, overlayBelowTop, type SuggestionAnchor } from "./lib/overlayPlacement";
@@ -6421,6 +6421,7 @@ const {
   folderUploadInput,
   folderUploadSupported,
   folderUploadProgress,
+  fileBatchProgress,
   dropUploadPrompt,
   dropUploadTarget,
   dropCwdTarget,
@@ -6447,6 +6448,7 @@ const {
   t, showNotice, showError, session, connected, canWrite, currentPath, sftpHomePath,
   terminalCwd, sftpNameEncodingState, dragActive, terminalDragActive, sftpPaneOpen, terminalTransferBusy,
   uploadSource, loadTransferConcurrency, loadTransferMaxActive, loadTransferDuplicatePolicy, transferDuplicateState,
+  transferTasks,
   terminal: () => terminal,
   loadDirectory,
   openTransferPanel,
@@ -8426,6 +8428,14 @@ watch(historyScope, () => {
               <progress :value="folderUploadPercent(folderUploadProgress)" max="100" />
               <div class="transfer-meta"><span>{{ t("folderUpload.progress", { dirs: folderUploadProgress.directoriesDone, dirsTotal: folderUploadProgress.directoriesTotal, files: folderUploadProgress.filesDone, filesTotal: folderUploadProgress.filesTotal }) }}</span><span>{{ formatBytes(folderUploadProgress.bytesDone) }} / {{ formatBytes(folderUploadProgress.totalBytes) }}</span></div>
               <p v-if="folderUploadProgress.currentFile" class="transfer-path mono" :title="folderUploadProgress.currentFile">{{ folderUploadProgress.currentFile }}</p>
+            </article>
+            <!-- 普通多文件上传批次聚合（issue #165）：文件 N/M + 总字节；批次
+                 卡整批常驻，填补逐文件卡交接间隙的"传完就没"空窗。 -->
+            <article v-if="fileBatchProgress" class="transfer-card">
+              <div class="transfer-title"><FileUp /><span>{{ t("uploadBatch.title") }}</span><strong>{{ batchUploadPercent(fileBatchProgress) }}%</strong></div>
+              <progress :value="batchUploadPercent(fileBatchProgress)" max="100" />
+              <div class="transfer-meta"><span>{{ t("uploadBatch.progress", { files: fileBatchProgress.filesDone, filesTotal: fileBatchProgress.filesTotal }) }}</span><span>{{ formatBytes(fileBatchProgress.bytesDone) }} / {{ formatBytes(fileBatchProgress.totalBytes) }}</span></div>
+              <p v-if="fileBatchProgress.currentFile" class="transfer-path mono" :title="fileBatchProgress.currentFile">{{ fileBatchProgress.currentFile }}</p>
             </article>
             <article v-for="task in transferList" :key="task.taskId" class="transfer-card">
               <div class="transfer-title"><FileUp v-if="task.direction === 'upload'" /><Download v-else /><span>{{ task.fileName || task.taskId }}</span><span v-if="task.compression === 'gzip'" class="transfer-badge" :title="t('transferCompress.badgeHint')">{{ t("transferCompress.badge") }}</span><strong v-if="task.phase !== 'staging'">{{ transferPercent(task) }}%</strong></div>

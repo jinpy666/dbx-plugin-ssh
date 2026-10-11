@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  batchUploadPercent,
   clampTransferConcurrency,
   clampTransferDownloadLimit,
   clampTransferMaxActive,
   isTransferCancelledCause,
+  summarizeBatchUpload,
   nextRunnable,
   runTransfers,
   TRANSFER_CANCELLED_CODE,
@@ -264,5 +266,43 @@ describe("runTransfers (orchestration over the pure scheduler)", () => {
     expect(isTransferCancelledCause(new Error("boom"))).toBe(false);
     expect(isTransferCancelledCause(null)).toBe(false);
     expect(isTransferCancelledCause(undefined)).toBe(false);
+  });
+});
+
+describe("summarizeBatchUpload / batchUploadPercent (#165)", () => {
+  const row = (overrides: Partial<Parameters<typeof summarizeBatchUpload>[0][number]>): Parameters<typeof summarizeBatchUpload>[0][number] => ({
+    taskId: "t", direction: "upload", fileName: "a.bin", size: 100, transferred: 0, status: "running", ...overrides,
+  });
+
+  it("aggregates per-batch byte progress and settled counts", () => {
+    const tasks = [
+      row({ taskId: "1", batchId: "b1", size: 100, transferred: 100, status: "completed" }),
+      row({ taskId: "2", batchId: "b1", size: 200, transferred: 50, status: "running", fileName: "b.bin" }),
+      // 其他批次/无批次的行不并入
+      row({ taskId: "3", batchId: "other", size: 999, transferred: 999, status: "completed" }),
+      row({ taskId: "4", size: 50, transferred: 50, status: "completed" }),
+    ];
+    const summary = summarizeBatchUpload(tasks, "b1", 3, 400);
+    expect(summary.filesDone).toBe(1);
+    expect(summary.bytesDone).toBe(150);
+    expect(summary.currentFile).toBe("b.bin");
+    expect(batchUploadPercent(summary)).toBe(38);
+  });
+
+  it("treats failed/cancelled rows as settled and clamps overflow bytes", () => {
+    const tasks = [
+      row({ batchId: "b1", size: 100, transferred: 100, status: "failed" }),
+      row({ taskId: "2", batchId: "b1", size: 10, transferred: 999, status: "cancelled" }),
+    ];
+    const summary = summarizeBatchUpload(tasks, "b1", 2, 110);
+    expect(summary.filesDone).toBe(2);
+    expect(summary.bytesDone).toBe(110);
+    expect(summary.currentFile).toBeUndefined();
+  });
+
+  it("percent falls back to file counts before any bytes land", () => {
+    expect(batchUploadPercent({ filesDone: 1, filesTotal: 4, bytesDone: 0, totalBytes: 0 })).toBe(25);
+    expect(batchUploadPercent({ filesDone: 0, filesTotal: 0, bytesDone: 0, totalBytes: 0 })).toBe(0);
+    expect(batchUploadPercent({ filesDone: 0, filesTotal: 2, bytesDone: 0, totalBytes: 100 })).toBe(0);
   });
 });

@@ -124,6 +124,8 @@ function updateTransfer(params: Record<string, unknown>) {
     joinedAt: existing?.joinedAt ?? Date.now(),
     fileCount: Number.isFinite(fileCount) && fileCount! > 0 ? fileCount : undefined,
     currentFile: currentFile || undefined,
+    // 事件从不携带批次键（issue #165）：透传首见记录上的 batchId。
+    batchId: existing?.batchId,
   };
   settleTransferCompletion(taskId, status);
   if (!isLiveTransferStatus(status)) scheduleTerminalTaskSweep(taskId);
@@ -365,7 +367,7 @@ function persistTransferDownloadLimit(value: number) {
 /** 单文件上传入口。返回 boolean 供批次调用方区分成功与放弃：true=已交付
  * sidecar（后台推送中也算），false=重复目标弹窗里放弃跳过（无会话同理）——
  * 抛错仍是失败。成功提示的计数只该包含 true 的那份。 */
-async function uploadSource(name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean }): Promise<boolean> {
+async function uploadSource(name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean; batchId?: string }): Promise<boolean> {
   if (!session.value) return false;
   // resume 携带原 taskId/remotePath：后端校验 spool meta 后从已传前缀续接。
   // targetDir 仅新上传生效（终端拖入的自定义目标目录）；缺省仍是 SFTP 当前目录。
@@ -391,7 +393,7 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
   const startOffset = info.resumeOffset ?? 0;
   // 压缩通道标记（M33）：start 响应即带决策结果，任务卡建卡时就点徽标；
   // 后续 progress 事件（恒带 compression）接手维护，回退时以 none 清除。
-  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "upload", fileName: uploadName, size, transferred: startOffset, compression: info.compression === "gzip" ? "gzip" : undefined, status: startOffset > 0 ? "running" : "queued", joinedAt: Date.now() };
+  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "upload", fileName: uploadName, size, transferred: startOffset, compression: info.compression === "gzip" ? "gzip" : undefined, status: startOffset > 0 ? "running" : "queued", joinedAt: Date.now(), batchId: options?.batchId };
   try {
     let offset = startOffset;
     while (offset < size) {
