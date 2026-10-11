@@ -31,3 +31,22 @@ export function echoConfirmsLine(echoText: string | null, line: string): boolean
   if (echoText === null) return true;
   return Boolean(line.trim()) && echoText.includes(line);
 }
+
+/**
+ * 从屏幕回显文本提取真实执行的命令（issue #169）：模型行只是键入前缀，
+ * Tab 补全/历史展开由 shell 在回显里改写（键入 `cd blen` + Tab，屏幕是
+ * `user@h:~$ cd blender/`，模型停在 `cd blen`）。提取法：以 trim 后的模型行
+ * 在屏幕文本中的首次出现位置为锚（提示符在前、命令在后，首次出现即命令区
+ * 起点；对照门已保证它是子串），取锚点到光标（屏幕文本末尾）——即 shell
+ * 实际要执行的行。定位失败（理论上门已挡，防御）返回 null，调用方回落
+ * 模型行，不劣于旧行为。
+ */
+export function extractEchoedCommand(echoText: string | null, line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  if (echoText === null) return null;
+  const anchor = echoText.indexOf(trimmed);
+  if (anchor < 0) return null;
+  const extracted = echoText.slice(anchor).trim();
+  return extracted || null;
+}

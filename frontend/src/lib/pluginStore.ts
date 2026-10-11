@@ -67,6 +67,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-terminal-ghost-suggest",
   // 「Tab 接受建议」可选开关（ghostAcceptKey.ts 自治读写，默认关）。
   "ssh-ghost-tab-accept",
+  // 历史面板功能开关（issue #169）：关 = 面板整体不可唤起（↑ 与 Ctrl+R 归还
+  // 远端 shell 原生历史/反向搜索）。SettingsDialog 开关行自治读写，默认开。
+  "ssh-history-panel-enabled",
   // 建议黑名单（对标 Warp IgnoredSuggestionsModel，suggestionBlocklist.ts
   // 自治读写）：点 ✗ 屏蔽的单条建议不再提示。
   "ssh-suggestion-blocklist",

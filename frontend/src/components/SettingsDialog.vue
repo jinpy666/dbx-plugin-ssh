@@ -357,6 +357,30 @@ function setCompletionEngine(next: string) {
 const GHOST_SUGGEST_KEY = "ssh-terminal-ghost-suggest";
 const ghostEnabled = ref(loadGhostEnabled());
 
+// 历史面板功能开关（issue #169）：与 ghost 开关同模式——组件内自治读写
+// pluginStore，写穿后经 update:historyPanelEnabled 上抛（App 只握内存权威态，
+// gate/仲裁/热键入口即时生效）。默认开；关闭后 ↑ 与 Ctrl+R 都归还远端 shell。
+const HISTORY_PANEL_ENABLED_KEY = "ssh-history-panel-enabled";
+const historyPanelEnabled = ref(loadHistoryPanelEnabled());
+
+function loadHistoryPanelEnabled(): boolean {
+  try {
+    return pluginStore.getItem(HISTORY_PANEL_ENABLED_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function setHistoryPanelEnabled(next: boolean) {
+  historyPanelEnabled.value = next;
+  try {
+    pluginStore.setItem(HISTORY_PANEL_ENABLED_KEY, next ? "1" : "0");
+  } catch {
+    // 存储不可用（沙箱降级链耗尽）：退化为会话内存态，开关仍然生效。
+  }
+  emit("update:historyPanelEnabled", next);
+}
+
 function loadGhostEnabled(): boolean {
   try {
     return pluginStore.getItem(GHOST_SUGGEST_KEY) !== "0";
@@ -494,6 +518,8 @@ const emit = defineEmits<{
   (e: "set-local-shell", program: string): void;
   /** 行内 ghost 自动建议开关（组件自治持久化 pluginStore，App 只同步内存态）。 */
   (e: "update:ghostSuggest", value: boolean): void;
+  /** 历史面板功能开关（issue #169，组件自治持久化 pluginStore）。 */
+  (e: "update:historyPanelEnabled", value: boolean): void;
   (e: "update:ghostTabAccept", value: boolean): void;
   /** AI 助手设置增量（Warp AI 对齐批）：App 归一化 + pluginStore 持久化。 */
   (e: "update-ai-settings", patch: Partial<AiSettings>): void;
@@ -2377,6 +2403,14 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("terminalGhost.tabAcceptHint") }}</p>
             <p class="muted settings-note">{{ t("terminalGhost.keysSummary") }}</p>
+            <!-- 历史面板功能开关（issue #169）：关闭后 ↑ 与 Ctrl+R 都归还
+                 shell 原生历史/反向搜索，面板整体不可唤起。 -->
+            <h3 class="settings-section-title">{{ t("historyPanelSettings.sectionTitle") }}</h3>
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="historyPanelEnabled" size="sm" @update:model-value="setHistoryPanelEnabled(Boolean($event))" />
+              <span>{{ t("historyPanelSettings.enabledLabel") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("historyPanelSettings.enabledHint") }}</p>
             <!-- 空提示符快捷键引导条开关：终端空行静置时的 kbd 提示（↑/Ctrl+R/
                  Ctrl+Space/→），用过即散；设置里重开即清消散旗标。 -->
             <label class="settings-field settings-switch-row">
