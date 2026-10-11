@@ -795,7 +795,7 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
         map.insert("startup_commands".to_string(), store);
     }
     // RDP 安全设置（RDP-2）：布尔直存；证书策略走白名单（白名单外报错，
-    // 不落盘污染），缺省语义由 rdp_session::resolve_security 兜底
+    // 不落盘污染），缺省语义由 rdp::security::resolve_security 兜底
     // （use_nla=true、certificate_policy=prompt）。
     // RDP 仍处实验阶段：仅显式 true 才显示/允许入口，普通用户默认不可用。
     if let Some(value) = params.get("rdp_experimental_enabled") {

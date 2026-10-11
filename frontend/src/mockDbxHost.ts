@@ -141,9 +141,22 @@ const context = localOnlyContext
   restored: false,
   surface: surfaceFixture,
   workbenchState: { sftpPath: "/home/demo", splitRatio: 58, paneOrder: "terminal-left", visibleColumns: ["size", "modified", "owner", "group", "permissions"] },
-  // ?proto=rdp 模拟宿主连接表单 protocol=rdp（RDP 连接级 UI 门控走查：
-  // SSH/SFTP 专属工具条整类隐藏，连接协议由 openSession 路由到 RDP 会话）。
-  connection: { name: protoFixture === "rdp" ? "Production RDP" : "Production SSH", host: protoFixture === "rdp" ? "rdp.demo.internal" : "192.168.1.64", port: protoFixture === "rdp" ? 3389 : 22, username: "user", color: "#3b82f6", readOnly: !writable, ...(protoFixture ? { protocol: protoFixture } : {}), ...(autoAuthActive ? { authentication: "auto" } : {}) },
+  // ?proto=rdp 模拟一条 RDP 连接（RDP 连接级 UI 门控走查：SSH/SFTP 专属工具
+  // 条整类隐藏，连接协议由 openSession 路由到 RDP 会话）。协议形态对齐真实
+  // 宿主：宿主推给 webview 的 connection 上下文【不带】external_config.protocol
+  // （该字段只随 lifecycle connection/connect 走向 sidecar），前端经
+  // connection/protocol 向 sidecar 查询权威协议——mock 在 invoke 分发里按
+  // protoFixture 应答。此前把 protocol 塞进 external_config 的形态在真实宿主
+  // 不存在，走查会漏掉「查询结果只用于当次路由」的门控缺口。
+  connection: {
+    name: protoFixture === "rdp" ? "Production RDP" : "Production SSH",
+    host: protoFixture === "rdp" ? "rdp.demo.internal" : "192.168.1.64",
+    port: protoFixture === "rdp" ? 3389 : 22,
+    username: "user",
+    color: "#3b82f6",
+    readOnly: !writable,
+    ...(autoAuthActive ? { authentication: "auto" } : {}),
+  },
 };
 // ?tunnels=1 and ?tunnels=quick model a connection right-click workbench.
 if (fixtureParams.has("tunnels")) {
@@ -235,8 +248,8 @@ function localDoneMarks(code: number) {
 // - 偏差 6：rdp/clipboard 无 CF_UNICODETEXT/16 MiB/分片语义，固定 900ms 推
 //   一条小文本。
 // - 偏差 8：rdp/reconnect 无 generation/重新 prompt 语义（直接重拨）。
-const RDP_DESKTOP_W = 320;
-const RDP_DESKTOP_H = 200;
+let RDP_DESKTOP_W = 320;
+let RDP_DESKTOP_H = 200;
 
 let rdpSessionId = "";
 // 帧序号全局单调（mock 偏差 7）：真实 sidecar 的 frame_sequence 跨代单调，
@@ -819,6 +832,12 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     scheduleDisconnect();
     result = { sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, connected: true, sequence: 0, chunkSize: 262144, directoryTrackingSupported: true };
   } else if (method === "ssh/terminal/replay") result = { frameCount: 0, firstAvailableSequence: 1, tailSequence: sequence, complete: true };
+  // 对齐真实 sidecar 的 connection/protocol：lifecycle 把非 SSH 连接的协议
+  // 暂存（空串=未暂存，SSH 连接/宿主未推送），webview 路由前据此查询权威协议。
+  else if (method === "connection/protocol") {
+    const staged = protoFixture === "rdp" || protoFixture === "telnet" || protoFixture === "vnc" || protoFixture === "serial" ? protoFixture : "";
+    result = { protocol: staged };
+  }
   else if (method === "ssh/sessions/list") result = { sessions: failSessionOpen || freshSessionOpen ? [] : [{ sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, readOnly: !writable, connected: true, sudoKeepalive: true, createdAt: Math.floor(Date.now() / 1000), authMethod: authFixture === "auto" ? "auto" : "private-key", host: "server.demo.internal", port: 22, username: "demo" }] };
   else if (method === "ssh/session/attach") {
     const input = params as Record<string, unknown>;
@@ -1615,7 +1634,24 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
       reconnectAttempts: Number(input.reconnectAttempts) || 5,
     };
   }
-  else if (method === "rdp/input" || method === "rdp/resize" || method === "rdp/set-clipboard") result = { success: true };
+  else if (method === "rdp/resize") {
+    // 对齐真实 sidecar 的 resize 语义（重连生效）：先发 connecting 再
+    // connected，桌面帧尺寸随请求值重推。
+    const input = params as Record<string, unknown>;
+    const sessionId = String(input.sessionId ?? "");
+    if (!sessionId || sessionId !== rdpSessionId) throw new Error("RDP session was not found");
+    const width = Number(input.width) || 1280;
+    const height = Number(input.height) || 800;
+    if (width < 640 || width > 3840 || height < 480 || height > 2160) {
+      throw new Error("RDP desktop size must be within 640x480 .. 3840x2160");
+    }
+    RDP_DESKTOP_W = width;
+    RDP_DESKTOP_H = height;
+    emitRdpState("connecting");
+    setTimeout(() => rdpStartDesktop(sessionId), 120);
+    result = { sessionId, success: true, reconnected: true };
+  }
+  else if (method === "rdp/input" || method === "rdp/set-clipboard") result = { success: true };
   else if (method === "rdp/reconnect") {
     const sessionId = String((params as Record<string, unknown>)?.sessionId || "");
     if (!sessionId || sessionId !== rdpSessionId) throw new Error("RDP session was not found");

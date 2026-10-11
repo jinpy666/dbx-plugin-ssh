@@ -5,10 +5,10 @@
 // Telnet/VNC 同款常驻（远端可读写会话剪贴板，仅连接可信主机）。
 import { reactive, ref, watch } from "vue";
 import { TriangleAlert, X } from "@lucide/vue";
-import PasswordField from "./PasswordField.vue";
+import PasswordField from "../components/PasswordField.vue";
 import { workbenchMessage } from "../lib/i18n";
 import { loadLastConnectParams, persistLastConnectParams } from "../lib/connectLastParams";
-import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
+import { Dialog, DialogContent, DialogTitle } from "../components/ui/dialog";
 
 export interface RdpConnectOptions {
   host: string;

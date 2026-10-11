@@ -10,18 +10,25 @@ import { computed, onBeforeUnmount, ref } from "vue";
 import {
   buildRdpKeyDownEvent,
   buildRdpKeyUpEvent,
+  coalesceRdpPatches,
   decodeRdpFramePatch,
   mapDomButtonToRdpButton,
+  RDP_DRAW_MIN_INTERVAL_MS,
   type RdpFramePatch,
   type RdpInputEvent,
   type RdpPointerEvent,
-} from "../lib/rdpFrame";
+} from "./rdpFrame";
 
 interface Props {
   scaleMode: "fit" | "stretch" | "actual";
 }
 const props = defineProps<Props>();
-const emit = defineEmits<{ input: [RdpInputEvent]; "clipboard-out": [string] }>();
+const emit = defineEmits<{
+  input: [RdpInputEvent];
+  "clipboard-out": [string];
+  /** 桌面尺寸随帧头变化时上报（P0-2 分辨率入口据此标记当前档位）。 */
+  "desktop-size": [size: { width: number; height: number }];
+}>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const holderRef = ref<HTMLDivElement | null>(null);
@@ -29,35 +36,82 @@ const desktopSize = ref<{ width: number; height: number } | null>(null);
 const focused = ref(false);
 const cursorStyle = ref("");
 
+const scaleClass = computed(() => `vnc-scale-${props.scaleMode}`);
+
 // rAF 合帧队列：同一帧内的多个补丁一次绘制，避免高频 update 撕裂。
+// P0-1 卡顿优化（真机 22MB/8s 采样定位：burst 时多个 MB 级条带在同一 tick
+// 逐个 createImageData+putImageData 拖死主线程）：
+// 1. 绘制前 coalesceRdpPatches 合并——被更晚补丁完全覆盖的旧矩形与旧桌面
+//    尺寸补丁直接丢弃（后画覆盖先画，最终像素不变）；
+// 2. 批间隔 ≥ RDP_DRAW_MIN_INTERVAL_MS（≈30fps 上限）：间隔不足时推迟到下
+//    一个 rAF，让 burst 继续在队列里合并（多付 ≤33ms 延迟换主线程喘息）；
+// 3. ImageData 尺寸匹配时复用同一缓冲，不再每补丁分配（大补丁 4MB/次）。
 let pendingPatches: RdpFramePatch[] = [];
 let drawScheduled = false;
 let lastSequence = -1;
+let lastDrawAt = 0;
+// 复用的 ImageData（与最近一次绘制补丁同尺寸才有效）。
+let reusableImage: { width: number; height: number; image: ImageData } | null = null;
 
-const scaleClass = computed(() => `vnc-scale-${props.scaleMode}`);
+/** 帧管道计数器（P0-1 测量面）：绘制路径零日志开销，经 perfStats() 暴露。 */
+const perf = {
+  received: 0,
+  drawn: 0,
+  coalesced: 0,
+  ticks: 0,
+  decodeUs: 0,
+  drawUs: 0,
+  maxTickDrawUs: 0,
+  maxTickPatches: 0,
+};
+let tickDrawUs = 0;
+
+function perfStats() {
+  return { ...perf };
+}
 
 function scheduleDraw() {
   if (drawScheduled) return;
   drawScheduled = true;
   requestAnimationFrame(() => {
     drawScheduled = false;
-    const queued = pendingPatches;
+    // 30fps 节流：距上次绘制不足一个间隔时推迟本轮（补丁留队继续合并）。
+    const now = performance.now();
+    if (lastDrawAt && now - lastDrawAt < RDP_DRAW_MIN_INTERVAL_MS) {
+      scheduleDraw();
+      return;
+    }
+    lastDrawAt = now;
+    const queued = coalesceRdpPatches(pendingPatches);
+    perf.coalesced += pendingPatches.length - queued.length;
     pendingPatches = [];
+    if (queued.length === 0) return;
+    perf.ticks += 1;
+    perf.maxTickPatches = Math.max(perf.maxTickPatches, queued.length);
+    tickDrawUs = 0;
     for (const patch of queued) drawPatch(patch);
+    perf.maxTickDrawUs = Math.max(perf.maxTickDrawUs, tickDrawUs);
   });
 }
 
 function drawPatch(patch: RdpFramePatch) {
   const canvas = canvasRef.value;
   if (!canvas) return;
+  const drawStart = performance.now();
   if (canvas.width !== patch.desktopWidth || canvas.height !== patch.desktopHeight) {
     canvas.width = patch.desktopWidth;
     canvas.height = patch.desktopHeight;
     desktopSize.value = { width: patch.desktopWidth, height: patch.desktopHeight };
+    // 画布重设尺寸即清空 ImageData 缓存（尺寸绑定已失效）。
+    reusableImage = null;
+    emit("desktop-size", { ...desktopSize.value });
   }
   const context = canvas.getContext("2d");
   if (!context) return;
-  const image = context.createImageData(patch.width, patch.height);
+  if (!reusableImage || reusableImage.width !== patch.width || reusableImage.height !== patch.height) {
+    reusableImage = { width: patch.width, height: patch.height, image: context.createImageData(patch.width, patch.height) };
+  }
+  const image = reusableImage.image;
   const rowBytes = patch.width * 4;
   if (patch.stride === rowBytes) {
     image.data.set(patch.payload.subarray(0, rowBytes * patch.height));
@@ -68,10 +122,15 @@ function drawPatch(patch: RdpFramePatch) {
     }
   }
   context.putImageData(image, patch.x, patch.y);
+  perf.drawn += 1;
+  const drawUs = performance.now() - drawStart;
+  perf.drawUs += drawUs;
+  tickDrawUs += drawUs;
 }
 
 /** App.vue 帧通道入口：原始二进制帧在这里解码、乱序丢弃后入绘制队列。 */
 function acceptFrame(frame: Uint8Array): boolean {
+  const decodeStart = performance.now();
   let patch: RdpFramePatch;
   try {
     patch = decodeRdpFramePatch(frame);
@@ -79,8 +138,10 @@ function acceptFrame(frame: Uint8Array): boolean {
     // 非法帧直接丢弃（sidecar 侧同样的校验不该让坏帧走到这里）。
     return false;
   }
+  perf.decodeUs += performance.now() - decodeStart;
   if (patch.sequence <= lastSequence) return false;
   lastSequence = patch.sequence;
+  perf.received += 1;
   pendingPatches.push(patch);
   scheduleDraw();
   return true;
@@ -90,6 +151,8 @@ function acceptFrame(frame: Uint8Array): boolean {
 function reset() {
   pendingPatches = [];
   lastSequence = -1;
+  lastDrawAt = 0;
+  reusableImage = null;
   desktopSize.value = null;
   cursorStyle.value = "";
   const canvas = canvasRef.value;
@@ -138,7 +201,7 @@ function applyPointer(pointer: RdpPointerEvent) {
     : "";
 }
 
-defineExpose({ acceptFrame, reset, applyPointer });
+defineExpose({ acceptFrame, reset, applyPointer, perfStats });
 
 // —— 指针事件 → rdp/input ——
 
@@ -241,6 +304,7 @@ function onPaste(event: ClipboardEvent) {
 
 onBeforeUnmount(() => {
   pendingPatches = [];
+  reusableImage = null;
 });
 </script>
 

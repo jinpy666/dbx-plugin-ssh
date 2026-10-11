@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.dbx.ssh",
   "name": "Terminal",
-  "version": "0.7.5-beta.1",
+  "version": "0.7.5-beta.2",
   "publisher": "jinpy",
   "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
   "source": "https://github.com/jinpy666/dbx-plugin-ssh",
@@ -88,7 +88,12 @@
           "default": "127.0.0.1",
           "visible_when": {
             "field": "protocol",
-            "one_of": ["ssh", "telnet", "vnc", "rdp"]
+            "one_of": [
+              "ssh",
+              "telnet",
+              "vnc",
+              "rdp"
+            ]
           }
         },
         {
@@ -101,7 +106,12 @@
           "description": "TCP port, 1-65535. Defaults per protocol: SSH 22, Telnet 23, VNC 5900, RDP 3389.",
           "visible_when": {
             "field": "protocol",
-            "one_of": ["ssh", "telnet", "vnc", "rdp"]
+            "one_of": [
+              "ssh",
+              "telnet",
+              "vnc",
+              "rdp"
+            ]
           }
         },
         {
@@ -1214,6 +1224,7 @@
           "description": "Absolute shell path used to run the task's commands. Leave empty to use the DBX default shell (the same chain the local terminal uses)."
         }
       ],
+      "workbench": "io.dbx.ssh.workbench",
       "capabilities": [
         "test",
         "connect",
@@ -1225,8 +1236,17 @@
       "id": "io.dbx.ssh.tasks",
       "label": "Scheduled SSH commands",
       "allow_multiple_connections": true,
-      "connection_providers": ["io.dbx.ssh.connection", "io.dbx.ssh.local"],
-      "capabilities": ["run", "resident", "cancel", "logs", "progress"],
+      "connection_providers": [
+        "io.dbx.ssh.connection",
+        "io.dbx.ssh.local"
+      ],
+      "capabilities": [
+        "run",
+        "resident",
+        "cancel",
+        "logs",
+        "progress"
+      ],
       "triggers": [
         {
           "id": "execute",
@@ -1240,7 +1260,9 @@
               "type": "text",
               "binding": "config",
               "default": "",
-              "picker": { "kind": "file" },
+              "picker": {
+                "kind": "file"
+              },
               "description": "Optional local script file to run instead of the command text. SSH targets upload it to a remote temp file (removed afterwards); local-shell targets execute it directly. Mutually exclusive with Command.",
               "placeholder": "/opt/scripts/deploy.sh"
             },
@@ -1298,7 +1320,9 @@
               "type": "text",
               "binding": "config",
               "default": "",
-              "picker": { "kind": "file" },
+              "picker": {
+                "kind": "file"
+              },
               "description": "Optional local script file to run instead of the command text. SSH targets upload it to a remote temp file (removed afterwards); local-shell targets execute it directly. Mutually exclusive with Command.",
               "placeholder": "/opt/scripts/worker.sh"
             },
@@ -2669,11 +2693,21 @@
                   "label": "脚本文件",
                   "description": "可选：用本机脚本文件代替命令文本运行。SSH 连接会先把它上传到远端临时文件（运行后删除）；本地 Shell 连接直接执行该文件。与「命令」互斥，只能填一个。"
                 },
-                "command": { "label": "命令" },
-                "working_directory": { "label": "工作目录" },
-                "environment": { "label": "环境变量" },
-                "timeout_seconds": { "label": "超时（秒）" },
-                "pty": { "label": "请求伪终端（PTY）" }
+                "command": {
+                  "label": "命令"
+                },
+                "working_directory": {
+                  "label": "工作目录"
+                },
+                "environment": {
+                  "label": "环境变量"
+                },
+                "timeout_seconds": {
+                  "label": "超时（秒）"
+                },
+                "pty": {
+                  "label": "请求伪终端（PTY）"
+                }
               }
             },
             "resident": {
@@ -2683,12 +2717,24 @@
                   "label": "脚本文件",
                   "description": "可选：用本机脚本文件代替命令文本运行。SSH 连接会先把它上传到远端临时文件（运行后删除）；本地 Shell 连接直接执行该文件。与「命令」互斥，只能填一个。"
                 },
-                "command": { "label": "命令" },
-                "working_directory": { "label": "工作目录" },
-                "environment": { "label": "环境变量" },
-                "max_restarts": { "label": "最大重启次数" },
-                "restart_backoff_seconds": { "label": "重启退避（秒）" },
-                "restart_window_seconds": { "label": "重启计数窗口（秒）" }
+                "command": {
+                  "label": "命令"
+                },
+                "working_directory": {
+                  "label": "工作目录"
+                },
+                "environment": {
+                  "label": "环境变量"
+                },
+                "max_restarts": {
+                  "label": "最大重启次数"
+                },
+                "restart_backoff_seconds": {
+                  "label": "重启退避（秒）"
+                },
+                "restart_window_seconds": {
+                  "label": "重启计数窗口（秒）"
+                }
               }
             }
           }
@@ -3000,11 +3046,21 @@
                   "label": "指令檔",
                   "description": "可選：用本機指令檔代替命令文字執行。SSH 連線會先把它上傳到遠端暫存檔（執行後刪除）；本地 Shell 連線直接執行該檔案。與「命令」互斥，只能填一個。"
                 },
-                "command": { "label": "命令" },
-                "working_directory": { "label": "工作目錄" },
-                "environment": { "label": "環境變數" },
-                "timeout_seconds": { "label": "逾時（秒）" },
-                "pty": { "label": "請求偽終端（PTY）" }
+                "command": {
+                  "label": "命令"
+                },
+                "working_directory": {
+                  "label": "工作目錄"
+                },
+                "environment": {
+                  "label": "環境變數"
+                },
+                "timeout_seconds": {
+                  "label": "逾時（秒）"
+                },
+                "pty": {
+                  "label": "請求偽終端（PTY）"
+                }
               }
             },
             "resident": {
@@ -3014,12 +3070,24 @@
                   "label": "指令檔",
                   "description": "可選：用本機指令檔代替命令文字執行。SSH 連線會先把它上傳到遠端暫存檔（執行後刪除）；本地 Shell 連線直接執行該檔案。與「命令」互斥，只能填一個。"
                 },
-                "command": { "label": "命令" },
-                "working_directory": { "label": "工作目錄" },
-                "environment": { "label": "環境變數" },
-                "max_restarts": { "label": "最大重啟次數" },
-                "restart_backoff_seconds": { "label": "重啟退避（秒）" },
-                "restart_window_seconds": { "label": "重啟計數視窗（秒）" }
+                "command": {
+                  "label": "命令"
+                },
+                "working_directory": {
+                  "label": "工作目錄"
+                },
+                "environment": {
+                  "label": "環境變數"
+                },
+                "max_restarts": {
+                  "label": "最大重啟次數"
+                },
+                "restart_backoff_seconds": {
+                  "label": "重啟退避（秒）"
+                },
+                "restart_window_seconds": {
+                  "label": "重啟計數視窗（秒）"
+                }
               }
             }
           }

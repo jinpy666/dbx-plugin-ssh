@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildRdpKeyDownEvent,
   buildRdpKeyUpEvent,
+  coalesceRdpPatches,
   decodeRdpFramePatch,
   initialRdpSessionState,
   isRdpCertificateChallenge,
@@ -16,6 +17,7 @@ import {
   rdpCertStatusKey,
   rdpErrorKindKey,
   reduceRdpSessionState,
+  type RdpFramePatch,
   type RdpInputEvent,
   type RdpSessionStateView,
 } from "./rdpFrame";
@@ -219,5 +221,60 @@ describe("rdp input wire shapes", () => {
     ];
     const kinds = new Set(events.map((event) => event.kind));
     expect(kinds).toEqual(new Set(["key-down", "key-up", "unicode", "mouse-move", "mouse-button", "mouse-wheel", "release-all"]));
+  });
+});
+
+// P0-1 帧管道合帧：同一绘制批内被更晚补丁完全覆盖的旧矩形丢弃（后画覆盖
+// 先画，最终像素不变）、桌面尺寸变化作废旧尺寸补丁、最新补丁永不丢。
+describe("coalesceRdpPatches", () => {
+  let sequence = 0;
+  function patch(overrides: Partial<{ x: number; y: number; width: number; height: number; desktopWidth: number; desktopHeight: number }> = {}): RdpFramePatch {
+    sequence += 1;
+    const width = overrides.width ?? 4;
+    const height = overrides.height ?? 4;
+    return {
+      sequence,
+      desktopWidth: overrides.desktopWidth ?? 8,
+      desktopHeight: overrides.desktopHeight ?? 8,
+      x: overrides.x ?? 0,
+      y: overrides.y ?? 0,
+      width,
+      height,
+      stride: width * 4,
+      pixelFormat: "RGBA8888",
+      payload: new Uint8Array(width * height * 4),
+    };
+  }
+
+  it("keeps a single patch and preserves order", () => {
+    const one = [patch()];
+    expect(coalesceRdpPatches(one)).toEqual(one);
+    const two = [patch({ x: 0 }), patch({ x: 4 })];
+    expect(coalesceRdpPatches(two)).toEqual(two);
+  });
+
+  it("drops patches fully covered by a later patch", () => {
+    const earlyCovered = patch({ x: 1, y: 1, width: 2, height: 2 }); // ⊂ 更晚的横条
+    const independent = patch({ x: 6, y: 6, width: 2, height: 2 });
+    const strip = patch({ x: 0, y: 0, width: 8, height: 4 }); // 覆盖 earlyCovered
+    expect(coalesceRdpPatches([earlyCovered, independent, strip])).toEqual([independent, strip]);
+    // 覆盖者更早则不生效（先画大后画小，小补丁区域仍需要小补丁的像素）。
+    expect(coalesceRdpPatches([strip, earlyCovered, independent])).toEqual([strip, earlyCovered, independent]);
+    // 全屏帧吞掉同批一切更早补丁。
+    const fullscreen = patch({ x: 0, y: 0, width: 8, height: 8 });
+    expect(coalesceRdpPatches([earlyCovered, independent, fullscreen])).toEqual([fullscreen]);
+  });
+
+  it("drops stale-desktop patches once a new desktop size arrives", () => {
+    const oldFrame = patch({ x: 0, y: 0, width: 8, height: 8 });
+    const resized = patch({ x: 0, y: 0, width: 8, height: 4, desktopWidth: 8, desktopHeight: 4 });
+    expect(coalesceRdpPatches([oldFrame, resized])).toEqual([resized]);
+  });
+
+  it("keeps partial overlaps and never drops the newest patch", () => {
+    const base = patch({ x: 0, y: 0, width: 8, height: 8 });
+    const partial = patch({ x: 4, y: 4, width: 4, height: 4 });
+    // 部分重叠不丢弃（覆盖判定是完全包含）。
+    expect(coalesceRdpPatches([base, partial])).toEqual([base, partial]);
   });
 });

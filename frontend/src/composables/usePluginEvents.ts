@@ -11,7 +11,7 @@ import {
   reduceRdpSessionState,
   type RdpPointerEvent,
   type RdpSessionStateView,
-} from "../lib/rdpFrame";
+} from "../rdp/rdpFrame";
 import type { ConnectLog } from "../lib/connectLog";
 
 /** RDP 证书确认弹窗数据（App.vue 局部接口 RdpCertPrompt 按消费字段收敛）。 */

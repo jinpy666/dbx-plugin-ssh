@@ -53,8 +53,14 @@ function checkedSum(left: number, right: number, label: string): number {
   return sum;
 }
 
-/** 解码并校验一个 44 字节头的帧补丁；任何字段不合法都抛错（调用方丢弃该帧）。 */
-export function decodeVncFramePatch(buffer: ArrayBuffer | Uint8Array): VncFramePatch {
+/** 解码并校验一个 44 字节头的帧补丁；任何字段不合法都抛错（调用方丢弃该帧）。
+ *  zeroCopy=true 时 payload 返回 subarray 视图（省一次整帧 memcpy——帧管道热
+ *  路径用；调用方只读、不越 event 生命周期持有即可）。缺省保持历史 slice
+ *  语义（防御性拷贝）不变，VNC 路径不受影响。 */
+export function decodeVncFramePatch(
+  buffer: ArrayBuffer | Uint8Array,
+  options?: { zeroCopy?: boolean },
+): VncFramePatch {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   if (bytes.byteLength < HEADER_BYTES) {
     throw new Error("VNC frame patch is too short");
@@ -107,7 +113,9 @@ export function decodeVncFramePatch(buffer: ArrayBuffer | Uint8Array): VncFrameP
     height,
     stride,
     pixelFormat: "RGBA8888",
-    payload: bytes.slice(HEADER_BYTES, HEADER_BYTES + payloadLength),
+    payload: options?.zeroCopy
+      ? bytes.subarray(HEADER_BYTES, HEADER_BYTES + payloadLength)
+      : bytes.slice(HEADER_BYTES, HEADER_BYTES + payloadLength),
   };
 }
 

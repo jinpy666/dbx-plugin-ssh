@@ -9,13 +9,59 @@
 // 非扩展），线制形状与 sidecar `RdpWireInput`（rdp_session.rs）逐字段一致。
 // 会话状态机压缩 `rdp/session/state` 事件为连接卡/覆盖层的视图状态。
 
-import { decodeVncFramePatch, type VncFramePatch } from "./vncFrame";
+import { decodeVncFramePatch, type VncFramePatch } from "../lib/vncFrame";
 
 export type RdpFramePatch = VncFramePatch;
 
-/** 解码 RDP 帧补丁：与 vnc/frame 同一 44 字节头，校验规则同 VNC（超契约直接复用）。 */
+/** 解码 RDP 帧补丁：与 vnc/frame 同一 44 字节头，校验规则同 VNC（超契约直接复用）。
+ *  zeroCopy 打开（帧管道热路径：payload 只读，省一次整帧 memcpy）。 */
 export function decodeRdpFramePatch(buffer: ArrayBuffer | Uint8Array): RdpFramePatch {
-  return decodeVncFramePatch(buffer);
+  return decodeVncFramePatch(buffer, { zeroCopy: true });
+}
+
+// —— 帧管道合帧（P0-1 画面卡顿优化）—————————————————————————————————————
+
+/** 绘制节流下限：一次 rAF tick 至多一批，批间隔 ≥33ms（≈30fps 上限）。 */
+export const RDP_DRAW_MIN_INTERVAL_MS = 33;
+
+function rectCovers(
+  outer: Pick<RdpFramePatch, "x" | "y" | "width" | "height">,
+  inner: Pick<RdpFramePatch, "x" | "y" | "width" | "height">,
+): boolean {
+  return (
+    outer.x <= inner.x &&
+    outer.y <= inner.y &&
+    outer.x + outer.width >= inner.x + inner.width &&
+    outer.y + outer.height >= inner.y + inner.height
+  );
+}
+
+/**
+ * 同一绘制批内的补丁合并：后画的像素覆盖先画的，所以“完整落在任一更晚补丁
+ * 矩形内”的旧补丁可以安全丢弃（最终像素不变）。规则：
+ * - 桌面尺寸变化：新尺寸补丁到达时，旧尺寸补丁全部作废（画布将重设尺寸）；
+ * - 被更晚补丁矩形完全覆盖 → 丢弃；
+ * - 其余保留原顺序（sequence 升序），最新补丁永不丢弃。
+ * 输入按 sequence 升序（acceptFrame 已保证）；纯函数，便于单测。
+ */
+export function coalesceRdpPatches(patches: readonly RdpFramePatch[]): RdpFramePatch[] {
+  if (patches.length <= 1) return patches.slice();
+  const newest = patches[patches.length - 1];
+  const kept: RdpFramePatch[] = [];
+  for (let index = patches.length - 1; index >= 0; index -= 1) {
+    const patch = patches[index];
+    if (
+      patch.desktopWidth !== newest.desktopWidth ||
+      patch.desktopHeight !== newest.desktopHeight
+    ) {
+      continue; // 旧桌面尺寸：画布即将按 newest 重设，画了也白画。
+    }
+    if (kept.some((later) => rectCovers(later, patch))) {
+      continue; // 被更晚补丁完全覆盖：后画覆盖先画，可丢弃。
+    }
+    kept.unshift(patch);
+  }
+  return kept;
 }
 
 // —— rdp/input 线制形状（与 sidecar RdpWireInput 契约一致；camelCase 别名由

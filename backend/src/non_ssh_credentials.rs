@@ -21,6 +21,10 @@ const MAX_ENTRIES: usize = 256;
 struct Entry {
     username: String,
     password: Zeroizing<String>,
+    /// lifecycle `connection.external_config.protocol`（"rdp"/"telnet"/…），
+    /// 供 webview 路由前向 sidecar 查询权威协议（宿主推给 webview 的
+    /// connection 上下文不带该字段，见 App.vue connection 计算属性注释）。
+    protocol: String,
     _inserted_at: std::time::Instant,
 }
 
@@ -34,9 +38,10 @@ impl NonSshCredentials {
         Self::default()
     }
 
-    /// `connection/connect`（非 SSH 分支）：暂存该连接的表单凭据；空密码视
-    /// 为"清除已存"，删掉旧条目。用户名与密码都原样保留（首尾空格合法）。
-    pub fn store(&self, connection_id: &str, username: &str, password: &str) {
+    /// `connection/connect`（非 SSH 分支）：暂存该连接的表单凭据与协议；
+    /// 空密码视为"清除已存"，删掉旧条目。用户名与密码都原样保留（首尾空
+    /// 格合法）。
+    pub fn store(&self, connection_id: &str, username: &str, password: &str, protocol: &str) {
         if connection_id.is_empty() {
             return;
         }
@@ -62,6 +67,7 @@ impl NonSshCredentials {
             Entry {
                 username: username.to_string(),
                 password: Zeroizing::new(password.to_string()),
+                protocol: protocol.to_string(),
                 _inserted_at: std::time::Instant::now(),
             },
         );
@@ -88,6 +94,19 @@ impl NonSshCredentials {
             .get(connection_id)
             .map(|entry| (entry.username.clone(), entry.password.as_str().to_string()))
     }
+
+    /// webview 路由前查询权威协议（"rdp"/"telnet"/…；未暂存返回 None，
+    /// 意味着宿主尚未推送该连接的 lifecycle——调用方按推送协议/ssh 处理）。
+    pub fn protocol_of(&self, connection_id: &str) -> Option<String> {
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        entries
+            .get(connection_id)
+            .map(|entry| entry.protocol.clone())
+            .filter(|protocol| !protocol.is_empty())
+    }
 }
 
 impl std::fmt::Debug for NonSshCredentials {
@@ -110,30 +129,34 @@ mod tests {
     #[test]
     fn store_round_trips_username_and_password() {
         let registry = NonSshCredentials::new();
-        registry.store("conn-1", "ops", "s3cret");
+        registry.store("conn-1", "ops", "s3cret", "rdp");
         assert_eq!(
             registry.get("conn-1"),
             Some(("ops".to_string(), "s3cret".to_string()))
         );
         assert_eq!(registry.get("other"), None);
+        // 协议随条目暂存，供 webview 路由前查询；未暂存返回 None。
+        assert_eq!(registry.protocol_of("conn-1"), Some("rdp".to_string()));
+        assert_eq!(registry.protocol_of("other"), None);
     }
 
     #[test]
     fn empty_password_clears_previous_entry() {
         let registry = NonSshCredentials::new();
-        registry.store("conn-1", "ops", "s3cret");
-        registry.store("conn-1", "ops", "");
+        registry.store("conn-1", "ops", "s3cret", "rdp");
+        registry.store("conn-1", "ops", "", "rdp");
         assert_eq!(
             registry.get("conn-1"),
             None,
             "cleared password must not linger"
         );
+        assert_eq!(registry.protocol_of("conn-1"), None);
     }
 
     #[test]
     fn drop_connection_removes_entry() {
         let registry = NonSshCredentials::new();
-        registry.store("conn-1", "", "s3cret");
+        registry.store("conn-1", "", "s3cret", "telnet");
         registry.drop_connection("conn-1");
         assert_eq!(registry.get("conn-1"), None);
         registry.drop_connection("missing");
@@ -142,7 +165,7 @@ mod tests {
     #[test]
     fn blank_connection_id_is_ignored() {
         let registry = NonSshCredentials::new();
-        registry.store("", "ops", "s3cret");
+        registry.store("", "ops", "s3cret", "rdp");
         assert_eq!(registry.get(""), None);
     }
 
@@ -150,7 +173,7 @@ mod tests {
     fn registry_is_capped_and_never_debug_prints_password() {
         let registry = NonSshCredentials::new();
         for index in 0..(MAX_ENTRIES + 8) {
-            registry.store(&format!("conn-{index}"), "", "s3cret");
+            registry.store(&format!("conn-{index}"), "", "s3cret", "vnc");
         }
         let entries = registry
             .entries

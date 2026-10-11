@@ -1,12 +1,12 @@
 import { nextTick, ref, watch, type Ref } from "vue";
 import type { Terminal } from "@xterm/xterm";
-import type { RdpConnectOptions } from "../components/RdpConnectDialog.vue";
+import type { RdpConnectOptions } from "./RdpConnectDialog.vue";
 import {
   initialRdpSessionState,
   rdpCertRemainingSecs,
   type RdpInputEvent,
   type RdpSessionStateView,
-} from "../lib/rdpFrame";
+} from "./rdpFrame";
 
 /** RDP 证书确认弹窗数据（原 App.vue 局部接口 RdpCertPrompt，随状态收口）。 */
 export interface RdpCertPromptView {
@@ -64,6 +64,10 @@ export function useRdpSession(options: {
   let rdpCertTimer = 0;
 
   async function startRdpSession(options: RdpConnectOptions): Promise<boolean> {
+    // 重入保护（reconnect 双 start 竞态修复的第二道闸）：该连接已在连接中
+    // （connecting）时直接视为成功——reconnect 梯子/宿主 replay 并发触发的
+    // 第二次启动不再拆掉在途会话重建（配合 sidecar 同 workbenchId 幂等查重）。
+    if (rdpSession.value && rdpState.value.state === "connecting") return true;
     // 同一终端视图互斥：残留的 closed 会话先清场再开新连接。
     if (rdpSession.value && rdpState.value.state !== "closed") await closeRdpSession();
     try {

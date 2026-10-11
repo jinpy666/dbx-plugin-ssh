@@ -28,6 +28,7 @@ import {
   ClipboardPaste,
   Scan,
   StretchHorizontal,
+  Proportions,
   Columns3,
   Copy,
   Download,
@@ -238,7 +239,8 @@ import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/audit
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
 import { useSessionReconnect } from "./composables/useSessionReconnect";
 import { usePluginEvents } from "./composables/usePluginEvents";
-import { useRdpSession } from "./composables/useRdpSession";
+import { useRdpSession } from "./rdp/useRdpSession";
+import { useRdpWorkbench } from "./rdp/useRdpWorkbench";
 import { useConnectCard } from "./composables/useConnectCard";
 import { useProtocolFrameBuffers } from "./composables/useProtocolFrameBuffers";
 import { useUploadChain } from "./composables/useUploadChain";
@@ -392,14 +394,14 @@ import type { VncInputEvent } from "./lib/vncFrame";
 // RDP 会话（nyaterm-parity P3-4）：画布与 VNC 同构（同一 44 字节 patch 头，
 // 解码复用 vncFrame），输入走扫描码/unicode 双通道，证书确认走
 // connection/challenge kind=rdp-certificate 分支。
-import RdpConnectDialog, { type RdpConnectOptions } from "./components/RdpConnectDialog.vue";
-import RdpSurface from "./components/RdpSurface.vue";
+import RdpConnectDialog, { type RdpConnectOptions } from "./rdp/RdpConnectDialog.vue";
+import RdpSurface from "./rdp/RdpSurface.vue";
 import {
   initialRdpSessionState,
   rdpCertStatusKey,
   rdpErrorKindKey,
   type RdpSessionStateView,
-} from "./lib/rdpFrame";
+} from "./rdp/rdpFrame";
 import { ToastAction, ToastClose, ToastProvider, ToastRoot, ToastViewport } from "./components/ui/toast";
 
 interface SessionInfo {
@@ -480,6 +482,9 @@ interface WorkbenchState {
   sftpNameWidth?: number | null;
   /** 列配置版本标记：六列默认（issue #35）上线后的一次性迁移，老偏好重置为全开。 */
   columnsV2?: boolean;
+  /** RDP 会话内用户选择的桌面尺寸（P0-2）：恢复 tab 时优先于连接表单 rdp_resolution。 */
+  rdpWidth?: number;
+  rdpHeight?: number;
 }
 
 interface RuntimeEndpoint {
@@ -1287,38 +1292,6 @@ const rdpSurface = ref<InstanceType<typeof RdpSurface> | null>(null);
 const rdpClipboardChunks = new Map<string, { parts: string[]; received: number }>();
 const isRdpMode = computed(() => rdpSession.value !== null);
 const rdpTarget = computed(() => (rdpSession.value ? `${rdpSession.value.host}:${rdpSession.value.port}` : ""));
-// —— RDP 专属工具组（缩放 + 大文本粘贴）：SSH 工具在 RDP 连接上整类隐藏后，
-// 这里补上远程桌面自己需要的能力。缩放复用 RdpSurface 的 fit/actual/stretch
-// 三档（与连接表单同一组文案）；大文本粘贴双通道：写入远端剪贴板（快，远端
-// Ctrl+V）或按键注入（慢，剪贴板被禁时兜底，4k 字符/次为后端上限，分片发送）。
-const rdpPasteOpen = ref(false);
-const rdpPasteText = ref("");
-const rdpTypingBusy = ref(false);
-const rdpTypingSent = ref(0);
-const rdpTypingTotal = ref(0);
-async function rdpWriteRemoteClipboard() {
-  const text = rdpPasteText.value;
-  if (!text) return;
-  sendRdpClipboard(text);
-}
-async function rdpTypeAsKeystrokes() {
-  const text = rdpPasteText.value;
-  if (!text || rdpTypingBusy.value) return;
-  rdpTypingBusy.value = true;
-  rdpTypingSent.value = 0;
-  rdpTypingTotal.value = text.length;
-  const chunkSize = 512;
-  try {
-    for (let offset = 0; offset < text.length; offset += chunkSize) {
-      if (!isRdpMode.value) break;
-      sendRdpInput({ kind: "unicode", text: text.slice(offset, offset + chunkSize) });
-      rdpTypingSent.value = Math.min(offset + chunkSize, text.length);
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    }
-  } finally {
-    rdpTypingBusy.value = false;
-  }
-}
 const localUiMode = computed(() => isLocalMode.value || localShellRestored.value || isTelnetMode.value || isSerialMode.value || isVncMode.value || isRdpMode.value);
 // —— 本地终端偏好（sidecar preferences.json 持久化；iframe 沙箱无 localStorage）——
 // shell 空串 = 跟随自动探测；integration 缺省开。
@@ -1514,6 +1487,19 @@ const {
   isDisposed: () => disposed,
   getTerminal: () => terminal,
 });
+// —— RDP 工作台专属逻辑（大文本粘贴 + 分辨率入口）：收口在 rdp/useRdpWorkbench，
+// App.vue 只保留薄挂载点（模板绑定经解构同名透出）。 ——
+const {
+  rdpPasteOpen, rdpPasteText, rdpTypingBusy, rdpTypingSent, rdpTypingTotal,
+  rdpWriteRemoteClipboard, rdpTypeAsKeystrokes,
+  RDP_RESOLUTION_PRESETS, rdpResolutionOpen, rdpCustomWidth, rdpCustomHeight, rdpResizing,
+  rdpDesktopSize, rdpPersistedSize, rdpResolutionLabel, isRdpResolutionActive,
+  rdpWindowProportionPreset, applyRdpResolution, applyRdpCustomResolution,
+} = useRdpWorkbench({
+  t, showError, showNotice, persistState,
+  isRdpMode, rdpSession, rdpSurface,
+  sendRdpInput, sendRdpClipboard,
+});
 
 const restored = computed(() => hostContext.value.restored === true);
 const runtimeEndpoint = computed<RuntimeEndpoint>(() => {
@@ -1530,9 +1516,17 @@ const connection = computed<ConnectionSummary>(() => {
   // 宿主下发的 connection 是配置对象（mockDbxHost 同契约）；对象之外一律视为缺失。
   if (!value || typeof value !== "object" || Array.isArray(value)) return {} as ConnectionSummary;
   const raw = value as Record<string, unknown>;
+  // 宿主把插件表单状态放在嵌套的 external_config 里（生命周期推送同构：
+  // model.rs RuntimeEndpoint 即从 connection.external_config 读 protocol）；
+  // 顶层拍平与嵌套两级都读，顶层优先。
+  const ext = raw.external_config && typeof raw.external_config === "object" && !Array.isArray(raw.external_config)
+    ? (raw.external_config as Record<string, unknown>)
+    : {};
+  const field = (key: string): unknown => raw[key] ?? ext[key];
   // serial/rdp 连接配置（M32-B）：manifest select 存的是字符串值，逐项
   // 白名单归一，非法/缺失回落各 startXXXSession 的默认值。
-  const resolution = typeof raw.rdp_resolution === "string" ? raw.rdp_resolution.match(/^(\d{3,4})x(\d{3,4})$/) : null;
+  const resolution = typeof field("rdp_resolution") === "string" ? (field("rdp_resolution") as string).match(/^(\d{3,4})x(\d{3,4})$/) : null;
+  const protocolRaw = typeof field("protocol") === "string" ? (field("protocol") as string) : undefined;
   return {
     name: normalizeConnectionText(raw.name),
     host: normalizeConnectionText(raw.host),
@@ -1540,31 +1534,49 @@ const connection = computed<ConnectionSummary>(() => {
     username: normalizeConnectionText(raw.username),
     color: normalizeConnectionText(raw.color),
     readOnly: raw.readOnly === true,
-    protocol: raw.protocol === "telnet" || raw.protocol === "vnc" || raw.protocol === "serial" || raw.protocol === "rdp" ? raw.protocol : "ssh",
-    serialPort: normalizeConnectionText(raw.serial_port),
-    serialBaud: [9600, 19200, 38400, 57600, 115200, 230400].includes(Number(raw.serial_baud)) ? Number(raw.serial_baud) : undefined,
-    serialDataBits: raw.serial_data_bits === "7" ? "7" : raw.serial_data_bits === "8" ? "8" : undefined,
-    serialParity: raw.serial_parity === "even" || raw.serial_parity === "odd" ? raw.serial_parity : raw.serial_parity === "none" ? "none" : undefined,
-    serialStopBits: raw.serial_stop_bits === "1" ? "1" : raw.serial_stop_bits === "2" ? "2" : undefined,
-    serialBackspace: raw.serial_backspace === "ctrl_h" ? "ctrl_h" : raw.serial_backspace === "del" ? "del" : undefined,
-    rdpDomain: normalizeConnectionText(raw.rdp_domain),
+    protocol: protocolRaw === "telnet" || protocolRaw === "vnc" || protocolRaw === "serial" || protocolRaw === "rdp" ? protocolRaw : "ssh",
+    serialPort: normalizeConnectionText(field("serial_port")),
+    serialBaud: [9600, 19200, 38400, 57600, 115200, 230400].includes(Number(field("serial_baud"))) ? Number(field("serial_baud")) : undefined,
+    serialDataBits: field("serial_data_bits") === "7" ? "7" : field("serial_data_bits") === "8" ? "8" : undefined,
+    serialParity: field("serial_parity") === "even" || field("serial_parity") === "odd" ? (field("serial_parity") as "even" | "odd") : field("serial_parity") === "none" ? ("none" as const) : undefined,
+    serialStopBits: field("serial_stop_bits") === "1" ? "1" : field("serial_stop_bits") === "2" ? "2" : undefined,
+    serialBackspace: field("serial_backspace") === "ctrl_h" ? "ctrl_h" : field("serial_backspace") === "del" ? "del" : undefined,
+    rdpDomain: normalizeConnectionText(field("rdp_domain")),
     rdpWidth: resolution ? Number(resolution[1]) : undefined,
     rdpHeight: resolution ? Number(resolution[2]) : undefined,
-    rdpCertificatePolicy: raw.rdp_certificate_policy === "strict" || raw.rdp_certificate_policy === "accept-temporarily" ? raw.rdp_certificate_policy : raw.rdp_certificate_policy === "prompt" ? "prompt" : undefined,
-    rdpClipboard: raw.rdp_clipboard === undefined ? undefined : raw.rdp_clipboard === true || raw.rdp_clipboard === "true",
+    rdpCertificatePolicy: field("rdp_certificate_policy") === "strict"
+      ? ("strict" as const)
+      : field("rdp_certificate_policy") === "accept-temporarily"
+        ? ("accept-temporarily" as const)
+        : field("rdp_certificate_policy") === "prompt"
+          ? ("prompt" as const)
+          : undefined,
+    rdpClipboard: field("rdp_clipboard") === undefined ? undefined : field("rdp_clipboard") === true || field("rdp_clipboard") === "true",
   };
 });
-// 连接协议（对标 Tabby profile）：宿主连接表单的 protocol 字段，缺省 ssh。
-// 非 SSH 连接由 openSession 路由到各自的会话视图，不建立 SSH 会话。
+// sidecar 查询到的权威协议（connection/protocol）：真实宿主推给 webview 的
+// connection 上下文缺 external_config.protocol，openSession 路由时查询结果必须
+// 写回这里，协议路由与连接级门控才有可靠的事实源——只用于当次路由而不落状态的
+// 话，isRdpConnection 在真实宿主恒为 ssh 形态，SSH 专属入口全部漏出。
+// 连接切换（宿主改推另一连接）即失效，避免把上一连接的协议带给下一个连接。
+const storedConnectionProtocol = ref("");
+watch(connectionId, () => {
+  storedConnectionProtocol.value = "";
+});
+// 连接协议（对标 Tabby profile）：sidecar 暂存的权威协议 > 宿主连接表单的
+// protocol 字段，缺省 ssh。非 SSH 连接由 openSession 路由到各自的会话视图，
+// 不建立 SSH 会话。
 const connectionProtocol = computed<"ssh" | "telnet" | "vnc" | "serial" | "rdp">(() => {
-  const protocol = connection.value.protocol;
+  const protocol = storedConnectionProtocol.value || connection.value.protocol;
   return protocol === "telnet" || protocol === "vnc" || protocol === "serial" || protocol === "rdp" ? protocol : "ssh";
 });
 // RDP 连接（宿主表单 protocol=rdp）：SSH/SFTP/主机运维整类能力在 RDP 连接上
 // 无处生效，工具条、面板与覆盖层按连接协议整体隐藏（而非置灰）——与 localUiMode
 // 的"local 模式隐藏 SSH 专属动作"惯例一致。区别于 isRdpMode（仅 RDP 会话激活
-// 期），连接级门控让断开态下残留的 SSH 入口也不再出现。
-const isRdpConnection = computed(() => connectionProtocol.value === "rdp");
+// 期），连接级门控让断开态下残留的 SSH 入口也不再出现。并集 isRdpMode 兜住
+// 对话框直连路径（不经 openSession 查询，表单协议无从知晓）与会话已激活、
+// 协议查询尚未返回的窗口期——这两段里 SSH 入口同样一处都不该出现。
+const isRdpConnection = computed(() => connectionProtocol.value === "rdp" || isRdpMode.value);
 const canWrite = computed(() => !connection.value.readOnly && !connectionReadOnly.value);
 const selectedEntry = computed(() => entries.value.find((entry) => entry.uri === selectedPath.value));
 const connected = computed(() => terminalState.value === "connected" && !!session.value);
@@ -1717,6 +1729,12 @@ function restoreUiState() {
   }
   sftpNameWidth.value = typeof state.sftpNameWidth === "number" ? Math.max(NAME_COLUMN_MIN, Math.min(NAME_COLUMN_MAX, state.sftpNameWidth)) : null;
   lastSequence = typeof state.terminalSequence === "number" ? state.terminalSequence : 0;
+  // RDP 会话内选择的桌面尺寸（P0-2）：仅在契约门限内采用。
+  const rdpSavedWidth = typeof state.rdpWidth === "number" ? state.rdpWidth : 0;
+  const rdpSavedHeight = typeof state.rdpHeight === "number" ? state.rdpHeight : 0;
+  rdpPersistedSize.value = rdpSavedWidth >= 640 && rdpSavedWidth <= 3840 && rdpSavedHeight >= 480 && rdpSavedHeight <= 2160
+    ? { width: rdpSavedWidth, height: rdpSavedHeight }
+    : null;
 }
 
 function writeWorkbenchState() {
@@ -1733,6 +1751,7 @@ function writeWorkbenchState() {
     columnsV2: true,
     sftpColumnWidths: { ...sftpColumnWidths },
     sftpNameWidth: sftpNameWidth.value,
+    ...(rdpPersistedSize.value ? { rdpWidth: rdpPersistedSize.value.width, rdpHeight: rdpPersistedSize.value.height } : {}),
   }).catch(() => undefined);
 }
 
@@ -3657,10 +3676,87 @@ const { connectCardState, connectLogEntries, reconnect, cancelConnect, startConn
   closeSession,
 });
 
+// 宿主推给 webview 的 connection 上下文缺 external_config.protocol，向
+// sidecar 查询 lifecycle 暂存的权威协议；未暂存（宿主推送未落地或 SSH 连
+// 接）返回空串。恢复态标签的凭据重推更晚，重试窗口放宽对齐 BOOT_RESTORE。
+async function resolveStoredConnectionProtocol(connectionId: string, bootRestore: boolean): Promise<{ protocol: string; shell: string }> {
+  const attempts = bootRestore ? 10 : 2;
+  const delayMs = bootRestore ? 500 : 250;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const result = await window.dbxPlugin.invoke<{ protocol?: string; shell?: string }>("connection/protocol", { connectionId });
+      const protocol = typeof result?.protocol === "string" ? result.protocol : "";
+      if (protocol) return { protocol, shell: typeof result.shell === "string" ? result.shell : "" };
+    } catch {
+      // sidecar 未就绪/旧版 sidecar 无此方法：按未暂存处理，走推送协议。
+      return { protocol: "", shell: "" };
+    }
+    if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return { protocol: "", shell: "" };
+}
+
+// RDP 路由重入保护（与 sidecar 同 workbenchId 幂等查重双保险）：reconnect
+// 梯子/宿主 replay 并发触发的 openSession 会同时抵达 RDP 路由，两次 rdp/start
+// 会让 Windows 单会话策略互踢会话 → 前端持有的旧 sessionId 收到断开事件 →
+// 重连梯子再触发，工作台卡死在"连接中"。启动期间置位吞掉并发重入。
+let rdpRouteInFlight = false;
+async function routeRdpConnection(): Promise<void> {
+  if (rdpRouteInFlight) return;
+  rdpRouteInFlight = true;
+  try {
+    if (!(await startRdpFromConnection())) rdpDialogOpen.value = true;
+  } finally {
+    rdpRouteInFlight = false;
+  }
+}
+
+// 对话框发起的 RDP（回落/手动路径）：不经 openSession 的协议查询，表单协议
+// 无从判定——发起前把 tab 级协议置为 rdp，会话断开/关闭后连接级门控仍成立。
+async function connectViaRdpDialog(options: RdpConnectOptions): Promise<boolean> {
+  storedConnectionProtocol.value = "rdp";
+  return startRdpSession(options);
+}
+
 async function openSession(forceNew = false, bootRestore = false, isRetry = false) {
   if (!connectionId.value || !workbenchId.value) return;
   // 协议路由（对标 Tabby profile）：Telnet/VNC 连接不建 SSH 会话，直接驱动
   // 各自的会话启动；启动失败回落连接弹窗（预填 host/port，可改后重试）。
+  // 宿主推给 webview 的 connection 上下文缺 external_config.protocol（该字
+  // 段只随 lifecycle connection/connect 走向 sidecar），SSH 形态先向 sidecar
+  // 查询权威协议再路由——lifecycle 推送与 webview 创建存在固有竞态，用短重
+  // 试吸收（恢复态标签的凭据重推更晚，窗口放宽到 ~5s，对齐 BOOT_RESTORE 节奏）。
+  if (connectionProtocol.value === "ssh" && connectionId.value) {
+    const stored = await resolveStoredConnectionProtocol(connectionId.value, bootRestore);
+    const storedProtocol = stored.protocol;
+    // 权威协议写回响应式状态（storedConnectionProtocol）：路由之外的连接级
+    // 门控（isRdpConnection）也以它为准，否则真实宿主下 RDP 连接的 SSH 入口
+    // 整组漏出（宿主推送上下文缺 protocol，查询结果不落状态就只够当次路由）。
+    if (storedProtocol) storedConnectionProtocol.value = storedProtocol;
+    if (storedProtocol === "telnet") {
+      if (!(await startTelnetFromConnection())) telnetDialogOpen.value = true;
+      return;
+    }
+    if (storedProtocol === "vnc") {
+      if (!(await startVncFromConnection())) vncDialogOpen.value = true;
+      return;
+    }
+    if (storedProtocol === "serial") {
+      if (!(await startSerialFromConnection())) serialDialogOpen.value = true;
+      return;
+    }
+    if (storedProtocol === "rdp") {
+      await routeRdpConnection();
+      return;
+    }
+    if (storedProtocol === "local") {
+      // 本地 Shell 连接（io.dbx.ssh.local）：无网络语义，直接在连接绑定的
+      // 工作台里开本地终端；连接表单 shell 为空时回落偏好/默认解析链
+      //（与 startLocalTerminal 的优先级链一致）。
+      await startLocalTerminal(stored.shell.trim() || undefined);
+      return;
+    }
+  }
   if (connectionProtocol.value === "telnet") {
     if (!(await startTelnetFromConnection())) telnetDialogOpen.value = true;
     return;
@@ -3676,7 +3772,7 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     return;
   }
   if (connectionProtocol.value === "rdp") {
-    if (!(await startRdpFromConnection())) rdpDialogOpen.value = true;
+    await routeRdpConnection();
     return;
   }
   window.clearTimeout(reconnectTimer.value);
@@ -4158,8 +4254,10 @@ async function startRdpFromConnection(): Promise<boolean> {
     host: conn.host,
     port: conn.port && conn.port > 0 ? conn.port : 3389,
     username: conn.username || "",
-    width: conn.rdpWidth ?? 1280,
-    height: conn.rdpHeight ?? 800,
+    // 尺寸优先级（P0-2）：workbenchState 里用户会话内选择的尺寸 > 连接表单
+    // rdp_resolution > 默认 1280x800。
+    width: rdpPersistedSize.value?.width ?? conn.rdpWidth ?? 1280,
+    height: rdpPersistedSize.value?.height ?? conn.rdpHeight ?? 800,
     certificatePolicy: conn.rdpCertificatePolicy ?? "prompt",
     clipboard: conn.rdpClipboard ?? true,
     scaleMode: "fit",
@@ -4333,6 +4431,7 @@ if (window.dbxPlugin.workbench?.onClose) {
     serialSession.value = null;
     vncSession.value = null;
     rdpSession.value = null;
+    rdpDesktopSize.value = null;
     rdpClipboardChunks.clear();
   });
 }
@@ -7107,6 +7206,12 @@ async function confirmChmod() {
 
 
 function showTerminalMenu(event: MouseEvent) {
+  // RDP 画布占住终端视图时，右键属于远程桌面（画布 mousedown 已把右键发往
+  // rdp/input）；本地/SSH 终端菜单整类不适用，压住菜单与系统菜单即返回。
+  if (isRdpMode.value || isRdpConnection.value) {
+    event.preventDefault();
+    return;
+  }
   // 右键四档（对标 Tabby「Mouse → Right click」）：off / menu / paste / clipboard。
   // clipboard 档按有无选区决定复制还是粘贴；Shift+右键恒出菜单，是 off 与 paste
   // 档下唯一回到菜单的逃生口（与既有行为一致）。
@@ -7186,6 +7291,7 @@ function closeToolbarPopovers() {
   localShellSurfaceOpen.value = false;
   panelPaletteOpen.value = false;
   rdpPasteOpen.value = false;
+  rdpResolutionOpen.value = false;
 }
 
 function closeMenus() {
@@ -7987,18 +8093,49 @@ watch(historyScope, () => {
         </Popover>
       </div>
       <div v-if="!panelSurface" class="toolbar-actions">
-        <button v-if="!isRdpConnection" class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :aria-label="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
-        <!-- Local terminal UI hides SSH-only actions outright (not disabled): the local
-             shell has no SSH session to act on. RDP 连接同理：SFTP/分栏/字体缩放
-             在远程桌面上无处生效，按连接协议整体隐藏。 -->
-        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
-        <!-- RDP 专属工具组（isRdpMode 会话激活期）：缩放三档 + 大文本粘贴 +
-             断开。SSH 工具整类隐藏后，这是远程桌面自己需要的操作面。 -->
+        <!-- —— SSH 工具组·视图段（分栏/字号）：连接协议门控（!isRdpConnection）
+             在组级判一次，组内按钮只保留各自其余条件（localUiMode/panelSurface）；
+             RDP 连接下整组不渲染，不产生孤儿按钮。 -->
+        <template v-if="!isRdpConnection">
+          <button class="icon-button icon-neutral" :title="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :aria-label="paneOrder === 'terminal-left' ? t('moveSftpLeft') : t('moveTerminalLeft')" :disabled="panelSurface" @click="togglePaneOrder"><ArrowLeftRight /></button>
+          <!-- Local terminal UI hides SSH-only actions outright (not disabled): the local
+               shell has no SSH session to act on. -->
+          <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
+          <button class="icon-button" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
+          <button class="icon-button" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
+        </template>
+        <!-- —— RDP 独立工具组（isRdpMode 会话激活期）：缩放三档 + 桌面分辨率 +
+             大文本粘贴 + 断开。与 SSH 组互斥、各判一次门控；SSH 工具整类隐藏后，
+             这是远程桌面自己需要的操作面。 -->
         <template v-if="isRdpMode">
           <div class="rdp-scale-group" role="group" :aria-label="t('rdp.scaleMode')">
             <button class="icon-button rdp-scale-button" :class="{ 'is-active': rdpScaleMode === 'fit' }" :title="t('rdp.scaleMode.fit')" :aria-label="t('rdp.scaleMode.fit')" :aria-pressed="rdpScaleMode === 'fit'" @click="rdpScaleMode = 'fit'"><Scan /></button>
             <button class="icon-button rdp-scale-button" :class="{ 'is-active': rdpScaleMode === 'actual' }" :title="t('rdp.scaleMode.actual')" :aria-label="t('rdp.scaleMode.actual')" :aria-pressed="rdpScaleMode === 'actual'" @click="rdpScaleMode = 'actual'"><span class="font-step-label" aria-hidden="true">1:1</span></button>
             <button class="icon-button rdp-scale-button" :class="{ 'is-active': rdpScaleMode === 'stretch' }" :title="t('rdp.scaleMode.stretch')" :aria-label="t('rdp.scaleMode.stretch')" :aria-pressed="rdpScaleMode === 'stretch'" @click="rdpScaleMode = 'stretch'"><StretchHorizontal /></button>
+          </div>
+          <div>
+            <Popover :open="rdpResolutionOpen" @update:open="(open) => { if (!open) rdpResolutionOpen = false; }">
+              <PopoverAnchor as-child>
+                <button class="icon-button icon-cyan" :class="{ 'is-active': rdpResolutionOpen }" :title="t('rdp.resolution.title')" :aria-label="t('rdp.resolution.title')" :aria-expanded="rdpResolutionOpen" @click.stop="rdpResolutionOpen = !rdpResolutionOpen"><Proportions /></button>
+              </PopoverAnchor>
+              <PopoverContent class="popover rdp-resolution-popover" align="start" :side-offset="5">
+                <h3>{{ t("rdp.resolution.title") }}</h3>
+                <div class="rdp-resolution-presets">
+                  <button v-for="preset in RDP_RESOLUTION_PRESETS" :key="`${preset.width}x${preset.height}`" class="rdp-resolution-item" :class="{ 'is-active': isRdpResolutionActive(preset.width, preset.height) }" :disabled="rdpResizing" @click="applyRdpResolution(preset.width, preset.height)">
+                    {{ rdpResolutionLabel(preset.width, preset.height) }}
+                  </button>
+                  <button class="rdp-resolution-item" :disabled="rdpResizing" @click="applyRdpResolution(rdpWindowProportionPreset().width, rdpWindowProportionPreset().height)">{{ t("rdp.resolution.window") }}</button>
+                </div>
+                <div class="rdp-resolution-custom">
+                  <input v-model="rdpCustomWidth" class="mono" type="number" min="640" max="3840" :placeholder="t('rdp.width')" :aria-label="t('rdp.width')" />
+                  <span aria-hidden="true">×</span>
+                  <input v-model="rdpCustomHeight" class="mono" type="number" min="480" max="2160" :placeholder="t('rdp.height')" :aria-label="t('rdp.height')" />
+                  <button class="primary-button" :disabled="rdpResizing || !rdpCustomWidth || !rdpCustomHeight" @click="applyRdpCustomResolution">{{ t("rdp.resolution.apply") }}</button>
+                </div>
+                <p v-if="rdpDesktopSize" class="muted rdp-paste-hint">{{ t("rdp.resolution.current", { width: rdpDesktopSize.width, height: rdpDesktopSize.height }) }}</p>
+                <p class="muted rdp-paste-hint">{{ t("rdp.resolution.note") }}</p>
+              </PopoverContent>
+            </Popover>
           </div>
           <div>
             <Popover :open="rdpPasteOpen" @update:open="(open) => { if (!open) rdpPasteOpen = false; }">
@@ -8019,9 +8156,8 @@ watch(historyScope, () => {
           </div>
           <button class="icon-button icon-emerald" :title="t('rdp.disconnect')" :aria-label="t('rdp.disconnect')" @click="closeRdpSession"><PlugZap /></button>
         </template>
-        <button v-if="!isRdpMode" class="icon-button" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
-        <button v-if="!isRdpMode" class="icon-button" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
-        <!-- 工具条语义分组：视图 / 会话 / 运维 / 命令 / 记录与设置 / SFTP 工具（分隔线避开 local 模式两侧皆隐藏的位置） -->
+        <!-- 工具条语义分组分隔线：两侧（视图段/会话菜单）在 SSH 与 RDP 两种形态
+             下都各有一侧可见，永远不会成为孤儿分隔符；其余分隔线全部收进 SSH 组。 -->
         <span class="toolbar-separator" aria-hidden="true" />
         <!-- 会话下拉：新建 / 复制 / 命令会话 / 本地终端 / Shell 选项收敛为单入口，
              工具条不再平铺五个会话类按钮（视觉走查）。Shell 选项为同弹层视图切换
@@ -8108,29 +8244,33 @@ watch(historyScope, () => {
             </PopoverContent>
           </Popover>
         </div>
+        <!-- —— SSH 工具组·运维/命令/记录/SFTP 工具段：组级 !isRdpConnection 判
+             一次，段内三条语义分隔线随组渲染，RDP 连接下不会再出现孤儿分隔符。
+             组内按钮只保留 localUiMode/isSerialMode/panelSurface 等自身条件。 -->
+        <template v-if="!isRdpConnection">
         <!-- 串口文件上传入口（NyaTerm 对齐 P0-3）：仅串口模式可用；传输中禁发。 -->
         <button v-if="isSerialMode" class="icon-button icon-emerald" :title="t('serial.upload.open')" :aria-label="t('serial.upload.open')" :disabled="serialUploadBusy" @click="serialUploadDialogOpen = true"><FileUp /></button>
-        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-emerald" :title="t('reconnect')" :aria-label="t('reconnect')" :disabled="terminalState === 'connecting' && !reconnectPending" @click="reconnectNow"><PlugZap /></button>
+        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('reconnect')" :aria-label="t('reconnect')" :disabled="terminalState === 'connecting' && !reconnectPending" @click="reconnectNow"><PlugZap /></button>
         <!-- 一键 sudo -v：向当前 PTY 写入命令刷新 sudo 凭据缓存；quick sudo 自动应答
              是否启用由连接设置决定（设置弹窗），工作台不再提供开关。 -->
-        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-emerald" :title="t('sudoRefresh.title')" :aria-label="t('sudoRefresh.title')" :disabled="!connected" @click="sendSudoRefresh"><ShieldCheck /></button>
+        <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('sudoRefresh.title')" :aria-label="t('sudoRefresh.title')" :disabled="!connected" @click="sendSudoRefresh"><ShieldCheck /></button>
         <!-- quick sudo profiles 管理入口（M32-A）已归位设置·sudo：工具条不再放
              管理类按钮，sudoRefresh 保留为会话内即时动作。 -->
-        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
-        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
+        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
         <!-- Docker 浮层（鲸鱼 logo 独立入口，metrics-float 同款右上浮层）：
              SFTP 面板关闭时也可达；local 模式保留——本机 daemon（Docker
              Desktop/OrbStack）场景照常可用。面板自治，关闭即卸载停轮询。 -->
-        <button v-if="!isRdpConnection" class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
-        <label v-if="!localUiMode && !isRdpConnection" class="follow-directory-control" :title="t('followTerminal')">
+        <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
+        <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
           <Switch size="sm" :model-value="followDirectory" :disabled="!connected || panelSurface" @update:model-value="setDirectoryTracking" />
           <span>{{ t("followTerminal") }}</span>
         </label>
         <span class="toolbar-separator" aria-hidden="true" />
-        <button v-if="!localUiMode && !isRdpConnection" class="icon-button icon-neutral" :title="t('commandTitle')" :aria-label="t('commandTitle')" :disabled="!connected" @click="openCommandDialog"><SquareTerminal /></button>
-        <button v-if="!localUiMode && !panelSurface && !isRdpConnection" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
-        <div v-if="!localUiMode && !isRdpConnection">
+        <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('commandTitle')" :aria-label="t('commandTitle')" :disabled="!connected" @click="openCommandDialog"><SquareTerminal /></button>
+        <button v-if="!localUiMode && !panelSurface" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
+        <div>
           <Popover :open="quickMenuOpen" @update:open="(open) => { if (!open) quickMenuOpen = false; }">
             <PopoverAnchor as-child>
               <button class="icon-button icon-amber" :title="t('quickCommands')" :aria-label="t('quickCommands')" :disabled="!connected" @click.stop="toggleQuickMenu"><Zap /></button>
@@ -8167,7 +8307,7 @@ watch(historyScope, () => {
             </PopoverContent>
           </Popover>
         </div>
-        <div v-if="!isRdpConnection">
+        <div>
           <Popover :open="agentModeOpen" @update:open="(open) => { if (!open) agentModeOpen = false; }">
             <PopoverAnchor as-child>
               <button class="icon-button" :class="agentMode === 'off' ? 'icon-neutral' : 'icon-emerald is-active'" :title="t('agentTerminalQuickHint')" :aria-label="t('agentTerminalQuickHint')" :aria-pressed="agentMode !== 'off'" :disabled="!connected" @click.stop="toggleAgentModeMenu"><Bot /></button>
@@ -8185,13 +8325,16 @@ watch(historyScope, () => {
         <!-- 高亮规则管理（M32-A2）已归位设置·终端（HighlightRulesSection）：
              工具条不再放配置编辑器，渲染扫描（compiledHighlightRules）仍在。 -->
         <span class="toolbar-separator" aria-hidden="true" />
-        <button v-if="!isRdpConnection" class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-label="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
-        <button v-if="!isRdpConnection" class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
-        <button v-if="!isRdpConnection" class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-label="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
+        <button class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-label="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
+        <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
+        <button class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-label="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
+        <!-- 设置弹窗承载 SSH/SFTP/终端专属分节（sudo/agent/安全/命名编码…），
+             RDP 连接下整类不适用——入口随之隐藏（RDP 实验开关在非 RDP tab 的
+             设置·终端里仍可达）；审计日志只记录 SSH/SFTP 操作，RDP 从不入审计。 -->
         <button class="icon-button icon-violet" :title="t('settings')" :aria-label="t('settings')" @click="openSettings"><Settings /></button>
         <button class="icon-button icon-amber" :title="t('auditLog.title')" :aria-label="t('auditLog.title')" @click="openAuditLog"><FileText /></button>
         <span class="toolbar-separator" aria-hidden="true" />
-        <div v-if="!isRdpConnection">
+        <div>
           <Popover :open="columnsOpen" @update:open="(open) => { if (!open) columnsOpen = false; }">
             <PopoverAnchor as-child>
               <button class="icon-button icon-violet" :title="t('customizeColumns')" :aria-label="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
@@ -8203,13 +8346,14 @@ watch(historyScope, () => {
             </PopoverContent>
           </Popover>
         </div>
-        <div v-if="!isRdpConnection">
+        <div>
           <!-- 历史卡右键菜单（ContextMenu）打开时忽略弹层的外点关闭请求：
                菜单项 pointerdown 相对弹层是"外部"，不加守卫会在 select 前把宿主弹层
                连同菜单一起卸载，动作丢失。 -->
           <button class="icon-button icon-blue" :title="t('transfers')" :aria-label="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
 
         </div>
+        </template>
       </div>
       <!-- dock 面板左组：系统信息带（CPU/内存/网速，5s 轮询），flex:1 把
            右侧按钮组推到右缘；数据未就绪/不支持时整条隐藏不占位。 -->
@@ -8260,7 +8404,7 @@ watch(historyScope, () => {
             </footer>
           </PopoverContent>
         </Popover>
-        <button class="icon-button compact" :title="t('settings')" :aria-label="t('settings')" @click="openSettings"><Settings /></button>
+        <button v-if="!isRdpConnection" class="icon-button compact" :title="t('settings')" :aria-label="t('settings')" @click="openSettings"><Settings /></button>
         <button class="icon-button compact" :title="t('panel.hideToolbar')" :aria-label="t('panel.hideToolbar')" :aria-pressed="panelToolbarHidden" @click="togglePanelToolbar"><ChevronUp /></button>
       </div>
       <!-- 传输弹层单实例（tab/panel 两表面共用）：Popover 挂在 header 层，锚点是
@@ -8381,7 +8525,7 @@ watch(historyScope, () => {
              键盘经扫描码映射、鼠标/滚轮原样映射发 rdp/input，服务端光标形状
              （rdp/pointer）落到画布 CSS cursor。连接态/退出覆盖层沿用
              terminal-overlay。 -->
-        <RdpSurface v-if="isRdpMode" ref="rdpSurface" class="vnc-surface" :scale-mode="rdpScaleMode" @input="sendRdpInput" @clipboard-out="sendRdpClipboard" />
+        <RdpSurface v-if="isRdpMode" ref="rdpSurface" class="vnc-surface" :scale-mode="rdpScaleMode" @input="sendRdpInput" @clipboard-out="sendRdpClipboard" @desktop-size="(size) => (rdpDesktopSize = size)" />
         <!-- P1-2 动作链接命令预览浮签：悬停 / Alt+点击时显示建议命令文本。 -->
         <div v-if="actionLinkHint" class="action-link-hint mono" :style="{ left: `${actionLinkHint.x}px`, top: `${actionLinkHint.y}px` }">{{ actionLinkHint.text }}</div>
         <!-- #33/#71 快速输入丢失诊断浮层：Ctrl/Cmd+Shift+D 切换。keys=onData
@@ -8557,7 +8701,7 @@ watch(historyScope, () => {
              预拨号、面板直出终端区域），但 FAILED/disconnected 是死路态——
              连接卡（错误文案 + 重连出口）在面板内同样要呈现，否则面板读作空白。 -->
         <div
-          v-if="(!panelSurface || terminalState === 'error' || terminalState === 'disconnected') && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && !isRdpConnection && terminalState !== 'connected' && !reconnectPending"
+          v-if="(!panelSurface || terminalState === 'error' || terminalState === 'disconnected') && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && !isRdpConnection && !isRdpMode && terminalState !== 'connected' && !reconnectPending"
           class="terminal-overlay"
         >
           <ConnectingCard
@@ -8650,6 +8794,9 @@ watch(historyScope, () => {
             <span v-if="rdpState.error" class="mono local-exit-code">{{ rdpState.error }}</span>
             <div class="local-exit-actions">
               <button class="primary-button" @click="reconnectRdpSession">{{ t("rdp.reconnect") }}</button>
+              <!-- 认证失败是永久错误：重连只会用同一套凭据再撞一次（协议：
+                   认证失败永不自动重试），把用户带回可改凭据的连接对话框。 -->
+              <button v-if="rdpState.errorKind === 'authentication'" @click="rdpDialogOpen = true">{{ t("rdp.editCredentials") }}</button>
               <button @click="closeRdpSession">{{ t("rdp.close") }}</button>
             </div>
           </div>
@@ -9994,7 +10141,7 @@ watch(historyScope, () => {
     <VncConnectDialog :locale="locale" :open="vncDialogOpen" @update:open="(open) => (vncDialogOpen = open)" @connect="startVncSession" />
 
     <!-- RDP 连接表单（P3-4）：host/port/NLA 凭据/分辨率/证书策略。 -->
-    <RdpConnectDialog :locale="locale" :open="rdpDialogOpen" @update:open="(open) => (rdpDialogOpen = open)" @connect="startRdpSession" />
+    <RdpConnectDialog :locale="locale" :open="rdpDialogOpen" @update:open="(open) => (rdpDialogOpen = open)" @connect="connectViaRdpDialog" />
 
     <!-- RDP 确认/VNC 确认/Telnet 确认/串口确认（M32-A 移除）：工具条协议直开
          入口下线后，表单兜底从连接路由失败路径直接弹 ConnectDialog，不再有
@@ -10097,6 +10244,7 @@ watch(historyScope, () => {
    新建/编辑/导入样式随管理视图迁入 QuickCommandsSection。 */
 .quick-commands-popover h3 { margin: 2px 4px 6px; font-size: 12px; }
 
+
 /* RDP 缩放三档按钮组（isRdpMode 工具组）：与 icon-button 同密度，激活态
    走 primary 描边与 icon-emerald 同款强调。 */
 .rdp-scale-group { display: flex; align-items: center; gap: 1px; }
@@ -10122,6 +10270,31 @@ watch(historyScope, () => {
 .rdp-paste-text:focus { border-color: color-mix(in srgb, var(--primary) 70%, var(--border)); }
 .rdp-paste-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 .rdp-paste-hint { margin: 6px 4px 0; font-size: 11px; }
+/* RDP 分辨率弹层（工具栏下拉）：预设网格 + 自定义宽高行。 */
+.rdp-resolution-popover h3 { margin: 2px 4px 8px; font-size: 12px; }
+.rdp-resolution-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.rdp-resolution-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 11px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.rdp-resolution-item:hover { border-color: color-mix(in srgb, var(--primary) 55%, var(--border)); }
+.rdp-resolution-item.is-active { color: var(--primary); border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.rdp-resolution-custom { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.rdp-resolution-custom input {
+  width: 72px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 11px;
+  padding: 4px 6px;
+}
+.rdp-resolution-custom input:focus { border-color: color-mix(in srgb, var(--primary) 70%, var(--border)); }
 
 /* 搜索行：图标 + 无边框输入（容器边框即输入框）。 */
 .quick-search { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 4px; padding: 0 8px; background: var(--background); }
