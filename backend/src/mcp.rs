@@ -4818,12 +4818,10 @@ fn parse_jump_hosts(arguments: &Value) -> Result<Vec<JumpHost>, String> {
 /// Quick Sudo profile tool (schema round 6: every advertised parameter must
 /// carry an accurate description; defined once here, referenced by both
 /// schema sites so the wording can never drift apart).
-const AUTHENTICATION_DESCRIPTION: &str = "Authentication method for inline dials: password (default), private-key, private-key-password, or agent. Omitted is inferred: privateKeyPath or privateKeyContent present selects private-key, otherwise password; private-key* requires one of the two and password requires password";
+const AUTHENTICATION_DESCRIPTION: &str = "Authentication for inline dials: password (default), private-key, private-key-password, or agent; omitted is inferred from privateKey*/password presence";
 const CONNECT_TIMEOUT_DESCRIPTION: &str =
     "TCP connect timeout in seconds for inline dials (default 30, minimum 1)";
-const AUTH_FLOW_MODE_DESCRIPTION: &str = "Two-factor sudo authentication flow: password_only (no OTP), password_plus_otp (password and TOTP code submitted together at a combined prompt), password_then_otp (password first, TOTP answered at a separate later prompt; default when omitted). Values are matched case-insensitively (PASSWORD_PLUS_OTP works); unrecognized values fall back to the default flow instead of erroring. When set both inline and via a Quick Sudo profile, explicit arguments win";
-const PASSWORD_PROMPT_HINT_DESCRIPTION: &str = "Text fragment used to recognize a non-standard sudo password prompt (localized or custom message) when the built-in prompt patterns miss it";
-const TOTP_PROMPT_HINT_DESCRIPTION: &str = "Text fragment used to recognize a non-standard TOTP/verification-code prompt when the built-in prompt patterns miss it";
+const AUTH_FLOW_MODE_DESCRIPTION: &str = "Two-factor sudo flow: password_only (no OTP), password_plus_otp (combined prompt), password_then_otp (separate later prompt; default); unknown values fall back to the default, explicit args win";
 
 /// Tool-specific parameters layered on the shared connection properties.
 /// Each entry is `(key, json type, description)`; the type is part of the
@@ -4835,27 +4833,33 @@ fn connection_properties(extra: &[(&str, &str, &str)]) -> Value {
         // it for terminal routing (runInTerminal) and stored-connection
         // resolution, and an undeclared argument is dropped by schema
         // validation before the sidecar ever sees the call.
-        "connectionId": { "type": "string", "description": "Saved DBX connection id (list ids with ssh_list_connections, or in the DBX app). With runInTerminal: true, a stdio-mode call is forwarded through the DBX app bridge to the connection's visible workbench terminal; on the embedded bridge it also resolves the stored connection's Quick Sudo source and read-only flag. In stdio mode an id unknown to this session is forwarded to the running DBX app, so no inline credentials are needed" },
-        "connectionName": { "type": "string", "description": "Saved DBX connection name. It may replace connectionId; if names repeat, also provide host, port, and username to narrow to one connection. Ambiguous matches are refused with candidate ids." },
-        "host": { "type": "string", "description": "Remote SSH host" },
-        "port": { "type": "integer", "description": "SSH port (default 22)" },
-        "username": { "type": "string", "description": "Login user" },
+        //
+        // 描述文本按 #172 预算刻意精简（属性名/类型/枚举齐全，语义保留）：
+        // 33 个工具 × 21 参数逐字重复，description 文本是 tools/list 尺寸的
+        // 绝对大头；自明参数（host/port/username/路径类）整条去掉
+        // description，改写时只删铺垫，不删模型正确调用所需的行为语义与
+        // 安全警告。超预算先砍最长描述（见 tool_definitions_stay_under 测试）。
+        "connectionId": { "type": "string", "description": "Saved DBX connection id (via ssh_list_connections). runInTerminal: true forwards a stdio call to that connection's workbench terminal; unknown stdio ids forward to the DBX app, so no inline credentials are needed" },
+        "connectionName": { "type": "string", "description": "Saved connection name (may replace connectionId); ambiguous matches are refused with candidate ids" },
+        "host": { "type": "string" },
+        "port": { "type": "integer" },
+        "username": { "type": "string" },
         "password": { "type": "string", "description": "Login password (password auth, or sudo fallback)" },
-        "privateKeyPath": { "type": "string", "description": "Local private key path for key auth" },
-        "privateKeyContent": { "type": "string", "description": "Private key contents for key auth (OpenSSH/PEM/PPK); takes precedence over privateKeyPath" },
-        "privateKeyPassphrase": { "type": "string", "description": "Private key passphrase" },
-        "agentSocket": { "type": "string", "description": "SSH agent socket for agent auth" },
+        "privateKeyPath": { "type": "string" },
+        "privateKeyContent": { "type": "string", "description": "Private key contents (OpenSSH/PEM/PPK); takes precedence over privateKeyPath" },
+        "privateKeyPassphrase": { "type": "string" },
+        "agentSocket": { "type": "string" },
         "authentication": { "type": "string", "enum": ["password", "private-key", "private-key-password", "agent"], "description": AUTHENTICATION_DESCRIPTION },
         "connectTimeoutSecs": { "type": "integer", "description": CONNECT_TIMEOUT_DESCRIPTION },
         "sudoPassword": { "type": "string", "description": "Sudo password override (defaults to password)" },
-        "totpSecret": { "type": "string", "description": "TOTP secret (otpauth:// URI, base32 key, or static code) for 2FA auto-answer; multiple secrets (newline/semicolon separated) rotate automatically — unexpired, unused codes first, across calls" },
+        "totpSecret": { "type": "string", "description": "TOTP secret (otpauth:// URI, base32, or static code) for 2FA auto-answer; newline/semicolon separated secrets rotate automatically" },
         "authFlowMode": { "type": "string", "enum": ["password_only", "password_plus_otp", "password_then_otp"], "description": AUTH_FLOW_MODE_DESCRIPTION },
-        "passwordPromptHint": { "type": "string", "description": PASSWORD_PROMPT_HINT_DESCRIPTION },
-        "totpPromptHint": { "type": "string", "description": TOTP_PROMPT_HINT_DESCRIPTION },
-        "jumpHosts": { "type": "array", "description": "ProxyJump chain (up to 3): [{\"host\":\"bastion\",\"port\":22,\"username\":\"ops\",\"password\":\"…\"}] with snake_case fields; replaces direct dialing" },
-        "triggers": { "type": "string", "description": "Expect-style terminal triggers as a JSON or tssh text string. Official syntax reference: https://github.com/trzsz/trzsz-ssh. Example: {\"stages\":[{\"pattern\":\"(?i)code\",\"sendText\":\"654321\\\\r\"}]}; each stage answers sendText, sendSecretKey (trigger_answer_1/2, unavailable on inline dials) or sendCommand (local command) when its ordered regex matches the PTY output. Invalid JSON/tssh rules, limits (max 16 stages) or an uncompileable regex fails the dial. A malicious server can fake a matching prompt to harvest the configured reply" },
-        "passwordCommand": { "type": "string", "description": "Local command run only when no explicit password is set; its stdout minus one trailing newline is the login password. Placeholders: %h host, %u username, %p port, %% a literal %. Explicit credentials win" },
-        "passphraseCommand": { "type": "string", "description": "Local command run only when an encrypted private key cannot be decoded without a passphrase; its stdout minus one trailing newline is the passphrase. Placeholders: %h host, %u username, %p port, %% a literal %" },
+        "passwordPromptHint": { "type": "string" },
+        "totpPromptHint": { "type": "string" },
+        "jumpHosts": { "type": "array", "description": "ProxyJump chain (up to 3), snake_case: [{\"host\":\"bastion\",\"port\":22,\"username\":\"ops\",\"password\":\"…\"}]; replaces direct dialing" },
+        "triggers": { "type": "string", "description": "Expect-style triggers, JSON or tssh text (https://github.com/trzsz/trzsz-ssh), e.g. {\"stages\":[{\"pattern\":\"(?i)code\",\"sendText\":\"654321\\\\r\"}]}; each stage replies when its regex matches PTY output; invalid rules fail the dial. A malicious server can fake prompts to harvest replies" },
+        "passwordCommand": { "type": "string", "description": "Local command; stdout (minus trailing newline) is the login password when none is set. Placeholders: %h %u %p %%; explicit credentials win" },
+        "passphraseCommand": { "type": "string", "description": "Local command; stdout is the key passphrase when the key needs one. Same placeholders as passwordCommand" },
     });
     if let Some(map) = properties.as_object_mut() {
         for (key, kind, description) in extra {
@@ -5139,7 +5143,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "docker_action",
-            "description": "Run a lifecycle action (start | stop | restart | kill | rm) on one container on a remote SSH host, or on the local machine with {\"target\":\"local\"}. Works with Docker and Podman: pass cli (e.g. \"podman\") and optionally socket or host (mutually exclusive) to retarget the daemon. DESTRUCTIVE for rm (removes the container) and kill (SIGKILL): get explicit human confirmation in the frontend/dialog before sending them - start/stop/restart are reversible and do not need one. containerId must be 12-64 lowercase hex characters; the tool never accepts passwords. Plain execution first; only a daemon-socket permission failure retries through the connection's Quick Sudo credentials (piped over stdin, never the command line). Read-only connections are refused.",
+            "description": "Run a lifecycle action (start | stop | restart | kill | rm) on one container (remote SSH host, or local with {\"target\":\"local\"}). Docker and Podman: pass cli/socket/host to retarget. DESTRUCTIVE for rm and kill: get explicit human confirmation first; start/stop/restart are reversible. containerId is 12-64 lowercase hex. Only a daemon-socket permission failure retries via Quick Sudo credentials (stdin, never argv). Read-only connections are refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": connection_properties(&[
@@ -5219,8 +5223,8 @@ pub fn tool_definitions() -> Value {
                     "clearSudoPassword": { "type": "boolean", "description": "Set true to remove the stored sudo password" },
                     "clearTotpSecret": { "type": "boolean", "description": "Set true to remove the stored TOTP secret" },
                     "authFlowMode": { "type": "string", "enum": ["password_only", "password_plus_otp", "password_then_otp"], "description": AUTH_FLOW_MODE_DESCRIPTION },
-                    "passwordPromptHint": { "type": "string", "description": PASSWORD_PROMPT_HINT_DESCRIPTION },
-                    "totpPromptHint": { "type": "string", "description": TOTP_PROMPT_HINT_DESCRIPTION },
+                    "passwordPromptHint": { "type": "string", "description": "Text fragment to recognize a non-standard sudo password prompt when built-in patterns miss it" },
+                    "totpPromptHint": { "type": "string", "description": "Text fragment to recognize a non-standard TOTP/verification-code prompt when built-in patterns miss it" },
                     "sudoUsePty": { "type": "boolean", "description": "Request a PTY for sudo executions using this profile" },
                 },
                 "required": ["name"],
@@ -5416,6 +5420,22 @@ mod tests {
         // Unique data dir per call: settings persistence (limits AND the
         // §1.3 permission keys) must not leak across parallel tests.
         McpState::new(std::env::temp_dir().join(format!("dbx-mcp-test-{}", uuid::Uuid::new_v4())))
+    }
+
+    /// tools/list 尺寸预算（#172）：桥模式下 `dbx_plugin_tools` 把整份列表
+    /// 塞进一次工具返回，MCP 客户端对结果大小有硬上限（实测 126k 字符 /
+    /// ~27.9k token 被判超限落盘）。公共连接参数在严格宿主下不可删（未声明
+    /// 参数会在 schema 校验时被丢弃），所以预算靠压缩 description 文本达成。
+    /// 超预算时先砍最长 description，而不是删属性名。
+    #[test]
+    fn tool_definitions_stay_under_bridge_result_budget() {
+        let serialized = tool_definitions().to_string();
+        let chars = serialized.chars().count();
+        assert!(
+            chars <= 100_000,
+            "tools/list is {chars} chars (budget 100_000); \
+             trim the fattest descriptions in connection_properties/tool_definitions"
+        );
     }
 
     // —— §1.3 confirm 档 + connectionScope ——
