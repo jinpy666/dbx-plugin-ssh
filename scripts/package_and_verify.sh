@@ -19,7 +19,9 @@ if [ "${1:-}" != "--no-build" ]; then
   echo "==> cargo build --release"
   cargo build --release --manifest-path backend/Cargo.toml
   echo "==> dbx-plugin package ."
-  unset DBX_PLUGIN_SDK_ROOT
+  # 与 build.sh 同款垫片：unset 会让 npm 包装器回注 CLI 自带 sdk-root（旧
+  # vendored SDK），仓库 shared/sdk 的本地修复进不了包（0.4.79 案例）。
+  export DBX_PLUGIN_SDK_ROOT="$(bash scripts/sdk_root_shim.sh)"
   NO_COLOR=1 dbx-plugin package .
 fi
 
