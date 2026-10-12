@@ -1455,7 +1455,10 @@ async function saveMcpSettings() {
  * MCP 表单非法时保持现有校验提示、静默跳过提交。
  */
 async function saveSettings() {
-  if (isLocalSession.value || settingsSaving.value || settingsLoading.value || settingsLoadFailed.value || !settingsMeta.value) return;
+  // 本地 Shell 工作台没有 SSH 会话（settingsMeta 恒缺）：全局偏好面板必须
+  // 可保存，只隔离会话级段（sudo/2FA/agent 更新依赖 sessionId）。
+  if (settingsSaving.value || settingsLoading.value || settingsLoadFailed.value) return;
+  if (!isLocalSession.value && !settingsMeta.value) return;
   settingsSaving.value = true;
   try {
     props.downloadPrefs.persistDir(downloadDirDraft.value);
@@ -1479,6 +1482,8 @@ async function saveSettings() {
       // editorDefaultDraft === "system"（或意外值）时不落默认编辑器字段。
     });
     if (profileEditing.value) await saveProfileDraft();
+    // 会话级段：本地 Shell 工作台整段跳过（分类已隐藏，无表单可改）。
+    if (!isLocalSession.value) {
     const rememberedCommands = sanitizeRememberedCommands(settingsDraft.rememberedCommands);
     const updates: Record<string, unknown> = {
       quickSudo: settingsDraft.quickSudo,
@@ -1501,6 +1506,7 @@ async function saveSettings() {
     }
     settingsDraft.sudoPassword = "";
     settingsDraft.totpSecret = "";
+    }
     await saveMcpSettings();
     emit("notice", t("settingsSaved"));
   } catch (cause) {
@@ -2569,7 +2575,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
         <footer>
           <button :disabled="settingsLoading || settingsLoadFailed || settingsSaving || (!settingsMeta?.sudoPasswordSet && !settingsMeta?.totpConfigured)" @click="clearStoredSecrets"><Trash2 />{{ t("settingsClearSecrets") }}</button>
           <button @click="emit('update:open', false)">{{ t("close") }}</button>
-          <button class="primary-button" :disabled="settingsLoading || settingsLoadFailed || settingsSaving || !settingsMeta" @click="saveSettings"><Loader2 v-if="settingsSaving" class="spinning" />{{ t("settingsSave") }}</button>
+          <button class="primary-button" :disabled="settingsLoading || settingsLoadFailed || settingsSaving || (!isLocalSession && !settingsMeta)" @click="saveSettings"><Loader2 v-if="settingsSaving" class="spinning" />{{ t("settingsSave") }}</button>
         </footer>
       </DialogContent>
     </Dialog>

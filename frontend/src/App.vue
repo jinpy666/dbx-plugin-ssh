@@ -6490,8 +6490,17 @@ function clipboardDeps(): ClipboardDeps {
 }
 
 async function copyTerminalSelection() {
-  const text = terminal?.getSelection() || "";
-  if (!text) return;
+  // 选区以菜单打开瞬间的快照优先：弹层接管焦点后实时 getSelection() 可能
+  // 已被清空（clipboard 档直通路径不受影响，仍取实时选区）。
+  const text = menuSelectionSnapshot.value || terminal?.getSelection() || "";
+  menuSelectionSnapshot.value = "";
+  // 无论成败都关菜单：静默早退会让菜单挂着，看起来像"复制无效"。
+  terminalMenuOpen.value = false;
+  if (!text) {
+    showError(new Error(t("terminalCopyNoSelection")), "terminal");
+    terminal?.focus();
+    return;
+  }
   terminalCopyCache.set(text);
   try {
     await writeClipboardText(text, clipboardDeps());
@@ -6499,7 +6508,6 @@ async function copyTerminalSelection() {
   } catch {
     showError(new Error(t("terminalCopyUnavailable")), "terminal");
   }
-  terminalMenuOpen.value = false;
   terminal?.focus();
 }
 
@@ -7230,6 +7238,9 @@ async function confirmChmod() {
 }
 
 
+// 右键菜单打开瞬间的选区快照（复制用它，而不是点击时刻的实时选区）。
+const menuSelectionSnapshot = ref("");
+
 function showTerminalMenu(event: MouseEvent) {
   // RDP 画布占住终端视图时，右键属于远程桌面（画布 mousedown 已把右键发往
   // rdp/input）；本地/SSH 终端菜单整类不适用，压住菜单与系统菜单即返回。
@@ -7247,6 +7258,9 @@ function showTerminalMenu(event: MouseEvent) {
     shiftKey: event.shiftKey,
   });
   if (target === "menu") {
+    // 打开瞬间快照选区文本：菜单接管焦点后 xterm 可能清空选区，复制时再
+    // getSelection() 就会拿到空串（右键复制无效的静默失败路径）。
+    menuSelectionSnapshot.value = terminal?.hasSelection() ? (terminal.getSelection() ?? "") : "";
     terminalMenuOpen.value = true;
     fileMenu.value = undefined;
     return;
