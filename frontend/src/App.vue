@@ -6632,7 +6632,11 @@ async function sendConfirmedPaste(text: string) {
     terminal?.focus();
     return;
   }
-  if (!session.value || terminalTransferBusy.value) return;
+  // 会话门按活动传输判定（sendTerminalBytes 已分派 SSH/本地/Telnet/串口）：
+  // 只看 SSH session 会让本地 Shell（及 Telnet/串口）的粘贴静默无效果——
+  // 确认弹窗照出、字节却永不落终端（用户感知为「右键粘贴没动静」）。
+  if (terminalTransferBusy.value) return;
+  if (!session.value && !localSession.value && !telnetSession.value && !serialSession.value) return;
   trackPendingInput(payload);
   sendTerminalBytes(new TextEncoder().encode(payload));
   terminal?.focus();
