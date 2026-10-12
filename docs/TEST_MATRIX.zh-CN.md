@@ -261,7 +261,7 @@ smoke_fs_test.py +1 用例（PASS **83** / SKIP 0 / FAIL 0）：latin-1 连接�
 | --- | --- | --- |
 | `SGR 4:3`（curly 下划线） | 内核入属性 | 字节入 cell 下划线属性（`4:` 系冒号子参同路），**零宽不占列**；`translateToString` 纯文本不含任何残留 |
 | `SGR 38:2::r:g:b`（ITU 冒号真彩，含 colorspace 空段） | 内核入属性 | 与 legacy `38;2;r;g;b` 存进同一种 RGB 单元属性（getFgColor 打包值一致、色彩模式一致），零宽不占列 |
-| 与自研 decoration（关键词高亮 / 动作链接 / gutter）的交互 | **无相互作用** | 自研绘制路径按 `buffer.getLine(row).translateToString()` 的纯文本列偏移定位（`keywordHighlight.ts` 的 `matchesInLine` / `toAbsoluteRowRange`），SGR 已被内核在 parse 阶段消费为 cell 属性，冒号形式不改变文本列——装饰 `registerDecoration({ x, width })` 的偏移天然对齐；着色为装饰层半透明填充画在文字层上方，与内核画的下划线/真彩字色叠加显示，互不覆写。前提「冒号 SGR 零宽」一旦被内核破坏会整体错位，已锁进 spec |
+| 与自研 decoration（关键词高亮 / 动作链接 / gutter）的交互 | **无相互作用** | 自研绘制路径按 `buffer.getLine(row).translateToString()` 的纯文本列偏移定位（`keywordHighlight.ts` 的 `matchesInLine` / `toAbsoluteRowRange`），SGR 已被内核在 parse 阶段消费为 cell 属性，冒号形式不改变文本列——装饰 `registerDecoration({ x, width })` 的偏移天然对齐；着色为装饰层半透明填充画在文字层上方，与内核画的下划线/真彩字色叠加显示，互不覆写。前提「冒号 SGR 零宽」一旦被内核破坏会整体错位，已锁进 spec。**2026-10-12 补充**：着色分两种显示方式（全局 `ssh-keyword-display-mode`）——默认「背景色块」即上述半透明填充，与 SGR 真彩前景互不覆写；切到「字体颜色」后装饰改为写单元格 `foregroundColor`，此时**会**覆盖 SGR 真彩前景色（内核下划线仍叠加）；该 `foregroundColor` 由 DOM / WebGL 两条渲染路径共同消费（DOM 落到单元格 span，WebGL 经 `CellColorResolver` 折进该格 fg 属性），GPU 渲染不受影响 |
 | 与命令标记路径（`terminalCommandMarkers.ts` OSC 633 解析）的交互 | **无相互作用** | 633 解析只识别自己的帧（`ESC]633;…`），SGR 冒号序列原样透传内核；流中夹带的 SGR 不影响 carry/帧边界判定 |
 
 ### 8 位 C1 控制码（GBK 堡垒机场景）

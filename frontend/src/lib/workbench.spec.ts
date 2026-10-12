@@ -10,7 +10,7 @@ import { clampFontSize } from "./terminalZoom";
 import { pushPathHistory, sanitizePathHistories } from "./sftpPathHistory";
 import { formatBytes, formatRate } from "./format";
 import { expandSelection, filterSftpEntries } from "./sftpFileFilters";
-import { getSshWorkbenchSplitLayout, resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, sanitizeSftpAutoConnectPref, shouldLazyLoadSftpListing } from "./workbenchLayout";
+import { getSshWorkbenchSplitLayout, resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, sanitizeSftpAutoConnectPref, shouldLazyLoadSftpListing, sanitizeWorkbenchLayoutPrefs } from "./workbenchLayout";
 import { commandMarkerTooltip, formatCommandDuration, getOsc633ParserState, Osc633CommandParser, parseOsc633StreamChunk, runningCommandElapsedMs } from "./terminalCommandMarkers";
 import { describeWorkbenchSessionStatus, isUsableSshSession, normalizeSshSessionStatus } from "./sessionStatus";
 import { sanitizeCommandOutput, stripCommandEcho, stripHiddenCommandEchoes, stripTerminalControlSequences } from "./terminalOutputText";
@@ -144,6 +144,41 @@ describe("SSH workbench protocol helpers", () => {
     expect(sanitizeSftpPaneDefaultOpen("true")).toBe(true);
     expect(sanitizeSftpPaneDefaultOpen("garbage")).toBe(false);
     expect(sanitizeSftpPaneDefaultOpen("false")).toBe(false);
+  });
+
+  it("sanitizes the cross-restart layout preference payload (issue #178)", () => {
+    // 非对象/损坏输入：视为无偏好档，调用方保持当前值。
+    expect(sanitizeWorkbenchLayoutPrefs(null)).toBeNull();
+    expect(sanitizeWorkbenchLayoutPrefs("json")).toBeNull();
+    expect(sanitizeWorkbenchLayoutPrefs([1, 2])).toBeNull();
+    // 合法载荷逐字段收下。
+    expect(sanitizeWorkbenchLayoutPrefs({
+      paneOrder: "sftp-left",
+      splitRatio: 62,
+      sftpPaneOpen: true,
+      visibleColumns: ["size", "modified"],
+      sftpColumnWidths: { size: 90, modified: 140 },
+      sftpNameWidth: 260,
+      showHidden: true,
+      sort: { column: "modified", direction: "desc" },
+    })).toEqual({
+      paneOrder: "sftp-left",
+      splitRatio: 62,
+      sftpPaneOpen: true,
+      visibleColumns: ["size", "modified"],
+      sftpColumnWidths: { size: 90, modified: 140 },
+      sftpNameWidth: 260,
+      showHidden: true,
+      sort: { column: "modified", direction: "desc" },
+    });
+    // 越界/非法字段逐个丢弃，其余保留；排序仅认三种列与两个方向。
+    expect(sanitizeWorkbenchLayoutPrefs({
+      paneOrder: "top-left",
+      splitRatio: 99,
+      sort: { column: "owner", direction: "asc" },
+      showHidden: "yes",
+    })).toEqual({});
+    expect(sanitizeWorkbenchLayoutPrefs({ sort: { column: "size", direction: "up" } })).toEqual({});
   });
 
   it("resolves the directory-follow switch from the workbench state or the global preference", () => {

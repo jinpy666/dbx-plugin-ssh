@@ -220,7 +220,17 @@ try {
   console.log("==> 关键词高亮 pane（从 Terminal 拆出的规则管理器）");
   await openCategory(4);
   check("highlight pane renders the rules editor", (await page.locator(".settings-pane:visible .highlight-rule-list, .settings-pane:visible .highlight-editor").count()) > 0);
+  // 显示方式（全局偏好）：默认「背景色块」= 既有行为；「字体颜色」把规则色写进
+  // 字形前景，decoration 的 foregroundColor 由 DOM / WebGL 两条渲染路径共同消费，
+  // 故任何显示方式下都不应出现"会关闭 GPU 渲染"的降级提示。
+  const displayItems = page.locator(".settings-pane:visible .highlight-display-mode-item");
+  check("highlight pane exposes the display-mode switch", (await displayItems.count()) === 2, `count=${await displayItems.count()}`);
+  check("display mode defaults to the background fill", (await page.locator(".settings-pane:visible .highlight-display-mode-item[data-state='on']").innerText()).trim() === "Background");
+  await displayItems.filter({ hasText: "Text color" }).click();
+  check("text mode shows no GPU fallback hint", (await page.locator(".settings-pane:visible .highlight-display-mode-hint").count()) === 0);
   await page.screenshot({ path: join(SHOT_DIR, "02b-keyword-highlighting.png") });
+  // 复原默认态，免得这条断言改动影响后面的持久化 round-trip。
+  await displayItems.filter({ hasText: "Background" }).click();
 
   console.log("==> 快速命令 pane（从 Terminal 拆出的片段管理器）");
   await openCategory(5);

@@ -1079,6 +1079,15 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .highlight-rule-limit { font-size: 10px; color: var(--muted-foreground); margin-right: auto; }
 .highlight-switch-control { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted-foreground); cursor: pointer; }
 .highlight-switch-control input { accent-color: var(--primary); }
+/* 显示方式（全局偏好）：背景色块 = 既有行为；字体颜色把规则色写进字形前景。
+   两者都在 GPU 渲染器下生效，故无降级提示样式。 */
+.highlight-display-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+.highlight-display-mode-label { font-size: 11px; color: var(--muted-foreground); }
+.highlight-display-mode-group { display: inline-flex; overflow: hidden; border: 1px solid var(--border); border-radius: 4px; }
+.highlight-display-mode-item { height: 22px; padding: 0 10px; border: 0; background: transparent; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+.highlight-display-mode-item + .highlight-display-mode-item { border-left: 1px solid var(--border); }
+.highlight-display-mode-item:hover { background: var(--accent); }
+.highlight-display-mode-item[data-state="on"] { background: color-mix(in srgb, var(--primary) 16%, transparent); color: var(--primary); }
 
 /* ---- metrics sparkline + 发行版徽标（IMPL_PLAN_NETCATTY_PARITY §3-B2）---- */
 /* 网络区头部两枚 60×18 SVG 曲线（rx=primary / tx=success），零资产纯内联。

@@ -70,6 +70,14 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 历史面板功能开关（issue #169）：关 = 面板整体不可唤起（↑ 与 Ctrl+R 归还
   // 远端 shell 原生历史/反向搜索）。SettingsDialog 开关行自治读写，默认开。
   "ssh-history-panel-enabled",
+  // 空提示符快捷键引导条（terminalPromptHints.ts 自治读写）：设置开关 +
+  // 用过即散的一次性旗标。此前漏登记白名单——真机写入落盘但水合不拉，
+  // 重启永远读不回（issue #178），补登记后恢复持久化。
+  "ssh-terminal-prompt-hints-enabled",
+  "ssh-terminal-prompt-hints-dismissed",
+  // 跨重启的布局/视图全局偏好（issue #178）：单键 JSON（paneOrder/splitRatio/
+  // SFTP 面板开合/列显隐与列宽/显示隐藏文件/排序），writeWorkbenchState 写穿。
+  "ssh-workbench-layout",
   // 建议黑名单（对标 Warp IgnoredSuggestionsModel，suggestionBlocklist.ts
   // 自治读写）：点 ✗ 屏蔽的单条建议不再提示。
   "ssh-suggestion-blocklist",

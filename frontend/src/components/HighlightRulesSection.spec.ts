@@ -1,11 +1,12 @@
 // @vitest-environment happy-dom
 // HighlightRulesSection 组件测试（M32-A2）：规则列表渲染、启停/编辑/删除上抛、
-// 草稿校验（非法颜色不出 emit）、保存成功后随 rules 引用替换复位草稿。
+// 草稿校验（非法颜色不出 emit）、保存成功后随 rules 引用替换复位草稿；
+// 关键词显示方式（全局：背景色块 / 字体颜色）的切换与 radio 语义。
 import { afterEach, describe, expect, it } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import HighlightRulesSection from "./HighlightRulesSection.vue";
 import { workbenchMessage } from "../lib/i18n";
-import type { HighlightRuleView } from "../lib/keywordHighlight";
+import type { HighlightDisplayMode, HighlightRuleView } from "../lib/keywordHighlight";
 
 const t = (key: string, values?: Record<string, string | number>) => workbenchMessage("zh-CN", key, values);
 
@@ -14,9 +15,9 @@ const rules: HighlightRuleView[] = [
   { id: "r2", pattern: "\\d+ms", color: "#3b82f6", isRegex: true, caseSensitive: true, enabled: false, createdAt: 2, updatedAt: 2 },
 ];
 
-function mountSection(props: { rules?: HighlightRuleView[]; saving?: boolean } = {}) {
+function mountSection(props: { rules?: HighlightRuleView[]; saving?: boolean; displayMode?: HighlightDisplayMode } = {}) {
   return mount(HighlightRulesSection, {
-    props: { rules: props.rules ?? rules, saving: props.saving ?? false, limit: 30, t },
+    props: { rules: props.rules ?? rules, saving: props.saving ?? false, limit: 30, displayMode: props.displayMode ?? "bg", t },
   });
 }
 
@@ -57,5 +58,27 @@ describe("HighlightRulesSection", () => {
     await wrapper.setProps({ rules: [{ id: "r1", pattern: "ERROR", color: "#f59e0b", isRegex: false, caseSensitive: false, enabled: true, createdAt: 1, updatedAt: 1 }] });
     await flushPromises();
     expect((wrapper.find(".highlight-editor-inputs input").element as HTMLInputElement).value).toBe("");
+  });
+
+  it("emits the display mode on switch and keeps both modes GPU-safe", async () => {
+    const wrapper = mountSection({ displayMode: "bg" });
+    const items = wrapper.findAll(".highlight-display-mode-item");
+    expect(items.map((item) => item.text())).toEqual(["背景色块", "字体颜色"]);
+    // 默认背景色块 = 既有行为。
+    expect(wrapper.find(".highlight-display-mode-hint").exists()).toBe(false);
+
+    await items[1].trigger("click");
+    expect(wrapper.emitted("update:displayMode")![0][0]).toBe("text");
+
+    // 「字体颜色」同样在 GPU 渲染器下生效（decoration 的 foregroundColor 被 DOM /
+    // WebGL 两条渲染路径共同消费），因此不出现任何"关闭 GPU"的降级提示。
+    await wrapper.setProps({ displayMode: "text" });
+    expect(wrapper.find(".highlight-display-mode-hint").exists()).toBe(false);
+    // 再点已选中项：reka-ui 单选会派发空串（反选），组件按 radio 语义忽略。
+    await items[1].trigger("click");
+    expect(wrapper.emitted("update:displayMode")).toHaveLength(1);
+    await items[0].trigger("click");
+    expect(wrapper.emitted("update:displayMode")).toHaveLength(2);
+    expect(wrapper.emitted("update:displayMode")![1][0]).toBe("bg");
   });
 });

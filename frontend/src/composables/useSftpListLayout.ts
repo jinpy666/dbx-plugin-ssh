@@ -186,6 +186,8 @@ onBeforeUnmount(() => {
 
 function toggleSort(column: SftpSortColumn) {
   sort.value = sort.value.column === column ? { column, direction: sort.value.direction === "asc" ? "desc" : "asc" } : { column, direction: "asc" };
+  // 排序进全局布局偏好（issue #178）：与列宽/面板开合同一防抖写穿通道。
+  persistState();
 }
 
 function sortIcon(column: SftpSortColumn) {

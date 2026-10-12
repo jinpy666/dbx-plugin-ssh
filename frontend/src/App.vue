@@ -213,6 +213,7 @@ import { AGENT_MODES } from "./lib/agentTerminal";
 import { purposeKeyLabel, sanitizeTriagePayload, severityClass } from "./lib/alertTriage";
 import {
   highlightFillStyle,
+  highlightTextStyle,
   matchesInLine,
   shouldRebuildHighlightRow,
   toAbsoluteRowRange,
@@ -280,7 +281,7 @@ import { useAgentTerminalMode } from "./composables/useAgentTerminalMode";
 import { useAlertTriage } from "./composables/useAlertTriage";
 import { type TransferHistoryEntry } from "./lib/transferHistory";
 import { useTransferHistory } from "./composables/useTransferHistory";
-import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, sanitizeSftpAutoConnectPref, shouldLazyLoadSftpListing, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
+import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, sanitizeSftpAutoConnectPref, shouldLazyLoadSftpListing, sanitizeWorkbenchLayoutPrefs, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
 import { pickLiveSessionForReattach, pickProtocolSessionForReattach, type SessionSummary } from "./lib/sessionRestore";
 import { toolbarTintStyle } from "./lib/toolbarTint";
 import { createGhostClickGuard } from "./lib/ghostClickGuard";
@@ -567,6 +568,11 @@ const COMMAND_HISTORY_META_KEY = "ssh-command-history-meta";
 // 终端字号/字体族键移入 lib/terminalFont.ts（issue #31 字体单独设置）统一管理。
 // SFTP 面板默认打开偏好：pluginStore 全局持久化（"false" = 新工作台仅终端）。
 const SFTP_PANE_OPEN_KEY = "ssh-sftp-pane-open";
+// 跨重启的布局/视图全局偏好（issue #178）：单键 JSON，记录最近一次的
+// paneOrder / splitRatio / SFTP 面板开合 / 列显隐与列宽 / 显示隐藏文件 / 排序。
+// writeWorkbenchState 写穿（persistState 防抖统一触发），restoreUiState 启动
+// 水合为新工作台初始值；workbenchState 会话恢复字段存在时仍优先覆盖。
+const WORKBENCH_LAYOUT_KEY = "ssh-workbench-layout";
 // 目录跟随全局偏好：pluginStore 持久化（"true" = 新工作台初始即开启；per-tab
 // 的 workbenchState.followDirectory 仍优先，恢复的 tab 不被全局值覆盖）。
 const FOLLOW_DIRECTORY_KEY = "ssh-follow-directory";
@@ -1124,6 +1130,11 @@ const sftpTypeFilter = ref<SftpTypeFilter>("all");
 /** 默认隐藏以 "." 开头的 Unix 隐藏文件、__pycache__ 等系统缓存条目；
  *  用户可通过过滤栏眼睛图标切换。 */
 const sftpShowHidden = ref(false);
+/** 显示/隐藏文件切换进全局布局偏好（issue #178），重启不再回落默认隐藏。 */
+function toggleSftpShowHidden() {
+  sftpShowHidden.value = !sftpShowHidden.value;
+  persistState();
+}
 const selectedUris = ref<string[]>([]);
 // 选中态热点查询走 Set：行 class 绑定与 selectedEntries 每次渲染对全部
 // 可见条目各查一次，数组 includes 是 O(条目×选中数)（万行目录 × 多选
@@ -1715,40 +1726,73 @@ function initialState(): WorkbenchState {
   return value && typeof value === "object" ? (value as WorkbenchState) : {};
 }
 
+/** 水合跨重启的布局/视图全局偏好（issue #178）：作为新工作台的初始值——
+ *  字段缺省保持硬编码默认，随后 workbenchState 的会话恢复字段存在时覆盖。 */
+function applyWorkbenchLayoutPrefs() {
+  let prefs = null;
+  try {
+    prefs = sanitizeWorkbenchLayoutPrefs(JSON.parse(pluginStore.getItem(WORKBENCH_LAYOUT_KEY) ?? "null"));
+  } catch {
+    prefs = null;
+  }
+  if (!prefs) return;
+  if (prefs.paneOrder) paneOrder.value = prefs.paneOrder;
+  if (prefs.splitRatio !== undefined) splitRatio.value = prefs.splitRatio;
+  // 面板开合记的是用户最近一次的手动切换；偏好里没有时维持设置页的
+  // 「默认打开」偏好（sftpPaneOpen ref 的初始值即来自它）。
+  if (prefs.sftpPaneOpen !== undefined) sftpPaneOpen.value = prefs.sftpPaneOpen;
+  if (prefs.visibleColumns) visibleColumns.value = sanitizeVisibleColumns(prefs.visibleColumns);
+  if (prefs.sftpColumnWidths) {
+    const allCols: SftpColumn[] = ["size", "modified", "owner", "group", "permissions"];
+    for (const col of allCols) {
+      const num = prefs.sftpColumnWidths[col];
+      if (typeof num === "number") sftpColumnWidths[col] = Math.max(COLUMN_MIN_WIDTHS[col], Math.min(COLUMN_WIDTH_MAX, num));
+    }
+  }
+  if (prefs.sftpNameWidth !== undefined) sftpNameWidth.value = Math.max(NAME_COLUMN_MIN, Math.min(NAME_COLUMN_MAX, prefs.sftpNameWidth));
+  if (prefs.showHidden !== undefined) sftpShowHidden.value = prefs.showHidden;
+  if (prefs.sort) sort.value = prefs.sort;
+}
+
 function restoreUiState() {
-  // 布局恢复的合并方向（issue #178）：镜像作底层默认、initialState 作权威
+  // 两层布局持久化（issue #178 双方案合并）：1) pluginStore 全局偏好
+  // （ssh-workbench-layout）先水合为新工作台初始值；2) UI 镜像
+  // （ssh-workbench-ui，0.7.6-beta.1 起）作底层默认、initialState 作权威
   // 覆盖——宿主缺 workbenchState 桥时 initialState 恒空对象，镜像整组生效；
-  // 桥在时每工作台状态照旧优先，镜像只补它没有的键（如新加的 showHidden）。
+  // 桥在时每工作台状态照旧优先，镜像只补它没有的键。
+  applyWorkbenchLayoutPrefs();
   const state = { ...readWorkbenchUiMirror(), ...initialState() };
   currentPath.value = typeof state.sftpPath === "string" ? normalizeRemotePath(state.sftpPath) : "/";
-  splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : 58;
-  paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : "terminal-left";
+  splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : splitRatio.value;
+  paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : state.paneOrder === "terminal-left" ? "terminal-left" : paneOrder.value;
   // Dock panel surface：SFTP 面板默认不开（不自动列目录/不自动建 SFTP 会话，
   // dock 保持轻量）；需要文件面板时用 panel-actions 的开关手动打开（连接建立时
   // loadDirectory 本就会拉列表，打开即有数据）。
-  sftpPaneOpen.value = panelSurface.value ? false : resolveSftpPaneOpen(state, sftpPaneDefaultOpen.value);
-  // Dock panel surface：目录跟随是 SFTP 域能力，面板一律关闭。
+  sftpPaneOpen.value = panelSurface.value ? false : resolveSftpPaneOpen(state, sftpPaneOpen.value);
+  // Dock panel surface：目录跟随是 SFTP 面板能力，面板一律关闭。
   // 恢复的 tab 用 per-workbench 状态；全新工作台回落全局偏好（pluginStore）。
   followDirectory.value = panelSurface.value ? false : resolveDirectoryFollow(state, loadDirectoryFollowPref());
   sudoMode.value = state.sudoMode === true && canWrite.value;
   // 一次性迁移：六列默认上线前的旧偏好重置为全开（之后用户自定义照常持久化）。
   const legacyColumns = state.visibleColumns != null && state.columnsV2 !== true;
-  visibleColumns.value = legacyColumns ? [...DEFAULT_VISIBLE_COLUMNS] : sanitizeVisibleColumns(state.visibleColumns);
-  // 恢复列宽，未知列或越界用默认值兜底
+  if (legacyColumns) visibleColumns.value = [...DEFAULT_VISIBLE_COLUMNS];
+  else if (state.visibleColumns != null) visibleColumns.value = sanitizeVisibleColumns(state.visibleColumns);
+  // 恢复列宽，未知列或越界用默认值兜底；state 无该列宽度时保持当前值
+  // （布局偏好层已写入的值或默认值）。
   const saved = state.sftpColumnWidths || {};
   const allCols: SftpColumn[] = ["size", "modified", "owner", "group", "permissions"];
   for (const col of allCols) {
     const raw = saved[col];
-    const num = typeof raw === "number" ? raw : DEFAULT_COLUMN_WIDTHS[col];
-    sftpColumnWidths[col] = Math.max(COLUMN_MIN_WIDTHS[col], Math.min(COLUMN_WIDTH_MAX, num));
+    if (typeof raw === "number") sftpColumnWidths[col] = Math.max(COLUMN_MIN_WIDTHS[col], Math.min(COLUMN_WIDTH_MAX, raw));
   }
-  sftpNameWidth.value = typeof state.sftpNameWidth === "number" ? Math.max(NAME_COLUMN_MIN, Math.min(NAME_COLUMN_MAX, state.sftpNameWidth)) : null;
-  // 隐藏文件显隐与排序规则（issue #178）：此前无任何持久化，重开必丢。
-  sftpShowHidden.value = state.sftpShowHidden === true;
+  if (typeof state.sftpNameWidth === "number") sftpNameWidth.value = Math.max(NAME_COLUMN_MIN, Math.min(NAME_COLUMN_MAX, state.sftpNameWidth));
+  // 镜像/桥里若带 showHidden/sort（ssh-workbench-ui 布局子集，beta.1 起），
+  // 字段存在即覆盖偏好水合值；缺字段时保持全局偏好或硬编码默认。
+  if (typeof state.sftpShowHidden === "boolean") sftpShowHidden.value = state.sftpShowHidden;
   const savedSort = state.sftpSort;
-  sort.value = savedSort && (savedSort.column === "name" || savedSort.column === "size" || savedSort.column === "modified")
-    ? { column: savedSort.column, direction: savedSort.direction === "desc" ? "desc" : "asc" }
-    : { column: "name", direction: "asc" };
+  if (savedSort && (savedSort.column === "name" || savedSort.column === "size" || savedSort.column === "modified")) {
+    sort.value = { column: savedSort.column, direction: savedSort.direction === "desc" ? "desc" : "asc" };
+  }
   lastSequence = typeof state.terminalSequence === "number" ? state.terminalSequence : 0;
   // RDP 会话内选择的桌面尺寸（P0-2）：仅在契约门限内采用。
   const rdpSavedWidth = typeof state.rdpWidth === "number" ? state.rdpWidth : 0;
@@ -1776,6 +1820,22 @@ function writeWorkbenchState() {
   // 布局镜像双写（issue #178）：宿主缺 workbenchState 桥时它是唯一持久层；
   // 桥在时镜像只作恢复兜底（见 restoreUiState 的合并方向）。
   writeWorkbenchUiMirror(uiMirror);
+  // 同一载荷写穿跨重启的全局布局偏好（ssh-workbench-layout）：workbenchState 按
+  // sessionId 键控、重启即孤儿化，这里把最近一次布局/视图状态另存一份作新工作台初始值。
+  try {
+    pluginStore.setItem(WORKBENCH_LAYOUT_KEY, JSON.stringify({
+      paneOrder: paneOrder.value,
+      splitRatio: splitRatio.value,
+      sftpPaneOpen: sftpPaneOpen.value,
+      visibleColumns: visibleColumns.value,
+      sftpColumnWidths: { ...sftpColumnWidths },
+      sftpNameWidth: sftpNameWidth.value,
+      showHidden: sftpShowHidden.value,
+      sort: sort.value,
+    }));
+  } catch {
+    // 存储不可用（沙箱降级链耗尽）：会话恢复态照写，全局偏好退化为本次会话。
+  }
   return window.dbxPlugin.workbenchState?.set({
     sessionId: session.value?.sessionId,
     terminalSequence: lastSequence,
@@ -4839,12 +4899,20 @@ const {
   highlightRules,
   highlightSaving,
   highlightEnabled,
+  highlightDisplayMode,
   compiledHighlightRules,
   hydrateHighlightRules,
   saveHighlightRule,
   toggleHighlightRule,
   deleteHighlightRule,
+  setHighlightDisplayMode,
 } = useHighlightRules({ showError });
+
+// 「字体颜色」= 把规则色交给 decoration 的 foregroundColor，由渲染器写进该格字形：
+// DOM 渲染器落到单元格 span 的 color（DomRendererRowFactory），WebGL 渲染器在
+// CellColorResolver 里把 foregroundColorRGB 折进该格 fg 属性（glyph atlas 以 fg
+// 为键、会自动重新光栅化）——两条渲染路径都生效，故无需回退 DOM、GPU 照常。
+const keywordTextColorActive = computed(() => highlightDisplayMode.value === "text");
 
 // ---- decoration 引擎 ----
 // onRender({start,end}) 给的是"本帧实际重绘的行区间"（输入时常常只有光标一行），
@@ -4954,17 +5022,26 @@ function scanHighlightRange(start: number, end: number) {
     };
     for (const match of matches) {
       if (highlightDecorationCount >= HIGHLIGHT_DECORATION_LIMIT) break;
-      const decoration = term.registerDecoration({ marker, x: match.start, width: match.end - match.start });
+      // 「字体颜色」模式：把规则色交给 decoration 的 foregroundColor——无覆盖层、
+      // 无需逐帧重放（渲染器每次重绘都会重新查询 decoration），也不与配色方案/主题
+      // 的调色板打架。DOM 与 WebGL 两条渲染路径都消费该字段。
+      const decoration = term.registerDecoration(
+        keywordTextColorActive.value
+          ? { marker, x: match.start, width: match.end - match.start, foregroundColor: highlightTextStyle(match.color) }
+          : { marker, x: match.start, width: match.end - match.start },
+      );
       if (decoration) {
-        // xterm 6 的 DOM renderer 仍不把 registerDecoration 的 backgroundColor
-        // 选项应用到 cell（且 CM_RGB 路径会丢 alpha，实心色会盖字形），着色继续
-        // 走 onRender 在 overlay 元素上半透明自绘。注意 overlay 元素由
-        // BufferDecorationRenderer 在渲染刷新帧里创建：窗口被遮挡/rAF 冻结期间
-        // 注册的高亮要等下一次刷新帧才显色（可见后一帧内自愈，属显示时序而非
-        // 逻辑缺陷——逐字符 span 是 cell 层 run 拆分，不代表 decoration 丢失）。
-        decoration.onRender((element) => {
-          element.style.backgroundColor = highlightFillStyle(match.color);
-        });
+        if (!keywordTextColorActive.value) {
+          // 背景色块模式保持原样：xterm 6 的 DOM renderer 仍不把 registerDecoration
+          // 的 backgroundColor 选项应用到 cell（且 CM_RGB 路径会丢 alpha，实心色会
+          // 盖字形），着色继续走 onRender 在 overlay 元素上半透明自绘。注意 overlay
+          // 元素由 BufferDecorationRenderer 在渲染刷新帧里创建：窗口被遮挡/rAF 冻结
+          // 期间注册的高亮要等下一次刷新帧才显色（可见后一帧内自愈，属显示时序而非
+          // 逻辑缺陷——逐字符 span 是 cell 层 run 拆分，不代表 decoration 丢失）。
+          decoration.onRender((element) => {
+            element.style.backgroundColor = highlightFillStyle(match.color);
+          });
+        }
         disposables.push(decoration);
         entry.decorations++;
         highlightDecorationCount++;
@@ -4974,8 +5051,10 @@ function scanHighlightRange(start: number, end: number) {
   }
 }
 
-// 规则/开关变化：全量清理后重扫当前视口（即时生效语义）。
-watch(compiledHighlightRules, () => {
+// 规则表/显示方式变化：全量清理后重扫当前视口（即时生效语义）。显示方式切换必须
+// 重建 decoration——背景色块画在 overlay 元素上、字体颜色是 registerDecoration 的
+// foregroundColor 选项，两者无法就地改样式互转。
+watch([compiledHighlightRules, highlightDisplayMode], () => {
   clearHighlightDecorations();
   rescanHighlightViewport();
 });
@@ -9411,7 +9490,7 @@ watch(historyScope, () => {
               :class="{ 'is-active': sftpShowHidden }"
               :title="sftpShowHidden ? t('sftpFilter.hideHidden') : t('sftpFilter.showHidden')" :aria-label="sftpShowHidden ? t('sftpFilter.hideHidden') : t('sftpFilter.showHidden')"
               :aria-pressed="sftpShowHidden"
-              @click="sftpShowHidden = !sftpShowHidden"
+              @click="toggleSftpShowHidden"
             >
               <Eye v-if="sftpShowHidden" />
               <EyeOff v-else />
@@ -9946,6 +10025,7 @@ watch(historyScope, () => {
       :suggestion-prefs="suggestionPrefsAdapter"
       :highlight-rules="highlightRules"
       :highlight-saving="highlightSaving"
+      :highlight-display-mode="highlightDisplayMode"
       :quick-commands="quickCommands"
       :quick-saving="quickSaving"
       :quick-importing="quickImportBusy"
@@ -9955,6 +10035,7 @@ watch(historyScope, () => {
       @save-highlight-rule="saveHighlightRule"
       @delete-highlight-rule="deleteHighlightRule"
       @toggle-highlight-rule="toggleHighlightRule"
+      @update:highlight-display-mode="setHighlightDisplayMode"
       @save-quick-command="saveQuickCommand"
       @delete-quick-command="deleteQuickCommand"
       @import-quick-commands="importQuickCommands"

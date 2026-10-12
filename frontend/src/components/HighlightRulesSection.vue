@@ -5,12 +5,13 @@
 import { computed, reactive, ref, watch } from "vue";
 import { Pencil, Trash2 } from "@lucide/vue";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
-import { HIGHLIGHT_COLOR_DEFAULT, sanitizeHighlightRuleInput, type HighlightRuleView } from "../lib/keywordHighlight";
+import { HIGHLIGHT_COLOR_DEFAULT, sanitizeHighlightRuleInput, type HighlightDisplayMode, type HighlightRuleView } from "../lib/keywordHighlight";
 
 const props = defineProps<{
   rules: HighlightRuleView[];
   saving: boolean;
   limit: number;
+  displayMode: HighlightDisplayMode;
   t: (key: string, values?: Record<string, string | number>) => string;
 }>();
 
@@ -18,6 +19,7 @@ const emit = defineEmits<{
   (e: "save", rule: { id?: string; pattern: string; color: string; isRegex: boolean; caseSensitive: boolean }): void;
   (e: "delete", id: string): void;
   (e: "toggle", item: HighlightRuleView): void;
+  (e: "update:displayMode", mode: HighlightDisplayMode): void;
 }>();
 
 const t = props.t;
@@ -85,10 +87,29 @@ function deleteRule(id: string) {
   awaitingDeleteId = id;
   emit("delete", id);
 }
+
+// 显示方式切换（全局偏好，App 落 pluginStore）。reka-ui 单选组在"再点已选项"
+// 时会派发空串表示反选，这里按 radio 语义忽略非目标值——显示方式必须二选一，
+// 空值会把终端渲染器判定带进未定义状态。
+function onDisplayModeChange(value: unknown) {
+  if (value !== "bg" && value !== "text") return;
+  if (value === props.displayMode) return;
+  emit("update:displayMode", value);
+}
 </script>
 
 <template>
   <div class="highlight-section">
+    <!-- 显示方式（全局，非逐条规则）：默认「背景色块」= 既有行为；「字体颜色」把规则
+         色写进字形前景。decoration 的 foregroundColor 由 DOM / WebGL 两条渲染路径
+         共同消费，故切换显示方式不影响 GPU 渲染，无需任何降级提示。 -->
+    <div class="highlight-display-mode">
+      <span class="highlight-display-mode-label">{{ t("highlightRules.displayMode") }}</span>
+      <ToggleGroup :model-value="displayMode" type="single" class="highlight-display-mode-group" @update:model-value="onDisplayModeChange">
+        <ToggleGroupItem value="bg" class="highlight-display-mode-item">{{ t("highlightRules.displayModeBg") }}</ToggleGroupItem>
+        <ToggleGroupItem value="text" class="highlight-display-mode-item">{{ t("highlightRules.displayModeText") }}</ToggleGroupItem>
+      </ToggleGroup>
+    </div>
     <div v-if="!rules.length" class="empty compact">{{ t("highlightRules.empty") }}</div>
     <div v-else class="highlight-rule-list highlight-rule-list--section">
       <div v-for="item in rules" :key="item.id" class="highlight-rule-row">
