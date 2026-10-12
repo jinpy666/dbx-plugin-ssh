@@ -1222,6 +1222,24 @@
           "default": "",
           "placeholder": "/bin/bash",
           "description": "Absolute shell path used to run the task's commands. Leave empty to use the DBX default shell (the same chain the local terminal uses)."
+        },
+        {
+          "key": "cwd",
+          "label": "Working directory",
+          "type": "text",
+          "binding": "config",
+          "default": "",
+          "placeholder": "/home/user/projects/demo",
+          "description": "Absolute directory the shell starts in. Leave empty to use the home directory; reopening the terminal keeps following the shell's last directory."
+        },
+        {
+          "key": "env",
+          "label": "Environment variables",
+          "type": "textarea",
+          "binding": "config",
+          "default": "",
+          "placeholder": "EDITOR=/usr/bin/vim\nMY_PROJECT_ENV=dev",
+          "description": "Additional environment variables, one NAME=value per line. TERM, COLORTERM and TERM_PROGRAM are managed by the terminal; empty or malformed lines are ignored."
         }
       ],
       "workbench": "io.dbx.ssh.workbench",
@@ -1358,9 +1376,17 @@
             },
             "shell": {
               "label": "Shell",
-              "description": "Ruta absoluta del shell que ejecutará los comandos de la tarea. Déjelo vacío para usar el shell predeterminado de DBX (la misma cadena que el terminal local)."
-            }
-          }
+      "description": "Ruta absoluta del shell que ejecutará los comandos de la tarea. Déjelo vacío para usar el shell predeterminado de DBX (la misma cadena que el terminal local)."
+    },
+    "cwd": {
+      "label": "Directorio de trabajo",
+      "description": "Directorio absoluto donde inicia el shell. Déjelo vacío para usar el directorio personal; al reabrir el terminal se conserva el último directorio del shell."
+    },
+    "env": {
+      "label": "Variables de entorno",
+      "description": "Variables de entorno adicionales, una línea NAME=value cada una. TERM, COLORTERM y TERM_PROGRAM los gestiona el terminal; las líneas vacías o mal formadas se ignoran."
+    }
+  }
         },
         "io.dbx.ssh.connection": {
           "label": "Servidor SSH",
@@ -1655,9 +1681,17 @@
             },
             "shell": {
               "label": "Shell",
-              "description": "Percorso assoluto della shell che esegue i comandi dell'attività. Lasciare vuoto per usare la shell predefinita di DBX (la stessa catena del terminale locale)."
-            }
-          }
+      "description": "Percorso assoluto della shell che esegue i comandi dell'attività. Lasciare vuoto per usare la shell predefinita di DBX (la stessa catena del terminale locale)."
+    },
+    "cwd": {
+      "label": "Directory di lavoro",
+      "description": "Directory assoluta in cui la shell si avvia. Lasciare vuoto per usare la home; riaprendo il terminale si mantiene l'ultima directory della shell."
+    },
+    "env": {
+      "label": "Variabili d'ambiente",
+      "description": "Variabili d'ambiente aggiuntive, una riga NAME=value ciascuna. TERM, COLORTERM e TERM_PROGRAM sono gestite dal terminale; le righe vuote o malformate vengono ignorate."
+    }
+  }
         },
         "io.dbx.ssh.connection": {
           "label": "Server SSH",
@@ -1952,9 +1986,17 @@
             },
             "shell": {
               "label": "シェル",
-              "description": "タスクのコマンドを実行するシェルの絶対パス。空欄にすると DBX のデフォルトシェル（ローカルターミナルと同じ解決チェーン）を使用します。"
-            }
-          }
+      "description": "タスクのコマンドを実行するシェルの絶対パス。空欄にすると DBX のデフォルトシェル（ローカルターミナルと同じ解決チェーン）を使用します。"
+    },
+    "cwd": {
+      "label": "作業ディレクトリ",
+      "description": "シェルの起動ディレクトリ（絶対パス）。空欄でホームディレクトリ。再オープン時はシェルの最終ディレクトリを引き継ぎます。"
+    },
+    "env": {
+      "label": "環境変数",
+      "description": "追加の環境変数（1 行に NAME=value）。TERM・COLORTERM・TERM_PROGRAM はターミナルが管理し、空行や不正な行は無視されます。"
+    }
+  }
         },
         "io.dbx.ssh.connection": {
           "label": "SSH サーバー",
@@ -2249,9 +2291,17 @@
             },
             "shell": {
               "label": "Shell",
-              "description": "Caminho absoluto do shell que executará os comandos da tarefa. Deixe vazio para usar o shell padrão do DBX (a mesma cadeia do terminal local)."
-            }
-          }
+      "description": "Caminho absoluto do shell que executará os comandos da tarefa. Deixe vazio para usar o shell padrão do DBX (a mesma cadeia do terminal local)."
+    },
+    "cwd": {
+      "label": "Diretório de trabalho",
+      "description": "Diretório absoluto onde o shell inicia. Deixe vazio para usar o diretório pessoal; ao reabrir o terminal, o último diretório do shell é mantido."
+    },
+    "env": {
+      "label": "Variáveis de ambiente",
+      "description": "Variáveis de ambiente adicionais, uma linha NAME=value cada uma. TERM, COLORTERM e TERM_PROGRAM são gerenciados pelo terminal; linhas vazias ou malformadas são ignoradas."
+    }
+  }
         },
         "io.dbx.ssh.connection": {
           "label": "Servidor SSH",
@@ -2546,9 +2596,17 @@
             },
             "shell": {
               "label": "Shell",
-              "description": "运行任务命令所用的 Shell 绝对路径。留空则使用 DBX 默认 Shell（与本地终端同一解析链）。"
-            }
-          }
+      "description": "运行任务命令所用的 Shell 绝对路径。留空则使用 DBX 默认 Shell（与本地终端同一解析链）。"
+    },
+    "cwd": {
+      "label": "工作目录",
+      "description": "Shell 启动所在的绝对目录。留空则使用家目录；重开终端会继承 Shell 最后所在目录。"
+    },
+    "env": {
+      "label": "环境变量",
+      "description": "追加的环境变量，每行一条 NAME=value。TERM、COLORTERM、TERM_PROGRAM 由终端托管；空行与格式非法的行将被忽略。"
+    }
+  }
         },
         "io.dbx.ssh.connection": {
           "label": "SSH 服务器",
@@ -2843,9 +2901,17 @@
             },
             "shell": {
               "label": "Shell",
-              "description": "執行任務命令所用的 Shell 絕對路徑。留空則使用 DBX 預設 Shell（與本地終端機同一解析鏈）。"
-            }
-          }
+      "description": "執行任務命令所用的 Shell 絕對路徑。留空則使用 DBX 預設 Shell（與本地終端機同一解析鏈）。"
+    },
+    "cwd": {
+      "label": "工作目錄",
+      "description": "Shell 啟動所在的絕對目錄。留空則使用家目錄；重新開啟終端機會繼承 Shell 最後所在目錄。"
+    },
+    "env": {
+      "label": "環境變數",
+      "description": "附加的環境變數，每行一條 NAME=value。TERM、COLORTERM、TERM_PROGRAM 由終端機託管；空行與格式非法的行將被忽略。"
+    }
+  }
         },
         "io.dbx.ssh.connection": {
           "label": "SSH 伺服器",

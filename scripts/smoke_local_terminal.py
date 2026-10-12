@@ -21,6 +21,7 @@ semantics as the live-container smokes. Run directly:
 
 import argparse
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -30,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from sidecar_client import SidecarClient  # noqa: E402
 
 
-def collect_until(client, out_channel, in_channel, ready, done, deadline_s=15.0):
+def collect_until(client, out_channel, in_channel, ready, done, deadline_s=15.0, probe=None):
     """Pump frames via harmless list requests; type the probe line once the
     first prompt mark arrives; stop when `done(text)` holds."""
     collected = bytearray()
@@ -45,7 +46,7 @@ def collect_until(client, out_channel, in_channel, ready, done, deadline_s=15.0)
         text = bytes(collected)
         if ready(text) and not sent:
             sent = True
-            client.send_binary(in_channel, struct.pack(">Q", 1) + b"echo DBX_SMOKE_$((6*7))_OK COLORTERM=$COLORTERM\r")
+            client.send_binary(in_channel, struct.pack(">Q", 1) + (probe or b"echo DBX_SMOKE_$((6*7))_OK COLORTERM=$COLORTERM\r"))
         if done(text):
             return text
         time.sleep(0.1)
@@ -78,6 +79,27 @@ def main() -> int:
             assert prefs.get("localShellIntegration") is False, prefs
             client.request("local/preferences/set", {"localShellIntegration": True})
             assert client.request("local/preferences/get").get("localShellIntegration") is True
+
+            # 偏好往返（env/cwd 键）：cwd 裁剪存储、空串=清除；env 数组内坏
+            # 条目（空名/含 =/托管键）静默丢弃。
+            client.request("local/preferences/set", {
+                "localShellCwd": "  /tmp/dbx-smoke-cwd  ",
+                "localShellEnv": [
+                    {"name": " DBX_PREF_VAR ", "value": "1"},
+                    {"name": "", "value": "drop"},
+                    {"name": "A=B", "value": "drop"},
+                    {"name": "TERM", "value": "drop"},
+                    {"name": "NO_VALUE"},
+                ],
+            })
+            prefs = client.request("local/preferences/get")
+            assert prefs.get("localShellCwd") == "/tmp/dbx-smoke-cwd", prefs
+            assert prefs.get("localShellEnv") == [
+                {"name": "DBX_PREF_VAR", "value": "1"},
+                {"name": "NO_VALUE", "value": ""},
+            ], prefs
+            client.request("local/preferences/set", {"localShellCwd": ""})
+            assert "localShellCwd" not in client.request("local/preferences/get"), "cwd clear failed"
 
             # 显式 shell 启动：返回的 shell 必须回显请求值（cwd 非法值回落家目录）。
             started = client.request(
@@ -150,9 +172,45 @@ def main() -> int:
             assert event and event["params"]["state"] == "exited", f"no exit event: {event}"
             print("exit event ok:", event["params"])
 
-            # cwd 继承路径的参数面：合法目录被接受（响应无直接回显，用 list+事件
-            # 之外的方式难以观察；这里只断言非法值不致命——上面 start 已带非法
-            # cwd 且会话成功创建）。
+            # env/cwd 启动参数端到端：用户变量进 shell、合法 cwd 被采纳、
+            # 非法条目（含 =/空名）与托管键 TERM 覆写被净化（TERM 保持受管
+            # 值）。探测命令是 POSIX sh 语法，无 /bin/sh 的主机跳过该组。
+            if shutil.which("/bin/sh"):
+                env_dir = tempfile.mkdtemp(prefix="dbx-local-smoke-cwd-")
+                env_started = client.request(
+                    "local/terminal/start",
+                    {
+                        "workbenchId": "smoke-wb",
+                        "cols": 100,
+                        "rows": 30,
+                        "shell": "/bin/sh",
+                        "cwd": env_dir,
+                        "env": {
+                            "DBX_SMOKE_VAR": "env-ok-42",
+                            "TERM": "vt100",
+                            "BAD=KEY": "x",
+                            "": "dropped",
+                        },
+                    },
+                )
+                env_session = env_started["sessionId"]
+                env_text = collect_until(
+                    client,
+                    f"local/terminal/out/{env_session}",
+                    f"local/terminal/in/{env_session}",
+                    ready=lambda chunk: b"$ " in chunk,
+                    done=lambda chunk: b"env-ok-42" in chunk and env_dir.encode() in chunk and b"TERM=xterm-256color" in chunk,
+                    probe=b'echo "VAR=$DBX_SMOKE_VAR DIR=$(pwd) TERM=$TERM"\r',
+                )
+                assert b"env-ok-42" in env_text, f"user env missing; tail={env_text[-200:]!r}"
+                assert env_dir.encode() in env_text, f"cwd not honoured; tail={env_text[-200:]!r}"
+                assert b"TERM=xterm-256color" in env_text, f"managed TERM overridden; tail={env_text[-200:]!r}"
+                print("env + cwd honoured, managed TERM reserved")
+                client.request("local/session/close", {"sessionId": env_session})
+                client.wait_event("local/session/state", timeout=10)
+            else:
+                print("SKIP env/cwd case: no /bin/sh on this host")
+
             print("LOCAL TERMINAL SMOKE PASS")
             return 0
         finally:

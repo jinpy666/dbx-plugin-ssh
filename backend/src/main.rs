@@ -749,11 +749,16 @@ impl Plugin {
             // PR-A4 generic launch-options contract: picker entries for the dock "+".
             // locale = 宿主 UI 语言（宿主侧 options_action 契约；旧宿主不传，回落英文）；
             // 描述展示解析后的默认 Shell（配置的 localShell 优先，否则自动探测链）。
+            // 已显式配置 localShell 时折叠发现分组——只留配置的那一个入口。
             "local/terminal/launch-options" => {
-                let default_shell = local_terminal::resolve_default_shell(&plugin_data_dir());
+                let configured = local_terminal::resolve_configured_shell(&plugin_data_dir());
+                let default_shell = configured
+                    .clone()
+                    .unwrap_or_else(|| local_terminal::resolve_default_shell(&plugin_data_dir()));
                 Ok(self.local.launch_options(
                     params.get("locale").and_then(Value::as_str).unwrap_or(""),
                     &default_shell,
+                    configured.as_deref(),
                 ))
             }
             // Telnet 会话（明文协议，P2-3）：入口在 SSH 工作台工具栏，用户显
@@ -2870,14 +2875,25 @@ fn operation_id(params: &Value) -> String {
 /// 优先——宿主侧要求每个 connection provider 可打开（声明 workbench 或
 /// filesystem provider），本地目标打开的是 Terminal 工作台，webview 需要据
 /// protocol="local" 路由到 local/terminal/start 而非误拨 SSH；shell 透传连接
-/// 表单值（空 = 前端回落偏好/默认 Shell 解析链）。非本地连接回落非 SSH 凭据
-/// 注册表的会话协议（telnet/vnc/rdp/serial），未暂存为空串（调用方短重试）。
+/// 表单值（空 = 前端回落偏好/默认 Shell 解析链），cwd/env 同样透传连接表单
+/// 配置（`env` 为净化后的 name/value 行数组，空数组 = 未配置）。非本地连接
+/// 回落非 SSH 凭据注册表的会话协议（telnet/vnc/rdp/serial），未暂存为空串
+/// （调用方短重试）。
 fn connection_protocol_payload(
     local_target: Option<crate::local_target::LocalTarget>,
     stored_protocol: Option<String>,
 ) -> Value {
     match local_target {
-        Some(target) => json!({ "protocol": "local", "shell": target.shell }),
+        Some(target) => json!({
+            "protocol": "local",
+            "shell": target.shell,
+            "cwd": target.cwd,
+            "env": target
+                .env
+                .iter()
+                .map(|(name, value)| json!({ "name": name, "value": value }))
+                .collect::<Vec<_>>(),
+        }),
         None => json!({ "protocol": stored_protocol.unwrap_or_default() }),
     }
 }
@@ -3193,20 +3209,35 @@ mod tests {
                 id: "conn-local-1".to_string(),
                 name: Some("Local shell".to_string()),
                 shell: "/bin/bash".to_string(),
+                cwd: "/tmp/demo".to_string(),
+                env: vec![("EDITOR".to_string(), "/usr/bin/vim".to_string())],
             }),
             Some("rdp".to_string()),
         );
-        assert_eq!(local, json!({ "protocol": "local", "shell": "/bin/bash" }));
+        assert_eq!(
+            local,
+            json!({
+                "protocol": "local",
+                "shell": "/bin/bash",
+                "cwd": "/tmp/demo",
+                "env": [{ "name": "EDITOR", "value": "/usr/bin/vim" }],
+            })
+        );
         // 连接表单未填 shell：空串透出，前端回落默认 Shell 解析链。
         let local_default = connection_protocol_payload(
             Some(crate::local_target::LocalTarget {
                 id: "conn-local-2".to_string(),
                 name: None,
                 shell: String::new(),
+                cwd: String::new(),
+                env: Vec::new(),
             }),
             None,
         );
-        assert_eq!(local_default, json!({ "protocol": "local", "shell": "" }));
+        assert_eq!(
+            local_default,
+            json!({ "protocol": "local", "shell": "", "cwd": "", "env": [] })
+        );
         // 非 SSH 会话连接（telnet/vnc/rdp/serial）与未暂存连接维持原契约。
         let stored = connection_protocol_payload(None, Some("telnet".to_string()));
         assert_eq!(stored, json!({ "protocol": "telnet" }));

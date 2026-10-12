@@ -979,6 +979,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .session-menu-shell .local-shell-program { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; opacity: 0.75; }
 .session-menu-shell .local-shell-badge { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; font-size: 9px; color: var(--muted-foreground); }
 .session-menu-shell .local-shell-footer { display: flex; justify-content: flex-end; margin-top: 8px; }
+/* 本地 Shell 设置视图的启动目录/环境变量编辑器（localShellCwd/localShellEnv）。 */
+.session-menu-shell .local-shell-field { margin: 10px 0 0; }
+.session-menu-shell .local-shell-field-label { display: block; font-size: 11px; font-weight: 600; margin-bottom: 4px; }
+.session-menu-shell .local-shell-input { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); color: var(--foreground); padding: 4px 8px; font-size: 11px; }
+.session-menu-shell .local-shell-input:focus { outline: 1px solid var(--ring, var(--border)); }
+.session-menu-shell .local-shell-env-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.session-menu-shell .local-shell-env-row { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.session-menu-shell .local-shell-env-row .local-shell-input { flex: 1 1 40%; min-width: 0; }
 .local-shell-popover .local-shell-hint { margin: 0 0 8px; font-size: 11px; }
 .local-shell-popover .local-shell-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .local-shell-popover .local-shell-program { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; opacity: 0.75; }

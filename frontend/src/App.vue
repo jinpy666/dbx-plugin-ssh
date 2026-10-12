@@ -38,6 +38,7 @@ import {
   FilePlus,
   FileText,
   FileUp,
+  Plus,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -1320,11 +1321,24 @@ const localUiMode = computed(() => isLocalMode.value || localShellRestored.value
 // shell 空串 = 跟随自动探测；integration 缺省开。
 const localShellPref = ref("");
 const localShellIntegrationPref = ref(true);
+// 本地 Shell 启动目录/环境变量（localShellCwd/localShellEnv 偏好）。envPref
+// 保留未填完的草稿行作为 UI 模型；持久化与 spawn 载荷都取净化后的副本。
+const localShellCwdPref = ref("");
+const localShellEnvPref = ref<Array<{ name: string; value: string }>>([]);
+// 净化视图：名字非空的行（与 sidecar 的 sanitize_env_pair 边界对齐的前端版）。
+const localShellEnvClean = computed(() =>
+  localShellEnvPref.value
+    .map((pair) => ({ name: pair.name.trim(), value: pair.value }))
+    .filter((pair) => pair.name),
+);
 // shell 选择器菜单：打开 shell 选项视图时拉一次 local/shells/list。
 // 会话下拉（新建/复制/命令会话/本地终端/Shell 选项）单入口状态；shell 视图
 // 为同弹层内的视图切换（非独立 popover，Esc/外点由 reka 随弹层整体收口）。
 const sessionMenuOpen = ref(false);
 const sessionMenuShellOpen = ref(false);
+// 「选择 Shell 打开」子视图：同弹层视图切换（dock「+」同款列表），语义是
+// 一次性 override 打开，与设置子视图（radio = 默认偏好）刻意分开。
+const sessionMenuShellPickOpen = ref(false);
 // Dock 面板表面的配色快切弹层（底部栏精简工具条）：列出与当前宿主明暗档
 // 同调性的方案，单击即写入对应槽位并启用 custom 来源；「跟随宿主」恢复 host。
 const panelPaletteOpen = ref(false);
@@ -1769,6 +1783,10 @@ function restoreUiState() {
   // dock 保持轻量）；需要文件面板时用 panel-actions 的开关手动打开（连接建立时
   // loadDirectory 本就会拉列表，打开即有数据）。
   sftpPaneOpen.value = panelSurface.value ? false : resolveSftpPaneOpen(state, sftpPaneOpen.value);
+  // 本地终端工作台没有 SFTP 语义：连接less tab 的恢复态/布局镜像若带开合
+  // 记录，会在 !localUiMode 门控下留下幽灵分栏（模板 v-if 只显式防了 RDP），
+  // 恢复层一律收起。hostContext 在本函数之前已水合（initialize 7787）。
+  if (readPluginMode(hostContext.value) === "local-terminal") sftpPaneOpen.value = false;
   // Dock panel surface：目录跟随是 SFTP 面板能力，面板一律关闭。
   // 恢复的 tab 用 per-workbench 状态；全新工作台回落全局偏好（pluginStore）。
   followDirectory.value = panelSurface.value ? false : resolveDirectoryFollow(state, loadDirectoryFollowPref());
@@ -3769,21 +3787,33 @@ const { connectCardState, connectLogEntries, reconnect, cancelConnect, startConn
 // 宿主推给 webview 的 connection 上下文缺 external_config.protocol，向
 // sidecar 查询 lifecycle 暂存的权威协议；未暂存（宿主推送未落地或 SSH 连
 // 接）返回空串。恢复态标签的凭据重推更晚，重试窗口放宽对齐 BOOT_RESTORE。
-async function resolveStoredConnectionProtocol(connectionId: string, bootRestore: boolean): Promise<{ protocol: string; shell: string }> {
+async function resolveStoredConnectionProtocol(connectionId: string, bootRestore: boolean): Promise<{ protocol: string; shell: string; cwd: string; env: Array<{ name: string; value: string }> }> {
   const attempts = bootRestore ? 10 : 2;
   const delayMs = bootRestore ? 500 : 250;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const result = await window.dbxPlugin.invoke<{ protocol?: string; shell?: string }>("connection/protocol", { connectionId });
+      const result = await window.dbxPlugin.invoke<{ protocol?: string; shell?: string; cwd?: string; env?: Array<{ name?: unknown; value?: unknown }> }>("connection/protocol", { connectionId });
       const protocol = typeof result?.protocol === "string" ? result.protocol : "";
-      if (protocol) return { protocol, shell: typeof result.shell === "string" ? result.shell : "" };
+      if (protocol) {
+        return {
+          protocol,
+          shell: typeof result.shell === "string" ? result.shell : "",
+          // 连接表单的启动目录/环境变量（旧 sidecar 无键 → 空 = 未配置）。
+          cwd: typeof result.cwd === "string" ? result.cwd.trim() : "",
+          env: Array.isArray(result.env)
+            ? result.env
+                .filter((entry): entry is { name: string; value: string } => typeof entry === "object" && entry !== null && typeof (entry as { name?: unknown }).name === "string" && typeof (entry as { value?: unknown }).value === "string")
+                .map((entry) => ({ name: entry.name, value: entry.value }))
+            : [],
+        };
+      }
     } catch {
       // sidecar 未就绪/旧版 sidecar 无此方法：按未暂存处理，走推送协议。
-      return { protocol: "", shell: "" };
+      return { protocol: "", shell: "", cwd: "", env: [] };
     }
     if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
-  return { protocol: "", shell: "" };
+  return { protocol: "", shell: "", cwd: "", env: [] };
 }
 
 // RDP 路由重入保护（与 sidecar 同 workbenchId 幂等查重双保险）：reconnect
@@ -3841,9 +3871,12 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     }
     if (storedProtocol === "local") {
       // 本地 Shell 连接（io.dbx.ssh.local）：无网络语义，直接在连接绑定的
-      // 工作台里开本地终端；连接表单 shell 为空时回落偏好/默认解析链
-      //（与 startLocalTerminal 的优先级链一致）。
-      await startLocalTerminal(stored.shell.trim() || undefined);
+      // 工作台里开本地终端；连接表单 shell/cwd/env 为空时逐级回落偏好/默认
+      // 解析链（cwd/env 的合并优先级见 startLocalTerminal）。
+      await startLocalTerminal(stored.shell.trim() || undefined, {
+        cwd: stored.cwd || undefined,
+        env: stored.env.length ? stored.env : undefined,
+      });
       return;
     }
   }
@@ -4134,9 +4167,18 @@ async function closeSession(updateStatus = true) {
 // 退出态统一入口：exitCode 为 null 表示 sidecar 未上报（进程被杀/会话已回收），
 // 覆盖层对 null 只显示"已退出"，有值时显示退出码。
 
-async function startLocalTerminal(shellOverride?: string) {
+async function startLocalTerminal(
+  shellOverride?: string,
+  connection?: { cwd?: string; env?: Array<{ name: string; value: string }> },
+) {
   if (localState.value === "starting" || isLocalMode.value) return;
   localState.value = "starting";
+  // 本地模式与 SFTP 分栏/批量栏互斥（对齐 RDP 进入会话前的收口惯例 4348）：
+  // 按钮层的 !localUiMode 门控只藏入口、不收已开的面板——SSH 工作台带分栏切
+  // 本地、或恢复态 tab 从布局镜像水合出 sftpPaneOpen=true，都会留下对着空
+  // 会话的幽灵分栏。persistState 由既有 watch 带上。
+  if (sftpPaneOpen.value) sftpPaneOpen.value = false;
+  if (batchBarOpen.value) batchBarOpen.value = false;
   try {
     const info = await window.dbxPlugin.invoke<{ sessionId: string; shell: string }>("local/terminal/start", {
       workbenchId: workbenchId.value,
@@ -4152,8 +4194,21 @@ async function startLocalTerminal(shellOverride?: string) {
       // Shell precedence: explicit dock choice > user preference > auto-detection.
       ...(shellOverride?.trim() ? { shell: shellOverride.trim() } : localShellPref.value ? { shell: localShellPref.value } : {}),
       ...(localShellIntegrationPref.value ? {} : { shellIntegration: false }),
-      // 重开继承上次 cwd（目录可能已被删，sidecar 会回落家目录）。
-      ...(localLastCwd.value ? { cwd: localLastCwd.value } : {}),
+      // cwd 优先级：重开继承上次跟踪目录 > 连接表单启动目录 > 偏好启动目录
+      // > 不传（家目录）。目录可能已被删，sidecar 会回落家目录。
+      ...(localLastCwd.value
+        ? { cwd: localLastCwd.value }
+        : connection?.cwd
+          ? { cwd: connection.cwd }
+          : localShellCwdPref.value
+            ? { cwd: localShellCwdPref.value }
+            : {}),
+      // 环境变量：偏好与连接表单合并（同名时连接表单覆盖），sidecar 侧还有
+      // 一道同规则净化兜底。
+      ...(() => {
+        const pairs = [...localShellEnvClean.value, ...(connection?.env ?? [])];
+        return pairs.length ? { env: Object.fromEntries(pairs.map((pair) => [pair.name, pair.value])) } : {};
+      })(),
       // spawn 是快路径，但宿主桥丢响应时 promise 永久 pending＝纯黑屏；
       // 与同文件其他交互调用一致地给超时，失败落入 catch 走 showError。
     }, { timeoutMs: 10_000 });
@@ -4187,6 +4242,7 @@ async function closeLocalTerminal() {
   localOpenConfirmOpen.value = false;
   sessionMenuOpen.value = false;
   sessionMenuShellOpen.value = false;
+  sessionMenuShellPickOpen.value = false;
   if (!sessionId) return;
   await window.dbxPlugin.invoke("local/session/close", { sessionId }, { timeoutMs: 10_000 }).catch(() => undefined);
   terminal?.focus();
@@ -4583,29 +4639,61 @@ async function rerunLocalCommand(command: string) {
   await sendConfirmedPaste(payload);
 }
 
-async function restartLocalTerminal() {
+async function restartLocalTerminal(shellOverride?: string) {
   await closeLocalTerminal();
-  await startLocalTerminal();
+  await startLocalTerminal(shellOverride);
 }
+
+// 一次性 shell override 的确认挂起：requestLocalTerminal 在 SSH 在连时先走
+// 确认弹窗，所选 shell 存这里；确认/取消两路各自消费/清空（watch 兜底）。
+let pendingLocalShellOverride = "";
 
 // SSH 会话在连/连接中/重连中时先经确认关闭（本地模式与 SSH 会话互斥展示，
 // connecting 途中放行会让在途 ssh/session/open 成功后与本地会话抢同一终端
 // 视图），再开本地终端。
-function requestLocalTerminal() {
+function requestLocalTerminal(shellOverride?: string) {
   // 串口/Telnet/VNC/RDP 会话占用终端视图时不开本地终端（互斥展示）。
   if (isSerialMode.value || isTelnetMode.value || isVncMode.value || isRdpMode.value) return;
   if (isLocalMode.value || localState.value === "starting") return;
   if (session.value || reconnectPending.value || terminalState.value === "connecting") {
+    pendingLocalShellOverride = shellOverride ?? "";
     localOpenConfirmOpen.value = true;
     return;
   }
-  void startLocalTerminal();
+  void startLocalTerminal(shellOverride);
 }
 
 async function confirmLocalTerminal() {
   localOpenConfirmOpen.value = false;
+  const shellOverride = pendingLocalShellOverride || undefined;
+  pendingLocalShellOverride = "";
   await closeSession();
-  await startLocalTerminal();
+  await startLocalTerminal(shellOverride);
+}
+
+// 确认弹窗取消（按钮/X/外点/Esc 多路）统一清掉挂起的 override，避免残留到
+// 下一次无 override 的确认；confirm 路径在本行同步消费后才会触发本 watch。
+watch(localOpenConfirmOpen, (open) => {
+  if (!open) pendingLocalShellOverride = "";
+});
+
+// 会话菜单「选择 Shell 打开」：一次性 override（dock per-shell 语义），不动
+// localShell 默认偏好。已在本地模式（运行中或恢复态）= 换 shell 重启；SSH 在
+// 连时走既有确认流（override 经 pendingLocalShellOverride 透传）。
+function pickLocalShell(program?: string) {
+  sessionMenuOpen.value = false;
+  sessionMenuShellPickOpen.value = false;
+  if (localShellRestored.value || isLocalMode.value) {
+    void restartLocalTerminal(program);
+    return;
+  }
+  requestLocalTerminal(program);
+}
+
+// 下拉内切到 shell 选择视图：同弹层视图切换，菜单不关，顺带懒加载 shell 列表。
+function openSessionShellPick() {
+  sessionMenuShellPickOpen.value = true;
+  void openLocalShellPrefs();
 }
 
 // —— shell 选择器：多平台 shell 发现 + 偏好（VS Code terminal profiles 简化版）——
@@ -4683,6 +4771,35 @@ async function setLocalShellIntegrationPref(enabled: boolean) {
   } catch {
     // 旧 sidecar：会话内存态兜底。
   }
+}
+
+// 启动目录：空串 = 恢复默认（家目录）；sidecar 在 start 时校验现存目录。
+async function setLocalShellCwd(dir: string) {
+  localShellCwdPref.value = dir.trim();
+  try {
+    await window.dbxPlugin.invoke("local/preferences/set", { localShellCwd: localShellCwdPref.value });
+  } catch {
+    // 旧 sidecar：会话内存态兜底。
+  }
+}
+
+// 环境变量：持久化取净化副本（未填名的草稿行不落库，保留在 UI 里继续编辑）；
+// 名字重复时后者覆盖前者（与 start 载荷的 map 语义一致）。
+async function setLocalShellEnv() {
+  try {
+    await window.dbxPlugin.invoke("local/preferences/set", { localShellEnv: localShellEnvClean.value });
+  } catch {
+    // 旧 sidecar：会话内存态兜底。
+  }
+}
+
+function addLocalShellEnvRow() {
+  localShellEnvPref.value = [...localShellEnvPref.value, { name: "", value: "" }];
+}
+
+function removeLocalShellEnvRow(index: number) {
+  localShellEnvPref.value = localShellEnvPref.value.filter((_, i) => i !== index);
+  void setLocalShellEnv();
 }
 
 // P0.2 self-open: opens a separate connectionless local-terminal tab through the host openWorkbench bridge.
@@ -5894,6 +6011,8 @@ async function hydratePrefsOnce() {
       wallpaper_enabled?: unknown;
       wallpaper_opacity?: unknown;
       rdp_experimental_enabled?: unknown;
+      localShellCwd?: unknown;
+      localShellEnv?: unknown;
     }>("local/preferences/get", {});
     // 背景图本体与偏好同拉（旧 sidecar 无 wallpaper/* 时静默缺席）。
     void loadWallpaperImage();
@@ -5902,6 +6021,13 @@ async function hydratePrefsOnce() {
     if (prefs.downloadConflictPolicy !== undefined) downloadConflictState.value = sanitizeConflictPolicy(prefs.downloadConflictPolicy);
     if (typeof prefs.localShell === "string") localShellPref.value = prefs.localShell;
     if (typeof prefs.localShellIntegration === "boolean") localShellIntegrationPref.value = prefs.localShellIntegration;
+    // 启动目录/环境变量：结构不合法静默回落默认（旧 sidecar 无键 = undefined）。
+    if (typeof prefs.localShellCwd === "string") localShellCwdPref.value = prefs.localShellCwd;
+    if (Array.isArray(prefs.localShellEnv)) {
+      localShellEnvPref.value = prefs.localShellEnv
+        .filter((entry): entry is { name: unknown; value: unknown } => typeof entry === "object" && entry !== null && "name" in entry)
+        .map((entry) => ({ name: typeof entry.name === "string" ? entry.name : "", value: typeof entry.value === "string" ? entry.value : "" }));
+    }
     // 动作链接 / gutter：键位缺省时保持内存默认（功能关闭），不无谓覆写。
     if (prefs.action_links_enabled !== undefined || prefs.action_links_matchers !== undefined) {
       actionLinksSettings.value = sanitizeActionLinksSettings({ enabled: prefs.action_links_enabled, matchers: prefs.action_links_matchers });
@@ -7013,7 +7139,10 @@ function toggleSessionMenu() {
   const next = !sessionMenuOpen.value;
   closeToolbarPopovers();
   sessionMenuOpen.value = next;
-  if (next) sessionMenuShellOpen.value = false;
+  if (next) {
+    sessionMenuShellOpen.value = false;
+    sessionMenuShellPickOpen.value = false;
+  }
 }
 
 // 下拉内切到 shell 选项视图：同弹层视图切换，菜单不关，顺带懒加载 shell 列表。
@@ -7445,6 +7574,7 @@ function closeToolbarPopovers() {
   batchTargetsOpen.value = false;
   sessionMenuOpen.value = false;
   sessionMenuShellOpen.value = false;
+  sessionMenuShellPickOpen.value = false;
   localShellSurfaceOpen.value = false;
   panelPaletteOpen.value = false;
   rdpPasteOpen.value = false;
@@ -8334,8 +8464,8 @@ watch(historyScope, () => {
             <PopoverAnchor as-child>
               <button class="icon-button icon-emerald" :class="{ 'is-active': sessionMenuOpen }" :title="t('sessionMenu.title')" :aria-label="t('sessionMenu.title')" :aria-expanded="sessionMenuOpen" @click.stop="toggleSessionMenu"><SquarePlus /></button>
             </PopoverAnchor>
-            <PopoverContent class="popover session-menu-popover" :class="{ 'session-menu-shell': sessionMenuShellOpen }" align="start" :side-offset="5">
-              <template v-if="!sessionMenuShellOpen">
+            <PopoverContent class="popover session-menu-popover" :class="{ 'session-menu-shell': sessionMenuShellOpen || sessionMenuShellPickOpen }" align="start" :side-offset="5">
+              <template v-if="!sessionMenuShellOpen && !sessionMenuShellPickOpen">
                 <h3>{{ t("sessionMenu.title") }}</h3>
                 <button v-if="!localUiMode && !isRdpConnection" class="session-menu-item" :disabled="!connectionId" @click="sessionMenuOpen = false; openNewSessionTab();"><SquarePlus />{{ t("newSessionTab") }}</button>
                 <button v-if="!localUiMode && !isRdpConnection" class="session-menu-item" :disabled="!connectionId || !connected" @click="sessionMenuOpen = false; openCopiedSessionTab();"><Copy />{{ t("copySessionTab") }}</button>
@@ -8345,7 +8475,34 @@ watch(historyScope, () => {
                      已连接时经确认先关 SSH；退出态由终端覆盖层提供重开出口。
                      Telnet/VNC/RDP/串口模式下为对应的断开动作。 -->
                 <button class="session-menu-item" @click="sessionMenuOpen = false; toggleLocalTerminal();"><TerminalIcon />{{ isRdpMode ? t("rdp.disconnect") : isVncMode ? t("vnc.disconnect") : isSerialMode ? t("serial.disconnect") : isTelnetMode ? t("telnet.disconnect") : localUiMode && !localShellRestored ? t("localTerminal.close") : t("localTerminal.open") }}</button>
+                <button v-if="!isTelnetMode && !isSerialMode && !isVncMode && !isRdpMode" class="session-menu-item" @click="openSessionShellPick"><ChevronDown />{{ t("localTerminal.pickShell") }}</button>
                 <button v-if="!isTelnetMode && !isSerialMode && !isVncMode && !isRdpMode" class="session-menu-item" @click="openSessionShellPrefs"><ChevronDown />{{ t("localTerminal.settings") }}</button>
+              </template>
+              <template v-else-if="sessionMenuShellPickOpen">
+                <header class="session-shell-head">
+                  <button class="icon-button compact" :title="t('cancel')" :aria-label="t('cancel')" @click="sessionMenuShellPickOpen = false"><ArrowLeft /></button>
+                  <h3>{{ t("localTerminal.pickShell") }}</h3>
+                </header>
+                <p class="muted local-shell-hint">{{ t("localTerminal.pickShellHint") }}</p>
+                <div v-if="localShellsLoading" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
+                <template v-else-if="localShells.length">
+                  <!-- dock「+」同款列表语义：点击即以该 shell 一次性打开/重启，
+                       不改 localShell 默认偏好；首项 = 偏好/自动探测链。 -->
+                  <button class="shell-surface-item" @click="pickLocalShell()">
+                    <TerminalIcon class="h-3.5 w-3.5" />{{ t("localTerminal.autoShell") }}
+                  </button>
+                  <button v-for="entry in localShells" :key="entry.program" class="shell-surface-item" @click="pickLocalShell(entry.program)">
+                    <TerminalIcon class="h-3.5 w-3.5" />{{ entry.name }}<span class="mono local-shell-program">{{ entry.program }}</span>
+                    <span v-if="entry.isDefault" class="local-shell-badge">{{ t("localTerminal.defaultBadge") }}</span>
+                    <span v-if="entry.isUserShell" class="local-shell-badge">{{ t("localTerminal.userShellBadge") }}</span>
+                  </button>
+                </template>
+                <p v-else class="muted local-shell-hint">{{ t("localTerminal.shellsUnavailable") }}</p>
+                <footer class="local-shell-footer">
+                  <button class="primary-button" :disabled="localState === 'starting'" @click="sessionMenuOpen = false; sessionMenuShellPickOpen = false; pickLocalShell()">
+                    {{ localUiMode ? t("localTerminal.restart") : t("localTerminal.open") }}
+                  </button>
+                </footer>
               </template>
               <template v-else>
                 <header class="session-shell-head">
@@ -8370,6 +8527,25 @@ watch(historyScope, () => {
                   <input type="checkbox" name="local-shell-integration" :checked="localShellIntegrationPref" :disabled="selectedShellInjectable === false" @change="setLocalShellIntegrationPref(($event.target as HTMLInputElement).checked)" />
                   <span>{{ t("localTerminal.injection") }}</span>
                 </label>
+                <!-- 启动目录 + 环境变量（localShellCwd/localShellEnv 偏好）：
+                     change 时落库，草稿行（未填名）只留在 UI 不持久化。 -->
+                <div class="local-shell-field">
+                  <label class="local-shell-field-label" for="local-shell-cwd">{{ t("localTerminal.cwdLabel") }}</label>
+                  <input id="local-shell-cwd" :value="localShellCwdPref" class="mono local-shell-input" :placeholder="t('localTerminal.cwdPlaceholder')" spellcheck="false" @change="setLocalShellCwd(($event.target as HTMLInputElement).value)" />
+                  <p class="muted local-shell-hint">{{ t("localTerminal.cwdHint") }}</p>
+                </div>
+                <div class="local-shell-field">
+                  <div class="local-shell-env-head">
+                    <span class="local-shell-field-label">{{ t("localTerminal.envLabel") }}</span>
+                    <button class="icon-button compact" :title="t('localTerminal.envAdd')" :aria-label="t('localTerminal.envAdd')" @click="addLocalShellEnvRow"><Plus /></button>
+                  </div>
+                  <div v-for="(_, index) in localShellEnvPref" :key="index" class="local-shell-env-row">
+                    <input v-model="localShellEnvPref[index].name" class="mono local-shell-input" :placeholder="t('localTerminal.envName')" :aria-label="t('localTerminal.envName')" spellcheck="false" @change="setLocalShellEnv()" />
+                    <input v-model="localShellEnvPref[index].value" class="mono local-shell-input" :placeholder="t('localTerminal.envValue')" :aria-label="t('localTerminal.envValue')" spellcheck="false" @change="setLocalShellEnv()" />
+                    <button class="icon-button compact" :title="t('localTerminal.envRemove')" :aria-label="t('localTerminal.envRemove')" @click="removeLocalShellEnvRow(index)"><Trash2 /></button>
+                  </div>
+                  <p class="muted local-shell-hint">{{ t("localTerminal.envHint") }}</p>
+                </div>
                 <footer class="local-shell-footer">
                   <!-- 本地模式中按钮保持可用：restart 语义（关当前 → 按新偏好重开）。
                        仅 starting 期间禁用防双击。 -->
@@ -8392,9 +8568,13 @@ watch(historyScope, () => {
                       <button class="shell-surface-item" @click="openLocalShellSurface()">
                         <TerminalIcon class="h-3.5 w-3.5" />{{ t("localTerminal.autoShell") }}
                       </button>
-                      <button v-for="entry in localShells" :key="entry.program" class="shell-surface-item" @click="openLocalShellSurface(entry.program)">
-                        <TerminalIcon class="h-3.5 w-3.5" />{{ entry.name }}<span class="mono local-shell-program">{{ entry.program }}</span>
-                      </button>
+                      <!-- 已配置默认 Shell 时隐藏发现列表（与 dock「+」launch-options
+                           同规则）：autoShell 项已按偏好打开，无需再选。 -->
+                      <template v-if="!localShellPref">
+                        <button v-for="entry in localShells" :key="entry.program" class="shell-surface-item" @click="openLocalShellSurface(entry.program)">
+                          <TerminalIcon class="h-3.5 w-3.5" />{{ entry.name }}<span class="mono local-shell-program">{{ entry.program }}</span>
+                        </button>
+                      </template>
                       <template v-if="dockConnections.length">
                         <p class="shell-surface-header">{{ t("localTerminal.connectionTerminals") }}</p>
                         <button v-for="connection in dockConnections" :key="`conn-${connection.id}`" class="shell-surface-item" @click="openConnectionSurface(connection)">
@@ -8809,7 +8989,7 @@ watch(historyScope, () => {
           <button type="button" class="terminal-ai-fix-btn" @click="aiFixFromBar">{{ t("aiFix.barAction") }}</button>
           <button type="button" class="terminal-ai-fix-close" :title="t('aiFix.barClose')" :aria-label="t('aiFix.barClose')" @click="aiFixBar = null; clearFixRecommendation()">✕</button>
         </div>
-        <div v-if="!isRdpConnection && (terminalDragActive || (dragActive && !sftpPaneOpen))" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
+        <div v-if="!isRdpConnection && !localUiMode && (terminalDragActive || (dragActive && !sftpPaneOpen))" class="drop-overlay"><FileUp /><strong>{{ t("terminalDrop.hint") }}</strong></div>
         <TerminalSearchPanel
           v-if="searchOpen"
           :locale="locale"
@@ -8914,7 +9094,7 @@ watch(historyScope, () => {
             <strong>{{ t("localTerminal.exited") }}</strong>
             <span v-if="localExitCode !== null" class="mono local-exit-code">{{ t("localTerminal.exitCode", { code: localExitCode }) }}</span>
             <div class="local-exit-actions">
-              <button class="primary-button" @click="restartLocalTerminal">{{ t("localTerminal.restart") }}</button>
+              <button class="primary-button" @click="restartLocalTerminal()">{{ t("localTerminal.restart") }}</button>
               <button @click="localShellRestored ? dismissRestoredLocalShell() : closeLocalTerminal()">{{ t("localTerminal.close") }}</button>
             </div>
           </div>
@@ -9350,7 +9530,7 @@ watch(historyScope, () => {
       </ContextMenu>
 
       <div
-        v-if="sftpPaneOpen && !isRdpConnection"
+        v-if="sftpPaneOpen && !isRdpConnection && !localUiMode"
         class="divider"
         role="separator"
         aria-orientation="vertical"
@@ -9363,7 +9543,7 @@ watch(historyScope, () => {
         @keydown="onDividerKeydown($event, nudgeSplitDivider)"
       />
 
-      <section v-if="sftpPaneOpen && !isRdpConnection" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave.self="dragActive = false" @drop.prevent="onDrop">
+      <section v-if="sftpPaneOpen && !isRdpConnection && !localUiMode" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave.self="dragActive = false" @drop.prevent="onDrop">
         <div class="path-toolbar">
           <button class="icon-button" :title="t('parentFolder')" :aria-label="t('parentFolder')" :disabled="currentPath === '/'" @click="goParent"><ArrowUp /></button>
           <button class="icon-button icon-amber" :title="t('home')" :aria-label="t('home')" :disabled="!connected" @click="loadHome"><Home /></button>

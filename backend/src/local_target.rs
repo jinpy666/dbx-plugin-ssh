@@ -36,6 +36,14 @@ pub(crate) struct LocalTarget {
     /// Absolute shell path from the connection form; empty = resolve the
     /// DBX default shell when the task actually spawns.
     pub shell: String,
+    /// Absolute start directory from the connection form; empty = resolve
+    /// through the normal chain (last tracked cwd > preference > home).
+    pub cwd: String,
+    /// Connection-form environment variables (`NAME=value` per line),
+    /// sanitized through the same rules as the terminal's `env` parameter —
+    /// invalid lines (empty name, `=` in the name, managed TERM family) are
+    /// dropped at parse time, never surfaced.
+    pub env: Vec<(String, String)>,
 }
 
 impl LocalTarget {
@@ -77,7 +85,14 @@ impl LocalTarget {
             .map(str::trim)
             .unwrap_or_default()
             .to_string();
-        Ok(Some(Self { id, name, shell }))
+        let (cwd, env) = config_cwd_env(connection);
+        Ok(Some(Self {
+            id,
+            name,
+            shell,
+            cwd,
+            env,
+        }))
     }
 
     /// Shell this target spawns commands with: the connection's explicit
@@ -100,6 +115,40 @@ fn provider_id(params: &Value) -> Option<String> {
         .and_then(|provider| provider.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// Extracts the connection form's `cwd` and `env` values. `env` is a
+/// textarea: one `NAME=value` per line, blank lines and `#` comments skipped,
+/// the first `=` separates name and value (values may contain `=`), and every
+/// pair still passes [`crate::local_terminal::sanitize_env_pair`] so managed
+/// keys and malformed entries drop exactly like the terminal's own env
+/// parameter. A malformed line never fails the connection — it is ignored.
+fn config_cwd_env(connection: &serde_json::Map<String, Value>) -> (String, Vec<(String, String)>) {
+    let config = connection.get("external_config").and_then(Value::as_object);
+    let cwd = config
+        .and_then(|config| config.get("cwd"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let text = config
+        .and_then(|config| config.get("env"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut env = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if let Some(pair) = crate::local_terminal::sanitize_env_pair(name, value) {
+            env.push(pair);
+        }
+    }
+    (cwd, env)
 }
 
 /// Pure provider-marker predicate. The task provider's local-vs-SSH decision
@@ -134,6 +183,31 @@ mod tests {
         assert_eq!(target.name.as_deref(), Some("ops box"));
         assert_eq!(target.shell, "/bin/bash");
         assert_eq!(target.shell_or("/bin/zsh"), "/bin/bash");
+        // 旧宿主/旧连接没有 cwd/env 键：解析为空，不报错。
+        assert_eq!(target.cwd, "");
+        assert!(target.env.is_empty());
+    }
+
+    #[test]
+    fn connection_form_cwd_and_env_lines_parse_and_sanitize() {
+        let mut payload = lifecycle(LOCAL_CONNECTION_PROVIDER);
+        payload["connection"]["external_config"] = json!({
+            "shell": "/bin/sh",
+            "cwd": "  /tmp/work  ",
+            "env": "EDITOR=/usr/bin/vim\n# comment\n\nBAD LINE WITHOUT EQUALS\nA=B=C\nTERM=vt100\n  \n=DROPPED",
+        });
+        let target = LocalTarget::from_lifecycle_params(&payload)
+            .expect("parse")
+            .expect("local target");
+        assert_eq!(target.cwd, "/tmp/work");
+        // 第一处 `=` 分隔（值可含 `=`）；空名/托管键/无 `=` 的行静默丢弃。
+        assert_eq!(
+            target.env,
+            vec![
+                ("EDITOR".to_string(), "/usr/bin/vim".to_string()),
+                ("A".to_string(), "B=C".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -173,6 +247,8 @@ mod tests {
             id: "c".to_string(),
             name: None,
             shell: String::new(),
+            cwd: String::new(),
+            env: Vec::new(),
         };
         assert_eq!(target.shell_or("/bin/sh"), "/bin/sh");
         target.shell = "/usr/bin/fish".to_string();

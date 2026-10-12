@@ -20,7 +20,7 @@
 //! user's own startup chain — a broken rc must never keep the shell from
 //! reaching a prompt.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -79,6 +79,57 @@ pub struct LocalTerminalStartRequest {
     /// older workbenches that do not send it.
     pub cursor_row: Option<u16>,
     pub cursor_col: Option<u16>,
+    /// User-supplied environment variables layered over the inherited system
+    /// environment. Renderer input is sanitized defensively
+    /// ([`sanitize_user_env`]): integration env and the managed TERM family
+    /// always win, so a bad value can never break the rendering contract —
+    /// and a bad entry must never keep the shell from reaching a prompt.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// Caps for renderer-supplied env, bounded like every other renderer input.
+pub const USER_ENV_MAX_PAIRS: usize = 32;
+const USER_ENV_MAX_KEY: usize = 128;
+const USER_ENV_MAX_VALUE: usize = 4096;
+/// Env the sidecar manages for the workbench: the TERM family defines how the
+/// embedded terminal renders and `TERM_PROGRAM` is the plugin's detectability
+/// marker. User values for these keys are ignored (case-insensitively).
+const USER_ENV_MANAGED_KEYS: [&str; 3] = ["TERM", "COLORTERM", "TERM_PROGRAM"];
+
+/// Validates one user-supplied env pair: non-empty trimmed key within the size
+/// caps, no `=` and no control bytes (the spawn layer would reject or garble
+/// them), not a managed key, value within the cap. `None` = drop the entry.
+pub fn sanitize_env_pair(name: &str, value: &str) -> Option<(String, String)> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > USER_ENV_MAX_KEY
+        || name.contains('=')
+        || name.bytes().any(|byte| byte.is_ascii_control())
+        || USER_ENV_MANAGED_KEYS
+            .iter()
+            .any(|managed| managed.eq_ignore_ascii_case(name))
+        || value.len() > USER_ENV_MAX_VALUE
+    {
+        return None;
+    }
+    Some((name.to_string(), value.to_string()))
+}
+
+/// Pure core of user-env validation over the request map: keeps the valid
+/// pairs up to the pair cap. `BTreeMap` iterates key-sorted, so the cap trims
+/// deterministically (same input → same survivors).
+fn sanitize_user_env(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for (key, value) in env {
+        if pairs.len() >= USER_ENV_MAX_PAIRS {
+            break;
+        }
+        if let Some(pair) = sanitize_env_pair(key, value) {
+            pairs.push(pair);
+        }
+    }
+    pairs
 }
 
 enum LocalTerminalCommand {
@@ -171,6 +222,12 @@ impl LocalTerminalRuntime {
         // same), plus a detectable marker akin to TERM_PROGRAM=vscode.
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "dbx");
+        // User env sits beneath integration env: injection owns its mechanics
+        // (ZDOTDIR…) and the managed keys above are filtered out entirely, so
+        // the shell's rendering contract holds no matter what was sent.
+        for (key, value) in sanitize_user_env(&request.env) {
+            command.env(key, value);
+        }
         for (key, value) in &integration.env {
             command.env(key, value);
         }
@@ -1199,22 +1256,28 @@ fn launch_option_copy(locale: &str) -> (&'static str, &'static str, &'static str
 /// Surfaced in the dock picker description; the default itself is set from the
 /// workbench settings dialog (also the shell picker's `localShell` key).
 pub fn resolve_default_shell(data_dir: &Path) -> String {
-    let prefs = crate::preferences::load_preferences(data_dir);
-    let configured = prefs
+    resolve_configured_shell(data_dir).unwrap_or_else(|| {
+        let shell_env = std::env::var("SHELL").ok();
+        pick_shell(
+            None,
+            shell_env.as_deref(),
+            directory_services_shell().as_deref(),
+            current_platform(),
+        )
+        .program
+    })
+}
+
+/// The explicitly configured `localShell` preference, or `None` when unset —
+/// the dock picker collapses its discovery list to the single configured
+/// shell exactly when this returns `Some`.
+pub fn resolve_configured_shell(data_dir: &Path) -> Option<String> {
+    crate::preferences::load_preferences(data_dir)
         .get("localShell")
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty());
-    if let Some(program) = configured {
-        return program.to_string();
-    }
-    let shell_env = std::env::var("SHELL").ok();
-    pick_shell(
-        None,
-        shell_env.as_deref(),
-        directory_services_shell().as_deref(),
-        current_platform(),
-    )
-    .program
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 impl LocalTerminalRuntime {
@@ -1226,17 +1289,28 @@ impl LocalTerminalRuntime {
     /// opens with the configured `localShell` preference (auto-detect chain
     /// as fallback) — resolved by `resolve_default_shell` on the host call
     /// path — while the per-shell entries pin an explicit shell via their
-    /// context fragment. Business meaning stays on the plugin side; the host
-    /// renders labels and never interprets the contexts. `locale` is the host
-    /// UI language (the host-side `options_action` contract); older hosts
-    /// omit it and get English.
-    pub fn launch_options(&self, locale: &str, default_shell: &str) -> Value {
+    /// context fragment. `configured_shell` (the raw `localShell` preference,
+    /// via `resolve_configured_shell`) collapses the discovery group: once
+    /// the user picked a default there is nothing to choose among, so the
+    /// picker carries just the one configured entry. Business meaning stays
+    /// on the plugin side; the host renders labels and never interprets the
+    /// contexts. `locale` is the host UI language (the host-side
+    /// `options_action` contract); older hosts omit it and get English.
+    pub fn launch_options(
+        &self,
+        locale: &str,
+        default_shell: &str,
+        configured_shell: Option<&str>,
+    ) -> Value {
         let (label, group, description_prefix) = launch_option_copy(locale);
         let mut entries = vec![json!({
             "label": label,
             "description": format!("{description_prefix}{default_shell}"),
             "context": { "plugin": { "mode": "local-terminal" } },
         })];
+        if configured_shell.is_some() {
+            return json!({ "entries": entries });
+        }
         for shell in discover_shells(current_platform()) {
             if shell.program.is_empty() {
                 continue;
@@ -1455,6 +1529,48 @@ fn prepare_integration(kind: ShellKind, enabled: bool) -> PreparedIntegration {
 mod tests {
     use super::*;
     use crate::model::TerminalFrame;
+
+    #[test]
+    fn start_request_env_defaults_to_empty() {
+        // Older workbenches never send `env`: the field must stay optional.
+        let request: LocalTerminalStartRequest =
+            serde_json::from_str(r#"{"workbenchId":"w","cols":80,"rows":24}"#).unwrap();
+        assert!(request.env.is_empty());
+    }
+
+    #[test]
+    fn user_env_sanitizes_drops_and_reserves() {
+        let env = BTreeMap::from([
+            ("HOME".to_string(), "/tmp/x".to_string()),
+            ("TERM".to_string(), "vt100".to_string()),
+            ("colorterm".to_string(), "none".to_string()),
+            ("  ".to_string(), "v".to_string()),
+            ("A=B".to_string(), "v".to_string()),
+            ("BAD\u{7}".to_string(), "v".to_string()),
+            ("OVER".to_string(), "x".repeat(USER_ENV_MAX_VALUE + 1)),
+            (" OK ".to_string(), "kept".to_string()),
+        ]);
+        // BTreeMap iterates by the RAW keys (space sorts below letters), so
+        // the trimmed " OK " pair comes out first — order stays deterministic.
+        assert_eq!(
+            sanitize_user_env(&env),
+            vec![
+                ("OK".to_string(), "kept".to_string()),
+                ("HOME".to_string(), "/tmp/x".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn user_env_pair_cap_trims_deterministically() {
+        let env: BTreeMap<String, String> = (0..USER_ENV_MAX_PAIRS + 5)
+            .map(|i| (format!("K{i:03}"), "v".to_string()))
+            .collect();
+        let pairs = sanitize_user_env(&env);
+        assert_eq!(pairs.len(), USER_ENV_MAX_PAIRS);
+        assert_eq!(pairs[0].0, "K000");
+        assert_eq!(pairs[USER_ENV_MAX_PAIRS - 1].0, "K031");
+    }
 
     #[test]
     fn handshake_filter_swallows_the_query_and_reports_it() {
@@ -1973,7 +2089,7 @@ mod tests {
     #[test]
     fn launch_options_default_first_then_local_terminal_shell_group() {
         let runtime = LocalTerminalRuntime::new();
-        let options = runtime.launch_options("zh-CN", "/bin/zsh");
+        let options = runtime.launch_options("zh-CN", "/bin/zsh", None);
         let entries = options["entries"].as_array().unwrap();
         // First entry: the default-shell launcher, carried without a `group`
         // so the host pins it top-level as the quickest action.
@@ -1995,13 +2111,26 @@ mod tests {
     fn launch_options_fall_back_to_english_for_unknown_locale() {
         // Older hosts pass no locale at all (empty string) — same fallback.
         let runtime = LocalTerminalRuntime::new();
-        let english = runtime.launch_options("ko", "/bin/bash");
+        let english = runtime.launch_options("ko", "/bin/bash", None);
         assert_eq!(english["entries"][0]["label"], "Local terminal");
         assert!(english["entries"][0]["group"].is_null());
         assert_eq!(
-            runtime.launch_options("", "/bin/bash")["entries"][0]["description"],
+            runtime.launch_options("", "/bin/bash", None)["entries"][0]["description"],
             "Default shell: /bin/bash"
         );
+    }
+
+    #[test]
+    fn launch_options_configured_shell_collapses_the_discovery_group() {
+        // The user picked a default shell: the picker has nothing left to
+        // choose among, so only the single configured entry remains.
+        let runtime = LocalTerminalRuntime::new();
+        let options = runtime.launch_options("zh-CN", "/usr/bin/fish", Some("/usr/bin/fish"));
+        let entries = options["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["label"], "本地终端");
+        assert_eq!(entries[0]["description"], "默认 Shell：/usr/bin/fish");
+        assert!(entries[0]["group"].is_null());
     }
 
     #[test]

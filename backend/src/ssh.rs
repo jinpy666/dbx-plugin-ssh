@@ -16245,6 +16245,8 @@ matrix-ed25519";
                     id: "conn-local-1".to_string(),
                     name: Some("ops".to_string()),
                     shell: "/bin/bash".to_string(),
+                    cwd: String::new(),
+                    env: Vec::new(),
                 })
                 .unwrap();
             let target = runtime_handle
@@ -16257,6 +16259,8 @@ matrix-ed25519";
                     id: "conn-local-1".to_string(),
                     name: None,
                     shell: String::new(),
+                    cwd: String::new(),
+                    env: Vec::new(),
                 })
                 .unwrap();
             let replaced = runtime_handle

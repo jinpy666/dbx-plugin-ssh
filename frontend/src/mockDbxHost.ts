@@ -675,6 +675,10 @@ const localPrefsState = {
   downloadConflictPolicy: "rename",
   localShell: "",
   localShellIntegration: true,
+  // 本地 Shell 启动目录/环境变量（镜像 sidecar preferences.json 白名单键；
+  // env 存净化后的 [{name, value}]，与 sidecar sanitize_env_pair 边界一致）。
+  localShellCwd: "",
+  localShellEnv: [] as Array<{ name: string; value: string }>,
   auto_record: false,
   // M14-B 三键镜像（缺省与 sidecar 一致：深度 3 / 兼容关 / 编码 auto）。
   transfer_max_active: 3,
@@ -1160,6 +1164,26 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     if (typeof input.downloadUseDefaultDir === "boolean") localPrefsState.downloadUseDefaultDir = input.downloadUseDefaultDir;
     if (typeof input.downloadConflictPolicy === "string" && ["rename", "ask", "overwrite"].includes(input.downloadConflictPolicy)) localPrefsState.downloadConflictPolicy = input.downloadConflictPolicy;
     if (typeof input.auto_record === "boolean") localPrefsState.auto_record = input.auto_record;
+    // 本地 Shell 偏好：cwd 字符串裁剪存储（空串=清除）；env 数组镜像 sidecar
+    // 净化——空名/含 =/托管键/超限条目静默丢弃，≤32 对。
+    if (typeof input.localShellCwd === "string") localPrefsState.localShellCwd = input.localShellCwd.trim();
+    if (Array.isArray(input.localShellEnv)) {
+      const managed = ["TERM", "COLORTERM", "TERM_PROGRAM"];
+      const store: Array<{ name: string; value: string }> = [];
+      for (const entry of input.localShellEnv) {
+        if (store.length >= 32) break;
+        if (typeof entry !== "object" || entry === null) continue;
+        const record = entry as Record<string, unknown>;
+        if (typeof record.name !== "string") continue;
+        // 缺 value 视为空值保留（镜像 sidecar unwrap_or("")）。
+        const value = typeof record.value === "string" ? record.value : "";
+        const name = record.name.trim();
+        if (!name || name.includes("=") || name.length > 128 || value.length > 4096) continue;
+        if (managed.some((key) => key.toLowerCase() === name.toLowerCase())) continue;
+        store.push({ name, value });
+      }
+      localPrefsState.localShellEnv = store;
+    }
     if (input.transfer_max_active !== undefined) localPrefsState.transfer_max_active = Math.min(8, Math.max(1, Math.floor(Number(input.transfer_max_active) || 3)));
     if (typeof input.sftp_compat_mode === "boolean") localPrefsState.sftp_compat_mode = input.sftp_compat_mode;
     if (input.sftp_name_encoding === "auto" || input.sftp_name_encoding === "latin-1") localPrefsState.sftp_name_encoding = input.sftp_name_encoding;

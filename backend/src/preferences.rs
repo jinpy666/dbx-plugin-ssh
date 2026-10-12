@@ -118,6 +118,36 @@ fn sanitize_local_shell(value: &Value) -> Option<String> {
     Some(shell.chars().take(200).collect())
 }
 
+/// 本地 Shell 启动目录：仅裁剪与限长（≤512 字符），不校验存在性——
+/// `local/terminal/start` 时再对现存目录校验并回落家目录。空串 = 未设置。
+fn sanitize_local_shell_cwd(value: &Value) -> Option<String> {
+    let dir = value.as_str()?.trim();
+    Some(dir.chars().take(512).collect())
+}
+
+/// 本地 Shell 环境变量（`[{name, value}]`）：复用
+/// `local_terminal::sanitize_env_pair` 的同一条规则集（≤32 对、名 ≤128 字节
+/// 且不含 `=`/控制字符、值 ≤4096 字节、托管键忽略）。坏条目静默丢弃而非整
+/// 批拒绝，与 sidecar 侧"坏 env 不能挡住提示符"的 fail-safe 契约一致。
+fn sanitize_local_shell_env(value: &Value) -> Option<Value> {
+    let entries = value.as_array()?;
+    let mut pairs = Vec::new();
+    for entry in entries {
+        if pairs.len() >= crate::local_terminal::USER_ENV_MAX_PAIRS {
+            break;
+        }
+        let name = match entry.get("name").and_then(Value::as_str) {
+            Some(name) => name,
+            None => continue,
+        };
+        let text = entry.get("value").and_then(Value::as_str).unwrap_or("");
+        if let Some((name, text)) = crate::local_terminal::sanitize_env_pair(name, text) {
+            pairs.push(json!({ "name": name, "value": text }));
+        }
+    }
+    Some(Value::Array(pairs))
+}
+
 /// 冲突策略白名单：自动重命名（默认）/ 询问我 / 覆盖已有文件。
 fn sanitize_conflict_policy(value: &Value) -> Option<&'static str> {
     match value.as_str()? {
@@ -376,6 +406,16 @@ pub fn load_preferences(data_dir: &Path) -> Value {
             Value::Bool(integration),
         );
     }
+    // 本地 Shell 启动目录/环境变量：cwd 空串视为未设置不入返回；env 空数组
+    // 照常返回（前端按无变量处理）。
+    if let Some(dir) = map.get("localShellCwd").and_then(sanitize_local_shell_cwd) {
+        if !dir.is_empty() {
+            prefs.insert("localShellCwd".to_string(), Value::String(dir));
+        }
+    }
+    if let Some(env) = map.get("localShellEnv").and_then(sanitize_local_shell_env) {
+        prefs.insert("localShellEnv".to_string(), env);
+    }
     // 上传并发（1..=10，默认 3）与重复目标策略（P1-5）。
     if map.contains_key("transfer_concurrency") {
         let concurrency = sanitize_u64_clamped(&map["transfer_concurrency"], 1, 10, 3);
@@ -594,6 +634,18 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
             "localShellIntegration".to_string(),
             Value::Bool(integration),
         );
+    }
+    // 本地 Shell 启动目录/环境变量：cwd 允许空串（= 清除）；env 非数组报错，
+    // 数组内坏条目由净化器静默丢弃。
+    if let Some(value) = params.get("localShellCwd") {
+        let dir = sanitize_local_shell_cwd(value)
+            .ok_or_else(|| "localShellCwd must be a string".to_string())?;
+        map.insert("localShellCwd".to_string(), Value::String(dir));
+    }
+    if let Some(value) = params.get("localShellEnv") {
+        let env = sanitize_local_shell_env(value)
+            .ok_or_else(|| "localShellEnv must be an array of {name, value}".to_string())?;
+        map.insert("localShellEnv".to_string(), env);
     }
     // 上传并发/重复策略与命令建议键：数值一律钳制到合法区间（非法回落默认），
     // 不报错，保证旧前端/手改文件不会把偏好写入卡死。
@@ -870,6 +922,51 @@ fn write_preferences_atomically(path: &Path, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_shell_cwd_and_env_whitelist_and_roundtrip() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // cwd roundtrip：裁剪存储；空串 = 清除（load 不再返回）；非字符串拒绝。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "localShellCwd": "  /tmp/work  " }),
+        )
+        .unwrap();
+        assert_eq!(
+            load_preferences(data_dir.path())["localShellCwd"],
+            json!("/tmp/work")
+        );
+        save_preferences(data_dir.path(), &json!({ "localShellCwd": "" })).unwrap();
+        assert!(load_preferences(data_dir.path())
+            .get("localShellCwd")
+            .is_none());
+        assert!(save_preferences(data_dir.path(), &json!({ "localShellCwd": 3 })).is_err());
+
+        // env roundtrip：缺 value 视为空值；坏条目（空名/含=/托管键/超长值）
+        // 静默丢弃，好条目保留。
+        save_preferences(
+            data_dir.path(),
+            &json!({ "localShellEnv": [
+                {"name": "EMPTY_OK"},
+                {"name": "DBX_WORK", "value": "1"},
+                {"name": "", "value": "drop"},
+                {"name": "A=B", "value": "drop"},
+                {"name": "TERM", "value": "drop"},
+                {"name": "TOO_LONG", "value": "x".repeat(4097)},
+                {"value": "no name"},
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(
+            load_preferences(data_dir.path())["localShellEnv"],
+            json!([
+                { "name": "EMPTY_OK", "value": "" },
+                { "name": "DBX_WORK", "value": "1" },
+            ])
+        );
+        // 非数组 env 整批拒绝。
+        assert!(save_preferences(data_dir.path(), &json!({ "localShellEnv": "x" })).is_err());
+    }
 
     #[test]
     fn wallpaper_roundtrip_validates_magic_and_size() {
