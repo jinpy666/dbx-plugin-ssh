@@ -110,11 +110,11 @@ function dockerListPayload(raw: unknown): { available: boolean; needsSudo: boole
   };
 }
 
-/** 「在终端打开」命令：容器内挑一个可用 shell（与 NyaTerm 约定一致）。
+/** 「在终端打开」命令：先检测可用 shell，再 exec；非零退出不触发其他 shell。
  *  CLI 跟随引擎设置（podman 等自定义命令同样可进终端 exec）。 */
 function dockerExecCommand(containerId: string): string {
   const cli = engineSettings.value.cli || "docker";
-  return `${cli} exec -it ${containerId} sh -lc 'bash || zsh || fish || ash || sh'`;
+  return `${cli} exec -it ${containerId} sh -lc 'for shell in bash zsh fish ash; do if command -v "$shell" >/dev/null 2>&1; then exec "$shell"; fi; done; exec sh'`;
 }
 
 /** 状态徽标 class：已知状态着色，未知状态走中性灰。 */
