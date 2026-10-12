@@ -10,7 +10,7 @@ import { clampFontSize } from "./terminalZoom";
 import { pushPathHistory, sanitizePathHistories } from "./sftpPathHistory";
 import { formatBytes, formatRate } from "./format";
 import { expandSelection, filterSftpEntries } from "./sftpFileFilters";
-import { getSshWorkbenchSplitLayout, resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref } from "./workbenchLayout";
+import { getSshWorkbenchSplitLayout, resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, sanitizeSftpAutoConnectPref, shouldLazyLoadSftpListing } from "./workbenchLayout";
 import { commandMarkerTooltip, formatCommandDuration, getOsc633ParserState, Osc633CommandParser, parseOsc633StreamChunk, runningCommandElapsedMs } from "./terminalCommandMarkers";
 import { describeWorkbenchSessionStatus, isUsableSshSession, normalizeSshSessionStatus } from "./sessionStatus";
 import { sanitizeCommandOutput, stripCommandEcho, stripHiddenCommandEchoes, stripTerminalControlSequences } from "./terminalOutputText";
@@ -164,6 +164,27 @@ describe("SSH workbench protocol helpers", () => {
     expect(sanitizeDirectoryFollowPref("true")).toBe(true);
     expect(sanitizeDirectoryFollowPref("garbage")).toBe(false);
     expect(sanitizeDirectoryFollowPref("false")).toBe(false);
+  });
+
+  it("parses the persisted SFTP auto-connect preference defensively", () => {
+    // Global default is ON (#179): only the explicit opt-out stops prefetching
+    // the remote listing on connect (servers without SFTP keep erroring).
+    expect(sanitizeSftpAutoConnectPref(null)).toBe(true);
+    expect(sanitizeSftpAutoConnectPref("true")).toBe(true);
+    expect(sanitizeSftpAutoConnectPref("garbage")).toBe(true);
+    expect(sanitizeSftpAutoConnectPref("false")).toBe(false);
+  });
+
+  it("lazy-loads the SFTP listing only on the first manual pane open of a live session", () => {
+    // Auto-connect off: opening the pane fires the session's first listing.
+    expect(shouldLazyLoadSftpListing({ paneOpen: true, sessionLive: true, listingLoaded: false })).toBe(true);
+    // A pane that was already open (e.g. default-open preference on connect)
+    // must not trigger; the watch only fires on the closed → open transition.
+    expect(shouldLazyLoadSftpListing({ paneOpen: false, sessionLive: true, listingLoaded: false })).toBe(false);
+    // No live session: nothing to list.
+    expect(shouldLazyLoadSftpListing({ paneOpen: true, sessionLive: false, listingLoaded: false })).toBe(false);
+    // Already fetched this session: the refresh button is the explicit path.
+    expect(shouldLazyLoadSftpListing({ paneOpen: true, sessionLive: true, listingLoaded: true })).toBe(false);
   });
 });
 

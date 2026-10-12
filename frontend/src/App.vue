@@ -280,7 +280,7 @@ import { useAgentTerminalMode } from "./composables/useAgentTerminalMode";
 import { useAlertTriage } from "./composables/useAlertTriage";
 import { type TransferHistoryEntry } from "./lib/transferHistory";
 import { useTransferHistory } from "./composables/useTransferHistory";
-import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
+import { resolveSftpPaneOpen, sanitizeSftpPaneDefaultOpen, resolveDirectoryFollow, sanitizeDirectoryFollowPref, sanitizeSftpAutoConnectPref, shouldLazyLoadSftpListing, type SshWorkbenchPaneOrder } from "./lib/workbenchLayout";
 import { pickLiveSessionForReattach, pickProtocolSessionForReattach, type SessionSummary } from "./lib/sessionRestore";
 import { toolbarTintStyle } from "./lib/toolbarTint";
 import { createGhostClickGuard } from "./lib/ghostClickGuard";
@@ -570,6 +570,9 @@ const SFTP_PANE_OPEN_KEY = "ssh-sftp-pane-open";
 // 目录跟随全局偏好：pluginStore 持久化（"true" = 新工作台初始即开启；per-tab
 // 的 workbenchState.followDirectory 仍优先，恢复的 tab 不被全局值覆盖）。
 const FOLLOW_DIRECTORY_KEY = "ssh-follow-directory";
+// SFTP 自动连接偏好：pluginStore 持久化（"false" = 连接成功后不自动加载
+// SFTP 目录；服务端未开 SFTP 时避免每次连接弹错误横幅，issue #179）。
+const SFTP_AUTO_CONNECT_KEY = "ssh-sftp-auto-connect";
 const DOWNLOAD_DIR_KEY = "ssh-download-directory";
 // 是否默认下载到「下载保存目录」（默认开）；关闭则每次下载打开目录选择窗口。
 const DOWNLOAD_USE_DEFAULT_KEY = "ssh-download-use-default-dir";
@@ -728,6 +731,10 @@ const paneOrder = ref<SshWorkbenchPaneOrder>("terminal-left");
 // 新工作台的初始值取全局"默认打开"偏好（pluginStore）。
 const sftpPaneOpen = ref(loadSftpPaneDefaultOpen());
 const sftpPaneDefaultOpen = ref(loadSftpPaneDefaultOpen());
+// 本会话是否已成功加载过 SFTP 目录：自动连接关闭时，手动打开面板的瞬间
+// 据此惰性补载（每会话一次，断开重置）。
+const sftpListingLoaded = ref(false);
+const sftpAutoConnect = ref(loadSftpAutoConnect());
 // sftp/home 探测结果：quick tab 置顶展示（获取失败时该项隐藏）。
 const sftpHomePath = ref("");
 // 终端行为偏好（对标 Tabby「Terminal」页）：右键语义、剪贴板、响铃、渲染细项，
@@ -4002,13 +4009,20 @@ async function afterSessionConnected() {
   scheduleFit();
   await writeWorkbenchState();
   if (followDirectory.value) await setDirectoryTracking(true);
-  void refreshSftpHomePath();
-  await Promise.all([loadDirectory(currentPath.value), restoreTransfers()]);
+  if (sftpAutoConnect.value) {
+    void refreshSftpHomePath();
+    await Promise.all([loadDirectory(currentPath.value), restoreTransfers()]);
+    // 侧栏 tree tab 可见时补拉根节点（首连/重连后缓存仍为空的场景）。
+    ensureSideTreeRoot();
+  } else {
+    // 自动连接已关：连接成功不碰 SFTP 子系统——列表首拉、主目录探测、侧栏
+    // 树根都不发（服务端未开 SFTP 时不再每次连接弹错误横幅）；侧栏树展开/
+    // 刷新与首次手动打开面板（sftpPaneOpen watch 惰性补载）时才连。
+    await restoreTransfers();
+  }
   // 「在外部编辑器中打开」菜单项的可用性依赖本机落盘能力，连接后即探测
   // （结果按工作台生命周期缓存，web/docker 为 false → 菜单项保持禁用）。
   void probeLocalCapabilities();
-  // 侧栏 tree tab 可见时补拉根节点（首连/重连后缓存仍为空的场景）。
-  ensureSideTreeRoot();
   // 远端 shell 历史导入(↑ history 面板内容对齐 shell history):异步拉取,
   // 不阻塞会话建立;失败静默(受限 shell/无历史文件时回落仅本会话采集)。
   const connectedSessionId = session.value?.sessionId;
@@ -4039,6 +4053,8 @@ async function closeSession(updateStatus = true) {
   terminalInputQueue.reset();
   reconnectPending.value = false;
   resetCommandMarker();
+  // 新会话的 SFTP 目录视为未加载：自动连接关闭时，重连后手动打开面板会重新补载。
+  sftpListingLoaded.value = false;
   // 外部编辑器监听挂在会话上：断开前先停掉（后端 ssh/session/close 兜底）。
   // M15 多文件：清空整个 watch 注册表与逐文件确认队列。
   if (sessionId) {
@@ -5498,6 +5514,7 @@ const {
   hydrateLinkTargets: (list, isCurrent) => hydrateLinkTargets(list, isCurrent),
   rememberPathHistory: (path) => rememberPathHistory(path),
   closePathHistoryMenu: () => { pathHistoryOpen.value = false; },
+  onListingLoaded: () => { sftpListingLoaded.value = true; },
 });
 
 function togglePaneOrder() {
@@ -5527,6 +5544,24 @@ function loadSftpPaneDefaultOpen(): boolean {
     return sanitizeSftpPaneDefaultOpen(pluginStore.getItem(SFTP_PANE_OPEN_KEY));
   } catch {
     return false;
+  }
+}
+
+// SFTP 自动连接全局偏好：关闭后连接成功不再自动加载 SFTP 目录（#179）。
+function toggleSftpAutoConnect() {
+  sftpAutoConnect.value = !sftpAutoConnect.value;
+  try {
+    pluginStore.setItem(SFTP_AUTO_CONNECT_KEY, sftpAutoConnect.value ? "true" : "false");
+  } catch {
+    // localStorage 不可用时偏好仅对当前会话生效。
+  }
+}
+
+function loadSftpAutoConnect(): boolean {
+  try {
+    return sanitizeSftpAutoConnectPref(pluginStore.getItem(SFTP_AUTO_CONNECT_KEY));
+  } catch {
+    return true;
   }
 }
 
@@ -7861,6 +7896,12 @@ async function reattachProtocolSession(): Promise<boolean> {
 
 watch([splitRatio, paneOrder, sftpPaneOpen, followDirectory, sudoMode, visibleColumns, sftpShowHidden, sort], persistState, { deep: true });
 
+// SFTP 自动连接关闭时的惰性加载：面板从收起到打开的瞬间才补发首次列目录
+// （连接时已打开的面板不触发；已加载过或无会话也不触发，见 shouldLazyLoadSftpListing）。
+watch(sftpPaneOpen, (open) => {
+  if (shouldLazyLoadSftpListing({ paneOpen: open, sessionLive: !!session.value, listingLoaded: sftpListingLoaded.value })) void loadDirectory();
+});
+
 // ---------------------------------------------------------------------------
 // MCP 设置镜像（存储迁移批 1，IMPL_PLAN_STORAGE_SYNC）：sidecar 在 MCP serve
 // 时直接消费 mcp-settings.json，pluginStore 里只存「云同步载荷」。启动时：
@@ -8390,6 +8431,7 @@ watch(historyScope, () => {
             <label v-for="column in (['size', 'modified', 'owner', 'group', 'permissions'] as SftpColumn[])" :key="column"><input type="checkbox" :checked="visibleColumns.includes(column)" @change="toggleColumn(column)" />{{ t(column) }}</label>
             <hr class="columns-popover-separator" />
             <label :title="t('sftpPane.defaultOpenHint')"><input type="checkbox" :checked="sftpPaneDefaultOpen" @change="toggleSftpPaneDefaultOpen" />{{ t("sftpPane.defaultOpen") }}</label>
+            <label :title="t('sftpPane.autoConnectHint')"><input type="checkbox" :checked="sftpAutoConnect" @change="toggleSftpAutoConnect" />{{ t("sftpPane.autoConnect") }}</label>
             </PopoverContent>
           </Popover>
         </div>

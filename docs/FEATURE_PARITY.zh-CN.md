@@ -647,3 +647,9 @@ Xshell/Termius/SecureCRT 全部不存在，维持不立项；Telnet/Serial 维�
 | known_hosts TOFU 闭环测试 | electerm host-trust / tssh 鲁棒性 | ✅ 已有（测试资产） | check→learn→check 变 Trusted、learned key 变更拒绝（MITM 护栏）两个闭环用例；写路径 learn 追加语义 + 8192 字符脏行截断既有覆盖不变 |
 | 上传临时件路径边界 | Guacamole 路径矩阵 | ✅ 已有（修复） | `remote_transfer_paths` 段级 `..` 收敛（含 `..` 目标的 `.part`/`.backup` 临时件与 normalize 后目标同目录，原子 rename 前提）；相对父目录弹空显式拒绝 |
 | 认证计划纯函数单测 | Tabby authMethodSelection 7 用例 | ✅ 已有 | `method_offered`/`auth_partial_success` 直接断言（服务器广告驱动、Success/空集 false、partial 三态） |
+
+## 用户反馈补充（issue 驱动）
+
+| 能力 | 来源 | 插件状态 | 说明 |
+| --- | --- | --- | --- |
+| SFTP 自动连接开关 | issue #179（服务端未开 SFTP 时每次连接弹错误横幅） | ✅ 已有（2026-10-12） | 全局偏好 `ssh-sftp-auto-connect`（默认开，pluginStore 持久化，`lib/workbenchLayout.ts` `sanitizeSftpAutoConnectPref` 纯函数解析）。关闭后 `afterSessionConnected` 跳过 `sftp/list` 首拉、`sftp/home` 主目录探测与侧栏树根补拉（tree tab 默认，其失败同样会弹错）——连接成功不再触碰 SFTP 子系统，无 SFTP 的服务端不再弹错误横幅；传输恢复（`restoreTransfers`）不受影响。面板仍按「默认打开 SFTP 面板」偏好/per-tab 状态打开但保持未加载，首次手动打开面板时经 `shouldLazyLoadSftpListing`（面板打开 × 会话在场 × 本会话未加载过三条件）惰性补载一次，刷新按钮随时手动加载；断开重置「已加载」标记（`onListingLoaded` 回调上报）。开关入口在工具栏「自定义列」popover、「默认打开 SFTP 面板」下方（`sftpPane.autoConnect`/`autoConnectHint` 七语）。单测 `workbench.spec.ts`（偏好解析 + 惰性加载判定矩阵） |

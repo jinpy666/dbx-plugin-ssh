@@ -297,6 +297,8 @@ export const messages = {
       close: "Collapse SFTP panel",
       defaultOpen: "Open SFTP panel by default",
       defaultOpenHint: "Applies to newly opened terminal sessions",
+      autoConnect: "Connect SFTP automatically",
+      autoConnectHint: "Loads the SFTP listing as soon as the session connects. Turn off for servers without SFTP to avoid the connect-time error",
     },
     sftpBatch: {
       selected: "{count} selected",
@@ -831,6 +833,8 @@ export const messages = {
       close: "Plegar panel SFTP",
       defaultOpen: "Abrir el panel SFTP por defecto",
       defaultOpenHint: "Se aplica a las sesiones de terminal nuevas",
+      autoConnect: "Conectar SFTP automáticamente",
+      autoConnectHint: "Carga el listado SFTP al conectar. Desactívalo en servidores sin SFTP para evitar el error al conectar",
     },
     sftpBatch: {
       selected: "{count} seleccionados",
@@ -1358,6 +1362,8 @@ export const messages = {
       close: "Comprimi pannello SFTP",
       defaultOpen: "Apri il pannello SFTP per impostazione predefinita",
       defaultOpenHint: "Si applica alle nuove sessioni del terminale",
+      autoConnect: "Connetti SFTP automaticamente",
+      autoConnectHint: "Carica l'elenco SFTP alla connessione. Disattivalo sui server senza SFTP per evitare l'errore al collegamento",
     },
     sftpBatch: {
       selected: "{count} selezionati",
@@ -1885,6 +1891,8 @@ export const messages = {
       close: "SFTP パネルを折りたたむ",
       defaultOpen: "SFTP パネルを既定で開く",
       defaultOpenHint: "新しく開くターミナルセッションに適用されます",
+      autoConnect: "SFTP を自動接続",
+      autoConnectHint: "接続直後に SFTP 一覧を読み込みます。SFTP がないサーバーではオフにすると接続時のエラーを防げます",
     },
     sftpBatch: {
       selected: "{count} 件を選択中",
@@ -2412,6 +2420,8 @@ export const messages = {
       close: "Recolher painel SFTP",
       defaultOpen: "Abrir o painel SFTP por padrão",
       defaultOpenHint: "Aplica-se às novas sessões do terminal",
+      autoConnect: "Conectar SFTP automaticamente",
+      autoConnectHint: "Carrega a listagem SFTP ao conectar. Desative em servidores sem SFTP para evitar o erro na conexão",
     },
     sftpBatch: {
       selected: "{count} selecionados",
@@ -2939,6 +2949,8 @@ export const messages = {
       close: "收起 SFTP 面板",
       defaultOpen: "默认打开 SFTP 面板",
       defaultOpenHint: "仅对新打开的终端会话生效",
+      autoConnect: "自动连接 SFTP",
+      autoConnectHint: "连接成功后立即加载 SFTP 目录；服务器未启用 SFTP 时可关闭，避免每次连接弹出错误",
     },
     sftpBatch: {
       selected: "已选择 {count} 项",
@@ -3473,6 +3485,8 @@ export const messages = {
       close: "收合 SFTP 面板",
       defaultOpen: "預設開啟 SFTP 面板",
       defaultOpenHint: "僅對新開啟的終端工作階段生效",
+      autoConnect: "自動連線 SFTP",
+      autoConnectHint: "連線成功後立即載入 SFTP 目錄；伺服器未啟用 SFTP 時可關閉，避免每次連線彈出錯誤",
     },
     sftpBatch: {
       selected: "已選擇 {count} 項",

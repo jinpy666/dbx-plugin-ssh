@@ -43,8 +43,10 @@ export function useSftpNavigation(options: {
   hydrateLinkTargets: (list: { uri: string; name: string; kind: SftpEntryKind }[], isCurrent: () => boolean) => void;
   rememberPathHistory: (path: string) => void;
   closePathHistoryMenu: () => void;
+  /** 首次列目录成功的回调：App 侧据此置"本会话已加载"标记（#179 惰性连接判定）。 */
+  onListingLoaded?: () => void;
 }) {
-  const { t, showNotice, showError, session, sudoMode, connected, canWrite, currentPath, entries, loadingFiles, sftpError, sftpErrorOpen, sftpErrorKey, sftpHomePath, visibleColumns, followDirectory, directoryParser, selectedPath, directoryTrackingSupported, clearRowSelection, parentPath, normalizeRemotePath, getPendingTerminalInput, persistState, refreshDiskUsage, persistDirectoryFollowPref, resetLinkTargets, hydrateLinkTargets, rememberPathHistory, closePathHistoryMenu } = options;
+  const { t, showNotice, showError, session, sudoMode, connected, canWrite, currentPath, entries, loadingFiles, sftpError, sftpErrorOpen, sftpErrorKey, sftpHomePath, visibleColumns, followDirectory, directoryParser, selectedPath, directoryTrackingSupported, clearRowSelection, parentPath, normalizeRemotePath, getPendingTerminalInput, persistState, refreshDiskUsage, persistDirectoryFollowPref, resetLinkTargets, hydrateLinkTargets, rememberPathHistory, closePathHistoryMenu, onListingLoaded } = options;
 
 async function loadHome() {
   if (!session.value) return;
@@ -83,6 +85,7 @@ async function loadDirectory(path = currentPath.value, fromTerminal = false) {
     // R3-P2-3：响应容错——非数组/畸形行走 sanitize（null entries → 空数组、
     // 缺 kind 的行降级为 file），单行坏数据不再让列表僵死或抛 pageerror。
     entries.value = sanitizeSftpEntries(result.entries);
+    onListingLoaded?.();
     resetLinkTargets();
     void hydrateLinkTargets(entries.value, () => listEpoch.isCurrent(epochId));
     currentPath.value = normalized;

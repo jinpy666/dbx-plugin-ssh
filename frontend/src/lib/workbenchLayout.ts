@@ -42,3 +42,23 @@ export function resolveDirectoryFollow(state: { followDirectory?: unknown }, fol
 export function sanitizeDirectoryFollowPref(raw: string | null): boolean {
   return raw === "true";
 }
+
+/**
+ * Parses the persisted global SFTP auto-connect preference. Default is ON:
+ * only the explicit "false" opts out of prefetching the remote listing on
+ * connect (issue #179 — servers without an SFTP subsystem surface an error
+ * banner on every connect otherwise).
+ */
+export function sanitizeSftpAutoConnectPref(raw: string | null): boolean {
+  return raw !== "false";
+}
+
+/**
+ * Decides whether opening the SFTP pane should fire the session's first
+ * directory load (the lazy connect path when auto-connect is off). A pane
+ * that stayed open, a listing already fetched, or no live session must not
+ * re-trigger it.
+ */
+export function shouldLazyLoadSftpListing(input: { paneOpen: boolean; sessionLive: boolean; listingLoaded: boolean }): boolean {
+  return input.paneOpen && input.sessionLive && !input.listingLoaded;
+}
