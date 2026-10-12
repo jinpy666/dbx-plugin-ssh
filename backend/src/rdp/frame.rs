@@ -37,6 +37,11 @@ impl RdpFrameState {
         self.framebuffer = None;
     }
 
+    /// Converts one engine `ImagePatch` (u32 0x00RRGGBB pixels) into the shared
+    /// 44-byte RGBA patch frame (same wire format as `vnc/frame`; the golden
+    /// vector lives in docs/PROTOCOL.zh-CN.md and the frontend decoder spec).
+    /// The argument list mirrors the engine event's own field set (NyaTerm's
+    /// helper has the same shape).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_and_encode(
         &mut self,

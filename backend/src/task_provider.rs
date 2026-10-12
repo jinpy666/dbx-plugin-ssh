@@ -252,9 +252,7 @@ fn validate_task_config(trigger_id: &str, config: &Value) -> (Vec<String>, Vec<S
     } else if !command.is_empty() && !script_path.is_empty() {
         // Deliberately a hard error, not a precedence rule: silently picking
         // one side would run something the author did not review.
-        errors.push(
-            "command and script_path are mutually exclusive; set exactly one".to_string(),
-        );
+        errors.push("command and script_path are mutually exclusive; set exactly one".to_string());
     }
     if let Some(environment) = config.get("environment").and_then(Value::as_str) {
         for line in environment.lines() {
@@ -413,7 +411,11 @@ fn local_command_flag(shell: &str) -> &'static str {
         .unwrap_or(shell)
         .to_ascii_lowercase();
     let basename = basename.strip_suffix(".exe").unwrap_or(&basename);
-    if basename == "cmd" { "/C" } else { "-c" }
+    if basename == "cmd" {
+        "/C"
+    } else {
+        "-c"
+    }
 }
 
 /// What a local spawn executes: in command mode the raw command text after
@@ -425,7 +427,10 @@ fn local_command_flag(shell: &str) -> &'static str {
 /// never need shell quoting.
 fn local_spawn_args(shell: &str, config: &TaskConfig) -> Vec<String> {
     if config.script_path.is_empty() {
-        vec![local_command_flag(shell).to_string(), config.command.clone()]
+        vec![
+            local_command_flag(shell).to_string(),
+            config.command.clone(),
+        ]
     } else {
         vec![config.script_path.clone()]
     }
@@ -747,6 +752,7 @@ async fn run_streaming(
 /// timeout kill the whole process group, not just the shell leader. The
 /// heartbeat tick mirrors the SSH path so resident supervision keeps
 /// advancing `heartbeatAt` while a quiet process holds the pipes open.
+#[allow(clippy::too_many_arguments)]
 async fn run_local_streaming(
     shell: &str,
     args: &[String],
@@ -905,33 +911,25 @@ fn read_script_file(script_path: &str) -> Result<Vec<u8>, String> {
 /// Uploads script bytes to a fresh remote `mktemp` file (mode 0600 by
 /// mktemp semantics) over an SFTP session opened on the task transport's
 /// own handle — no workbench session is involved. Returns the temp path.
-async fn ssh_upload_script(
-    handle: &Handle<SshClient>,
-    bytes: &[u8],
-) -> Result<String, String> {
-    let temp_path = exec_plain(
-        handle,
-        "mktemp",
-        Duration::from_secs(30),
-        &[],
-    )
-    .await
-    .map_err(|error| format!("Failed to create remote temp file: {error}"))
-    .and_then(|outcome| {
-        if outcome.exit_code == 0 {
-            let path = outcome.output.trim().to_string();
-            if path.is_empty() {
-                Err("Remote mktemp returned an empty path".to_string())
+async fn ssh_upload_script(handle: &Handle<SshClient>, bytes: &[u8]) -> Result<String, String> {
+    let temp_path = exec_plain(handle, "mktemp", Duration::from_secs(30), &[])
+        .await
+        .map_err(|error| format!("Failed to create remote temp file: {error}"))
+        .and_then(|outcome| {
+            if outcome.exit_code == 0 {
+                let path = outcome.output.trim().to_string();
+                if path.is_empty() {
+                    Err("Remote mktemp returned an empty path".to_string())
+                } else {
+                    Ok(path)
+                }
             } else {
-                Ok(path)
+                Err(format!(
+                    "Remote mktemp failed with exit code {}",
+                    outcome.exit_code
+                ))
             }
-        } else {
-            Err(format!(
-                "Remote mktemp failed with exit code {}",
-                outcome.exit_code
-            ))
-        }
-    })?;
+        })?;
     let channel = handle
         .channel_open_session()
         .await
@@ -1737,7 +1735,7 @@ impl TaskProvider {
                         &session_id,
                         ResidentState::Stopped,
                     );
-                    let _ = self.emit_log(
+                    self.emit_log(
                         &emitter,
                         &request.task_id,
                         &request.run_id,
@@ -2604,8 +2602,7 @@ mod tests {
     #[tokio::test]
     async fn local_streaming_reports_nonzero_exit_and_timeout() {
         let (_cancel, cancel_rx) = watch::channel(false);
-        let (end, _stdout, _stderr) =
-            local_run("exit 7", "", &[], None, cancel_rx).await;
+        let (end, _stdout, _stderr) = local_run("exit 7", "", &[], None, cancel_rx).await;
         assert_eq!(end, RunEnd::Completed(Some(7)));
 
         // A silent process past its deadline ends as TimedOut (the deadline
@@ -2678,8 +2675,8 @@ mod tests {
 
     #[test]
     fn read_script_file_rejects_missing_paths_and_directories() {
-        let error = read_script_file("/definitely/not/here/task.sh")
-            .expect_err("missing script must fail");
+        let error =
+            read_script_file("/definitely/not/here/task.sh").expect_err("missing script must fail");
         assert!(error.contains("is not readable"), "{error}");
         let error = read_script_file("/tmp").expect_err("directory must fail");
         assert!(error.contains("not a regular file"), "{error}");

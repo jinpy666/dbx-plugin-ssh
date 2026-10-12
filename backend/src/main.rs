@@ -3196,10 +3196,7 @@ mod tests {
             }),
             Some("rdp".to_string()),
         );
-        assert_eq!(
-            local,
-            json!({ "protocol": "local", "shell": "/bin/bash" })
-        );
+        assert_eq!(local, json!({ "protocol": "local", "shell": "/bin/bash" }));
         // 连接表单未填 shell：空串透出，前端回落默认 Shell 解析链。
         let local_default = connection_protocol_payload(
             Some(crate::local_target::LocalTarget {

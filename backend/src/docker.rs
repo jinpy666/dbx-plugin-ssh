@@ -1177,7 +1177,8 @@ d4a7c9f1e2b3\tweb-nginx\tnginx:1.27\trunning\tUp 3 days\t0.0.0.0:8080->80/tcp\t2
     /// Status 文本推导；modern 段优先、legacy 段拼接其后。
     #[test]
     fn list_payload_parses_legacy_fallback_rows() {
-        let legacy_row = "9f8e7d6c5b4a\tcache\tredis:7\tExited (0) 2 days ago\t\t2026-09-18 21:30:00 +0000 UTC";
+        let legacy_row =
+            "9f8e7d6c5b4a\tcache\tredis:7\tExited (0) 2 days ago\t\t2026-09-18 21:30:00 +0000 UTC";
         let output = format!(
             "DBXDOCKER_PROBE\ndocker-found\ndaemon-ok\nDBXDOCKER_PS\n{PS_LEGACY_MARKER}\n{legacy_row}\n"
         );
@@ -1195,10 +1196,19 @@ d4a7c9f1e2b3\tweb-nginx\tnginx:1.27\trunning\tUp 3 days\t0.0.0.0:8080->80/tcp\t2
     fn legacy_state_derives_from_status_text() {
         assert_eq!(legacy_state_from_status("Up 3 hours"), "running");
         assert_eq!(legacy_state_from_status("Up 2 hours (Paused)"), "paused");
-        assert_eq!(legacy_state_from_status("Up 5 minutes (unhealthy)"), "running");
-        assert_eq!(legacy_state_from_status("Exited (137) 9 minutes ago"), "exited");
+        assert_eq!(
+            legacy_state_from_status("Up 5 minutes (unhealthy)"),
+            "running"
+        );
+        assert_eq!(
+            legacy_state_from_status("Exited (137) 9 minutes ago"),
+            "exited"
+        );
         assert_eq!(legacy_state_from_status("Created"), "created");
-        assert_eq!(legacy_state_from_status("Restarting (1) 12 seconds ago"), "restarting");
+        assert_eq!(
+            legacy_state_from_status("Restarting (1) 12 seconds ago"),
+            "restarting"
+        );
         assert_eq!(legacy_state_from_status("Dead"), "dead");
         assert_eq!(legacy_state_from_status("Something New"), "unknown");
     }
@@ -1210,7 +1220,10 @@ d4a7c9f1e2b3\tweb-nginx\tnginx:1.27\trunning\tUp 3 days\t0.0.0.0:8080->80/tcp\t2
         let output = format!(
             "DBXDOCKER_PROBE\ndocker-found\ndaemon-ok\nDBXDOCKER_PS\n{modern}\n{PS_LEGACY_MARKER}\n{legacy}\n"
         );
-        let rows = list_payload(&output)["containers"].as_array().unwrap().clone();
+        let rows = list_payload(&output)["containers"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["state"], "running");
         assert_eq!(rows[1]["state"], "exited");

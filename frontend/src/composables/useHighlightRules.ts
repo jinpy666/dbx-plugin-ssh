@@ -44,7 +44,8 @@ function loadHighlightEnabled(): boolean {
 const highlightEnabled = ref(loadHighlightEnabled());
 
 // 关键词显示方式（pluginStore 持久化；默认 "bg" 背景色块 = 既有行为，GPU 渲染
-// 不受影响）。"text" 只染字体色，需要 DOM 渲染器，App 据此回退 WebGL。
+// 不受影响）。"text" 把规则色交给 decoration 的 foregroundColor，DOM / WebGL
+// 两条渲染路径都消费，切换显示方式不影响 GPU 渲染。
 const highlightDisplayMode = ref<HighlightDisplayMode>(loadHighlightDisplayModeFromStore());
 
 async function setHighlightDisplayMode(mode: HighlightDisplayMode) {

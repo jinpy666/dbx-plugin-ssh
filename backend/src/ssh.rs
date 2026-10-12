@@ -4195,11 +4195,7 @@ impl SshRuntime {
         &self,
         connection_id: &str,
     ) -> Option<crate::local_target::LocalTarget> {
-        self.local_targets
-            .read()
-            .ok()?
-            .get(connection_id)
-            .cloned()
+        self.local_targets.read().ok()?.get(connection_id).cloned()
     }
 
     /// True when at least one authenticated live session exists for the

@@ -145,7 +145,10 @@ mod tests {
         );
         // Older hosts may omit the provider stamp entirely.
         let legacy = json!({ "connection": { "id": "c", "host": "h", "port": 22 } });
-        assert_eq!(LocalTarget::from_lifecycle_params(&legacy).expect("parse"), None);
+        assert_eq!(
+            LocalTarget::from_lifecycle_params(&legacy).expect("parse"),
+            None
+        );
         assert!(!connection_is_local(None));
         assert!(!connection_is_local(Some("io.dbx.ssh.connection")));
         assert!(connection_is_local(Some(LOCAL_CONNECTION_PROVIDER)));

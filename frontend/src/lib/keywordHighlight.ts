@@ -53,10 +53,11 @@ export const HIGHLIGHT_MATCHES_PER_LINE_LIMIT = 20;
  * - `bg`（默认）：装饰层半透明铺底（`highlightFillStyle`），即"背景色块"；
  * - `text`：只改命中文字的**字体颜色**、不铺底色。
  *
- * `text` 只能落在 DOM 渲染器的单元格 span 上：WebGL 渲染器把字形与底色一起烤进
- * 不透明画布，覆盖层无论填什么色都只是"盖在字上的一块色"，改不动字形颜色。
- * 因此 App 会在启用 `text` 时把渲染器回退到 DOM（见 rendererWebglEffective），
- * 这正是设置里要提示"会关闭 GPU 渲染"的原因。
+ * `text` 走 decoration 的 `foregroundColor` 选项，由渲染器把规则色写进单元格
+ * 字形属性：DOM 渲染器落到单元格 span 的 color，WebGL 渲染器在
+ * CellColorResolver 里把 foregroundColorRGB 折进该格 fg 属性（glyph atlas 以
+ * fg 为键缓存，规则色变化自动重新光栅化）——两条渲染路径都消费该字段，
+ * GPU 渲染不受影响，无需任何 DOM 回退或降级提示。
  */
 export type HighlightDisplayMode = "bg" | "text";
 
@@ -149,8 +150,8 @@ export function highlightFillStyle(color: string): string {
 
 /**
  * `#rrggbb` 规则色 → decoration 的 `foregroundColor` 取值（非法形状回退默认色）。
- * xterm 的该选项只接受 `#RRGGBB`（无 alpha），且只在 DOM 渲染器里生效——这正是
- * 「字体颜色」模式必须回退 DOM 的原因。
+ * xterm 的该选项只接受 `#RRGGBB`（无 alpha）；DOM 与 WebGL 渲染器都消费它，
+ * 非法形状回退默认色而不是把坏值透传给渲染器。
  */
 export function highlightTextStyle(color: string): string {
   return HIGHLIGHT_COLOR_PATTERN.test(color) ? color : HIGHLIGHT_COLOR_DEFAULT;

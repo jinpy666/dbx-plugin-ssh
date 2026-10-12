@@ -68,7 +68,9 @@ pub(crate) enum RdpCommand {
     Close,
 }
 
-/// One retained 4K RGBA desktop is 31,850,496 bytes. Keeping one composite
+// One retained 4K RGBA desktop is 31,850,496 bytes. Keeping one composite
+// replay framebuffer per session (RdpFrameState) bounds resident memory to
+// that order.
 
 pub(crate) struct RdpSessionEntry {
     pub(crate) workbench_id: String,
@@ -892,11 +894,6 @@ fn publish_frame(session_id: &str, frame: &[u8], emitter: &PluginEmitter) {
         );
     }
 }
-
-/// Converts one engine `ImagePatch` (u32 0x00RRGGBB pixels) into the shared
-/// 44-byte RGBA patch frame (same wire format as `vnc/frame`). Pure —
-/// unit-tested against the shared golden vector shape. The argument list
-/// mirrors the engine event's own field set (NyaTerm's helper has the same
 
 // —— engine config builder ——
 

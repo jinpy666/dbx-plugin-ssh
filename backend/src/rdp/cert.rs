@@ -406,8 +406,7 @@ impl RdpCertificateVerifier {
                     )
                     .await;
                 self.cert_wait.store(false, Ordering::Release);
-                let decision =
-                    answered.ok_or_else(|| "certificate rejected".to_string())?;
+                let decision = answered.ok_or_else(|| "certificate rejected".to_string())?;
                 // A close/reconnect must not let a prompt decision carry
                 // across generations.
                 if self.stale() {
