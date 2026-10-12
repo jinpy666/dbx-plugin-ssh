@@ -43,6 +43,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-sftp-side-collapsed",
   "ssh-terminal-select-copy",
   "ssh-keyword-highlight",
+  // 关键词显示方式（keywordHighlight.ts 自治读写，#180）：bg | text。漏登记 =
+  // 水合不拉，用户切「字体颜色」后重启静默回落「背景色块」。
+  "ssh-keyword-display-mode",
   "ssh-batch-bar-open",
   "ssh-terminal-search-options",
   "ssh-terminal-webgl",

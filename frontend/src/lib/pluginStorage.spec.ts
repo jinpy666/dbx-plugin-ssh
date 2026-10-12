@@ -27,6 +27,8 @@ describe("ssh pluginStore wiring", () => {
         "ssh-sftp-side-collapsed",
         "ssh-terminal-select-copy",
         "ssh-keyword-highlight",
+        // 关键词显示方式（#180）：与 pluginStore 白名单镜像同步。
+        "ssh-keyword-display-mode",
         "ssh-batch-bar-open",
         "ssh-terminal-search-options",
         "ssh-terminal-webgl",
