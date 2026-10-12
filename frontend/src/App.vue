@@ -209,6 +209,7 @@ import { AGENT_MODES } from "./lib/agentTerminal";
 import { purposeKeyLabel, sanitizeTriagePayload, severityClass } from "./lib/alertTriage";
 import {
   highlightFillStyle,
+  highlightTextStyle,
   matchesInLine,
   shouldRebuildHighlightRow,
   toAbsoluteRowRange,
@@ -4658,12 +4659,20 @@ const {
   highlightRules,
   highlightSaving,
   highlightEnabled,
+  highlightDisplayMode,
   compiledHighlightRules,
   hydrateHighlightRules,
   saveHighlightRule,
   toggleHighlightRule,
   deleteHighlightRule,
+  setHighlightDisplayMode,
 } = useHighlightRules({ showError });
+
+// 「字体颜色」= 把规则色交给 decoration 的 foregroundColor，由渲染器写进该格字形：
+// DOM 渲染器落到单元格 span 的 color（DomRendererRowFactory），WebGL 渲染器在
+// CellColorResolver 里把 foregroundColorRGB 折进该格 fg 属性（glyph atlas 以 fg
+// 为键、会自动重新光栅化）——两条渲染路径都生效，故无需回退 DOM、GPU 照常。
+const keywordTextColorActive = computed(() => highlightDisplayMode.value === "text");
 
 // ---- decoration 引擎 ----
 // onRender({start,end}) 给的是"本帧实际重绘的行区间"（输入时常常只有光标一行），
@@ -4773,17 +4782,26 @@ function scanHighlightRange(start: number, end: number) {
     };
     for (const match of matches) {
       if (highlightDecorationCount >= HIGHLIGHT_DECORATION_LIMIT) break;
-      const decoration = term.registerDecoration({ marker, x: match.start, width: match.end - match.start });
+      // 「字体颜色」模式：把规则色交给 decoration 的 foregroundColor——无覆盖层、
+      // 无需逐帧重放（渲染器每次重绘都会重新查询 decoration），也不与配色方案/主题
+      // 的调色板打架。DOM 与 WebGL 两条渲染路径都消费该字段。
+      const decoration = term.registerDecoration(
+        keywordTextColorActive.value
+          ? { marker, x: match.start, width: match.end - match.start, foregroundColor: highlightTextStyle(match.color) }
+          : { marker, x: match.start, width: match.end - match.start },
+      );
       if (decoration) {
-        // xterm 6 的 DOM renderer 仍不把 registerDecoration 的 backgroundColor
-        // 选项应用到 cell（且 CM_RGB 路径会丢 alpha，实心色会盖字形），着色继续
-        // 走 onRender 在 overlay 元素上半透明自绘。注意 overlay 元素由
-        // BufferDecorationRenderer 在渲染刷新帧里创建：窗口被遮挡/rAF 冻结期间
-        // 注册的高亮要等下一次刷新帧才显色（可见后一帧内自愈，属显示时序而非
-        // 逻辑缺陷——逐字符 span 是 cell 层 run 拆分，不代表 decoration 丢失）。
-        decoration.onRender((element) => {
-          element.style.backgroundColor = highlightFillStyle(match.color);
-        });
+        if (!keywordTextColorActive.value) {
+          // 背景色块模式保持原样：xterm 6 的 DOM renderer 仍不把 registerDecoration
+          // 的 backgroundColor 选项应用到 cell（且 CM_RGB 路径会丢 alpha，实心色会
+          // 盖字形），着色继续走 onRender 在 overlay 元素上半透明自绘。注意 overlay
+          // 元素由 BufferDecorationRenderer 在渲染刷新帧里创建：窗口被遮挡/rAF 冻结
+          // 期间注册的高亮要等下一次刷新帧才显色（可见后一帧内自愈，属显示时序而非
+          // 逻辑缺陷——逐字符 span 是 cell 层 run 拆分，不代表 decoration 丢失）。
+          decoration.onRender((element) => {
+            element.style.backgroundColor = highlightFillStyle(match.color);
+          });
+        }
         disposables.push(decoration);
         entry.decorations++;
         highlightDecorationCount++;
@@ -4793,8 +4811,10 @@ function scanHighlightRange(start: number, end: number) {
   }
 }
 
-// 规则/开关变化：全量清理后重扫当前视口（即时生效语义）。
-watch(compiledHighlightRules, () => {
+// 规则表/显示方式变化：全量清理后重扫当前视口（即时生效语义）。显示方式切换必须
+// 重建 decoration——背景色块画在 overlay 元素上、字体颜色是 registerDecoration 的
+// foregroundColor 选项，两者无法就地改样式互转。
+watch([compiledHighlightRules, highlightDisplayMode], () => {
   clearHighlightDecorations();
   rescanHighlightViewport();
 });
@@ -9630,6 +9650,7 @@ watch(historyScope, () => {
       :suggestion-prefs="suggestionPrefsAdapter"
       :highlight-rules="highlightRules"
       :highlight-saving="highlightSaving"
+      :highlight-display-mode="highlightDisplayMode"
       :quick-commands="quickCommands"
       :quick-saving="quickSaving"
       :quick-importing="quickImportBusy"
@@ -9639,6 +9660,7 @@ watch(historyScope, () => {
       @save-highlight-rule="saveHighlightRule"
       @delete-highlight-rule="deleteHighlightRule"
       @toggle-highlight-rule="toggleHighlightRule"
+      @update:highlight-display-mode="setHighlightDisplayMode"
       @save-quick-command="saveQuickCommand"
       @delete-quick-command="deleteQuickCommand"
       @import-quick-commands="importQuickCommands"

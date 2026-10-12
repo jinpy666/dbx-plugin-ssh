@@ -49,6 +49,52 @@ export const HIGHLIGHT_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 export const HIGHLIGHT_MATCHES_PER_LINE_LIMIT = 20;
 
 /**
+ * 关键词显示方式（全局偏好，二选一）：
+ * - `bg`（默认）：装饰层半透明铺底（`highlightFillStyle`），即"背景色块"；
+ * - `text`：只改命中文字的**字体颜色**、不铺底色。
+ *
+ * `text` 只能落在 DOM 渲染器的单元格 span 上：WebGL 渲染器把字形与底色一起烤进
+ * 不透明画布，覆盖层无论填什么色都只是"盖在字上的一块色"，改不动字形颜色。
+ * 因此 App 会在启用 `text` 时把渲染器回退到 DOM（见 rendererWebglEffective），
+ * 这正是设置里要提示"会关闭 GPU 渲染"的原因。
+ */
+export type HighlightDisplayMode = "bg" | "text";
+
+/** 显示方式持久化键（pluginStore 全局偏好，与 `ssh-keyword-highlight` 同族）。 */
+export const HIGHLIGHT_DISPLAY_MODE_STORE_KEY = "ssh-keyword-display-mode";
+
+/** 显示方式默认值：保持既有背景色块行为，GPU 渲染不受影响。 */
+export const HIGHLIGHT_DISPLAY_MODE_DEFAULT: HighlightDisplayMode = "bg";
+
+/**
+ * 归一显示方式：只认字面量 `"text"`，其余（缺失 / 坏值 / 旧版本遗留）一律回落
+ * 默认 `bg`——默认态必须与升级前完全一致，不能因为读到脏值就把用户的 GPU 关掉。
+ */
+export function normalizeHighlightDisplayMode(raw: unknown): HighlightDisplayMode {
+  return raw === "text" ? "text" : HIGHLIGHT_DISPLAY_MODE_DEFAULT;
+}
+
+/** 读显示方式：键缺失/坏值/读异常一律回落默认 `bg`，升级路径不动既有 GPU 渲染。 */
+export function loadHighlightDisplayModeFromStore(): HighlightDisplayMode {
+  try {
+    return normalizeHighlightDisplayMode(pluginStore.getItem(HIGHLIGHT_DISPLAY_MODE_STORE_KEY));
+  } catch {
+    return HIGHLIGHT_DISPLAY_MODE_DEFAULT;
+  }
+}
+
+/** 写显示方式（归一后落键）；持久化失败不阻断，本次会话内存态仍生效。 */
+export function persistHighlightDisplayMode(mode: HighlightDisplayMode): HighlightDisplayMode {
+  const normalized = normalizeHighlightDisplayMode(mode);
+  try {
+    pluginStore.setItem(HIGHLIGHT_DISPLAY_MODE_STORE_KEY, normalized);
+  } catch {
+    // 持久化失败不阻断：本次会话内存态仍生效。
+  }
+  return normalized;
+}
+
+/**
  * 装饰填充透明度：xterm 的 decoration 元素绘制在文字层上方，纯色背景会
  * 盖死字形（用户可见即"色块遮字"）；用半透明填充让原文字透出、色相保留。
  */
@@ -99,6 +145,15 @@ export function highlightFillStyle(color: string): string {
   const green = (value >> 8) & 0xff;
   const blue = value & 0xff;
   return `rgba(${red}, ${green}, ${blue}, ${HIGHLIGHT_FILL_ALPHA})`;
+}
+
+/**
+ * `#rrggbb` 规则色 → decoration 的 `foregroundColor` 取值（非法形状回退默认色）。
+ * xterm 的该选项只接受 `#RRGGBB`（无 alpha），且只在 DOM 渲染器里生效——这正是
+ * 「字体颜色」模式必须回退 DOM 的原因。
+ */
+export function highlightTextStyle(color: string): string {
+  return HIGHLIGHT_COLOR_PATTERN.test(color) ? color : HIGHLIGHT_COLOR_DEFAULT;
 }
 
 function escapeRegExp(pattern: string): string {

@@ -152,6 +152,7 @@ function mountSettings(sessionId?: string) {
       },
       highlightRules: [],
       highlightSaving: false,
+      highlightDisplayMode: "bg",
       quickCommands: [],
       quickSaving: false,
       quickImporting: false,

@@ -3,15 +3,21 @@ import { pluginStore } from "./pluginStore";
 import {
   compileRules,
   highlightFillStyle,
+  highlightTextStyle,
+  loadHighlightDisplayModeFromStore,
   loadHighlightRulesFromStore,
   matchesInLine,
+  normalizeHighlightDisplayMode,
   normalizeHighlightRules,
+  persistHighlightDisplayMode,
   persistHighlightRules,
   sanitizeHighlightRuleInput,
   shouldRebuildHighlightRow,
   toAbsoluteRowRange,
   upsertHighlightRule,
   HIGHLIGHT_COLOR_DEFAULT,
+  HIGHLIGHT_DISPLAY_MODE_DEFAULT,
+  HIGHLIGHT_DISPLAY_MODE_STORE_KEY,
   HIGHLIGHT_RULE_PATTERN_MAX,
   HIGHLIGHT_RULES_STORE_KEY,
   type HighlightRuleView,
@@ -272,5 +278,44 @@ describe("upsertHighlightRule + store-backed authority (存储迁移批 1)", () 
     pluginStore.setItem(HIGHLIGHT_RULES_STORE_KEY, "{broken");
     // 键已存在（已迁移）时坏 JSON 不回退种子。
     expect(loadHighlightRulesFromStore()).toEqual([]);
+  });
+});
+
+describe("keyword highlight display mode (关键词显示方式)", () => {
+  // 与规则表同款顺序约束：pluginStore 模块缓存在同文件内跨用例存活，所以"键不存在
+  // = 默认背景色块"这条断言必须排在首个 persist 之前。
+  it("defaults to the background fill while the key is absent", () => {
+    expect(HIGHLIGHT_DISPLAY_MODE_DEFAULT).toBe("bg");
+    expect(loadHighlightDisplayModeFromStore()).toBe("bg");
+  });
+
+  it("normalizes every non-text value back to the default (never disables GPU by accident)", () => {
+    expect(normalizeHighlightDisplayMode("text")).toBe("text");
+    for (const raw of ["bg", "", "TEXT", null, undefined, 0, false, {}, ["text"]]) {
+      expect(normalizeHighlightDisplayMode(raw)).toBe("bg");
+    }
+  });
+
+  it("persists a mode and round-trips it through the store", () => {
+    expect(persistHighlightDisplayMode("text")).toBe("text");
+    expect(loadHighlightDisplayModeFromStore()).toBe("text");
+    expect(persistHighlightDisplayMode("bg")).toBe("bg");
+    expect(loadHighlightDisplayModeFromStore()).toBe("bg");
+  });
+
+  it("coerces a bogus persisted value back to the default", () => {
+    pluginStore.setItem(HIGHLIGHT_DISPLAY_MODE_STORE_KEY, "fancy");
+    expect(loadHighlightDisplayModeFromStore()).toBe("bg");
+    pluginStore.setItem(HIGHLIGHT_DISPLAY_MODE_STORE_KEY, "text");
+    expect(loadHighlightDisplayModeFromStore()).toBe("text");
+  });
+
+  it("hands the validated hex to the decoration foregroundColor", () => {
+    expect(highlightTextStyle("#ef4444")).toBe("#ef4444");
+    expect(highlightTextStyle("#22C55E")).toBe("#22C55E");
+    // xterm 只接受 #RRGGBB（无 alpha），非法形状回退默认色而不是把坏值透传下去。
+    expect(highlightTextStyle("red")).toBe(HIGHLIGHT_COLOR_DEFAULT);
+    expect(highlightTextStyle("#12345")).toBe(HIGHLIGHT_COLOR_DEFAULT);
+    expect(highlightTextStyle("")).toBe(HIGHLIGHT_COLOR_DEFAULT);
   });
 });

@@ -18,7 +18,7 @@ import TerminalSchemePicker from "./TerminalSchemePicker.vue";
 import TerminalHotkeyEditor from "./TerminalHotkeyEditor.vue";
 import HighlightRulesSection from "./HighlightRulesSection.vue";
 import QuickCommandsSection from "./QuickCommandsSection.vue";
-import { HIGHLIGHT_RULES_LIMIT, type HighlightRuleView } from "../lib/keywordHighlight";
+import { HIGHLIGHT_RULES_LIMIT, type HighlightDisplayMode, type HighlightRuleView } from "../lib/keywordHighlight";
 import { QUICK_COMMANDS_LIMIT, type QuickCommand } from "../lib/quickCommands";
 import { AGENT_MODES, SSH_AGENT_APPROVED_STORE_KEY, SSH_AGENT_MODES_STORE_KEY, sanitizeAgentTerminalMode, sanitizeRememberedCommands } from "../lib/agentTerminal";
 import { connectionEntryEquals, loadConnectionEntry, saveConnectionEntry } from "../lib/connectionSettingMirror";
@@ -500,6 +500,8 @@ const props = defineProps<{
   /** 关键词高亮规则（M32-A2：权威态 + RPC 在 App，本组件只读 + 上抛增量）。 */
   highlightRules: HighlightRuleView[];
   highlightSaving: boolean;
+  /** 关键词显示方式（全局：背景色块 / 字体颜色；权威态在 App）。 */
+  highlightDisplayMode: HighlightDisplayMode;
   /** 快速命令（M32-A3：权威态 + RPC 在 App，本组件只读 + 上抛增量）。 */
   quickCommands: QuickCommand[];
   quickSaving: boolean;
@@ -553,6 +555,8 @@ const emit = defineEmits<{
   (e: "save-highlight-rule", rule: { id?: string; pattern: string; color: string; isRegex: boolean; caseSensitive: boolean }): void;
   (e: "delete-highlight-rule", id: string): void;
   (e: "toggle-highlight-rule", item: HighlightRuleView): void;
+  /** 显示方式增量（全局偏好）：同样只转发 section 的意图，落 pluginStore 在 App。 */
+  (e: "update:highlightDisplayMode", mode: HighlightDisplayMode): void;
   /** 快速命令增量（M32-A3）：同上，import 由 App 循环逐条 save。 */
   (e: "save-quick-command", command: { id?: string; name: string; command: string }): void;
   (e: "delete-quick-command", id: string): void;
@@ -2459,10 +2463,12 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               :rules="highlightRules"
               :saving="highlightSaving"
               :limit="HIGHLIGHT_RULES_LIMIT"
+              :display-mode="highlightDisplayMode"
               :t="t"
               @save="(rule) => emit('save-highlight-rule', rule)"
               @delete="(id) => emit('delete-highlight-rule', id)"
               @toggle="(item) => emit('toggle-highlight-rule', item)"
+              @update:display-mode="(mode) => emit('update:highlightDisplayMode', mode)"
             />
             </div>
 

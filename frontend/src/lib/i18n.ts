@@ -511,6 +511,9 @@ export const messages = {
       invalidPattern: "Enter a pattern of 1-200 characters.",
       invalidColor: "Use a hex color like #f59e0b.",
       invalidRegex: "This is not a valid regular expression.",
+      displayMode: "Keyword display",
+      displayModeBg: "Background",
+      displayModeText: "Text color",
     },
     mcpSettings: {
       permissionMode: "MCP execution approval",
@@ -1038,6 +1041,9 @@ export const messages = {
       invalidPattern: "Introduce un patrón de 1-200 caracteres.",
       invalidColor: "Usa un color hexadecimal como #f59e0b.",
       invalidRegex: "No es una expresión regular válida.",
+      displayMode: "Visualización de palabras clave",
+      displayModeBg: "Fondo",
+      displayModeText: "Color del texto",
     },
     mcpSettings: {
       permissionMode: "Aprobación de ejecución MCP",
@@ -1565,6 +1571,9 @@ export const messages = {
       invalidPattern: "Inserisci un pattern di 1-200 caratteri.",
       invalidColor: "Usa un colore esadecimale come #f59e0b.",
       invalidRegex: "Non è un'espressione regolare valida.",
+      displayMode: "Visualizzazione parole chiave",
+      displayModeBg: "Sfondo",
+      displayModeText: "Colore del testo",
     },
     mcpSettings: {
       permissionMode: "Approvazione esecuzione MCP",
@@ -2092,6 +2101,9 @@ export const messages = {
       invalidPattern: "1〜200 文字のパターンを入力してください。",
       invalidColor: "#f59e0b 形式の 16 進カラーを指定してください。",
       invalidRegex: "有効な正規表現ではありません。",
+      displayMode: "キーワードの表示",
+      displayModeBg: "背景",
+      displayModeText: "文字色",
     },
     mcpSettings: {
       permissionMode: "MCP 実行承認",
@@ -2619,6 +2631,9 @@ export const messages = {
       invalidPattern: "Informe um padrão de 1 a 200 caracteres.",
       invalidColor: "Use uma cor hexadecimal como #f59e0b.",
       invalidRegex: "Não é uma expressão regular válida.",
+      displayMode: "Exibição de palavras-chave",
+      displayModeBg: "Fundo",
+      displayModeText: "Cor do texto",
     },
     mcpSettings: {
       permissionMode: "Aprovação de execução MCP",
@@ -3153,6 +3168,9 @@ export const messages = {
       invalidPattern: "请输入 1-200 个字符的匹配内容。",
       invalidColor: "请使用 #f59e0b 这样的十六进制颜色。",
       invalidRegex: "不是有效的正则表达式。",
+      displayMode: "关键词显示方式",
+      displayModeBg: "背景色块",
+      displayModeText: "字体颜色",
     },
     mcpSettings: {
       permissionMode: "MCP 执行审批",
@@ -3687,6 +3705,9 @@ export const messages = {
       invalidPattern: "請輸入 1-200 個字元的比對內容。",
       invalidColor: "請使用 #f59e0b 這樣的十六進位顏色。",
       invalidRegex: "不是有效的正規表達式。",
+      displayMode: "關鍵詞顯示方式",
+      displayModeBg: "背景色塊",
+      displayModeText: "字型顏色",
     },
     mcpSettings: {
       permissionMode: "MCP 執行審批",

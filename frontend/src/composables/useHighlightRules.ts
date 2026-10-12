@@ -1,9 +1,12 @@
 import { computed, ref } from "vue";
 import {
   compileRules,
+  loadHighlightDisplayModeFromStore,
   loadHighlightRulesFromStore,
+  persistHighlightDisplayMode,
   persistHighlightRules,
   upsertHighlightRule,
+  type HighlightDisplayMode,
   type HighlightRuleView,
 } from "../lib/keywordHighlight";
 import { pluginStore } from "../lib/pluginStore";
@@ -39,6 +42,14 @@ function loadHighlightEnabled(): boolean {
 // 总开关（pluginStore 持久化，渲染引擎读取；M32-A2 后设置内无全局开关——
 // 规则逐条带 enabled，按条启停即可）。
 const highlightEnabled = ref(loadHighlightEnabled());
+
+// 关键词显示方式（pluginStore 持久化；默认 "bg" 背景色块 = 既有行为，GPU 渲染
+// 不受影响）。"text" 只染字体色，需要 DOM 渲染器，App 据此回退 WebGL。
+const highlightDisplayMode = ref<HighlightDisplayMode>(loadHighlightDisplayModeFromStore());
+
+async function setHighlightDisplayMode(mode: HighlightDisplayMode) {
+  highlightDisplayMode.value = persistHighlightDisplayMode(mode);
+}
 
 // 水合顺序：pluginStore 权威值（键缺失时才搬）→ sidecar 一次性搬迁（空表也
 // 落键，标记"已迁移"）→ sidecar 不可用（旧版/降级）静默空表兜底。
@@ -84,10 +95,12 @@ async function deleteHighlightRule(id: string) {
     highlightRules,
     highlightSaving,
     highlightEnabled,
+    highlightDisplayMode,
     compiledHighlightRules,
     hydrateHighlightRules,
     saveHighlightRule,
     toggleHighlightRule,
     deleteHighlightRule,
+    setHighlightDisplayMode,
   };
 }
