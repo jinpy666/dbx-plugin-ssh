@@ -6,6 +6,7 @@
 
 import type { ILink, ILinkProvider, Terminal } from "@xterm/xterm";
 import { matchActionLinks, ACTION_LINK_MATCHES_PER_LINE_LIMIT, type ActionLinkMatch, type ActionLinkMatcherToggles } from "./actionLinksMatcher";
+import { lineColumnTable, matchToColumns } from "./terminalLineColumns";
 
 /** 提供链路事件给 App.vue：命中对象 + 原始鼠标事件（Alt 判定用）。 */
 export interface ActionLinkProviderCallbacks {
@@ -43,20 +44,26 @@ export function createActionLinkProvider(terminal: Terminal, options: ActionLink
         callback(undefined);
         return;
       }
-      // IBufferRange 的 x 是 1-based，end 为 exclusive（与 @xterm/addon-web-links
-      // 的 range 构造同一口径：end.x = 0-based end + 1）。
-      const links = matches.map((match): ILink => ({
-        range: {
-          start: { x: match.start + 1, y: bufferLineNumber },
-          end: { x: match.end + 1, y: bufferLineNumber },
-        },
-        text: match.text,
-        // 悬停时 xterm 自带 pointer 光标 + 实线下划线；常驻虚线由 decoration 层画。
-        decorations: { pointerCursor: true, underline: false },
-        activate: (event: MouseEvent) => options.callbacks.onActivate(match, event),
-        hover: (event: MouseEvent) => options.callbacks.onHover?.(match, event),
-        leave: () => options.callbacks.onLeave?.(),
-      }));
+      // match.start/end 是 translateToString 文本的 UTF-16 下标，而 IBufferRange 的 x 是
+      // 1-based 单元格列号（end exclusive，与 @xterm/addon-web-links 同一口径）：宽字符行
+      // 里两者差着"前面有几个宽字符"，不换算的话悬停/点击范围会整体左移——中文行上的 IP、
+      // 时间戳点不中，末尾的命中甚至完全落到文字外。
+      const columns = line ? lineColumnTable(line, text.length) : undefined;
+      const links = matches.map((match): ILink => {
+        const { x, width } = matchToColumns(columns, match.start, match.end);
+        return {
+          range: {
+            start: { x: x + 1, y: bufferLineNumber },
+            end: { x: x + width + 1, y: bufferLineNumber },
+          },
+          text: match.text,
+          // 悬停时 xterm 自带 pointer 光标 + 实线下划线；常驻虚线由 decoration 层画。
+          decorations: { pointerCursor: true, underline: false },
+          activate: (event: MouseEvent) => options.callbacks.onActivate(match, event),
+          hover: (event: MouseEvent) => options.callbacks.onHover?.(match, event),
+          leave: () => options.callbacks.onLeave?.(),
+        };
+      });
       callback(links);
     },
   };

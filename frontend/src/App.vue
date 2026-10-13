@@ -228,6 +228,8 @@ import {
   type ActionLinkMatcherToggles,
   type ActionLinksSettings,
 } from "./lib/actionLinksMatcher";
+// 命中是文本下标，装饰要的是单元格列号：宽字符行（CJK）不换算就会整段左移。
+import { lineColumnTable, matchToColumns } from "./lib/terminalLineColumns";
 import {
   computeGutterRows,
   getRenderCellHeight,
@@ -5120,10 +5122,16 @@ function scanHighlightRange(start: number, end: number) {
   for (let row = vpFrom; row <= vpTo; row++) {
     if (highlightDecorationsByRow.has(row)) continue;
     if (highlightDecorationCount >= HIGHLIGHT_DECORATION_LIMIT) return;
-    const lineText = buffer.getLine(row)?.translateToString(true) ?? "";
+    const bufferLine = buffer.getLine(row);
+    const lineText = bufferLine?.translateToString(true) ?? "";
     if (!lineText) continue;
     const matches = matchesInLine(lineText, compiled);
     if (!matches.length) continue;
+    // 命中是文本下标，decoration 的 x/width 是单元格列号：宽字符（CJK、全角标点）在文本里
+    // 占 1 个单元、在终端里占 2 列，直接用下标会让整段高亮左移——前面有几个宽字符就少几列
+    // （中文行里越靠右的命中越歪，IP/时间戳会整段露白）。只有真有命中的行才补一次列号表，
+    // 其余行继续走 translateToString 的内部缓存。
+    const columns = bufferLine ? lineColumnTable(bufferLine, lineText.length) : undefined;
     const marker = term.registerMarker(row - base);
     if (!marker) continue;
     const disposables: Array<{ dispose(): void }> = [marker];
@@ -5142,10 +5150,11 @@ function scanHighlightRange(start: number, end: number) {
       // 「字体颜色」模式：把规则色交给 decoration 的 foregroundColor——无覆盖层、
       // 无需逐帧重放（渲染器每次重绘都会重新查询 decoration），也不与配色方案/主题
       // 的调色板打架。DOM 与 WebGL 两条渲染路径都消费该字段。
+      const { x, width } = matchToColumns(columns, match.start, match.end);
       const decoration = term.registerDecoration(
         keywordTextColorActive.value
-          ? { marker, x: match.start, width: match.end - match.start, foregroundColor: highlightTextStyle(match.color) }
-          : { marker, x: match.start, width: match.end - match.start },
+          ? { marker, x, width, foregroundColor: highlightTextStyle(match.color) }
+          : { marker, x, width },
       );
       if (decoration) {
         if (!keywordTextColorActive.value) {
@@ -5332,7 +5341,8 @@ function scanActionLinkRange(start: number, end: number) {
   for (let row = vpFrom; row <= vpTo; row++) {
     if (actionLinkDecorationsByRow.has(row)) continue;
     if (actionLinkDecorationCount >= ACTION_LINK_DECORATION_LIMIT) return;
-    const lineText = buffer.getLine(row)?.translateToString(true) ?? "";
+    const bufferLine = buffer.getLine(row);
+    const lineText = bufferLine?.translateToString(true) ?? "";
     if (!lineText) continue;
     const matches = matchActionLinks(lineText, matchers);
     if (!matches.length) continue;
@@ -5342,6 +5352,9 @@ function scanActionLinkRange(start: number, end: number) {
       ? matches.filter((match) => !keywordSpans.some((span) => match.start < span.end && match.end > span.start))
       : matches;
     if (!visible.length) continue;
+    // 常驻虚线同样按单元格列号绘制（理由见关键词高亮处）；让位过滤仍在下标空间做，
+    // 只比较命中区间的重叠关系，不需要换算。
+    const columns = bufferLine ? lineColumnTable(bufferLine, lineText.length) : undefined;
     const marker = term.registerMarker(row - base);
     if (!marker) continue;
     const disposables: Array<{ dispose(): void }> = [marker];
@@ -5356,7 +5369,8 @@ function scanActionLinkRange(start: number, end: number) {
     };
     for (const match of visible) {
       if (actionLinkDecorationCount >= ACTION_LINK_DECORATION_LIMIT) break;
-      const decoration = term.registerDecoration({ marker, x: match.start, width: match.end - match.start });
+      const { x, width } = matchToColumns(columns, match.start, match.end);
+      const decoration = term.registerDecoration({ marker, x, width });
       if (!decoration) continue;
       // 虚线下划线画在装饰元素下缘（装饰层在文字层上方，无填充不遮字形）。
       decoration.onRender((element) => {
