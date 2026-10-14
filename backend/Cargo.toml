@@ -92,6 +92,12 @@ ironrdp = { version = "0.17", default-features = false, features = ["client", "c
 # smallvec! 构造。已是 ironrdp 传递依赖（锁内 1.16.x），此处只声明直用。
 smallvec = "1"
 
+# 本地任务取消/超时的进程组终止（src/task_provider.rs）：直接 killpg 系统调用，
+# 不经外部 `kill` 二进制（其对负 pid 的 argv 解析随环境镜像变化，GitHub runner
+# 镜像 2026-10 更新后曾误伤 runner agent 自身，CI 连续红灯）。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2"
 # 进程级 kill-on-close job（src/job_object.rs）：sidecar 死亡时由内核回收

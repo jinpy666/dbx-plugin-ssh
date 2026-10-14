@@ -439,19 +439,24 @@ fn local_spawn_args(shell: &str, config: &TaskConfig) -> Vec<String> {
 /// Cancellation/timeout teardown for a local child: TERM the whole process
 /// group (the spawn created one, so `shell -c` compound commands cannot
 /// leave grandchildren behind), give it a short grace window, then escalate
-/// to SIGKILL — both the group (best-effort, via the external `kill`
-/// utility, keeping this libc-free) and the leader unconditionally through
-/// `start_kill`. Reaping stays with the caller.
+/// to SIGKILL — both the group (direct `killpg` syscall) and the leader
+/// unconditionally through `start_kill`. Reaping stays with the caller.
 #[cfg(unix)]
 async fn terminate_local_process(child: &mut tokio::process::Child) {
     let Some(pid) = child.id() else {
         return; // already exited and reaped by a previous pass
     };
-    let group = format!("-{pid}");
-    let _ = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(&group)
-        .status();
+    // Direct killpg syscall, not the external `kill` binary: the binary's
+    // argv handling is environment-sensitive (a GitHub runner image change
+    // made the group TERM there take down the runner agent mid-job, red CI
+    // across main and PRs from 2026-10-12 on), and the fork/exec per
+    // teardown is avoidable overhead.
+    let group = pid as libc::pid_t;
+    // SAFETY: killpg only sends a signal to the process group `group`; a
+    // vanished group fails with ESRCH, which we deliberately ignore.
+    unsafe {
+        libc::killpg(group, libc::SIGTERM);
+    }
     let deadline = Instant::now() + Duration::from_millis(1_500);
     while Instant::now() < deadline {
         if matches!(child.try_wait(), Ok(Some(_))) {
@@ -459,10 +464,10 @@ async fn terminate_local_process(child: &mut tokio::process::Child) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let _ = std::process::Command::new("kill")
-        .arg("-KILL")
-        .arg(&group)
-        .status();
+    // SAFETY: as above.
+    unsafe {
+        libc::killpg(group, libc::SIGKILL);
+    }
     let _ = child.start_kill();
 }
 
