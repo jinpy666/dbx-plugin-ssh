@@ -1425,8 +1425,10 @@ const terminalWriteThrottle: TerminalWriteThrottle = createTerminalWriteThrottle
 // DECSET 2026 同步渲染（WT-1，对标 WezTerm 帧合并）：`CSI ? 2026 h` 期间挂起
 // 合帧通道的定时提交、写入持续入队，`CSI ? 2026 l` 把积压整批合并一次提交——
 // vim 重绘 / cat 大文件在同步窗内的中间帧不再逐帧上屏，撕裂闪烁随之收敛。
-// 积压仍受合帧通道 1MiB 字节上限约束：应用异常驻留同步态时强制放行渲染，
-// 不会无限膨胀内存（防卡死优先于帧完整）。
+// 积压受合帧通道 1MiB 字节上限约束；hold 另有 100ms 截止时限：PTY 读边界把
+// 同步窗切成两帧时（codex 30fps 小帧流下必然发生），release 自身被 hold 挡在
+// 队列里，不定时放行会一直积到字节帽才渲染——表现为终端长时间"卡死"。
+// 防卡死优先于帧完整，异常驻留同步态时按 deadline 强制放行。
 const terminalSyncOutput: TerminalSyncOutput = {
   begin: () => terminalWriteThrottle.setHold(true),
   end: () => terminalWriteThrottle.setHold(false),
