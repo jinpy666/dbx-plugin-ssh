@@ -1178,7 +1178,7 @@ fn vendored_sspi_marks_ntlmv1_and_lm_as_unsupported() {
 
 #[test]
 fn client_build_encodes_the_package_version() {
-    assert_eq!(client_build(), 700); // 0.7.5-beta.1:patch 段含非数字后缀,按 0 计
+    assert_eq!(client_build(), 706); // 0.7.6：(0*100+7)*100+6；patch 段含非数字后缀按 0 计
 }
 
 #[test]
