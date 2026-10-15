@@ -836,11 +836,12 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     scheduleDisconnect();
     result = { sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, connected: true, sequence: 0, chunkSize: 262144, directoryTrackingSupported: true };
   } else if (method === "ssh/terminal/replay") result = { frameCount: 0, firstAvailableSequence: 1, tailSequence: sequence, complete: true };
-  // 对齐真实 sidecar 的 connection/protocol：lifecycle 把非 SSH 连接的协议
-  // 暂存（空串=未暂存，SSH 连接/宿主未推送），webview 路由前据此查询权威协议。
+  // 对齐真实 sidecar 的 connection/protocol：lifecycle 把非 SSH 连接的协议暂存，
+  // 已登记的 SSH 连接也回 "ssh"（宿主先推 connection/connect 再建 webview），只有
+  // 宿主尚未推送该连接时才是空串。?proto=pending 模拟最后那种迟到场景。
   else if (method === "connection/protocol") {
     const staged = protoFixture === "rdp" || protoFixture === "telnet" || protoFixture === "vnc" || protoFixture === "serial" ? protoFixture : "";
-    result = { protocol: staged };
+    result = { protocol: protoFixture === "pending" ? "" : staged || "ssh" };
   }
   else if (method === "ssh/sessions/list") result = { sessions: failSessionOpen || freshSessionOpen ? [] : [{ sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, readOnly: !writable, connected: true, sudoKeepalive: true, createdAt: Math.floor(Date.now() / 1000), authMethod: authFixture === "auto" ? "auto" : "private-key", host: "server.demo.internal", port: 22, username: "demo" }] };
   else if (method === "ssh/session/attach") {

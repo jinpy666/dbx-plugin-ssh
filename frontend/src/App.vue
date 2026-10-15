@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -3789,11 +3789,15 @@ const { connectCardState, connectLogEntries, reconnect, cancelConnect, startConn
 });
 
 // 宿主推给 webview 的 connection 上下文缺 external_config.protocol，向
-// sidecar 查询 lifecycle 暂存的权威协议；未暂存（宿主推送未落地或 SSH 连
-// 接）返回空串。恢复态标签的凭据重推更晚，重试窗口放宽对齐 BOOT_RESTORE。
+// sidecar 查询 lifecycle 暂存的权威协议；宿主尚未推送该连接时返回空串。
+// sidecar 现在对已登记的 SSH 连接也回答 "ssh"（backend/src/main.rs 的
+// connection/protocol），所以 SSH 连接首个查询即可命中——这个窗口只用于吸收
+// 恢复态标签更晚的凭据重推，以及非 SSH 协议的迟到推送：恢复态 4×250ms、常规
+// 2×250ms。旧 sidecar 对 SSH 仍回空串，最多多等 0.75s，路由结果不变；真未命中
+// 的连接落进既有重试梯子（每次重试都会重新查询，协议一到就路由）。
 async function resolveStoredConnectionProtocol(connectionId: string, bootRestore: boolean): Promise<{ protocol: string; shell: string; cwd: string; env: Array<{ name: string; value: string }> }> {
-  const attempts = bootRestore ? 10 : 2;
-  const delayMs = bootRestore ? 500 : 250;
+  const attempts = bootRestore ? 4 : 2;
+  const delayMs = 250;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const result = await window.dbxPlugin.invoke<{ protocol?: string; shell?: string; cwd?: string; env?: Array<{ name?: unknown; value?: unknown }> }>("connection/protocol", { connectionId });

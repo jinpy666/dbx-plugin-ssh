@@ -2011,6 +2011,18 @@ impl SshRuntime {
         self.data_dir.clone()
     }
 
+    /// Whether an SSH connection with this id is registered. `connection/protocol`
+    /// uses it to answer `"ssh"` instead of an empty string: the host pushes
+    /// `connection/connect` (which registers the connection here) before it creates
+    /// the webview, so the first query already knows the protocol and the frontend
+    /// stops burning its retry window on a question that never had an answer.
+    pub fn has_connection(&self, connection_id: &str) -> bool {
+        self.connections
+            .read()
+            .map(|connections| connections.contains_key(connection_id))
+            .unwrap_or(false)
+    }
+
     pub fn store_connection(&self, connection: StoredConnection) -> Result<(), String> {
         let connection_id = connection.id.clone();
         self.connections

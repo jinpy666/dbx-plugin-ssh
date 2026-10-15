@@ -509,9 +509,11 @@ impl Plugin {
             // 推送里），前端据此把 RDP/telnet/vnc 连接路由到各自的 * /start，
             // 而不是误拨 SSH。本地 Shell 目标（io.dbx.ssh.local）同理：返回
             // protocol="local" 与连接表单的 shell（空 = 默认 Shell 解析链），
-            // 前端据此路由到 local/terminal/start 而非 SSH 拨号。未暂存 = 宿主
-            // 尚未推送该连接，返回空串由调用方短暂重试（推送与 webview 创建
-            // 存在固有竞态）。
+            // 前端据此路由到 local/terminal/start 而非 SSH 拨号。SSH 连接（登记
+            // 于 SSH 连接注册表）返回 protocol="ssh"：宿主 lifecycle 推送先于
+            // webview 创建，首个查询即可命中，调用方不必把重试窗口跑满去等一个
+            // 永远为空的答案。三者都没有 = 宿主尚未推送该连接，返回空串由调用方
+            // 短暂重试（推送与 webview 创建存在固有竞态）。
             "connection/protocol" => {
                 let connection_id = params
                     .get("connectionId")
@@ -520,6 +522,7 @@ impl Plugin {
                 let payload = connection_protocol_payload(
                     self.runtime.block_on(self.ssh.local_target(connection_id)),
                     self.non_ssh_creds.protocol_of(connection_id),
+                    self.ssh.has_connection(connection_id),
                 );
                 log_rdp_debug(format!(
                     "connection/protocol query id={connection_id} -> {payload}"
@@ -2876,12 +2879,14 @@ fn operation_id(params: &Value) -> String {
 /// filesystem provider），本地目标打开的是 Terminal 工作台，webview 需要据
 /// protocol="local" 路由到 local/terminal/start 而非误拨 SSH；shell 透传连接
 /// 表单值（空 = 前端回落偏好/默认 Shell 解析链），cwd/env 同样透传连接表单
-/// 配置（`env` 为净化后的 name/value 行数组，空数组 = 未配置）。非本地连接
-/// 回落非 SSH 凭据注册表的会话协议（telnet/vnc/rdp/serial），未暂存为空串
-/// （调用方短重试）。
+/// 配置（`env` 为净化后的 name/value 行数组，空数组 = 未配置）。非本地连接按序
+/// 回落：非 SSH 凭据注册表的会话协议（telnet/vnc/rdp/serial）→ 已登记的 SSH 连接
+/// （`ssh`，宿主 lifecycle 推送先于 webview 查询，首个查询即可命中）→ 空串（宿主
+/// 尚未推送该连接，调用方短重试）。
 fn connection_protocol_payload(
     local_target: Option<crate::local_target::LocalTarget>,
     stored_protocol: Option<String>,
+    ssh_connection: bool,
 ) -> Value {
     match local_target {
         Some(target) => json!({
@@ -2894,7 +2899,14 @@ fn connection_protocol_payload(
                 .map(|(name, value)| json!({ "name": name, "value": value }))
                 .collect::<Vec<_>>(),
         }),
-        None => json!({ "protocol": stored_protocol.unwrap_or_default() }),
+        None => {
+            let protocol = match stored_protocol {
+                Some(protocol) => protocol,
+                None if ssh_connection => "ssh".to_string(),
+                None => String::new(),
+            };
+            json!({ "protocol": protocol })
+        }
     }
 }
 
@@ -3200,8 +3212,9 @@ mod tests {
     }
 
     /// `connection/protocol` 响应组装：本地 Shell 目标优先返回
-    /// protocol="local" + 连接表单 shell（空 shell 原样透出）；非本地连接
-    /// 回落非 SSH 凭据注册表协议，未暂存为空串（前端短重试）。
+    /// protocol="local" + 连接表单 shell（空 shell 原样透出）；非本地连接回落
+    /// 非 SSH 凭据注册表协议，其次已登记的 SSH 连接（"ssh"），都没有则空串
+    /// （宿主尚未推送该连接，前端短重试）。
     #[test]
     fn connection_protocol_payload_prefers_local_target() {
         let local = connection_protocol_payload(
@@ -3213,6 +3226,7 @@ mod tests {
                 env: vec![("EDITOR".to_string(), "/usr/bin/vim".to_string())],
             }),
             Some("rdp".to_string()),
+            false,
         );
         assert_eq!(
             local,
@@ -3233,16 +3247,37 @@ mod tests {
                 env: Vec::new(),
             }),
             None,
+            false,
         );
         assert_eq!(
             local_default,
             json!({ "protocol": "local", "shell": "", "cwd": "", "env": [] })
         );
         // 非 SSH 会话连接（telnet/vnc/rdp/serial）与未暂存连接维持原契约。
-        let stored = connection_protocol_payload(None, Some("telnet".to_string()));
+        let stored = connection_protocol_payload(None, Some("telnet".to_string()), false);
         assert_eq!(stored, json!({ "protocol": "telnet" }));
-        let unstaged = connection_protocol_payload(None, None);
+        let unstaged = connection_protocol_payload(None, None, false);
         assert_eq!(unstaged, json!({ "protocol": "" }));
+        // 已登记的 SSH 连接：首个查询即拿到 "ssh"，前端不再把重试窗口跑满
+        // （原恢复态 10×500ms 的纯等待是每次连接约 4.5s 延迟的来源）。
+        let ssh = connection_protocol_payload(None, None, true);
+        assert_eq!(ssh, json!({ "protocol": "ssh" }));
+        // 本地 Shell 目标仍然优先（同一 id 不会双登记，防御性保持）。
+        let local_beats_ssh = connection_protocol_payload(
+            Some(crate::local_target::LocalTarget {
+                id: "conn-local-3".to_string(),
+                name: None,
+                shell: "/bin/sh".to_string(),
+                cwd: String::new(),
+                env: Vec::new(),
+            }),
+            None,
+            true,
+        );
+        assert_eq!(
+            local_beats_ssh,
+            json!({ "protocol": "local", "shell": "/bin/sh", "cwd": "", "env": [] })
+        );
     }
 
     /// 宿主对 connection/action 响应的契约（与 ssh.rs 摘要臂测试同源）：
