@@ -94,11 +94,16 @@ export function decideConnectRetry(options: {
   bootRestore: boolean;
   /** Host marked the panel pre-dialed (connectionPreconnected) — race the connect push at a short fixed cadence. */
   preconnect?: boolean;
+  /** A request to restore this connection in the host has already failed. */
+  hostReopenFailed?: boolean;
 }): ConnectRetryDecision {
+  // Polling the sidecar cannot restore credentials when the host rejected the
+  // re-open request. Surface the failure immediately instead of making eleven
+  // identical ssh/session/open calls.
+  if (options.inactive && !options.bootRestore && options.hostReopenFailed) return { kind: "fail" };
   // "Connection is not active" means the sidecar lost the connection registry
-  // (e.g. sidecar restart); the host only refills it when the user reopens the
-  // connection from the DBX sidebar. Manual entry points (reconnect button
-  // etc.) poll for a bounded window so a reopen self-heals, then fail with
+  // (e.g. sidecar restart). The host must refill it; manual entry points poll
+  // for a bounded window so a reopen self-heals, then fail with
   // guidance. Boot restores keep the regular ladder because the host replays
   // the connect lifecycle on its own.
   if (options.inactive && !options.bootRestore) {

@@ -67,6 +67,14 @@ describe("decideConnectRetry", () => {
     expect(exhausted).toEqual({ kind: "fail" });
   });
 
+  it("does not poll after the host fails to restore a missing connection", () => {
+    expect(decideConnectRetry({ ...BASE, inactive: true, hostReopenFailed: true, cause: new Error("Connection is not active") })).toEqual({ kind: "fail" });
+  });
+
+  it("keeps boot restore retries independent from an earlier host reopen failure", () => {
+    expect(decideConnectRetry({ ...BASE, inactive: true, bootRestore: true, hostReopenFailed: true, cause: new Error("Connection is not active") })).toEqual({ kind: "retry", attempt: 1, delayMs: BOOT_RESTORE_RETRY_DELAY_MS });
+  });
+
   it("polls inactive errors during boot restore on the dedicated restore window", () => {
     // dbx-plugin-ssh#144: the regular ladder's 8s fast-fail window gave up
     // before the host's connect replay landed, stranding the restored tab.

@@ -103,7 +103,7 @@ export const messages = {
     reattachingTerminal: "The terminal channel was interrupted. Reattaching to the existing SSH session...",
     transportDisconnected: "The SSH connection was closed by the server or network. Reconnect to continue.",
     restartDisconnected: "SSH sessions are not restored after DBX restarts",
-    connectionInactive: "This connection was not reopened after DBX restarted, so its credentials are no longer available. Close this tab, then reopen the connection from the DBX sidebar.",
+    connectionInactive: "DBX could not restore this connection to the SSH plugin. Reload DBX, then reopen the connection from the sidebar.",
     connectError: {
       auth: "Authentication failed. Check the username, password or private key configured for this connection, then press Reconnect.",
       refused: "The server refused the connection. Verify the host and port, and make sure the SSH service is running.",
@@ -114,7 +114,7 @@ export const messages = {
       keyFormat: "The SSH private key could not be decoded. Re-paste the complete private key (including the BEGIN/END lines) — public keys, PuTTY PPK files or text mangled while copying all cause this. If the key is protected, fill in the private key passphrase field. The raw error shows the specific cause.",
     },
     connectCard: {
-      waitingReopen: "Credentials unavailable — close this tab and reopen the connection from the DBX sidebar; retrying automatically…",
+      waitingReopen: "Waiting for DBX to restore this connection; retrying automatically…",
       showLogs: "Show logs",
       hideLogs: "Hide logs",
       cancel: "Cancel",
@@ -653,7 +653,7 @@ export const messages = {
     reattachingTerminal: "El canal del terminal se interrumpió. Reconectando a la sesión SSH existente...",
     transportDisconnected: "El servidor o la red cerraron la conexión SSH. Vuelva a conectarse para continuar.",
     restartDisconnected: "Las sesiones SSH no se restauran al reiniciar DBX",
-    connectionInactive: "Esta conexión no se reabrió tras reiniciar DBX y sus credenciales ya no están disponibles. Cierra esta pestaña y vuelve a abrir la conexión en la barra lateral de DBX.",
+    connectionInactive: "DBX no pudo restaurar esta conexión en el complemento SSH. Recarga DBX y vuelve a abrir la conexión desde la barra lateral.",
     connectError: {
       auth: "Error de autenticación. Comprueba el usuario, la contraseña o la clave privada configurados en esta conexión y pulsa Reconectar.",
       refused: "El servidor rechazó la conexión. Verifica el host y el puerto, y asegúrate de que el servicio SSH esté en ejecución.",
@@ -664,7 +664,7 @@ export const messages = {
       keyFormat: "No se pudo decodificar la clave privada SSH. Vuelve a pegar la clave privada completa (incluidas las líneas BEGIN/END): las claves públicas, los archivos PuTTY PPK o el texto dañado al copiar lo provocan. Si la clave está protegida, rellena el campo «Frase de contraseña de la clave». El error original indica la causa concreta.",
     },
     connectCard: {
-      waitingReopen: "Credenciales no disponibles: cierra esta pestaña y vuelve a abrir la conexión desde la lista de DBX; reintentando automáticamente…",
+      waitingReopen: "Esperando a que DBX restaure esta conexión; reintentando automáticamente…",
       showLogs: "Mostrar registros",
       hideLogs: "Ocultar registros",
       cancel: "Cancelar",
@@ -1196,7 +1196,7 @@ export const messages = {
     reattachingTerminal: "Il canale del terminale è stato interrotto. Riconnessione alla sessione SSH esistente...",
     transportDisconnected: "La connessione SSH è stata chiusa dal server o dalla rete. Riconnettiti per continuare.",
     restartDisconnected: "Le sessioni SSH non vengono ripristinate dopo il riavvio di DBX",
-    connectionInactive: "Questa connessione non è stata riaperta dopo il riavvio di DBX, quindi le sue credenziali non sono più disponibili. Chiudi questa scheda e riapri la connessione dalla barra laterale di DBX.",
+    connectionInactive: "DBX non è riuscito a ripristinare questa connessione nel plugin SSH. Ricarica DBX e riapri la connessione dalla barra laterale.",
     connectError: {
       auth: "Autenticazione non riuscita. Controlla nome utente, password o chiave privata configurati per questa connessione, poi premi Riconnetti.",
       refused: "Il server ha rifiutato la connessione. Verifica host e porta e assicurati che il servizio SSH sia in esecuzione.",
@@ -1207,7 +1207,7 @@ export const messages = {
       keyFormat: "Impossibile decodificare la chiave privata SSH. Incolla di nuovo la chiave privata completa (incluse le righe BEGIN/END): chiavi pubbliche, file PuTTY PPK o testo danneggiato durante la copia lo causano. Se la chiave è protetta, compila il campo «Passphrase chiave privata». L'errore originale indica la causa specifica.",
     },
     connectCard: {
-      waitingReopen: "Credenziali non disponibili: chiudi questa scheda e riapri la connessione dall'elenco di DBX; nuovo tentativo automatico in corso…",
+      waitingReopen: "In attesa che DBX ripristini questa connessione; nuovo tentativo automatico in corso…",
       showLogs: "Mostra log",
       hideLogs: "Nascondi log",
       cancel: "Annulla",
@@ -1739,7 +1739,7 @@ export const messages = {
     reattachingTerminal: "ターミナルチャネルが中断されました。既存の SSH セッションへ再接続しています...",
     transportDisconnected: "SSH 接続がサーバーまたはネットワークによって切断されました。再接続してください。",
     restartDisconnected: "DBX の再起動後は SSH セッションを復元できません",
-    connectionInactive: "DBX の再起動後にこの接続が再オープンされていないため、認証情報を利用できません。このタブを閉じてから、DBX のサイドバーで接続を開き直してください。",
+    connectionInactive: "DBX はこの接続を SSH プラグインに復元できませんでした。DBX を再読み込みし、サイドバーから接続を開き直してください。",
     connectError: {
       auth: "認証に失敗しました。この接続に設定されたユーザー名・パスワード・秘密鍵を確認してから、再接続を押してください。",
       refused: "サーバーが接続を拒否しました。ホストとポートを確認し、SSH サービスが起動しているか確認してください。",
@@ -1750,7 +1750,7 @@ export const messages = {
       keyFormat: "SSH 秘密鍵をデコードできませんでした。秘密鍵を全文（BEGIN/END 行を含む）貼り直してください。公開鍵・PuTTY PPK・コピー時に壊れたテキストもこの原因になります。鍵が保護されている場合は「秘密鍵のパスフレーズ」欄に入力してください。具体的な原因は元のエラーを参照してください。",
     },
     connectCard: {
-      waitingReopen: "資格情報が利用できません — このタブを閉じ、DBX の接続一覧からこの接続を開き直してください。自動で再試行しています…",
+      waitingReopen: "DBX による接続の復元を待っています。自動で再試行しています…",
       showLogs: "ログを表示",
       hideLogs: "ログを隠す",
       cancel: "キャンセル",
@@ -2282,7 +2282,7 @@ export const messages = {
     reattachingTerminal: "O canal do terminal foi interrompido. Reconectando à sessão SSH existente...",
     transportDisconnected: "A conexão SSH foi encerrada pelo servidor ou pela rede. Reconecte para continuar.",
     restartDisconnected: "As sessões SSH não são restauradas após reiniciar o DBX",
-    connectionInactive: "Esta conexão não foi reaberta após o reinício do DBX, então suas credenciais não estão mais disponíveis. Feche esta aba e abra novamente a conexão na barra lateral do DBX.",
+    connectionInactive: "O DBX não conseguiu restaurar esta conexão no plugin SSH. Recarregue o DBX e reabra a conexão pela barra lateral.",
     connectError: {
       auth: "Falha de autenticação. Verifique o usuário, a senha ou a chave privada configurados nesta conexão e pressione Reconectar.",
       refused: "O servidor recusou a conexão. Confirme o host e a porta e verifique se o serviço SSH está em execução.",
@@ -2293,7 +2293,7 @@ export const messages = {
       keyFormat: "Não foi possível decodificar a chave privada SSH. Cole novamente a chave privada completa (incluindo as linhas BEGIN/END): chaves públicas, arquivos PuTTY PPK ou texto danificado ao copiar causam isso. Se a chave for protegida, preencha o campo «Frase secreta da chave». O erro original mostra a causa específica.",
     },
     connectCard: {
-      waitingReopen: "Credenciais indisponíveis — feche esta aba e reabra a conexão na lista do DBX; tentando novamente automaticamente…",
+      waitingReopen: "Aguardando o DBX restaurar esta conexão; tentando novamente automaticamente…",
       showLogs: "Mostrar logs",
       hideLogs: "Ocultar logs",
       cancel: "Cancelar",
@@ -2825,7 +2825,7 @@ export const messages = {
     reattachingTerminal: "终端通道已中断，正在重新附着到原 SSH 会话...",
     transportDisconnected: "SSH 连接已被服务器或网络中断，请重新连接。",
     restartDisconnected: "DBX 重启后不会自动恢复 SSH 会话",
-    connectionInactive: "DBX 重启后未重新打开该连接，凭据已不可用。请关闭本页签，然后在 DBX 左侧连接列表重新打开该连接。",
+    connectionInactive: "DBX 未能向 SSH 插件恢复此连接。请重新加载 DBX，再从左侧连接列表打开该连接。",
     connectError: {
       auth: "认证失败。请核对该连接配置的用户名、密码或私钥，然后点击“重新连接”。",
       refused: "服务器拒绝了连接。请确认主机地址与端口正确，且 SSH 服务正在运行。",
@@ -2836,7 +2836,7 @@ export const messages = {
       keyFormat: "SSH 私钥无法解析。请重新粘贴完整私钥（含 BEGIN/END 行）：公钥、PuTTY PPK 或复制时损坏的文本都会导致此错误。若私钥设有口令，请填写「私钥口令」字段。具体原因见原始错误信息。",
     },
     connectCard: {
-      waitingReopen: "凭据已不可用：请关闭本页签，再在 DBX 左侧连接列表重新打开该连接，正在自动重试…",
+      waitingReopen: "正在等待 DBX 恢复此连接，并自动重试…",
       showLogs: "显示日志",
       hideLogs: "隐藏日志",
       cancel: "取消",
@@ -3375,7 +3375,7 @@ export const messages = {
     reattachingTerminal: "終端通道已中斷，正在重新附加到原 SSH 工作階段...",
     transportDisconnected: "SSH 連線已被伺服器或網路中斷，請重新連線。",
     restartDisconnected: "DBX 重新啟動後不會自動恢復 SSH 工作階段",
-    connectionInactive: "DBX 重新啟動後未重新開啟該連線，憑證已不可用。請關閉本頁籤，然後在 DBX 左側連線清單重新開啟該連線。",
+    connectionInactive: "DBX 未能向 SSH 外掛恢復此連線。請重新載入 DBX，再從左側連線清單開啟該連線。",
     connectError: {
       auth: "驗證失敗。請核對該連線設定的使用者名稱、密碼或私密金鑰，然後點擊「重新連線」。",
       refused: "伺服器拒絕了連線。請確認主機位址與連接埠正確，且 SSH 服務正在執行。",
@@ -3386,7 +3386,7 @@ export const messages = {
       keyFormat: "SSH 私密金鑰無法解析。請重新貼上完整私密金鑰（含 BEGIN/END 行）：公鑰、PuTTY PPK 或複製時損毀的文字都會導致此錯誤。若金鑰設有通關密語，請填寫「私鑰密語」欄位。具體原因請見原始錯誤訊息。",
     },
     connectCard: {
-      waitingReopen: "憑據已不可用：請關閉本頁籤，再在 DBX 左側連線清單重新開啟此連線，正在自動重試…",
+      waitingReopen: "正在等待 DBX 恢復此連線，並自動重試…",
       showLogs: "顯示日誌",
       hideLogs: "隱藏日誌",
       cancel: "取消",

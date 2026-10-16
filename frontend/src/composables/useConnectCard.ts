@@ -21,7 +21,7 @@ export function useConnectCard(options: {
   getTerminal: () => Terminal | undefined;
   resetGutterTimestamps: () => void;
   requestHostReopenConnection: () => Promise<unknown>;
-  openSession: (forceNew?: boolean, bootRestore?: boolean, isRetry?: boolean) => Promise<void>;
+  openSession: (forceNew?: boolean, bootRestore?: boolean, isRetry?: boolean, hostReopenAttempted?: boolean) => Promise<void>;
   closeSession: (updateStatus?: boolean) => Promise<void>;
 }) {
   const {
@@ -55,7 +55,7 @@ export function useConnectCard(options: {
     resetGutterTimestamps();
     await closeSession(false);
     await requestHostReopenConnection();
-    await openSession();
+    await openSession(false, false, false, true);
   }
 
   /**
@@ -76,7 +76,7 @@ export function useConnectCard(options: {
   async function startConnect() {
     connectCancelled.value = false;
     await requestHostReopenConnection();
-    void openSession();
+    void openSession(false, false, false, true);
   }
 
   /**
@@ -92,7 +92,8 @@ export function useConnectCard(options: {
     window.clearTimeout(reconnectTimer.value);
     reconnectPending.value = false;
     reconnectAttempt.value = 0;
-    await openSession();
+    await requestHostReopenConnection();
+    await openSession(false, false, false, true);
   }
 
   return { connectCardState, connectLogEntries, reconnect, cancelConnect, startConnect, reconnectNow };

@@ -112,6 +112,7 @@ import { SERIAL_STREAM_STDIN, isKnownStreamTag, supportsBinaryInput } from "./li
 import { describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS } from "./lib/terminalReconnect";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
 import { decideConnectRetry, isDuplicatedTransportUnavailableError } from "./lib/connectRetry";
+import { reopenHostConnection } from "./lib/hostReopen";
 import {
   createSessionTransportReuseState,
   fallbackToFreshTransport,
@@ -3842,7 +3843,7 @@ async function connectViaRdpDialog(options: RdpConnectOptions): Promise<boolean>
   return startRdpSession(options);
 }
 
-async function openSession(forceNew = false, bootRestore = false, isRetry = false) {
+async function openSession(forceNew = false, bootRestore = false, isRetry = false, hostReopenAttempted = false) {
   if (!connectionId.value || !workbenchId.value) return;
   // 协议路由（对标 Tabby profile）：Telnet/VNC 连接不建 SSH 会话，直接驱动
   // 各自的会话启动；启动失败回落连接弹窗（预填 host/port，可改后重试）。
@@ -3972,6 +3973,7 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
       replayNoProgress = 0;
     }
     connectSucceeded.value = true;
+    hostReopenFailed = false;
     inactiveWaiting.value = false;
     connectLog.push("info", t("connectCard.log.connected", { seconds: ((Date.now() - attemptStarted) / 1000).toFixed(1) }));
     const replay = await window.dbxPlugin.invoke<ReplayResult>("ssh/terminal/replay", {
@@ -4009,13 +4011,17 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
     }
     const attemptMs = Date.now() - attemptStarted;
     // "Connection is not active"：sidecar 连接注册表还没有该连接。boot 恢复
-    // 场景（宿主启动时为恢复的插件 tab 重放 connect 生命周期）这是暂时态，
-    // 与其它快失败一起在窗口内重试即可自愈；非 boot 路径（手动重连等）宿主只在
-    // 用户从侧边栏重开连接时才重放凭据，因此在有界窗口内轮询等待自愈（卡片
-    // 显示等待文案），窗口耗尽再落错误态并指引从左侧连接重新打开。认证 /
+    // 场景先等待宿主重放 connect 生命周期；非 boot 路径先主动请求宿主重放，
+    // 成功后在有界窗口内轮询。宿主请求失败则立即呈现错误。认证 /
     // host-key 拒绝是秒级永久错误，重试不可能自愈——跳过重试直接进 error 态，
     // 呈现 friendly 文案 + Reconnect 出口（P1-1）。决策细节见 connectRetry.ts。
     const inactive = isConnectionInactiveError(cause);
+    // A live workbench can outlast its sidecar connection registration. Ask
+    // the host to replay the vault-backed lifecycle once before polling for
+    // the new registration. The webview never receives the credentials.
+    if (inactive && !bootRestore && openRetryAttempt === 0 && !hostReopenAttempted) {
+      await requestHostReopenConnection();
+    }
     // 预拨号面板的引导竞态：宿主在创建条目时已开始 connect，openSession 只
     // 是跑在了 connect 推送前面——用短间隔轮询等它落地，而不是 2s 退避梯子。
     const preconnect = bootRestore && panelSurface.value && hostContext.value.connectionPreconnected === true;
@@ -4027,6 +4033,7 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
       inactive,
       bootRestore,
       preconnect,
+      hostReopenFailed,
     });
     if (decision.kind === "retry") {
       openRetryAttempt = decision.attempt;
@@ -4852,17 +4859,14 @@ async function reattachLocalSession(): Promise<boolean> {
 // 手动重连前请宿主按当前最新配置重开连接：连接在侧边栏被编辑（如改密码）后，
 // 宿主会摘掉 connected 标记且不回推插件，sidecar 里存的凭据就此过期——不先
 // 重开的话 openSession 只会拿旧凭据反复失败。宿主以打开连接的同款流程重新
-// 下发配置（含 vault 里的最新凭据）。旧宿主无 host.reopenConnection：请求
-// 报错静默忽略，行为退化为原样。
-async function requestHostReopenConnection() {
-  if (!connectionId.value) return;
-  try {
-    const api = window.dbxPlugin;
-    if (api.reopenConnection) await api.reopenConnection(connectionId.value);
-    else await api.request("host.reopenConnection", { connectionId: connectionId.value });
-  } catch {
-    // 旧宿主无此方法。
-  }
+// 下发配置（含 vault 里的最新凭据）。失败记录下来，避免后续对空连接表
+// 反复发起 ssh/session/open；旧宿主仍可在连接表已有记录时继续拨号。
+let hostReopenFailed = false;
+async function requestHostReopenConnection(): Promise<boolean> {
+  if (!connectionId.value) return false;
+  const restored = await reopenHostConnection(window.dbxPlugin, connectionId.value);
+  hostReopenFailed = !restored;
+  return restored;
 }
 
 // 新建会话（同连接再开一个 tab）：context 复制当前一份并换发新 workbenchId——
