@@ -1732,8 +1732,6 @@ pub fn keyboard_interactive_answers(
     answers
 }
 
-const SUDO_PROMPT_PATTERS: &[&str] = &["[sudo] password for", "password:"];
-
 /// True when the last non-empty line of the terminal output looks like a
 /// shell prompt, meaning any in-flight auth sequence has finished.
 pub(crate) fn has_shell_prompt(normalized: &str) -> bool {
@@ -1745,6 +1743,71 @@ pub(crate) fn has_shell_prompt(normalized: &str) -> bool {
             let line = line.trim_end();
             line.ends_with('$') || line.ends_with('#')
         })
+}
+
+/// A live prompt arrives alone or right behind the echoed command. Anything
+/// longer is a screen dump (`cat`, `grep`, a pager, a vim redraw) whose text
+/// can end with a config key that reads exactly like a prompt.
+const MAX_PROMPT_CHUNK_LINES: usize = 8;
+
+/// Real prompts are short; a file line that merely mentions `password:` is
+/// usually not.
+const MAX_PROMPT_LINE_LEN: usize = 160;
+
+/// DEC private modes that switch the terminal to its alternate screen buffer.
+/// While one of them is set, a full-screen program (vim, less, top, man) owns
+/// the terminal and repaints arbitrary file content into it.
+const ALT_SCREEN_MODES: [u16; 3] = [47, 1047, 1049];
+
+/// Longest escape-sequence fragment carried across chunk boundaries so a
+/// terminal-mode switch split by the transport is never lost.
+const MAX_ESCAPE_CARRY: usize = 32;
+
+/// Returns the last visible line of a chunk when the chunk still looks like a
+/// live prompt: few lines, prompt starting at column 0. Screen dumps are
+/// rejected here so their content can never be mistaken for a prompt.
+pub(crate) fn prompt_tail_line(normalized: &str) -> Option<&str> {
+    let lines: Vec<&str> = normalized
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.len() > MAX_PROMPT_CHUNK_LINES {
+        return None;
+    }
+    let last = lines.last()?.trim_end();
+    if last.is_empty() || last.len() > MAX_PROMPT_LINE_LEN {
+        return None;
+    }
+    // Real prompts start at column 0; indented text is file content (a nested
+    // YAML key, a diff hunk, a log continuation line).
+    if last.starts_with([' ', '\t']) {
+        return None;
+    }
+    Some(last)
+}
+
+/// True when the chunk's last line is shaped like a password prompt: it ends
+/// with the prompt colon and opens with one of the built-in password patterns.
+/// A YAML `password: value` key, a grep hit or a log line ends with its value
+/// (or is indented), so it never matches.
+pub(crate) fn is_password_prompt_line(normalized: &str) -> bool {
+    let Some(line) = prompt_tail_line(normalized) else {
+        return false;
+    };
+    if !(line.ends_with(':') || line.ends_with('：')) {
+        return false;
+    }
+    let lower = line.to_lowercase();
+    // sudo names its own prompt and may follow the lecture sentence, so an
+    // inline match is fine. The bare forms (password:/passphrase:/密码:/口令:)
+    // have to open the line — prompt column 0 — so a nested YAML key, a log
+    // continuation or a diff hunk never qualifies.
+    if lower.contains("[sudo] password for") {
+        return true;
+    }
+    PASSWORD_PROMPT_PATTERS
+        .iter()
+        .any(|pattern| lower.starts_with(pattern))
 }
 
 /// What the state machine decided to type into the terminal.
@@ -1771,6 +1834,11 @@ pub struct TerminalAutoSudo {
     /// 仅轮转密钥（Key）适用；静态恢复码永远不变，重试无意义。
     otp_deferred_kind: Option<PromptKind>,
     otp_deferred_until: Option<u64>,
+    /// True while a full-screen program owns the alternate screen buffer.
+    /// Redraws there are file content, so auto-answers must stay off.
+    alt_screen: bool,
+    /// Tail of an escape sequence split across chunk boundaries.
+    escape_carry: String,
 }
 
 impl TerminalAutoSudo {
@@ -1782,12 +1850,87 @@ impl TerminalAutoSudo {
             otp_sent: false,
             otp_deferred_kind: None,
             otp_deferred_until: None,
+            alt_screen: false,
+            escape_carry: String::new(),
+        }
+    }
+
+    /// Tracks `CSI ? <modes> h|l` transitions for the alternate screen buffer.
+    /// A fragment cut by a chunk boundary is carried over, so entry/exit is
+    /// never lost.
+    fn track_alternate_screen(&mut self, chunk: &str) {
+        let mut scan = std::mem::take(&mut self.escape_carry);
+        scan.push_str(chunk);
+        let bytes = scan.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != 0x1b {
+                index += 1;
+                continue;
+            }
+            if index + 2 >= bytes.len() || bytes[index + 1] != b'[' || bytes[index + 2] != b'?' {
+                index += 1;
+                continue;
+            }
+            let mut cursor = index + 3;
+            let mut modes: Vec<u16> = Vec::new();
+            let mut value: u32 = 0;
+            let mut has_digits = false;
+            let mut terminator = None;
+            while cursor < bytes.len() {
+                let byte = bytes[cursor];
+                if byte.is_ascii_digit() {
+                    value = value
+                        .saturating_mul(10)
+                        .saturating_add(u32::from(byte - b'0'));
+                    has_digits = true;
+                    cursor += 1;
+                    continue;
+                }
+                if has_digits {
+                    modes.push(value as u16);
+                    value = 0;
+                    has_digits = false;
+                }
+                if byte == b';' {
+                    cursor += 1;
+                    continue;
+                }
+                if byte == b'h' || byte == b'l' {
+                    terminator = Some(byte);
+                    cursor += 1;
+                }
+                break;
+            }
+            match terminator {
+                Some(final_byte) => {
+                    if modes.iter().any(|mode| ALT_SCREEN_MODES.contains(mode)) {
+                        self.alt_screen = final_byte == b'h';
+                    }
+                    index = cursor;
+                }
+                None => {
+                    // Unterminated sequence: hold the fragment for the next
+                    // chunk instead of dropping the mode change on the floor.
+                    let carry = &scan[index..];
+                    if carry.len() <= MAX_ESCAPE_CARRY {
+                        self.escape_carry.push_str(carry);
+                    }
+                    return;
+                }
+            }
         }
     }
 
     /// Feeds one terminal output chunk and returns the answer to type back
     /// (without the carriage return), if any prompt was answered.
     pub fn observe(&mut self, chunk: &str) -> Option<(AutoSudoKind, String)> {
+        self.track_alternate_screen(chunk);
+        if self.alt_screen {
+            // A full-screen program is repainting the terminal: prompt-shaped
+            // text in its output is file content, never a live question.
+            return None;
+        }
         let auth = self
             .auth
             .read()
@@ -1809,6 +1952,13 @@ impl TerminalAutoSudo {
         let lower = normalized.to_lowercase();
         let mode = auth.flow_mode();
         let kind = classify_auth_prompt(&lower, auth);
+        // Credentials are only typed into a live prompt line, never into a
+        // screen of output that happens to mention a password. The shape check
+        // runs on the escape-stripped chunk before the leading trim: that trim
+        // would move an indented file line into the prompt column.
+        let shape_text = strip_ansi_control_sequences(&chunk.replace('\r', "\n"));
+        let prompt_line = prompt_tail_line(&shape_text).is_some();
+        let password_prompt = is_password_prompt_line(&shape_text);
 
         if self.sudo_pending {
             match kind {
@@ -1827,11 +1977,10 @@ impl TerminalAutoSudo {
         // merged prompt ([sudo] password + verification code in one line) is
         // not a plain password prompt: sending only the password half always
         // fails, so it falls through to the combined handling below.
-        if SUDO_PROMPT_PATTERS
-            .iter()
-            .any(|pattern| lower.contains(pattern))
-            && !matches!(kind, Some(PromptKind::Totp | PromptKind::Combined))
-        {
+        // The chunk also has to *look* like a prompt: its last line starts at
+        // column 0 and ends with the prompt colon. A config key, a log line or
+        // a grep hit that merely contains `password:` never matches.
+        if password_prompt && !matches!(kind, Some(PromptKind::Totp | PromptKind::Combined)) {
             if auth.password.is_empty() {
                 // Make the silent no-answer case diagnosable: the watcher is
                 // armed but holds no credential (sudo source off/unbound, or
@@ -1854,10 +2003,12 @@ impl TerminalAutoSudo {
         // hint — answering only its password half would always fail.
         let has_custom_hint = !auth.password_prompt_hint.trim().is_empty()
             || !auth.totp_prompt_hint.trim().is_empty();
-        let sudo_like_merged = matches!(kind, Some(PromptKind::Combined))
-            && SUDO_PROMPT_PATTERS
-                .iter()
-                .any(|pattern| lower.contains(pattern));
+        let sudo_like_merged = matches!(kind, Some(PromptKind::Combined)) && password_prompt;
+        // Hints are matched the same way: only a live prompt line, never a
+        // screen of output that happens to contain the hint text.
+        if !prompt_line {
+            return None;
+        }
         if !has_custom_hint && !sudo_like_merged {
             return None;
         }
@@ -2708,6 +2859,56 @@ mod tests {
         // Direct sudo prompts keep working after the reset.
         assert_eq!(
             auto.observe("We trust you... [sudo] password for user:"),
+            Some((AutoSudoKind::Password, "pw".to_string()))
+        );
+    }
+
+    #[test]
+    fn terminal_auto_sudo_ignores_fullscreen_redraws() {
+        let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+        // Entering the alternate screen buffer (vim/less/top) must disable the
+        // watcher: a redraw echoes file content, including lines that read
+        // exactly like a sudo prompt.
+        assert_eq!(auto.observe("\x1b[?1049h\x1b[H\x1b[2J"), None);
+        assert_eq!(auto.observe("\x1b[3;1H[sudo] password for user:"), None);
+        assert_eq!(
+            auto.observe("\x1b[4;1H    password:\x1b[5;1H\"conf.yml\" 12L, 340B"),
+            None
+        );
+        // Leaving the alternate screen re-arms the watcher.
+        assert_eq!(auto.observe("\x1b[?1049l"), None);
+        assert_eq!(
+            auto.observe("[sudo] password for user: "),
+            Some((AutoSudoKind::Password, "pw".to_string()))
+        );
+    }
+
+    #[test]
+    fn terminal_auto_sudo_tracks_mode_switches_split_across_chunks() {
+        let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+        assert_eq!(auto.observe("\x1b[?10"), None);
+        assert_eq!(auto.observe("49h"), None);
+        assert_eq!(auto.observe("[sudo] password for user: "), None);
+        assert_eq!(auto.observe("\x1b[?1049l"), None);
+        assert_eq!(
+            auto.observe("[sudo] password for user: "),
+            Some((AutoSudoKind::Password, "pw".to_string()))
+        );
+    }
+
+    #[test]
+    fn terminal_auto_sudo_ignores_file_content_that_mentions_passwords() {
+        let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+        // Config key with a value: the line does not end with the prompt colon.
+        assert_eq!(auto.observe("password: hunter2"), None);
+        // Nested YAML key: indented, so it never sits in the prompt column.
+        assert_eq!(auto.observe("      password:"), None);
+        // A cat/grep dump is long, so it cannot be a live prompt.
+        let dump = "spring:\n  datasource:\n    url: jdbc:mysql://db:3306/app\n    username: app\n    password:\n    driver: com.zaxxer.hikari.HikariDataSource\n    lazy: true\n    pool-name: main\npassword:\n";
+        assert_eq!(auto.observe(dump), None);
+        // A real prompt, even behind the echoed command, still answers.
+        assert_eq!(
+            auto.observe("user@host:~$ sudo ls\n[sudo] password for user:"),
             Some((AutoSudoKind::Password, "pw".to_string()))
         );
     }
