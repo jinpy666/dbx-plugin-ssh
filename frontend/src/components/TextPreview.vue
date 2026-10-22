@@ -8,6 +8,8 @@ import { languages } from "@codemirror/language-data";
 import { tags } from "@lezer/highlight";
 // 语法高亮调色板来自 shared 公共层（唯一实现点），暗色为提亮后的 GitHub Dark 系。
 import { dbxSyntaxHighlight } from "../../../shared/frontend/editorTheme";
+// issue #224：日志文件（.log/.out/.err）按级别整行着色 + 行内 ERROR/FATAL 词加重。
+import { isLogFileName, logLevelHighlightExtension } from "../lib/logLevelHighlight";
 
 const props = defineProps<{
   text: string;
@@ -57,6 +59,9 @@ async function extensions() {
     EditorView.editable.of(props.editable === true),
     EditorView.lineWrapping,
     previewTheme(),
+    // 仅日志类文件启用（.log 无语言支持，原本整篇单色）；非日志文件行为不变。
+    // fileName/appearance 变化经既有 watch → createEditor 重建自然生效。
+    ...(isLogFileName(props.fileName) ? [logLevelHighlightExtension(props.appearance.colorScheme)] : []),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) emit("change", update.state.doc.toString());
     }),
