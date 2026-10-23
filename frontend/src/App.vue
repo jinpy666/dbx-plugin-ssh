@@ -1906,6 +1906,9 @@ function initialState(): WorkbenchState {
   return value && typeof value === "object" ? (value as WorkbenchState) : {};
 }
 
+/** 启动时没有任何可信的初始目录：连接成功后回落服务器主目录（sftp/home）。 */
+const sftpInitialPathPending = ref(false);
+
 /** 水合跨重启的布局/视图全局偏好（issue #178）：作为新工作台的初始值——
  *  字段缺省保持硬编码默认，随后 workbenchState 的会话恢复字段存在时覆盖。 */
 function applyWorkbenchLayoutPrefs() {
@@ -1942,8 +1945,15 @@ function restoreUiState() {
   // 覆盖——宿主缺 workbenchState 桥时 initialState 恒空对象，镜像整组生效；
   // 桥在时每工作台状态照旧优先，镜像只补它没有的键。
   applyWorkbenchLayoutPrefs();
-  const state = { ...readWorkbenchUiMirror(), ...initialState() };
-  currentPath.value = typeof state.sftpPath === "string" ? normalizeRemotePath(state.sftpPath) : "/";
+  const mirror = readWorkbenchUiMirror();
+  const restored = initialState();
+  const state = { ...mirror, ...restored };
+  // SFTP 初始目录固定为服务器主目录（sftp/home），不做任何记忆：
+  // 镜像 sftpPath 是跨工作台共用的单键，按连接记忆又会因键白名单/读改写串到
+  // 别的主机——两者都会让新主机一开面板就停在上台主机的目录并报
+  // 「无法加载该路径」。每次打开都从家目录开始，行为可预测。
+  sftpInitialPathPending.value = true;
+  currentPath.value = "/";
   splitRatio.value = typeof state.splitRatio === "number" && state.splitRatio >= 35 && state.splitRatio <= 80 ? state.splitRatio : splitRatio.value;
   paneOrder.value = state.paneOrder === "sftp-left" ? "sftp-left" : state.paneOrder === "terminal-left" ? "terminal-left" : paneOrder.value;
   // Dock panel surface：SFTP 面板默认不开（不自动列目录/不自动建 SFTP 会话，
@@ -1988,8 +1998,9 @@ function restoreUiState() {
 }
 
 function writeWorkbenchState() {
+  // 布局镜像不再持久化 SFTP 路径：它是跨工作台共用的单键，路径会被「最后浏览
+  // 的那台主机」覆盖，恢复时必然串到别的连接（SFTP 面板现在固定从主目录开始）。
   const uiMirror = {
-    sftpPath: currentPath.value,
     followDirectory: followDirectory.value,
     sudoMode: sudoMode.value,
     splitRatio: splitRatio.value,
@@ -4473,7 +4484,17 @@ async function afterSessionConnected() {
     void refreshSftpHomePath();
     // #209 自动首拉走安静失败模式：失败落面板内软提示条，不弹全局错误横幅
     // （服务端停在堡垒机列表等场景的失败对用户是噪音）。
-    await Promise.all([loadDirectory(currentPath.value, false, true), restoreTransfers()]);
+    // 没有可信初始目录时一律回落服务器主目录：面板不再继承「上一次别的
+    // 主机」的路径（跨主机串目录修复）。
+    if (sftpInitialPathPending.value) {
+      sftpInitialPathPending.value = false;
+      await Promise.all([loadHome().catch(() => loadDirectory("/", false, true)), restoreTransfers()]);
+    } else {
+      await Promise.all([loadDirectory(currentPath.value, false, true), restoreTransfers()]);
+      // 面板当前目录可能已被删除/改名：首拉失败时再回落一次主目录，避免停在
+      // 一条永远打不开的路径上（只在首次首拉发生，不参与后续手动导航）。
+      if (sftpSoftError.value) await loadHome().catch(() => undefined);
+    }
     // 侧栏 tree tab 可见时补拉根节点（首连/重连后缓存仍为空的场景）。
     ensureSideTreeRoot();
   } else {
@@ -8584,7 +8605,12 @@ watch([splitRatio, paneOrder, paneDirection, sftpPaneOpen, followDirectory, sudo
 // SFTP 自动连接关闭时的惰性加载：面板从收起到打开的瞬间才补发首次列目录
 // （连接时已打开的面板不触发；已加载过或无会话也不触发，见 shouldLazyLoadSftpListing）。
 watch(sftpPaneOpen, (open) => {
-  if (shouldLazyLoadSftpListing({ paneOpen: open, sessionLive: !!session.value, listingLoaded: sftpListingLoaded.value })) void loadDirectory();
+  if (!shouldLazyLoadSftpListing({ paneOpen: open, sessionLive: !!session.value, listingLoaded: sftpListingLoaded.value })) return;
+  // 首次手动打开面板同样回落到服务器主目录。
+  if (sftpInitialPathPending.value) {
+    sftpInitialPathPending.value = false;
+    void loadHome().catch(() => loadDirectory("/"));
+  } else void loadDirectory();
 });
 
 // ---------------------------------------------------------------------------

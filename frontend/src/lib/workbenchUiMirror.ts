@@ -13,7 +13,8 @@ export const WORKBENCH_UI_MIRROR_KEY = "ssh-workbench-ui";
 
 /** 与 App.vue WorkbenchState 的布局子集对齐（workbenchUiMirror.spec 钉住）。 */
 export interface WorkbenchUiMirror {
-  sftpPath?: string;
+  // 刻意不含 sftpPath：镜像跨工作台共用单键，路径会被最后浏览的主机覆盖，
+  // 恢复时串到别的连接（SFTP 面板固定从服务器主目录开始）。
   followDirectory?: boolean;
   sudoMode?: boolean;
   splitRatio?: number;
