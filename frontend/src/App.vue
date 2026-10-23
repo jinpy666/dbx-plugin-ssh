@@ -31,6 +31,7 @@ import {
   Proportions,
   Columns3,
   Copy,
+  Crosshair,
   Download,
   Eraser,
   ExternalLink,
@@ -6143,6 +6144,19 @@ function togglePaneOrder() {
   void nextTick(scheduleFit);
 }
 
+/**
+ * 「定位到终端目录」：一次性把 SFTP 面板切到终端当前工作目录。
+ *
+ * 与「跟随终端」（followDirectory）区分：跟随是持续同步的开关，这里只做一次
+ * 跳转，所以关掉跟随时同样可用。cwd 由 OSC 7 / OSC 1337 SetUserVar 上报，
+ * 与跟随开关无关地持续更新（见 writeTerminalOutput 与 SetUserVar 处理器）。
+ */
+function jumpToTerminalDirectory() {
+  const cwd = terminalCwd.value;
+  if (!connected.value || isLocalMode.value || !cwd) return;
+  void loadDirectory(cwd, true);
+}
+
 function toggleSftpPane() {
   sftpPaneOpen.value = !sftpPaneOpen.value;
   persistState();
@@ -10177,6 +10191,9 @@ watch(historyScope, () => {
           <button class="icon-button" :title="t('parentFolder')" :aria-label="t('parentFolder')" :disabled="currentPath === '/'" @click="goParent"><ArrowUp /></button>
           <button class="icon-button icon-amber" :title="t('home')" :aria-label="t('home')" :disabled="!connected" @click="loadHome"><Home /></button>
           <button class="icon-button icon-cyan" :title="t('refresh')" :aria-label="t('refresh')" :disabled="!connected || loadingFiles" @click="loadDirectory()"><RefreshCw :class="{ spinning: loadingFiles }" /></button>
+          <!-- 「定位到终端目录」：与「跟随终端」开关无关的一次性跳转；终端尚未
+               上报 cwd（精简 shell 无 OSC 7 hook）时置灰，避免跳到 / 造成误解。 -->
+          <button class="icon-button" :title="t('locateTerminalDirectory')" :aria-label="t('locateTerminalDirectory')" :disabled="!connected || loadingFiles || !terminalCwd" @click="jumpToTerminalDirectory"><Crosshair /></button>
           <!-- #54 路径栏双态：非编辑态把当前路径渲染成可点击分段（末段为当前位置），
                点击分段直接回跳、点击分段外区域进入编辑；编辑态是原先的完整输入框，
                提交后回到分段展示。分段切分走 remotePathInput（有单测）。 -->
