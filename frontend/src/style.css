@@ -591,7 +591,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .path-toolbar input:focus, .modal input:focus, .modal textarea:focus,
 .popover textarea:focus { border-color: color-mix(in srgb, var(--primary) 70%, var(--border)); }
 
-.file-table { display: flex; min-height: 0; flex: 1; flex-direction: column; }
+.file-table { position: relative; display: flex; min-height: 0; flex: 1; flex-direction: column; }
 .file-header, .file-row { display: grid; min-width: 100%; align-items: center; column-gap: 6px; padding: 0 8px; }
 .file-header { position: sticky; top: 0; z-index: 3; height: 28px; min-height: 28px; border-bottom: 1px solid var(--border); background: var(--background); box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 8%, transparent); color: var(--muted-foreground); font-size: 11px; user-select: none; }
 .file-header button { display: flex; min-width: 0; height: 22px; align-items: center; justify-content: space-between; gap: 4px; border-radius: 3px; padding: 0 3px; text-align: left; color: inherit; }
@@ -605,6 +605,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .file-rows::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--foreground) 25%, transparent); border-radius: 5px; }
 .file-rows::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--foreground) 40%, transparent); }
 .file-rows::-webkit-scrollbar-track { background: transparent; }
+/* 列表加载浮层：替换原先塞在行流里的 120px「加载中」占位，改为绝对定位盖在
+   .file-table 上（不参与布局），换目录/刷新时列表不再上下跳。pointer-events
+   保持 none，滚动与既有按钮的 disabled 守卫行为不变。 */
+.sftp-loading-veil { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; background: color-mix(in srgb, var(--background) 62%, transparent); color: var(--muted-foreground); font-size: 12px; pointer-events: none; }
 .file-row { width: 100%; height: 30px; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); border-radius: 0; background: transparent; text-align: left; color: var(--foreground); font-size: 12px; cursor: default; }
 .file-row:hover { background: color-mix(in srgb, var(--accent) 65%, transparent); }
 .file-row.selected, .file-row.selected:hover { background: var(--accent); color: var(--accent-foreground); }

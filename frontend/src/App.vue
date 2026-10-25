@@ -10412,13 +10412,16 @@ watch(historyScope, () => {
                 <span v-if="visibleColumns.includes('group')" class="col-wrap" :title="t('group')">{{ t("group") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('group', e)" /></span>
                 <span v-if="visibleColumns.includes('permissions')" class="col-wrap">{{ t("permissions") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('permissions', e)" /></span>
               </div>
-              <div v-if="loadingFiles" class="empty"><Loader2 class="spinning" />{{ t("loading") }}</div>
+              <!-- 加载态不再占列表流内空间（原先 v-if + .empty 的 120px 会把整个
+                   目录列表往下顶，换目录/刷新时画面上下跳）。改为 .file-table 上的
+                   绝对定位浮层，见下方 .sftp-loading-veil：列表几何完全不变，
+                   旧行继续留在原位，只在上层盖一层半透明加载提示。 -->
               <!-- 窗口化 spacer：撑起视口外行的总高，滚动条比例保持真实。
                    注意 spacer 与行列表是「并存」关系不是「二选一」：这里绝不能
                    写 v-else——v-else 会绑定到紧邻的 padTop spacer 上，滚动过
                    前几行（padTop>0）后整个行列表就不再渲染，列表随即空白
                    （issue #151：文件多时滚动失效、列表展示不全）。 -->
-              <div v-if="!loadingFiles && virtualFileWindow.padTop" :style="{ height: `${virtualFileWindow.padTop}px` }" aria-hidden="true"></div>
+              <div v-if="virtualFileWindow.padTop" :style="{ height: `${virtualFileWindow.padTop}px` }" aria-hidden="true"></div>
               <button
                 v-for="entry in windowedEntries"
                 :key="entry.uri"
@@ -10467,7 +10470,7 @@ watch(historyScope, () => {
                 <span v-if="visibleColumns.includes('group')" class="mono" :title="entry.group">{{ entry.group || "-" }}</span>
                 <span v-if="visibleColumns.includes('permissions')" class="mono">{{ entry.permissions }}</span>
               </button>
-              <div v-if="!loadingFiles && virtualFileWindow.padBottom" :style="{ height: `${virtualFileWindow.padBottom}px` }" aria-hidden="true"></div>
+              <div v-if="virtualFileWindow.padBottom" :style="{ height: `${virtualFileWindow.padBottom}px` }" aria-hidden="true"></div>
               <div v-if="!loadingFiles && !visibleEntries.length" class="empty">{{ entries.length ? t("sftpSearch.noMatch") : t("emptyFolder") }}</div>
             </div>
               </ContextMenuTrigger>
@@ -10542,6 +10545,11 @@ watch(historyScope, () => {
               </ContextMenuContent>
             </ContextMenu>
             <footer class="file-footer"><span>{{ sftpFiltersActive ? t("sftpSearch.footerMatch", { matched: visibleEntries.length, total: entries.length }) : t("items", { count: entries.length }) }}</span><span v-if="diskUsage" :title="`${diskUsage.filesystem} → ${diskUsage.mount}`">{{ formatBytes(diskUsage.availableBytes) }} {{ t("diskFreeOf", { total: formatBytes(diskUsage.totalBytes) }) }}</span><span>{{ currentPath }}</span></footer>
+            <!-- 加载浮层：绝对定位叠在列表之上，不参与布局，换目录/刷新时列表不再
+                 被「加载中」挤下去；旧目录行保持原位，加载完成后原地替换。 -->
+            <div v-if="loadingFiles" class="sftp-loading-veil" role="status" aria-live="polite">
+              <Loader2 class="spinning" /><span>{{ t("loading") }}</span>
+            </div>
           </div>
           </div>
         </div>
