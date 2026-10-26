@@ -63,4 +63,14 @@ describe("resolveCtrlFRoute (issue #108a，iTerm2 同位)", () => {
     expect(resolveCtrlFRoute({ ghostVisible: false, transferBusy: true })).toBe("passthrough");
     expect(resolveCtrlFRoute({ ghostVisible: true, transferBusy: true })).toBe("passthrough");
   });
+
+  it("passes Ctrl+F through in the alternate buffer (vim page-forward, #108 反馈三)", () => {
+    expect(resolveCtrlFRoute({ ghostVisible: false, transferBusy: false, alternateActive: true })).toBe("passthrough");
+    expect(resolveCtrlFRoute({ ghostVisible: true, transferBusy: false, alternateActive: true })).toBe("passthrough");
+    expect(resolveCtrlFRoute({ ghostVisible: false, transferBusy: true, alternateActive: true })).toBe("passthrough");
+  });
+
+  it("keeps routing to search in the normal buffer when alternateActive is unset", () => {
+    expect(resolveCtrlFRoute({ ghostVisible: false, transferBusy: false })).toBe("search");
+  });
 });

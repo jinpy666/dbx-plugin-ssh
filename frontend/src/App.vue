@@ -2536,11 +2536,17 @@ function handleTerminalKey(event: KeyboardEvent) {
   // Ctrl+F 终端搜索（issue #108a，iTerm2 同位）：ghost 建议可见待接受时上方
   // 分支已把 Ctrl+F 消费为整段接受（Warp 键位模型不变）；无 ghost 才轮到
   // 搜索。传输占用（trz/zmodem 协议拥有输入流）时放行——与 resolveTerminalInputRoute
-  // 同判，不打断传输（Ctrl+F 的 0x06 由传输 filter/远端自行解释）。
+  // 同判，不打断传输（Ctrl+F 的 0x06 由传输 filter/远端自行解释）；alternate
+  // 屏（vim 的 Ctrl+F 是向前翻页，#108 反馈三）同样放行远端，本地搜索走
+  // Ctrl+Shift+F 热键兜底。
   if (
     event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey &&
     event.key.toLowerCase() === "f" &&
-    resolveCtrlFRoute({ ghostVisible: !!ghostMatch.value, transferBusy: terminalTransferBusy.value }) === "search"
+    resolveCtrlFRoute({
+      ghostVisible: !!ghostMatch.value,
+      transferBusy: terminalTransferBusy.value,
+      alternateActive: terminal?.buffer.active.type === "alternate",
+    }) === "search"
   ) {
     openTerminalSearch();
     return consume();
