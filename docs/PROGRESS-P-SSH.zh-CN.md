@@ -4542,3 +4542,51 @@ SFTP 面板切 sudo 后第二个文件操作起必卡满超时（list 60s / quic
   exec 无帮助（`timestamp_type=global` 的主机除外），随持久会话一并处理。
 - 4 个 worker 的 sidecar 在多个长等待并发时仍可能占满；本轮通过前端可退出
   sudo 模式缓解，未改请求模型。
+
+## MCP 只读控权加固（#246）+ 预览滚动条豁免（#243）+ 0.7.11-beta.1 预发布（2026-10-28）
+
+**背景**：issue 扫描（工作区 `docs/issue-scan-20261028/`，16 个开放 issue 全量
+triage）中 #246 为安全类零处理项，#243 为复现信息齐全的未处理 bug，随
+0.7.11-beta.1 预发布一并交付。
+
+**#246 MCP 只读控权无效——两处门禁缺口**：
+- 内联凭据拨打绕过：`registered_connection_matching_inline`（mcp.rs）此前按
+  `host + port + username` 三元组精确匹配注册表，换用户名/端口写法重拨同一
+  端点即可绕过已保存连接的只读标志（stdio 会话注册表为空时同样只剩进程级
+  开关兜底）。改为分层 fail-closed：精确三元组 → host+username（任意端口）
+  → host+port（任意账号，任一只读注册即拒）；精确命中的可写注册不受同端点
+  只读兄弟账号误伤。sudo 白名单继承与只读门同源，随分层比对一并收紧。
+- `ssh_remove_known_host` 漏网：写工具门 `is_write_tool` 为手工枚举（4 项），
+  该工具（删本地 known_hosts 条目）不在其中，只读连接可经 MCP 直接改写本地
+  信任存储。已纳入写门；为不改变其"本地工具"契约，`is_confirm_gated_tool`
+  解耦（不进确认门/连接作用域门）。
+- 新增默认拒绝对齐测试 `every_tool_is_classified_for_the_read_only_gate`：
+  TOOL_NAMES 中每个工具必须落在 写门/命令门/只读集/本地例外 四个显式集合
+  之一，新增工具漏登记即编译期测试失败。
+- 协议文档 `docs/MCP.zh-CN.md` §四层安全门同步分层比对语义与写门工具清单。
+- 根因 C（工作台 RPC `ssh/exec` 非 sudo、`ssh/terminal/batchInput`、
+  `ssh/forward/start` 无只读硬门）与根因 D（宿主旧 `mcp_access` 字段被忽略，
+  宿主侧）评估后本轮不动：C 的 `ssh::exec` 内部调用方多（磁盘用量/任务轮询/
+  sudo_fs），整体加门需按 mcp_safety 同源分类器重设计，列为加固项；
+  D 属宿主仓（规约 8 不动），在 issue 回复中向用户说明。
+
+**#243 预览无滚动条**：插件全局 `*::-webkit-scrollbar{display:none}` +
+`scrollbar-width:none`（style.css）未给预览弹窗豁免。按 `.file-rows` 同款
+配色为 `.ssh-preview .cm-scroller`、`.ssh-preview-hex`、
+`.ssh-preview .wb-md-render` 恢复滚动条（thin + 10px）。
+
+**验证**：
+- 后端 `cargo test` 1289 全绿（新增分层比对 4 断言 + 默认拒绝对齐测试；
+  `inline_dial_inherits_registered_read_only_gate` 按新语义改写并补 tier-1
+  精确可写放行用例）。
+- 前端 `vue-tsc` 0 错、vitest 2173 全绿。
+- Windows 本地 conpty 环境断言放宽：底行重序列化签名仅在新 conhost 出现，
+  Win10 19044 不复现，改为条件断言（签名缺席时记录环境，保留负向断言）。
+- Windows 测试基建修复（ldap/kafka 共享）：Go 插件 test.sh 构建产物补 `.exe`
+  后缀 + Python sidecar 客户端 `.exe` 解析兜底；ldap smoke_mcp stdio 管道读
+  在 Windows 改 daemon 线程 + 队列（select 不支持管道，与 kafka 同模式）；
+  ldap 3 处 POSIX 断言（0600 权限位 ×2、AF_UNIX）Windows skip。
+
+**预发布**：manifest / Cargo / Cargo.lock 同步 0.7.11-beta.1，rdp
+client_build 断言 700（beta 家族按 0 计），CHANGELOG 收录 #246/#243；
+`validate_manifests.py ssh --tag ssh-v0.7.11-beta.1` PASS。
