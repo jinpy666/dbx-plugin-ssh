@@ -605,6 +605,27 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .file-rows::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--foreground) 25%, transparent); border-radius: 5px; }
 .file-rows::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--foreground) 40%, transparent); }
 .file-rows::-webkit-scrollbar-track { background: transparent; }
+/* 预览弹窗是同一全局规则的例外（#243）：yml/json/log 长文档内部可滚却无
+   滚动条，用户无法直接定位；为 CodeMirror 文本/编辑区、hex 与 Markdown
+   渲染容器恢复滚动条，配色与 .file-rows 同款。 */
+.ssh-preview .cm-scroller,
+.ssh-preview-hex,
+.ssh-preview .wb-md-render {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--foreground) 25%, transparent) transparent;
+}
+.ssh-preview .cm-scroller::-webkit-scrollbar,
+.ssh-preview-hex::-webkit-scrollbar,
+.ssh-preview .wb-md-render::-webkit-scrollbar { display: block; height: 10px; width: 10px; }
+.ssh-preview .cm-scroller::-webkit-scrollbar-thumb,
+.ssh-preview-hex::-webkit-scrollbar-thumb,
+.ssh-preview .wb-md-render::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--foreground) 25%, transparent); border-radius: 5px; }
+.ssh-preview .cm-scroller::-webkit-scrollbar-thumb:hover,
+.ssh-preview-hex::-webkit-scrollbar-thumb:hover,
+.ssh-preview .wb-md-render::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--foreground) 40%, transparent); }
+.ssh-preview .cm-scroller::-webkit-scrollbar-track,
+.ssh-preview-hex::-webkit-scrollbar-track,
+.ssh-preview .wb-md-render::-webkit-scrollbar-track { background: transparent; }
 /* 列表加载浮层：替换原先塞在行流里的 120px「加载中」占位，改为绝对定位盖在
    .file-table 上（不参与布局），换目录/刷新时列表不再上下跳。pointer-events
    保持 none，滚动与既有按钮的 disabled 守卫行为不变。 */

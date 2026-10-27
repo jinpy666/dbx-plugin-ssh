@@ -200,10 +200,14 @@ MCP 调用方是 LLM，误操作的代价与人在终端敲错相同——因此
 四层安全门（全部在任何网络 I/O 之前，实现见 `backend/src/mcp_safety.rs`）：
 
 1. **只读连接写门**：DBX 连接勾选了"只读"后，写类工具（`ssh_exec_sudo`、
-   `ssh_run_bg` 与全部 sftp 写操作）直接拒绝，与工作台 `ensure_writable` 同源。
+   `ssh_run_bg`、`sftp_write_file`、`sftp_upload`、`ssh_remove_known_host`）
+   直接拒绝，与工作台 `ensure_writable` 同源。
    只读判定按连接身份：有 `connectionId` 时查注册表；无 `connectionId` 的内联
-   凭据拨打按 `host + port + username` 与已注册只读连接比对，同一主机换个方式
-   重拨不绕过门禁。
+   凭据拨打按端点身份与已注册连接分层比对（#246）：先精确 `host + port +
+   username`，其次 `host + username`（任意端口），最后 `host + port` 上任意
+   账号——该端点上存在任一只读注册即拒绝（fail-closed），同一主机换个用户名
+   或端口写法重拨不绕过门禁；端点上精确命中的可写注册仍按可写放行，不因同端
+   点的只读兄弟账号被误伤。
 2. **只读命令白名单**：只读连接上的 `ssh_exec` 只放行**可证明只读**的巡检命令
    （`ls` / `cat` / `df` / `ps` / `systemctl status` / `journalctl` / `docker ps`
    / `git log` 等，含管道组合；重定向、命令替换、`sudo`、白名单外的动词一律

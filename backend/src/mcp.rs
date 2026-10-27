@@ -350,9 +350,13 @@ pub fn scope_allows(scope: &[String], id: &str, name: Option<&str>, host: &str) 
 }
 
 /// Confirm-mode gate set (§1.3): write tools plus the exec family.
-/// Read-only tools and `ssh_close` are never intercepted.
+/// Read-only tools and `ssh_close` are never intercepted. `ssh_remove_known_host`
+/// is write-gated (it mutates the local trust store) but stays outside the
+/// confirm and connection-scope gates: it takes no connection reference and
+/// its scope contract is "local tool" (issue #246 read-only gate only).
 fn is_confirm_gated_tool(name: &str) -> bool {
-    is_write_tool(name) || matches!(name, "ssh_exec" | "ssh_multi_exec" | "ssh_terminal_input")
+    (is_write_tool(name) && name != "ssh_remove_known_host")
+        || matches!(name, "ssh_exec" | "ssh_multi_exec" | "ssh_terminal_input")
 }
 
 /// Tools whose resolved target must sit inside a non-empty
@@ -1357,8 +1361,13 @@ impl McpState {
     }
 
     /// Finds a lifecycle-registered connection whose endpoint identity
-    /// (host + port + username) matches the inline dial arguments. The port
-    /// defaults to 22 on both sides; host comparison is ASCII-case-insensitive.
+    /// matches the inline dial arguments. Matched in tiers, most specific
+    /// first — read-only must survive re-dialing the same server under a
+    /// different username or port spelling (issue #246):
+    ///   1. host + port + username (exact)
+    ///   2. host + username, any port
+    ///   3. host + port, any username — OR over every match (fail-closed)
+    /// Host comparison is ASCII-case-insensitive; the port defaults to 22.
     async fn registered_connection_matching_inline(
         &self,
         arguments: &Value,
@@ -1374,16 +1383,39 @@ impl McpState {
             .and_then(Value::as_str)
             .map(str::trim)
             .unwrap_or_default();
-        self.dbx_connections
-            .read()
-            .await
+        let registry = self.dbx_connections.read().await;
+        let same_host = |connection: &StoredConnection| {
+            connection.host.trim().eq_ignore_ascii_case(host)
+        };
+        // Tier 1: exact endpoint identity.
+        if let Some(connection) = registry.values().find(|connection| {
+            same_host(connection)
+                && connection.port == port
+                && connection.username == username
+        }) {
+            return Some(connection.clone());
+        }
+        // Tier 2: same host and username, port spelled differently.
+        if let Some(connection) = registry.values().find(|connection| {
+            same_host(connection) && connection.username == username
+        }) {
+            return Some(connection.clone());
+        }
+        // Tier 3: same endpoint, different account — fail-closed: ANY
+        // read-only registration on that endpoint blocks the inline dial
+        // (a saved read-only account must not be bypassed by switching to
+        // an unregistered username on the same host+port).
+        let matches: Vec<&StoredConnection> = registry
             .values()
-            .find(|connection| {
-                connection.host.trim().eq_ignore_ascii_case(host)
-                    && connection.port == port
-                    && connection.username == username
-            })
-            .cloned()
+            .filter(|connection| same_host(connection) && connection.port == port)
+            .collect();
+        if matches.iter().any(|connection| connection.read_only) {
+            return matches
+                .into_iter()
+                .find(|connection| connection.read_only)
+                .cloned();
+        }
+        None
     }
 
     /// Resolves the connection's sudoers-style allowlist: by `connectionId`
@@ -3756,6 +3788,7 @@ fn is_write_tool(name: &str) -> bool {
     matches!(
         name,
         "ssh_exec_sudo" | "ssh_run_bg" | "sftp_write_file" | "sftp_upload"
+            | "ssh_remove_known_host"
     )
 }
 
@@ -4833,6 +4866,49 @@ mod tests {
         }
     }
 
+    /// Default-deny for the read-only write gate (issue #246): every tool in
+    /// the catalog must be explicitly classified, or a newly added write
+    /// tool silently skips the `is_write_tool` gate on read-only connections.
+    #[test]
+    fn every_tool_is_classified_for_the_read_only_gate() {
+        // Explicitly blocked under read-only connections.
+        const WRITE_GATED: &[&str] = &[
+            "ssh_exec_sudo",
+            "ssh_run_bg",
+            "sftp_write_file",
+            "sftp_upload",
+            "ssh_remove_known_host",
+        ];
+        // Remote writes that are NOT blocked wholesale: gated per-call by the
+        // command-text gates / control-sequence gate instead.
+        const COMMAND_GATED: &[&str] = &["ssh_exec", "ssh_multi_exec", "ssh_terminal_input"];
+        // Provably read-only (annotations READ_ONLY set).
+        const SAFE: &[&str] = &[
+            "ssh_list_connections",
+            "ssh_list_known_hosts",
+            "ssh_task_status",
+            "sftp_list_dir",
+            "sftp_stat",
+            "sftp_read_file",
+        ];
+        // Reviewed local-only exceptions: mutate only the caller's machine
+        // (session teardown / download target), never the remote host.
+        const LOCAL_ONLY: &[&str] = &["ssh_close", "sftp_download"];
+        for name in TOOL_NAMES {
+            assert!(
+                WRITE_GATED.contains(name)
+                    || COMMAND_GATED.contains(name)
+                    || SAFE.contains(name)
+                    || LOCAL_ONLY.contains(name),
+                "{name} is unclassified for the read-only gate: add it to \
+                 is_write_tool, the command-gate family, the read-only set, \
+                 or review it as a local-only exception — never leave a new \
+                 tool outside every set"
+            );
+        }
+        assert!(is_write_tool("ssh_remove_known_host"));
+    }
+
     #[test]
     fn settings_roundtrip_permission_fields_and_env_override() {
         let state = state();
@@ -5130,20 +5206,70 @@ mod tests {
             error.contains("read-only"),
             "expected read-only refusal for inline dial of a registered host, got: {error}"
         );
-        // A different username or host is not covered by that registration.
+        // Issue #246: re-dialing the same endpoint under a different username
+        // or a different port spelling must NOT walk around the registration.
         for identity in [
             json!({"host": "prod.example.test", "port": 2222, "username": "other"}),
-            json!({"host": "other.example.test", "username": "deploy"}),
+            json!({"host": "prod.example.test", "username": "deploy"}),
         ] {
             let error = state
                 .call_tool("sftp_upload", &identity, None)
                 .await
                 .unwrap_err();
             assert!(
-                !error.contains("read-only"),
-                "expected non-matching identity to pass the gate, got: {error}"
+                error.contains("read-only"),
+                "expected same-endpoint re-dial to stay read-only-gated, got: {error}"
             );
         }
+        // A different host entirely is not covered by that registration.
+        let error = state
+            .call_tool(
+                "sftp_upload",
+                &json!({"host": "other.example.test", "username": "deploy"}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            !error.contains("read-only"),
+            "expected non-matching identity to pass the gate, got: {error}"
+        );
+        // Tier-1 precision: an exact writable registration on the same
+        // endpoint still dials writable — read-only on a sibling account
+        // must not over-block the exact match.
+        let writable = StoredConnection::from_lifecycle_params(&json!({
+            "connection": {
+                "id": "conn-rw",
+                "host": "prod.example.test",
+                "port": 2222,
+                "username": "root",
+                "password": format!("pw-{}", uuid::Uuid::new_v4()),
+            }
+        }))
+        .unwrap();
+        assert!(!writable.read_only);
+        state
+            .dbx_connections
+            .write()
+            .await
+            .insert("conn-rw".to_string(), writable);
+        let error = state
+            .call_tool(
+                "sftp_upload",
+                &json!({
+                    "host": "prod.example.test",
+                    "port": 2222,
+                    "username": "root",
+                    "remotePath": "/tmp/x",
+                }),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            !error.contains("read-only"),
+            "expected exact writable identity to pass the gate, got: {error}"
+        );
     }
 
     #[tokio::test]
