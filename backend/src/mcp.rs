@@ -1367,6 +1367,7 @@ impl McpState {
     ///   1. host + port + username (exact)
     ///   2. host + username, any port
     ///   3. host + port, any username — OR over every match (fail-closed)
+    ///
     /// Host comparison is ASCII-case-insensitive; the port defaults to 22.
     async fn registered_connection_matching_inline(
         &self,
