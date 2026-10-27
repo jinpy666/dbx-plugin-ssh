@@ -110,7 +110,12 @@ export class GeneratorScheduler {
         this.cache.set(key, promise);
         this.prune(timestamp);
       }
-      return promise.promise.then((items) => this.filterByPrefix(items, slot.prefix));
+      // 缓存条目是「一次执行的全量产出」，其中的 edit 范围来自首次调用的
+      // tokenEnd；前缀继续增长时（`ma`→`mav`）同一个 key 命中旧条目，直接
+      // 交出会把候选插到旧行尾（`git checkout maina`）。这里按本次 slot 的
+      // 前缀过滤并重建候选/edit 副本——文本与元数据复用，替换范围取当前
+      // tokenStart/tokenEnd，缓存对象本身绝不改写。
+      return promise.promise.then((items) => this.forSlot(items, slot));
     } catch {
       return Promise.resolve(null);
     }
@@ -165,6 +170,18 @@ export class GeneratorScheduler {
     if (!items) return null;
     if (!prefix) return items;
     return items.filter((item) => item.label.startsWith(prefix));
+  }
+
+  /** 为「本次调用」生成候选与 edit 副本：前缀过滤 + 替换范围取当前 slot
+   * 的 tokenStart/tokenEnd。缓存（含在途共享的同一次执行）保存的是原始
+   * 产出，绝不被调用方改写，先后到达的调用互不污染。 */
+  private forSlot(items: CompletionItem[] | null, slot: FigGeneratorSlot): CompletionItem[] | null {
+    const filtered = this.filterByPrefix(items, slot.prefix);
+    if (!filtered) return null;
+    return filtered.map((item) => ({
+      ...item,
+      edit: { ...item.edit, replaceStart: slot.tokenStart, replaceEnd: slot.tokenEnd },
+    }));
   }
 
   /** spec 原生 postProcess → runDeclarativeGenerator 的适配器。无 postProcess

@@ -1000,6 +1000,7 @@ const {
   completionOpen,
   completionItems,
   completionActiveIndex,
+  activateCompletion,
   completionAnchor,
   completionLoading,
   closeSuggestions,
@@ -9583,7 +9584,7 @@ watch(historyScope, () => {
           :viewport="suggestionViewport"
           :loading="completionLoading"
           :t="t"
-          @activate="(index) => (completionActiveIndex = index)"
+          @activate="activateCompletion"
           @accept="acceptCompletionRow"
         />
         <!-- 终端行内 ghost 自动建议（对标 Warp/fish）：灰色剩余文本盖在光标右侧，

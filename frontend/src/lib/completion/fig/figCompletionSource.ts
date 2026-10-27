@@ -592,6 +592,12 @@ export class FigCompletionSourceImpl implements FigCompletionSource {
     if ((flags & SuggestionFlag.Args) !== 0) {
       const arg = result.currentArg;
       for (const suggestion of arg?.suggestions ?? []) {
+        // Fig 的 hidden 标记 = 不进菜单、也不参与 Tab 接受的特殊参数
+        // （cd 语料里的 `-`/`~` 就是这种）。展示它们会让 `cd ` 的菜单只剩
+        // 两个特殊值，Tab 直接把 `cd -` 写进输入行。用户手打 `cd -`/`cd ~`
+        // 后仍按原有 shell 语义执行，这里只影响本地候选面。
+        // parser 的 suggestion 类型未声明该字段（spec 数据面），按 Fig 语义读。
+        if ((suggestion as { hidden?: boolean } | undefined)?.hidden === true) continue;
         const label = suggestion?.name;
         if (typeof label !== "string" || !label.startsWith(searchTerm)) continue;
         items.push(

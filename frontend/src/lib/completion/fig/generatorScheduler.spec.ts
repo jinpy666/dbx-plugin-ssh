@@ -8,6 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CompletionExecuteRequest, CompletionExecuteResult } from "../host/protocol";
 import { createCompletionHostClient, type CompletionHostInvoke } from "../host/hostClient";
+import { applyEditToText } from "../core/edit";
 import { GENERATOR_ITEM_SOURCE } from "./generatorRunner";
 import { GeneratorScheduler, type FigGeneratorSlot } from "./generatorScheduler";
 
@@ -219,6 +220,43 @@ describe("GeneratorScheduler · TTL 缓存（§29）", () => {
     await h.scheduler.run(baseSlot({ prefix: "ma", tokenStart: 4 }));
     await h.scheduler.run(baseSlot({ prefix: "ma", tokenStart: 12 }));
     expect(h.invoke).toHaveBeenCalledTimes(2);
+  });
+
+  // 缺陷回归（P2）：`git checkout m` → `ma`，TTL 内命中同一次执行；缓存里的
+  // edit 范围停在首次调用的 tokenEnd，直接把旧对象交给新行就会插到旧行尾，
+  // 接受 `main` 得到 `git checkout maina`。
+  it("缓存命中按本次 tokenEnd 重建 edit：m → ma 接受 main 得到正确整行", async () => {
+    const h = harness();
+    const line = "git checkout ma";
+    const tokenStart = "git checkout ".length;
+
+    const stale = await h.scheduler.run(baseSlot({ prefix: "m", tokenStart, tokenEnd: tokenStart + 1 }));
+    const fresh = await h.scheduler.run(baseSlot({ prefix: "ma", tokenStart, tokenEnd: line.length }));
+    expect(h.invoke).toHaveBeenCalledTimes(1); // 同一次查询被复用，不重打
+
+    const staleItem = stale?.find((item) => item.label === "main");
+    const freshItem = fresh?.find((item) => item.label === "main");
+    expect(staleItem?.edit.replaceEnd).toBe(tokenStart + 1);
+    expect(freshItem?.edit.replaceEnd).toBe(line.length);
+    expect(applyEditToText(line, freshItem!.edit).text).toBe("git checkout main");
+    // 旧调用拿到的候选不被后续调用改写（各调用独立对象）。
+    expect(staleItem?.edit.replaceEnd).toBe(tokenStart + 1);
+    expect(freshItem).not.toBe(staleItem);
+    expect(freshItem?.edit).not.toBe(staleItem?.edit);
+  });
+
+  it("在途共享的同一次执行：两个并发调用各拿独立 edit，互不污染", async () => {
+    const h = harness();
+    const line = "git checkout ma";
+    const tokenStart = "git checkout ".length;
+    const [shortPrefix, longPrefix] = await Promise.all([
+      h.scheduler.run(baseSlot({ prefix: "m", tokenStart, tokenEnd: tokenStart + 1 })),
+      h.scheduler.run(baseSlot({ prefix: "ma", tokenStart, tokenEnd: line.length })),
+    ]);
+    expect(h.invoke).toHaveBeenCalledTimes(1);
+    expect(shortPrefix?.[0]?.edit.replaceEnd).toBe(tokenStart + 1);
+    expect(longPrefix?.[0]?.edit.replaceEnd).toBe(line.length);
+    expect(longPrefix?.[0]).not.toBe(shortPrefix?.[0]);
   });
 });
 

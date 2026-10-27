@@ -1378,7 +1378,7 @@ FIG 补全引擎的专用执行通道（wave-1 lane B）：把一条 generator �
 - `target`：`{ kind: "local" | "ssh", sessionId }`（internally tagged）。local 的 `sessionId` 标识发起补全的本地终端会话（wave-1 仅透传）；ssh 的 `sessionId` 是既有 SSH 会话 id。
 - `command`：generator 程序名（非空、不含 NUL）。
 - `args`：参数数组（≤32 个、每个不含 NUL）。
-- `cwd`（可选）：工作目录。local target 生效（子进程 `current_dir`）；**ssh target wave-1 不支持，非空即报 `completion: cwd is not supported for ssh targets in wave 1`**（远端 cwd 语义留 wave 2 定义，显式失败优于静默在错误目录执行）。
+- `cwd`（可选）：工作目录。local target 生效（子进程 `current_dir`）；ssh target 仅接受**绝对 POSIX 路径**：在该次独立 exec 通道内先 `cd '<cwd>' 2>/dev/null &&` 再执行 generator（`&&` 短路：目录不可用时命令不执行；只抑制 `cd` 自身 stderr，避免把路径报错文本当作候选）。`~`/相对路径/Windows 盘符一律报 `completion: cwd must be an absolute POSIX path`（展开规则属远端 Shell，本轮不猜），含 NUL 报 `completion: invalid cwd`。切目录只作用于本次 exec，不向交互式 PTY 注入 `cd`，用户输入行、Shell 历史与会话状态都不受影响。缺省/null/空串保持原有命令拼装语义。
 - `timeoutMs`：completion 层超时，clamp 到 [200, 3000]，缺省（0/缺字段）1200。
 - `maxOutputBytes`：单流输出上限，stdout 与 stderr **各自**截断；缺省（0）或超过 256 KiB 时取 256 KiB。
 - `mode`：必须为 `"completion-generator"`（防止普通 RPC 复用本通道）。

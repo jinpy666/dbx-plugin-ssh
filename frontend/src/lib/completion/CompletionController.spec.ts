@@ -553,6 +553,137 @@ describe("CompletionController · generator 防陈旧（批次 2-1，§30）", (
   });
 });
 
+// 缺陷回归（P3）：thenable source 的分支此前直接 deliver 响应就 return，
+// 静态结果能到 UI，但声明式 generator 槽位从未被调度——Worker 形态下动态
+// 补全整条通道静默失效。
+describe("CompletionController · 异步 source（thenable）与动态槽位组合", () => {
+  interface AsyncHarness {
+    controller: CompletionController;
+    responses: CompletionResponse[];
+    runResults: Array<{ slot: FigGeneratorSlot; resolve: (items: CompletionItem[] | null) => void; reject: (cause?: unknown) => void }>;
+    pending: Array<{ request: FigSourceRequest; resolve: (response: CompletionResponse | null) => void; reject: (cause?: unknown) => void }>;
+    setEnabled: (enabled: boolean) => void;
+  }
+
+  function asyncHarness(config: { slots?: FigGeneratorSlot[] } = {}): AsyncHarness {
+    const line = "git checkout ma";
+    let enabled = true;
+    const responses: CompletionResponse[] = [];
+    const runResults: AsyncHarness["runResults"] = [];
+    const pending: AsyncHarness["pending"] = [];
+    const controller = new CompletionController({
+      source: {
+        id: "async-fixture",
+        resolve: (request) =>
+          new Promise<CompletionResponse | null>((resolve, reject) => pending.push({ request, resolve, reject })) as unknown as CompletionResponse,
+      },
+      sessionId: () => "session-a",
+      readLine: () => line,
+      enabled: () => enabled,
+      generators: {
+        slots: () => config.slots ?? [generatorSlot()],
+        run: (slot) => new Promise<CompletionItem[] | null>((resolve, reject) => runResults.push({ slot, resolve, reject })),
+      },
+      onResponse: (response) => responses.push(response),
+      onAcceptEdit: () => undefined,
+    });
+    return { controller, responses, runResults, pending, setEnabled: (next) => (enabled = next) };
+  }
+
+  it("异步 ready：静态候选与动态槽位都交付（旧实现不调度槽位）", async () => {
+    const h = asyncHarness();
+    h.controller.request("typing");
+    expect(h.responses).toEqual([]); // thenable 未 resolve，同步面无交付
+    const call = h.pending[0];
+    call.resolve(readyResponse(call.request, [item("checkout")]));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.responses.map((response) => response.state)).toEqual(["ready"]);
+    expect(h.responses[0].items.map((entry) => entry.label)).toEqual(["checkout"]);
+    expect(h.runResults).toHaveLength(1); // 动态通道被调度
+
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses).toHaveLength(2);
+    expect(h.responses[1].items.map((entry) => entry.label)).toEqual(["checkout", "main"]);
+  });
+
+  it("异步 null：仍尝试动态槽位（loading 占位 → 合并 ready）", async () => {
+    const h = asyncHarness();
+    h.controller.request("typing");
+    h.pending[0].resolve(null);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.responses.map((response) => response.state)).toEqual(["loading"]);
+    expect(h.runResults).toHaveLength(1);
+
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses[1].state).toBe("ready");
+    expect(h.responses[1].items.map((entry) => entry.label)).toEqual(["main"]);
+  });
+
+  it("异步 reject：降级 pass-through，且不启动任何动态查询", async () => {
+    const h = asyncHarness();
+    h.controller.request("typing");
+    h.pending[0].reject(new Error("worker boom"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.responses.map((response) => response.state)).toEqual(["pass-through"]);
+    expect(h.runResults).toHaveLength(0);
+  });
+
+  it("resolve 时已过期（新输入）：既不交付也不启动动态查询", async () => {
+    const h = asyncHarness();
+    h.controller.request("typing");
+    h.controller.lineChanged(); // revision 前进
+    h.pending[0].resolve(readyResponse(h.pending[0].request, [item("checkout")]));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.responses).toEqual([]);
+    expect(h.runResults).toHaveLength(0);
+  });
+
+  it("resolve 时引擎已关或菜单已关：不交付、不拉起动态查询", async () => {
+    const disabled = asyncHarness();
+    disabled.controller.request("typing");
+    disabled.setEnabled(false);
+    disabled.pending[0].resolve(readyResponse(disabled.pending[0].request, [item("checkout")]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(disabled.responses).toEqual([]);
+    expect(disabled.runResults).toHaveLength(0);
+
+    const dismissed = asyncHarness();
+    dismissed.controller.request("typing");
+    dismissed.controller.dismiss();
+    dismissed.pending[0].resolve(readyResponse(dismissed.pending[0].request, [item("checkout")]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(dismissed.responses).toEqual([]);
+    expect(dismissed.runResults).toHaveLength(0);
+  });
+
+  it("每个有效请求的槽位最多启动一次，新旧请求不串结果", async () => {
+    const h = asyncHarness();
+    h.controller.request("typing");
+    h.pending[0].resolve(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.runResults).toHaveLength(1);
+
+    h.controller.request("manual");
+    h.pending[1].resolve(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.runResults).toHaveLength(2);
+
+    // 旧请求的槽位结果仍然被丢弃（phase 已换）。
+    h.runResults[0].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses.filter((response) => response.state === "ready")).toHaveLength(0);
+    h.runResults[1].resolve([genItem("main")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.responses.at(-1)?.state).toBe("ready");
+  });
+});
+
 describe("FakeFigCompletionSource · 小语料行为（手动清单锚点）", () => {
   const source = new FakeFigCompletionSource();
   const requestOf = (line: string): FigSourceRequest => ({ line, requestId: 1, revision: 0, sessionId: "s", trigger: "typing" });

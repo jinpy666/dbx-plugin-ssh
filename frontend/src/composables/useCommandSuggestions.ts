@@ -132,12 +132,22 @@ const completionLoading = ref(false);
 // （与基线一致）；guard 抑制（alternate screen/跟随程序锁存/历史建议总开关
 // 关）同样关门。controller 在 lineChanged 调度时与 dispatch 前各查一次。
 let completionInputAllowed = false;
+// 显式选择锁（§4.1）：↑↓ 或指针激活后锁定候选 id。默认高亮第 0 项只是
+// 视觉焦点，不代表用户「选好了」——多候选时 Tab 不再默默接受第一项。
+let completionSelectionId: string | null = null;
+// 菜单归属快照：接受前核对行/会话仍与菜单一致。异步响应等待期间上一行的
+// 菜单即使还显示，也不该取得当前按键的回填权。
+let completionLineSnapshot = "";
+let completionSessionSnapshot = "";
+let completionRequestId = -1;
 
 function closeCompletionMenu() {
   completionOpen.value = false;
   completionItems.value = [];
   completionActiveIndex.value = 0;
   completionLoading.value = false;
+  completionSelectionId = null;
+  completionRequestId = -1;
 }
 
 /** 响应落地：ready（rankItems 排序截断后非空）开浮层；loading（generator
@@ -164,15 +174,42 @@ function openCompletionMenu(response: CompletionResponse) {
     closeCompletionMenu();
     return;
   }
+  // 新请求（新 requestId）= 用户又键入了内容 → 丢弃旧的选择锁；同一请求的
+  // 静态/动态合并则按候选 id 保留用户选择，候选消失才取消。
+  if (response.requestId !== completionRequestId) {
+    completionSelectionId = null;
+    completionRequestId = response.requestId;
+  }
+  const selectedIndex = completionSelectionId === null ? -1 : items.findIndex((item) => item.id === completionSelectionId);
+  if (completionSelectionId !== null && selectedIndex < 0) completionSelectionId = null;
   completionItems.value = items;
-  completionActiveIndex.value = 0;
+  completionActiveIndex.value = selectedIndex >= 0 ? selectedIndex : 0;
   completionAnchor.value = readTerminalSuggestionAnchor();
+  completionLineSnapshot = getPendingTerminalInput();
+  completionSessionSnapshot = getSessionId();
   completionOpen.value = true;
   // 双浮层仲裁（#138 丝滑度 review P0-A）：worker 模式下补全响应异步到达，
   // 键入时刻的互斥检查（refreshSuggestionsAfterInput 里 completionOpen 为
   // false）已放行历史建议浮层；此处不收会出现两个同锚点浮层叠加到下一次
   // 击键。补全菜单优先（结构化候选信息量更高），同步关掉建议浮层。
   closeSuggestionsOnly();
+}
+
+/** 指针/键盘激活为「明确选择」（§4.1）：菜单 click/hover 统一走这里，
+ *  避免只写 activeIndex 而漏掉选择锁。 */
+function activateCompletion(index: number) {
+  const item = completionItems.value[index];
+  completionSelectionId = item ? item.id : null;
+  completionActiveIndex.value = index;
+}
+
+/** 接受前的归属与信任门：菜单对应的行/会话、输入模型可信度、命令运行与
+ *  传输占用都在此核对。任一不满足 → 不做本地替换，把 Tab 交还 shell。 */
+function completionAcceptAllowed(): boolean {
+  if (options.isInputLineTrusted?.() === false) return false;
+  if (commandRunning.value || isTerminalTransferBusy()) return false;
+  if (completionSessionSnapshot !== getSessionId()) return false;
+  return completionLineSnapshot === getPendingTerminalInput();
 }
 
 /**
@@ -197,26 +234,43 @@ function handleCompletionKey(event: KeyboardEvent): boolean {
     case "accept": {
       const item = items[completionActiveIndex.value];
       if (!item) return true;
-      // 批 4b（Warp prefix.rs / shell 语义）：多候选共享同一替换区间时，Tab
-      // 先补最长公共前缀并保持菜单打开（refreshCompletionMenu 按新行重算）；
-      // 无推进（已到公共边界）或区间不一致才接受高亮项。
+      // §4.1 接受门：菜单必须仍属于当前行/会话，输入模型可信，且没有命令
+      // 或传输占用。不满足时不做本地替换——Tab 原样交给 shell。
+      if (!completionAcceptAllowed()) {
+        closeCompletionMenu();
+        return false;
+      }
+      // 1) 用户已明确选择（↑↓ 或指针激活）→ 接受该项，不走公共前缀分支。
+      const selected = completionSelectionId === null ? undefined : items.find((entry) => entry.id === completionSelectionId);
+      if (selected) {
+        acceptCompletionRow(selected);
+        return true;
+      }
+      // 2) 唯一候选 → 直接填充。
+      if (items.length === 1) {
+        acceptCompletionRow(item);
+        return true;
+      }
+      // 3) 批 4b（Warp prefix.rs / shell 语义）：多候选共享同一替换区间时，
+      // 只补最长公共前缀并保持菜单打开（refreshCompletionMenu 按新行重算）。
       const prefixEdit = longestCommonPrefixEdit(items, getPendingTerminalInput());
       if (prefixEdit) {
         completionController.accept({ ...item, edit: prefixEdit });
         refreshCompletionMenu();
         return true;
       }
-      acceptCompletionRow(item);
+      // 4) 多候选、无明确选择、公共前缀也无推进：消费本次 Tab，但不改输入、
+      // 不替用户填第一项——等方向键或点击。
       return true;
     }
     case "close":
       closeCompletionMenu();
       return true;
     case "next":
-      completionActiveIndex.value = (completionActiveIndex.value + 1) % items.length;
+      activateCompletion((completionActiveIndex.value + 1) % items.length);
       return true;
     case "prev":
-      completionActiveIndex.value = (completionActiveIndex.value - 1 + items.length) % items.length;
+      activateCompletion((completionActiveIndex.value - 1 + items.length) % items.length);
       return true;
     case "passthrough":
       // Enter 恒执行当前行、Tab 交还 shell（静态候选外的透传面）：同基线，
@@ -693,6 +747,7 @@ function resetSuggestionsForSession() {
     completionOpen,
     completionItems,
     completionActiveIndex,
+    activateCompletion,
     completionAnchor,
     completionLoading,
     closeSuggestions,

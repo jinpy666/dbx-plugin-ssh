@@ -47,4 +47,29 @@ describe("Alt/Option word editing", () => {
     }
     expect(wordEditingLineUntrusted(false, "x")).toBe(false);
   });
+
+  it("marks shell-owned line rewrites as untrusted on their own", () => {
+    // Tab（shell 自己的补全）、Ctrl+W/A/E/R、方向键/Home/End/历史序列都会
+    // 让增量模型与真实行失步；此后普通键入不得把它重新变成可信。
+    for (const data of ["\t", "\x17", "\x01", "\x05", "\x12"]) {
+      expect(wordEditingLineUntrusted(false, data)).toBe(true);
+    }
+    for (const data of ["\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1b[H", "\x1b[F", "\x1bOH", "\x1b[3~"]) {
+      expect(wordEditingLineUntrusted(false, data)).toBe(true);
+    }
+    // 序列被拆包：末尾残留 ESC / CSI / SS3 起始符同样不可追踪。
+    for (const data of ["\x1b", "\x1b[", "\x1b[1", "\x1bO"]) {
+      expect(wordEditingLineUntrusted(false, data)).toBe(true);
+    }
+    // 多字节块内嵌控制序列同样命中。
+    expect(wordEditingLineUntrusted(false, "ab\x17")).toBe(true);
+  });
+
+  it("keeps ordinary typing trusted and resets only on a new line", () => {
+    expect(wordEditingLineUntrusted(false, "abc")).toBe(false);
+    expect(wordEditingLineUntrusted(false, "/opt/aa")).toBe(false);
+    // 键入不解除不可信：只有回车/Ctrl+C 开新行才恢复。
+    expect(wordEditingLineUntrusted(true, "abc")).toBe(true);
+    expect(wordEditingLineUntrusted(true, "\r")).toBe(false);
+  });
 });

@@ -33,6 +33,13 @@ cases = [
     ("backward delete", b"one two three\x1b\x7f\r", b"one two "),
     ("forward delete", b"one two three\x01\x1bd\r", b" two three"),
     ("middle edit", b"one two three\x1bb\x1b\x7fNEW \x05\r", b"one NEW three"),
+    # Ctrl+W（unix-word-rubout）与 terminalLineModel.applyLineEditControlChar
+    # 的语义对照：删「行尾空白 + 最后一个词」，保留词前的分隔空白。
+    ("ctrl-w word", b"abc def\x17\r", b"abc "),
+    ("ctrl-w multiple trailing spaces", b"abc  def  \x17\r", b"abc  "),
+    ("ctrl-w trailing blank only", b"abc \x17\r", b""),
+    ("ctrl-w blank line", b"   \x17\r", b""),
+    ("ctrl-w quoted word", b"'a b'\x17\r", b"'a "),
 ]
 for name, keys, expected in cases:
     master, slave = pty.openpty()

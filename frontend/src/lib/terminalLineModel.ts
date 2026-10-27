@@ -4,13 +4,19 @@
 // 就会与真实提示符行失步（Ctrl+U 后模型仍留着死字符，建议/补全/ghost 对着
 // 错误的行检索，#138 丝滑度 review P0-B）。纯函数，语义对齐 bash readline：
 // - Ctrl+U（0x15，unix-line-discard）：清空整行；
-// - Ctrl+W（0x17，unix-word-rubout）：删掉行尾的词与词前空白
-//   （"abc def" → "abc"，"abc " → ""——词与间隔空白一并删除）。
+// - Ctrl+W（0x17，unix-word-rubout）：删掉行尾空白与它前面的一个词，**保留**
+//   该词之前的分隔空白（实测 bash 3.2/5.x readline：
+//   "abc def" → "abc "，"abc  def  " → "abc  "，"abc " → ""，"   " → ""）。
 
 /** 已知行编辑控制字符 → 新行内容；其余返回 null（调用方按原逻辑处理）。 */
 export function applyLineEditControlChar(line: string, char: string): string | null {
   if (char === "\u0015") return "";
-  // 「词 + 前后空白」一次删净；全空白行（无词可删）整体清空。
-  if (char === "\u0017") return /\S/.test(line) ? line.replace(/\s*\S+\s*$/, "") : "";
+  if (char === "\u0017") {
+    // 先吃掉行尾空白，再吃掉最后一个词；词前的分隔空白保留（bash 的
+    // unix-word-rubout 只删「空白 + 词」，不删词前空白）。全空白行或无词
+    // 可删时整行清空。
+    const trimmed = line.replace(/\s+$/, "");
+    return trimmed.replace(/\S+$/, "");
+  }
   return null;
 }

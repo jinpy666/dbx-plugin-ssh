@@ -159,16 +159,38 @@ export class CompletionController {
       outcome = null;
     }
     if (outcome !== null && typeof (outcome as { then?: unknown }).then === "function") {
-      // 防御分支：冻结接口为同步，此处仅为测试桩 / Worker 化留位。
-      // Worker 形态的 generator 第二段并发驱动不在本批次范围。
+      // Worker 化 / 测试桩的 thenable 形态：resolve 后走与同步路径完全相同的
+      // 后续流程（静态交付 + 声明式 generator 第二段）。此前这里直接交付
+      // 响应就返回，异步 source 的动态候选通道从未被调度。
       void Promise.resolve(outcome).then(
-        (response) => this.deliver(requestId, revision, sessionId, response ?? this.passThrough(requestId, revision)),
+        (response) => this.deliverOutcome(requestId, revision, sessionId, request, response ?? null),
+        // source 抛错/reject：安全降级为 pass-through，且不产生任何动态执行
+        // 副作用（不为错误请求启动远端查询）。
         () => this.deliver(requestId, revision, sessionId, this.passThrough(requestId, revision)),
       );
       return;
     }
+    this.deliverOutcome(requestId, revision, sessionId, request, outcome);
+  }
 
-    // —— 第一段（§31）：静态候选同步立即交付 ——
+  /**
+   * 一次解析结果落地：静态候选交付 + 声明式 generator 第二段调度。同步与
+   * 异步 source 共用本方法，保证两边的时序/guard/两段渲染语义一致。
+   *
+   * 过期请求在这里就被丢掉：既不进 UI（三重 guard），也不采集槽位、不启动
+   * 新的远端查询；引擎在等待期间被关闭同样不再拉起菜单。
+   */
+  private deliverOutcome(
+    requestId: number,
+    revision: number,
+    sessionId: string,
+    request: FigSourceRequest,
+    outcome: CompletionResponse | null,
+  ): void {
+    if (requestId !== this.requestId || revision !== this.revision || sessionId !== this.options.sessionId()) return;
+    if (!this.options.enabled()) return;
+
+    // —— 第一段（§31）：静态候选立即交付 ——
     const staticReady =
       outcome !== null && outcome.state === "ready" && outcome.items.length > 0 ? outcome : null;
 

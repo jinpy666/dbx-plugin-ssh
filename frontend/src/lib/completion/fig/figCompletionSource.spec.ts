@@ -197,6 +197,24 @@ const fixtureBroken = {
   parserDirectives: {},
   args: [],
 };
+const fixtureHiddenArg = {
+  // Fig 语料的 hidden 建议（cd 的 `-`/`~` 同形态）：不进菜单、不被 Tab 接受。
+  name: ["myhidden"],
+  subcommands: [],
+  options: [],
+  persistentOptions: [],
+  parserDirectives: {},
+  args: [
+    {
+      name: "target",
+      isOptional: true,
+      suggestions: [
+        { name: "hidden-one", description: "not offered", hidden: true },
+        { name: "visible-one", description: "offered" },
+      ],
+    },
+  ],
+};
 const fixtureManifest = {
   mygit: fixtureMyGit,
   mycat: fixtureVariadic,
@@ -209,6 +227,7 @@ const fixtureManifest = {
   "myaws/ec2": specEc2,
   mysudo: fixtureSudo,
   mybroken: fixtureBroken,
+  myhidden: fixtureHiddenArg,
 } as unknown as FigSpecManifest;
 
 const makeSource = () => new FigCompletionSourceImpl({ manifest: fixtureManifest });
@@ -426,5 +445,31 @@ describe("FigCompletionSource · 声明式 generator 槽位（批次 2-1 collect
   it("异常行不外抛（spec 枚举抛错 / 引号未闭合）→ []", () => {
     expect(source.collectGenerators(baseRequest("mybroken --x"))).toEqual([]);
     expect(source.collectGenerators(baseRequest('mygit commit -m "未闭合'))).toEqual([]);
+  });
+});
+
+// 缺陷回归（P1）：`cd ` 的候选曾被 fig 语料里的两个 hidden 特殊参数（`-`/`~`）
+// 占满，Tab 于是把 `\u0015cd -` 写进输入行，原生路径补全永远到不了 shell。
+describe("FigCompletionSource · hidden 参数建议（P1）", () => {
+  const source = makeSource();
+
+  it("hidden 建议不进候选，可见建议照常", () => {
+    expect(itemLabels(source.resolve(baseRequest("myhidden ")))).toEqual(["visible-one"]);
+    expect(itemLabels(source.resolve(baseRequest("myhidden vis")))).toEqual(["visible-one"]);
+  });
+
+  it("只命中 hidden 建议的前缀 → pass-through（Tab 交还 shell）", () => {
+    expect(source.resolve(baseRequest("myhidden hidden"))).toBeNull();
+  });
+
+  it("真实 cd 语料：空参数不再出现 `-`/`~`，本地无候选即 pass-through", () => {
+    const real = createFigCompletionSource();
+    // 隐藏特殊参数即使可以枚举也不得展示（`cd ` 曾因此变成 `cd -`）。
+    expect(itemLabels(real.resolve(baseRequest("cd ")))).toEqual([]);
+    expect(real.resolve(baseRequest("cd "))).toBeNull();
+    expect(itemLabels(real.resolve(baseRequest("cd -")))).toEqual([]);
+    // 目录生成器是 Fig custom 回调形态：不产声明式槽位，不擅自执行。
+    expect(real.collectGenerators(baseRequest("cd "))).toEqual([]);
+    expect(real.collectGenerators(baseRequest("cd pro"))).toEqual([]);
   });
 });

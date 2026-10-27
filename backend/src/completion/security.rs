@@ -70,6 +70,30 @@ pub fn build_remote_command_line(command: &str, args: &[String]) -> String {
     line
 }
 
+/// SSH 目标接受的 cwd：绝对 POSIX 路径。`~`、相对路径、Windows 盘符的展开
+/// 规则由远端 Shell 决定，本轮不猜——明确定界而不是静默在错误目录执行。
+pub fn validate_ssh_cwd(cwd: &str) -> Result<(), String> {
+    if cwd.contains('\0') {
+        return Err("completion: invalid cwd".to_string());
+    }
+    if !cwd.starts_with('/') {
+        return Err("completion: cwd must be an absolute POSIX path".to_string());
+    }
+    Ok(())
+}
+
+/// 「切到 cwd 成功后才执行」的远端命令行：`cd` 走
+/// [`crate::exec::shell_quote`] 按字面量转义（空格/单引号/中文原样保留），
+/// `&&` 短路保证目录不可用时 generator 不执行；只抑制 `cd` 自身 stderr——
+/// exec 通道是 stdout+stderr 合并流，路径报错文本否则会被当作候选。
+pub fn build_command_line_in_cwd(command_line: &str, cwd: &str) -> String {
+    format!(
+        "cd {} 2>/dev/null && {}",
+        crate::exec::shell_quote(cwd),
+        command_line
+    )
+}
+
 /// 按 `cap` 字节截断 UTF-8 文本（回退到字符边界），返回 `(截断后文本,
 /// 是否截断)`。SSH 路径拿到的是 exec 合并流 String，上限在 completion
 /// 层统一施加。
@@ -234,5 +258,37 @@ mod tests {
         assert!(truncated);
         let (cut, _) = truncate_utf8("éz", 1);
         assert_eq!(cut, "");
+    }
+
+    #[test]
+    fn ssh_cwd_accepts_only_absolute_posix_paths() {
+        const NOT_ABSOLUTE: &str = "completion: cwd must be an absolute POSIX path";
+        assert_eq!(validate_ssh_cwd("/home/me/src"), Ok(()));
+        assert_eq!(validate_ssh_cwd("/"), Ok(()));
+        assert_eq!(validate_ssh_cwd("src").unwrap_err(), NOT_ABSOLUTE);
+        assert_eq!(validate_ssh_cwd("./src").unwrap_err(), NOT_ABSOLUTE);
+        assert_eq!(validate_ssh_cwd("~/src").unwrap_err(), NOT_ABSOLUTE);
+        assert_eq!(validate_ssh_cwd("C:\\work").unwrap_err(), NOT_ABSOLUTE);
+        assert_eq!(
+            validate_ssh_cwd("/tmp/a\0b").unwrap_err(),
+            "completion: invalid cwd"
+        );
+    }
+
+    #[test]
+    fn cwd_prefix_quotes_path_and_short_circuits_on_failure() {
+        let line = build_command_line_in_cwd("git 'branch' '--list'", "/home/me/src");
+        assert_eq!(
+            line,
+            "cd '/home/me/src' 2>/dev/null && git 'branch' '--list'"
+        );
+        // 只抑制 cd 自身的 stderr：命令本身可诊断。
+        assert!(line.contains("2>/dev/null && "));
+    }
+
+    #[test]
+    fn cwd_prefix_keeps_spaces_quotes_and_unicode_verbatim() {
+        let line = build_command_line_in_cwd("ls", "/tmp/a b'c/目录");
+        assert_eq!(line, "cd '/tmp/a b'\\''c/目录' 2>/dev/null && ls");
     }
 }

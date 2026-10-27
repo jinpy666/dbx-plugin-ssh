@@ -29,13 +29,19 @@ pub async fn execute(
     {
         return Err("completion: disabled by the read-only connection setting".to_string());
     }
-    // wave-1 未定义远端 cwd 语义：显式报错而不是悄悄在错误目录执行
-    //（git 类 generator 对目录敏感，静默忽略会产生错误结果）。
-    if req.cwd.as_deref().is_some_and(|cwd| !cwd.is_empty()) {
-        return Err("completion: cwd is not supported for ssh targets in wave 1".to_string());
-    }
+    // 远端 cwd（前端跟踪的 OSC 7/633 目录）：在本次独立 exec 通道内先切目录
+    // 再执行 generator，绝不向交互式 PTY 注入 `cd`——用户当前输入行、Shell
+    // 历史与会话状态都不受影响。只接受绝对 POSIX 路径：`~`/相对路径/Windows
+    // 盘符的展开规则依赖远端 Shell，本轮明确报错让前端安全回落，而不是猜。
     let exec_id = format!("completion-{}", uuid::Uuid::new_v4());
-    let command_line = security::build_remote_command_line(&req.command, &req.args);
+    let base_line = security::build_remote_command_line(&req.command, &req.args);
+    let command_line = match req.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+        Some(cwd) => {
+            security::validate_ssh_cwd(cwd)?;
+            security::build_command_line_in_cwd(&base_line, cwd)
+        }
+        None => base_line,
+    };
     let exec = ssh.exec(session_id, Some(&exec_id), &command_line, false, None);
     match tokio::time::timeout(Duration::from_millis(req.timeout_ms), exec).await {
         Ok(Ok(value)) => map_exec_response(&value, req.max_output_bytes),
