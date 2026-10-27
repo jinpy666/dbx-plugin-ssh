@@ -97,6 +97,8 @@ import {
   parseOsc9Notification,
   shouldOsc7FollowOverrideUserVarCwd,
 } from "./lib/terminalOscChannels";
+import { findForwardConflict, forwardStartParams, parseForwards } from "./lib/portForward";
+import { loadTunnelProfiles, type TunnelProfile } from "./lib/tunnelProfiles";
 import {
   createTerminalCopyCache,
   resolveTerminalPasteText,
@@ -4485,12 +4487,53 @@ async function attachSession(sessionId: string, retryReference: string = initial
   }
 }
 
+// #248 连接自动启用已保存端口映射：会话建立后按当前连接的隧道预设逐条启动。
+// 已在跑/端口冲突的预设跳过（与映射弹窗「启用所有已保存」同一判定语义）；
+// 失败不阻断连接流——计数提示复用弹窗的 profilesStarted 文案，全失败时展示
+// 首条错误；无预设时完全静默。
+function normalizedForwardHost(value: string): string {
+  return value.trim().replace(/^\[|\]$/g, "").toLowerCase() || "127.0.0.1";
+}
+function matchingRunningForward(profile: TunnelProfile, forwards: ReturnType<typeof parseForwards>) {
+  return forwards.find((row) => row.state !== "stopped" && row.state !== "error"
+    && row.kind === profile.kind && row.listenHost === normalizedForwardHost(profile.listenHost)
+    && row.listenPort === Number(profile.listenPort)
+    && (profile.kind === "dynamic" || (row.targetHost === normalizedForwardHost(profile.targetHost) && row.targetPort === Number(profile.targetPort))));
+}
+async function autoStartTunnelProfiles() {
+  const cid = connectionId.value;
+  const sid = session.value?.sessionId;
+  if (!cid || !sid || localUiMode.value) return;
+  const profiles = loadTunnelProfiles(cid);
+  if (!profiles.length) return;
+  try {
+    const payload = await window.dbxPlugin.invoke<unknown>("ssh/forward/list", { connectionId: cid });
+    const running = parseForwards(payload);
+    let started = 0;
+    let firstFailure = "";
+    for (const profile of profiles) {
+      if (matchingRunningForward(profile, running) || findForwardConflict(running, profile)) continue;
+      try {
+        await window.dbxPlugin.invoke("ssh/forward/start", forwardStartParams(profile, sid, false));
+        started += 1;
+      } catch (cause) {
+        firstFailure ||= cause instanceof Error ? cause.message : String(cause);
+      }
+    }
+    if (started) showNotice(t("forwards.profilesStarted", { count: started }));
+    else if (firstFailure) showNotice(firstFailure);
+  } catch {
+    // forward/list 不可用（如旧 sidecar）：静默跳过自动启用。
+  }
+}
+
 async function afterSessionConnected() {
   terminalError.value = "";
   terminal?.focus();
   scheduleFit();
   await writeWorkbenchState();
   if (followDirectory.value) await setDirectoryTracking(true);
+  void autoStartTunnelProfiles();
   if (sftpAutoConnect.value) {
     void refreshSftpHomePath();
     // #209 自动首拉走安静失败模式：失败落面板内软提示条，不弹全局错误横幅

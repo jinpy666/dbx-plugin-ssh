@@ -210,6 +210,9 @@ function finishZmodemUpload(cause?: unknown) {
   cancelZmodemUpload();
   if (!wasActive) return;
   if (gracefulReceive) {
+    // #245：sz 收完自动在文件管理器中定位落盘目录（local/reveal 由 sidecar
+    // 校验路径归属；web/docker 无本机能力时静默跳过，不打断完成提示）。
+    if (savedPath) void window.dbxPlugin.invoke("local/reveal", { path: savedPath }).catch(() => undefined);
     showNotice(t("zmodemReceiveComplete", { count: savedCount }), savedPath
       ? [{ label: t("revealInFolder"), run: () => void revealTransferTarget(savedPath) }]
       : undefined);
@@ -317,6 +320,8 @@ function startZmodemReceive(session: ZmodemSession) {
     const savedPath = receiveLastSavedPath;
     finishZmodemUpload();
     if (savedCount > 0) {
+      // #245：同上——正常收尾路径也自动定位落盘目录（能力缺失静默跳过）。
+      if (savedPath) void window.dbxPlugin.invoke("local/reveal", { path: savedPath }).catch(() => undefined);
       showNotice(t("zmodemReceiveComplete", { count: savedCount }), savedPath
         ? [{ label: t("revealInFolder"), run: () => void revealTransferTarget(savedPath) }]
         : undefined);
