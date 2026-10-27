@@ -1384,21 +1384,19 @@ impl McpState {
             .map(str::trim)
             .unwrap_or_default();
         let registry = self.dbx_connections.read().await;
-        let same_host = |connection: &StoredConnection| {
-            connection.host.trim().eq_ignore_ascii_case(host)
-        };
+        let same_host =
+            |connection: &StoredConnection| connection.host.trim().eq_ignore_ascii_case(host);
         // Tier 1: exact endpoint identity.
         if let Some(connection) = registry.values().find(|connection| {
-            same_host(connection)
-                && connection.port == port
-                && connection.username == username
+            same_host(connection) && connection.port == port && connection.username == username
         }) {
             return Some(connection.clone());
         }
         // Tier 2: same host and username, port spelled differently.
-        if let Some(connection) = registry.values().find(|connection| {
-            same_host(connection) && connection.username == username
-        }) {
+        if let Some(connection) = registry
+            .values()
+            .find(|connection| same_host(connection) && connection.username == username)
+        {
             return Some(connection.clone());
         }
         // Tier 3: same endpoint, different account — fail-closed: ANY
@@ -3787,7 +3785,10 @@ fn terminal_input_gate(
 fn is_write_tool(name: &str) -> bool {
     matches!(
         name,
-        "ssh_exec_sudo" | "ssh_run_bg" | "sftp_write_file" | "sftp_upload"
+        "ssh_exec_sudo"
+            | "ssh_run_bg"
+            | "sftp_write_file"
+            | "sftp_upload"
             | "ssh_remove_known_host"
     )
 }
