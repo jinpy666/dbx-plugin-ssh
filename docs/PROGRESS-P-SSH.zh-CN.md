@@ -4590,3 +4590,24 @@ triage）中 #246 为安全类零处理项，#243 为复现信息齐全的未处
 **预发布**：manifest / Cargo / Cargo.lock 同步 0.7.11-beta.1，rdp
 client_build 断言 700（beta 家族按 0 计），CHANGELOG 收录 #246/#243；
 `validate_manifests.py ssh --tag ssh-v0.7.11-beta.1` PASS。
+
+## 遗留 issue 第二轮：#237 并发多流二期 + #248 自动端口映射 + #245 sz 自动定位（2026-10-28，0.7.11-beta.2）
+
+- **#237 二期（SFTP 大文件并发多流）**：`sftp/download/next` 是前端驱动的顺序
+  拉块循环，协议形状上前端无法并行——并发收进 sidecar 内部：一期预取槽推广为
+  有界并发预读窗口（新模块 `transfer_multistream.rs`，纯逻辑零 I/O）：≥256MiB
+  （偏好 `transfer_multistream_min_mib`，0 关闭）的单文件下载后台最多 4 路并发
+  预读、按 offset 拼装；每流独立句柄分槽轮转，offset 失配/通道错误整窗降级单
+  流；限速/兼容模式/裸包转义/压缩车道不启用。协议仅加 optional 字段（start 响
+  应 `multistream`、`transfer_status` 行同名字段），取消/断点语义零变化。上传
+  侧评估后不做对称改造（SFTPv3 顺序写无出块落盘保证）。新增 11 例纯逻辑单测，
+  cargo test 1300 全绿；真机吞吐复测待预发布通道按 issue 承诺回收（默认深度
+  4 的校准依据）。
+- **#248**：`afterSessionConnected` 挂 `autoStartTunnelProfiles`——按当前连接
+  隧道预设逐条 `ssh/forward/start`，先 `ssh/forward/list` 跳过已跑/冲突（与
+  弹窗同判定语义），计数提示复用 `forwards.profilesStarted` 七语文案，全失败
+  展示首条错误；新建/tab 恢复/重连全路径覆盖。
+- **#245**：useZmodem 两个 sz 收完点自动 `local/reveal` 定位落盘目录（sidecar
+  校验归属；web/docker 无能力静默跳过），手动按钮保留。
+- 验证：前端 vitest 2173 全绿、vue-tsc 0 错；后端 1300 全绿、clippy -D
+  warnings 清零、fmt 通过；`scripts/test.sh` 端到端 all green。

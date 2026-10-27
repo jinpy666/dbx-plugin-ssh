@@ -6,6 +6,36 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.11-beta.2] — 2026-10-28
+
+> 预发布基线说明延续 0.7.11-beta.1：调度任务（task-provider）功能声明继续摘除——DBX 上游尚未发布宿主侧 task-provider 能力。
+> **Pre-release baseline note (carried over from 0.7.11-beta.1):** the scheduler task-provider declaration stays withheld until the DBX host ships the capability.
+
+- **SFTP 大文件下载并发多流提速（#237 二期）**。单个大文件（≥256 MiB，可用偏好
+  `transfer_multistream_min_mib` 调整，设为 0 关闭）下载时，sidecar 会在后台用最多 4 路并发
+  流预读后续分块并按偏移拼装——此前单文件下载本质是单流串行（一期预取只消掉了每块一个往返
+  的等待），内网高带宽链路上 3.5GB 级安装包这类文件的吞吐现在随并发流数扩展，可接近跑满链路。
+  操作方式与进度、取消、断点续传完全不变；对不支持并发读的服务器自动降级回单流，老旧服务器
+  兼容模式、下载限速、压缩包下载等场景维持原有单流通道。上传暂不做对称改造（远端顺序写无出
+  块落盘保证，风险大于收益）。
+  **Concurrent multi-stream speedup for large SFTP downloads (#237 phase 2).** Single-file
+  downloads of 256 MiB or more (tunable via the `transfer_multistream_min_mib` preference,
+  0 disables) now keep up to 4 parallel read streams running in the sidecar, prefetching
+  upcoming chunks and reassembling them by offset — single-file downloads were effectively
+  serial before (the phase-1 prefetch only removed one round-trip per chunk), so on
+  high-bandwidth LAN links multi-GB files such as 3.5GB installers now scale with stream
+  count instead of stalling on one stream. Controls, progress, cancel and resume semantics
+  are unchanged; servers that cannot handle concurrent reads fall back to a single stream
+  automatically, and legacy-server compat mode, download throttling and compressed downloads
+  keep the original single-stream lane. Uploads intentionally stay single-stream (remote
+  sequential writes have no out-of-order placement guarantee).
+
+- **连接自动启用已保存端口映射（#248）**。SSH 会话建立（含标签恢复与重连）后，自动启用该连接已保存的端口映射预设：已在运行或端口冲突的预设自动跳过（与映射弹窗「启用所有已保存」同一判定），启动结果以提示条反馈，无预设时完全静默——隧道场景不再需要每次连完手动点「启用所有已保存」。
+  **Saved port forwards now auto-start on connect (#248).** When an SSH session is established (including tab restores and reconnects), the connection's saved port-forward presets start automatically: running or conflicting presets are skipped with the same semantics as the dialog's "start all saved" button, the outcome is surfaced as a notice, and connections without presets stay completely silent.
+
+- **sz/ZMODEM 收完自动定位下载目录（#245）**。zmodem sz 接收完成后自动在文件管理器中定位落盘目录（路径经 sidecar 归属校验；web/docker 无本机文件系统能力时静默跳过）——完成提示与「在文件夹中显示」按钮保留，不再需要手动翻找下载目录。
+  **Downloads folder opens automatically after sz/ZMODEM completes (#245).** When a zmodem sz receive finishes, the file manager now reveals the saved location automatically (path ownership validated by the sidecar; silently skipped where no local filesystem is available, e.g. web/docker) — the completion notice and the reveal button stay.
+
 ## [0.7.11-beta.1] — 2026-10-28
 
 > 预发布基线说明延续 0.7.10：调度任务（task-provider）功能声明继续摘除——DBX 上游尚未发布宿主侧 task-provider 能力。

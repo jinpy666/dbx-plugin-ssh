@@ -55,6 +55,9 @@ mod task_provider;
 mod telnet_session;
 mod transfer_compress;
 mod transfer_history;
+// 并发多流预读窗口（ST12，issue #237 二期）：大文件下载并发分块预读的
+// 深度决策与窗口簿记纯逻辑；I/O 挂接在 ssh.rs 的 download_chunk 车道。
+mod transfer_multistream;
 // 传输性能模型（ST8/P3）：网络腿 EMA 回灌（finish_upload 完成点）、codec
 // 吞吐回灌（lzpack 预压/解压点）、显式 lzpack 顾问（start 预测日志）均已
 // 接入产品路径；decide() 是 advisor 的底层纯函数。

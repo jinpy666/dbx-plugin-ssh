@@ -242,6 +242,24 @@ pub fn transfer_compress_threshold_mib(data_dir: &Path) -> u64 {
         .unwrap_or(crate::transfer_compress::THRESHOLD_MIB_DEFAULT)
 }
 
+/// 并发多流下载生效阈值（ST12，issue #237 二期）：MiB，0 = 多流关闭
+/// （一律单步预取），1..=65536；非法回落默认 256。
+pub fn sanitize_transfer_multistream_min_mib(value: &Value) -> u64 {
+    sanitize_u64_clamped(
+        value,
+        0,
+        crate::transfer_multistream::THRESHOLD_MIB_MAX,
+        crate::transfer_multistream::DEFAULT_THRESHOLD_MIB,
+    )
+}
+
+pub fn transfer_multistream_min_mib(data_dir: &Path) -> u64 {
+    load_preferences(data_dir)
+        .get("transfer_multistream_min_mib")
+        .map(sanitize_transfer_multistream_min_mib)
+        .unwrap_or(crate::transfer_multistream::DEFAULT_THRESHOLD_MIB)
+}
+
 /// 老旧服务器兼容模式（M14-B）：缺省关。开启后 SFTP 会话不做流水线并发、
 /// 传输深度强制 1，并避开非标准扩展请求。
 pub fn sftp_compat_mode(data_dir: &Path) -> bool {
@@ -462,6 +480,15 @@ pub fn load_preferences(data_dir: &Path) -> Value {
             "transfer_compress_threshold_mib".to_string(),
             Value::from(sanitize_transfer_compress_threshold_mib(
                 &map["transfer_compress_threshold_mib"],
+            )),
+        );
+    }
+    // 并发多流下载阈值（ST12）：MiB，0=关闭，1..=65536。
+    if map.contains_key("transfer_multistream_min_mib") {
+        prefs.insert(
+            "transfer_multistream_min_mib".to_string(),
+            Value::from(sanitize_transfer_multistream_min_mib(
+                &map["transfer_multistream_min_mib"],
             )),
         );
     }
@@ -719,6 +746,16 @@ pub fn save_preferences(data_dir: &Path, params: &Value) -> Result<Value, String
             "transfer_compress_threshold_mib".to_string(),
             Value::from(sanitize_transfer_compress_threshold_mib(
                 &params["transfer_compress_threshold_mib"],
+            )),
+        );
+    }
+    // 并发多流下载阈值（ST12，issue #237 二期）：数值钳制到 0..=65536 MiB
+    // （0=多流关闭），非法回落默认 256——与 compress_threshold 同向不报错。
+    if params.get("transfer_multistream_min_mib").is_some() {
+        map.insert(
+            "transfer_multistream_min_mib".to_string(),
+            Value::from(sanitize_transfer_multistream_min_mib(
+                &params["transfer_multistream_min_mib"],
             )),
         );
     }

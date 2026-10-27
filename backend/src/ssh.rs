@@ -57,6 +57,7 @@ use crate::sudo_download;
 use crate::sudo_profiles;
 use crate::transfer_compress::{self, CompressionMode};
 use crate::transfer_history;
+use crate::transfer_multistream;
 use crate::transfer_throttle::Throttle;
 use crate::triggers;
 
@@ -1605,6 +1606,59 @@ struct DownloadState {
     /// 下载启用（树/压缩/latin-1 车道维持原路径，预取收益另计）。槽值是
     /// (offset, chunk)；offset 与下一请求不一致即作废（续传跳片安全）。
     prefetch: DownloadPrefetchSlot,
+    /// 并发多流预读窗口（ST12，issue #237 二期）：大文件（≥
+    /// `transfer_multistream_min_mib`，默认 256 MiB）普通单文件下载启用，
+    /// 供给一块后后台并发预读未来 depth-1 块（硬上限 4 流）；Some 时
+    /// `download_chunk` 走窗口车道（命中窗口直回，未命中同步读兜底），
+    /// None 维持一期单步预取路径不变。树/压缩/lzpack/sudo/裸包转义/限速/
+    /// 兼容模式一律 None（决策见 `transfer_multistream::window_depth`）。
+    multistream: Option<Arc<MultistreamState>>,
+}
+
+/// 并发多流预读窗口的运行态（ST12）：窗口簿记在
+/// [`transfer_multistream::ReadaheadWindow`]（纯逻辑，单测覆盖），这里挂上
+/// 每条流独立的远端读句柄池。SFTP 单通道多请求交错是协议原生能力
+/// （request id 多路复用），N 路并发读共享一条 SFTP 子系统通道即可扩吞吐。
+struct MultistreamState {
+    window: AsyncMutex<transfer_multistream::ReadaheadWindow>,
+    /// 流句柄池：槽 i 供窗口读任务专用（懒开，错误弃柄惰性重建）；同步车道
+    /// 沿用 `DownloadState.read_handle`（逻辑上的槽 0）。分槽互斥保证并发读
+    /// 互不阻塞——共用一把句柄锁会把并发读串行化。
+    handles: Vec<Arc<AsyncMutex<Option<russh_sftp::client::fs::File>>>>,
+    /// 槽位轮转计数：稳态每次供给只回填一个新 offset，若按规划序号取槽会
+    /// 恒落槽 0 把在途读串行化；全局轮转让并发任务摊到各槽（偶发同槽由
+    /// 分槽互斥天然串行，仅损失一路并发，正确性不受影响）。
+    next_slot: std::sync::atomic::AtomicUsize,
+}
+
+impl MultistreamState {
+    fn new(depth: usize) -> Self {
+        Self {
+            window: AsyncMutex::new(transfer_multistream::ReadaheadWindow::new(depth)),
+            // 窗口并发读 = depth-1 路（供给车道占 1 路同步读）；池非空保证
+            // 轮转取槽恒有解。
+            handles: (0..depth.saturating_sub(1).max(1))
+                .map(|_| Arc::new(AsyncMutex::new(None)))
+                .collect(),
+            next_slot: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// 轮转取一个窗口读槽位。
+    fn pick_slot(&self) -> usize {
+        self.next_slot
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.handles.len()
+    }
+
+    /// 槽句柄取用（防御性取模对齐）。
+    fn stream_handle(&self, slot: usize) -> Arc<AsyncMutex<Option<russh_sftp::client::fs::File>>> {
+        let slot = slot % self.handles.len();
+        self.handles
+            .get(slot)
+            .cloned()
+            .expect("multistream handle pool is non-empty")
+    }
 }
 
 /// 下载预取槽类型（见 `DownloadState.prefetch`）。
@@ -7687,6 +7741,7 @@ impl SshRuntime {
                     raw_client: Arc::new(AsyncMutex::new(None)),
                     expand_lzpack: false,
                     prefetch: Arc::new(AsyncMutex::new(None)),
+                    multistream: None,
                 },
             );
         emitter
@@ -7886,6 +7941,7 @@ impl SshRuntime {
                     raw_client: Arc::new(AsyncMutex::new(None)),
                     expand_lzpack: true,
                     prefetch: Arc::new(AsyncMutex::new(None)),
+                    multistream: None,
                 },
             );
         // 4) prep 后台任务：拉流（packed 车道进度）→ 解压 → ready。
@@ -8394,6 +8450,27 @@ impl SshRuntime {
         let throttle = Throttle::new(crate::preferences::transfer_download_limit_kib(
             &self.data_dir,
         ));
+        // 并发多流预读窗口（ST12，issue #237 二期）：普通单文件大下载（≥
+        // `transfer_multistream_min_mib`，默认 256 MiB，0=关闭）启用并发
+        // 预读（硬上限 4 流）；兼容模式/限速/裸包转义名/压缩车道回落既有
+        // 单步预取。start 时现读现决——改动对下一个任务生效。
+        let multistream_depth =
+            transfer_multistream::window_depth(transfer_multistream::DepthInput {
+                size,
+                threshold_mib: crate::preferences::transfer_multistream_min_mib(&self.data_dir),
+                throttle_enabled: throttle.enabled(),
+                compat_mode: crate::preferences::sftp_compat_mode(&self.data_dir),
+                eligible: compression == CompressionMode::None
+                    && !(latin1 && sftp_name::has_wire_escapes(&remote_path)),
+            });
+        let multistream =
+            (multistream_depth > 1).then(|| Arc::new(MultistreamState::new(multistream_depth)));
+        let multistream_enabled = multistream.is_some();
+        if multistream.is_some() {
+            eprintln!(
+                "[sftp] download {task_id} multistream read-ahead enabled (depth={multistream_depth}, size={size})"
+            );
+        }
         // 压缩任务的暂存/临时件路径（文件由 prep 任务创建）。
         let gz_staging = (compression == CompressionMode::Gzip).then(|| {
             self.transfer_dir
@@ -8447,6 +8524,7 @@ impl SshRuntime {
                     raw_client: Arc::new(AsyncMutex::new(None)),
                     expand_lzpack: false,
                     prefetch: Arc::new(AsyncMutex::new(None)),
+                    multistream,
                 },
             );
         if compression == CompressionMode::Gzip {
@@ -8507,7 +8585,7 @@ impl SshRuntime {
             size,
         );
         Ok(
-            json!({ "taskId": task_id, "fileName": file_name, "size": size, "chunkSize": TRANSFER_CHUNK_SIZE, "resumeOffset": offset, "saveToLocal": save_to_local, "compression": compression.as_str() }),
+            json!({ "taskId": task_id, "fileName": file_name, "size": size, "chunkSize": TRANSFER_CHUNK_SIZE, "resumeOffset": offset, "saveToLocal": save_to_local, "compression": compression.as_str(), "multistream": multistream_enabled }),
         )
     }
 
@@ -9173,6 +9251,7 @@ impl SshRuntime {
                     raw_client: Arc::new(AsyncMutex::new(None)),
                     expand_lzpack: false,
                     prefetch: Arc::new(AsyncMutex::new(None)),
+                    multistream: None,
                 },
             );
         if compression == CompressionMode::Gzip {
@@ -9876,6 +9955,12 @@ impl SshRuntime {
                 .await;
         }
         if offset != download.next_offset {
+            // offset 失配（续传跳片/重试乱序）：并发预读窗口整窗作废（ST12，
+            // 与一期预取槽「失配即作废」同语义），防止跨跳供给陈块。降级
+            // 状态保留——降级是本任务生命周期事实，不因作废重置。
+            if let Some(state) = download.multistream.as_ref() {
+                state.window.lock().await.clear();
+            }
             return Err(format!(
                 "Download offset mismatch: expected {}, received {offset}",
                 download.next_offset
@@ -9890,10 +9975,26 @@ impl SshRuntime {
         // 预取命中（ST9）：上一片返回时后台预读的本片已在槽里，直接取出，
         // 省一个整 RTT。仅普通单文件下载启用（树/压缩/latin-1 车道不预取）；
         // 槽 offset 与本片请求不一致即作废（续传/重试跳片安全）。
-        let prefetchable = download.compression == CompressionMode::None
+        // 并发预读窗口车道（ST12）启用时走窗口分支，一期单步预取不再叠加
+        // （两套在途读会双倍打服务端并发，收益不增）。
+        let prefetchable = download.multistream.is_none()
+            && download.compression == CompressionMode::None
             && !(download.latin1 && sftp_name::has_wire_escapes(&download.remote_path));
         let mut served_from_prefetch = false;
-        let chunk = if prefetchable {
+        let chunk = if let Some(state) = download.multistream.as_ref() {
+            // 窗口命中（(offset, len) 精确匹配，末块短读/跳片天然失配）直接
+            // 回——后台并发读已把本片备好；未命中（预读未完成/已降级）同步
+            // 读兜底。分块供给顺序与二进制帧形状不变，并发只发生在 sidecar
+            // 内部的「预读未到来分块」上。
+            let hit = state.window.lock().await.take(offset, requested);
+            match hit {
+                Some(hit) => hit,
+                None => {
+                    self.read_plain_download_chunk(&download, offset, requested)
+                        .await?
+                }
+            }
+        } else if prefetchable {
             let mut slot = download.prefetch.lock().await;
             match slot.take() {
                 Some((hit_offset, hit_chunk))
@@ -9960,6 +10061,48 @@ impl SshRuntime {
                 )
                 .map_err(plugin_error)?;
         }
+        // 窗口回填（ST12，issue #237 二期）：供给推进后按窗口目标补发并发
+        // 预读。规划在窗口锁内完成（目标置在途，防重复发）；读任务用轮转
+        // 槽位的独立句柄并发读远端，结果回窗，失败整窗降级单流（错误不打
+        // 断任务，由同步车道按原语义浮出）。降级/EOF 后 plan 返回空，不再
+        // 发起。取消/终态无需专门清理：窗口任务只写窗口（Arc 随任务回收），
+        // 不触碰 sink/远端。
+        if let Some(state) = download.multistream.as_ref() {
+            let plan = {
+                let mut window = state.window.lock().await;
+                window.plan(next_offset, download.size, TRANSFER_CHUNK_SIZE as u64)
+            };
+            let spawn_task_id = task_id.to_string();
+            for (read_offset, read_len) in plan {
+                let this = self.clone_for_download_prefetch();
+                let download = download.clone();
+                let state = Arc::clone(state);
+                let slot = state.pick_slot();
+                let task_id = spawn_task_id.clone();
+                tokio::spawn(async move {
+                    match this
+                        .read_window_chunk(&download, &state, slot, read_offset, read_len)
+                        .await
+                    {
+                        Ok(data) => state.window.lock().await.complete(read_offset, data),
+                        Err(error) => {
+                            eprintln!(
+                                "[sftp] multistream {task_id} read offset {read_offset} failed: {error}"
+                            );
+                            let degraded = state.window.lock().await.fail(read_offset);
+                            if degraded {
+                                eprintln!(
+                                    "[sftp] multistream {task_id} degraded to single-stream (read-ahead aborted)"
+                                );
+                            }
+                            if is_channel_level_sftp_error(&error) {
+                                this.invalidate_sftp_cache(&download.session_id).await;
+                            }
+                        }
+                    }
+                });
+            }
+        }
         // 预取下一片（ST9）：仅当本片非 EOF、限速关闭（限速节奏下预取会
         // 打乱配速）且本次不是预取命中时发起；命中时后台任务通常还在跑，
         // 槽仍为空则补发一次。预读失败静默丢弃（槽保持空，下一片同步读）。
@@ -10016,19 +10159,61 @@ impl SshRuntime {
                 )
                 .await;
         }
-        // 句柄复用：首片 open 后缓存在任务槽（File 的 Drop 发
-        // close_nowait，槽位置 None 即完成关闭），后续片直接
-        // seek+read——逐片 OPEN/READ/CLOSE 每片多付 2 个 RTT，高延迟
-        // 链路吞吐被 RTT 界死。seek 用绝对 offset，断点续传/重试跳片
-        // 同样成立。
+        self.read_highlevel_chunk(
+            &download.session_id,
+            &download.remote_path,
+            &download.read_handle,
+            offset,
+            requested,
+        )
+        .await
+    }
+
+    /// 并发预读窗口的分片读取（ST12）：恒走高层车道（窗口车道 start 时已
+    /// 排除裸包转义名），使用轮转槽位的独立句柄——并发读共用 `read_handle`
+    /// 会被槽锁串行化，分槽才能真并发。错误语义与同步车道一致。
+    async fn read_window_chunk(
+        &self,
+        download: &DownloadState,
+        state: &MultistreamState,
+        slot: usize,
+        offset: u64,
+        requested: usize,
+    ) -> Result<Vec<u8>, String> {
+        let handle = state.stream_handle(slot);
+        self.read_highlevel_chunk(
+            &download.session_id,
+            &download.remote_path,
+            &handle,
+            offset,
+            requested,
+        )
+        .await
+    }
+
+    /// 高层车道分片读取（句柄复用）：首片 open 后缓存在句柄槽（File 的
+    /// Drop 发 close_nowait，槽位置 None 即完成关闭），后续片直接 seek+read
+    /// ——逐片 OPEN/READ/CLOSE 每片多付 2 个 RTT，高延迟链路吞吐被 RTT 界
+    /// 死。seek 用绝对 offset，断点续传/重试跳片/并发多流各自持有句柄同样
+    /// 成立。错误弃柄（下一片惰性重建）；通道级错误连带失效整个 SFTP 客户
+    /// 端缓存——死通道被原样复用会把该会话 SFTP 打到永久报错（误判无害：
+    /// 重建只是多一次握手）。
+    async fn read_highlevel_chunk(
+        &self,
+        session_id: &str,
+        remote_path: &str,
+        handle_slot: &AsyncMutex<Option<russh_sftp::client::fs::File>>,
+        offset: u64,
+        requested: usize,
+    ) -> Result<Vec<u8>, String> {
         let read_result: Result<Vec<u8>, String> = async {
-            let sftp = self.sftp(&download.session_id).await?;
-            let mut handle_slot = download.read_handle.lock().await;
+            let sftp = self.sftp(session_id).await?;
+            let mut handle_slot = handle_slot.lock().await;
             if handle_slot.is_none() {
                 let opened = sftp
                     .lock()
                     .await
-                    .open(download.remote_path.clone())
+                    .open(remote_path.to_string())
                     .await
                     .map_err(sftp_error)?;
                 *handle_slot = Some(opened);
@@ -10053,9 +10238,9 @@ impl SshRuntime {
                 // 读失败即弃句柄（下一片惰性重建）；通道级错误连带失效
                 // 整个 SFTP 客户端缓存——死通道被原样复用会把该会话
                 // SFTP 打到永久报错（误判无害：重建只是多一次握手）。
-                *download.read_handle.lock().await = None;
+                *handle_slot.lock().await = None;
                 if is_channel_level_sftp_error(&error) {
-                    self.invalidate_sftp_cache(&download.session_id).await;
+                    self.invalidate_sftp_cache(session_id).await;
                 }
                 Err(error)
             }
@@ -10680,6 +10865,11 @@ impl SshRuntime {
             .get(task_id)
         {
             let mut status = json!({ "taskId": task_id, "sessionId": download.session_id, "direction": "download", "size": download.size, "transferred": download.next_offset, "status": "running" });
+            // 并发多流预读窗口标记（ST12，optional 附加字段）：true = 本任务
+            // 启用了并发预读；缺省（无字段）= 一期单步预取路径，前端零感知。
+            if download.multistream.is_some() {
+                status["multistream"] = json!(true);
+            }
             if download.expand_lzpack {
                 status["compression"] = json!("lzpack");
                 status["ready"] = json!(download.ready);
@@ -15800,6 +15990,7 @@ matrix-ed25519";
                 raw_client: Arc::new(AsyncMutex::new(None)),
                 expand_lzpack: false,
                 prefetch: Arc::new(AsyncMutex::new(None)),
+                multistream: None,
             },
         );
         let no_connection = |_: &str| String::new();
@@ -15912,6 +16103,7 @@ matrix-ed25519";
                     raw_client: Arc::new(AsyncMutex::new(None)),
                     expand_lzpack: false,
                     prefetch: Arc::new(AsyncMutex::new(None)),
+                    multistream: None,
                 },
             );
         }
