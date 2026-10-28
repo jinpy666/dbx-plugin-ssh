@@ -68,7 +68,7 @@ interface DbxPluginApi {
   /** 宿主能力位（Host API 1.2 起）；storage 缺失表示该宿主无持久化桥，clipboard* 在 Host API 1.3 起引入。
    *  ai（Warp AI 对齐批）：宿主 AI 面板桥在位（host.ai.openConversation 可调）；
    *  旧宿主缺省即不支持，消费方经 lib/aiBridge.aiBridgeAvailable 降级。 */
-  readonly capabilities?: { storage?: boolean; clipboardRead?: boolean; clipboardWrite?: boolean; ai?: boolean; aiCompletion?: boolean; aiRecommendations?: boolean };
+  readonly capabilities?: { storage?: boolean; clipboardRead?: boolean; clipboardWrite?: boolean; ai?: boolean; aiCompletion?: boolean; aiRecommendations?: boolean; connectionsApi?: boolean; workbenchTitle?: boolean };
   /** 持久化 UI 状态桥（单值 256 KiB / 总量 1 MiB）；配 capabilities.storage 使用，经 shared/frontend/pluginStorage 读写。 */
   readonly storage?: {
     get(key: string): Promise<unknown>;
@@ -82,6 +82,8 @@ interface DbxPluginApi {
   openWorkbench?(contributionId: string, context?: Record<string, unknown>, options?: { forceNew?: boolean; target?: "tab" }): Promise<void>;
   /** 请宿主按当前最新配置重开连接（含 vault 最新凭据回推）。Host API 1.2+；旧宿主无此方法。 */
   reopenConnection?(connectionId: string): Promise<unknown>;
+  setTitle?(title: string | null): Promise<void>;
+  getTitle?(): Promise<string>;
   sendBinary(channel: string, data: Uint8Array | ArrayBuffer | string): Promise<void>;
   onEvent(listener: (event: DbxPluginEvent) => void): () => void;
   onBinary(listener: (event: DbxPluginBinaryEvent) => void): () => void;

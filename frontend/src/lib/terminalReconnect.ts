@@ -23,17 +23,14 @@ export function isConnectionInactiveError(cause: unknown): boolean {
 }
 
 /**
- * Matches the sidecar's session() / write_terminal() "not found or expired"
- * contract: the session object is gone server-side (host-pushed disconnect,
- * transport drop cleaned up by the read loop, sidecar restart). Callers treat
- * it as terminal for the current session id — sequence replays can never fill
- * their hole and further input frames are swallowed — so the terminal must
- * resync past stuck frames and run the reconnect ladder instead of retrying
- * the dead session.
+ * Matches the sidecar's missing-session contracts: the session object is gone
+ * server-side, or attach cannot find a live session for this workbench after a
+ * host-pushed disconnect, transport cleanup, connection edit, or sidecar restart.
+ * Callers must resync and open a fresh session instead of retrying the dead one.
  */
 export function isSessionGoneError(cause: unknown): boolean {
   const message = cause instanceof Error ? cause.message : String(cause ?? "");
-  return /SSH session was not found/i.test(message);
+  return /SSH session was not found|No live SSH session is attached to this workbench/i.test(message);
 }
 
 export interface ReconnectRestoredNotice {

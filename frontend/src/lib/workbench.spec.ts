@@ -119,6 +119,7 @@ describe("SSH workbench protocol helpers", () => {
     // object is gone: replays can never succeed and input is swallowed.
     expect(isSessionGoneError(new Error("SSH session was not found or expired"))).toBe(true);
     expect(isSessionGoneError("SSH session was not found")).toBe(true);
+    expect(isSessionGoneError(new Error("No live SSH session is attached to this workbench"))).toBe(true);
     // Transient failures keep the plain error banner path.
     expect(isSessionGoneError(new Error("SSH input queue is closed"))).toBe(false);
     expect(isSessionGoneError(new Error("Connection refused by host"))).toBe(false);

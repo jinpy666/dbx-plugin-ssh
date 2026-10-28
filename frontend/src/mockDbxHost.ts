@@ -39,6 +39,7 @@ const freshSessionOpen = fixtureParams.get("fresh") === "1";
 // {type:"env", locale}"语义（真桥无 onLocaleChange 订阅，X-P2/P5 对齐），
 // 供 i18n 切换链的浏览器与单测验证。
 let currentLocale = fixtureParams.get("locale") || "en";
+let mockWorkbenchTitle = "Production SSH";
 // 与 DBX globals.css 的 :root（pearl 浅色）和 .dark 规范块保持一致。
 const light = fixtureParams.get("theme") === "light";
 
@@ -1856,6 +1857,8 @@ window.dbxPlugin = {
     (window as unknown as { __dbxMockOpenWorkbench?: unknown[] }).__dbxMockOpenWorkbench ??= [];
     (window as unknown as { __dbxMockOpenWorkbench: unknown[] }).__dbxMockOpenWorkbench.push({ contributionId, context: hostContext });
   },
+  setTitle: async (title) => { mockWorkbenchTitle = title || "Production SSH"; },
+  getTitle: async () => mockWorkbenchTitle,
   sendBinary: async (channel, data) => {
     if (channel.startsWith("sftp/upload/")) {
       const bytes = typeof data === "string" ? Uint8Array.from(atob(data), (value) => value.charCodeAt(0)) : data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -1948,7 +1951,7 @@ window.dbxPlugin = {
   // 与真实 web 宿主同形由 localStorage 兜底（键名不变；字符串值原样、对象 JSON
   // 编码），刷新/重开不丢——?render=dom / mock 走查依赖该语义；opaque origin
   // 等不可用场景退化为内存 Map。get 未命中返回 null，set(undefined) 归一化为 null。
-  capabilities: { storage: true, ...(aiPanelOn ? { ai: true } : {}), ...(aiCompletionOn ? { aiCompletion: true, aiRecommendations: true } : {}) },
+  capabilities: { storage: true, connectionsApi: true, workbenchTitle: true, ...(aiPanelOn ? { ai: true } : {}), ...(aiCompletionOn ? { aiCompletion: true, aiRecommendations: true } : {}) },
   storage: (() => {
     let ls: Storage | null = null;
     try {

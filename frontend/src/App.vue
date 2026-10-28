@@ -206,6 +206,7 @@ import { registerWatch } from "./lib/watchEdits";
 import { batchTargetLabel } from "./lib/batchSend";
 import { formatLatency, formatAuthMethodLabel, normalizeConnectionPort, normalizeConnectionText, type KnownAuthMethod } from "./lib/connectionInfo";
 import { readPluginMode, readPluginShell, resolveWorkbenchId } from "./lib/pluginContext";
+import { createWorkbenchTitleSync, readListedConnectionName } from "./lib/workbenchTitle";
 import { clampFontSize } from "./lib/terminalZoom";
 import { loadLastConnectParams } from "./lib/connectLastParams";
 import { pluginStore } from "./lib/pluginStore";
@@ -1658,15 +1659,48 @@ const serialInputQueue = createTerminalInputQueue({
 
 const locale = ref("zh-CN");
 const t = (key: string, values: Record<string, string | number> = {}) => workbenchMessage(locale.value, key, values);
-// 宿主用 iframe 的 document.title 命名工作台标签：连接名实时跟随宿主上下文，
-// 未提供名称时回落到本地化的插件名，改名无需重建工作台。
+let syncWorkbenchTitle: ReturnType<typeof createWorkbenchTitleSync> | undefined;
 watch([locale, () => (hostContext.value.connection as { name?: string } | undefined)?.name], ([value, name]) => {
   document.title = name || workbenchMessage(value, "pluginName");
+  if (name && window.dbxPlugin) {
+    syncWorkbenchTitle ??= createWorkbenchTitleSync(window.dbxPlugin);
+    void syncWorkbenchTitle(name);
+  }
 }, { immediate: true });
 // html lang 同步跟随 locale：屏幕阅读器/拼写检查按它选语言，滞留 zh-CN 会让
 // 其他语种读错音（i18n 走查实录：locale=ja 时翻译已切换而 lang 仍为 zh-CN）。
 watch(locale, (value) => { document.documentElement.lang = value; }, { immediate: true });
 const connectionId = computed(() => normalizeConnectionText(hostContext.value.connectionId));
+const CONNECTION_NAME_REFRESH_MS = 1000;
+let connectionNameTimer = 0;
+let connectionNameRefreshInFlight = false;
+
+async function refreshConnectionName(api: DbxPluginApi) {
+  const id = connectionId.value;
+  if (!id || disposed || connectionNameRefreshInFlight || api.capabilities?.connectionsApi !== true) return;
+  connectionNameRefreshInFlight = true;
+  try {
+    const name = readListedConnectionName(await api.request("host.listConnections"), id);
+    if (!name || disposed || id !== connectionId.value) return;
+    const current = hostContext.value.connection;
+    const connection = current && typeof current === "object" && !Array.isArray(current) ? current as Record<string, unknown> : {};
+    if (connection.name === name) return;
+    hostContext.value = { ...hostContext.value, connection: { ...connection, name } };
+  } catch {
+    // 旧宿主或暂时不可用的枚举桥保留上下文里的名称，下一拍自动重试。
+  } finally {
+    connectionNameRefreshInFlight = false;
+  }
+}
+
+function startConnectionNameSync(api: DbxPluginApi) {
+  void refreshConnectionName(api);
+  connectionNameTimer = window.setInterval(() => {
+    if (document.visibilityState === "visible") void refreshConnectionName(api);
+  }, CONNECTION_NAME_REFRESH_MS);
+}
+
+onBeforeUnmount(() => window.clearInterval(connectionNameTimer));
 // Host API 1.1 provides a stable workbenchId in the host context; on 1.0 a
 // locally generated id keeps session scoping per workbench instance (A4 W1
 // helper, spec §11: host-authoritative workbenchId; the fallback covers 1.0
@@ -4311,6 +4345,12 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
   connectCancelled.value = false;
   connectSucceeded.value = false;
   connectLog.push("info", t("connectCard.log.attempt", { attempt: openRetryAttempt + 1 }));
+  // 强制替换已失效的会话时开始一份新的终端记录，不把历次登录欢迎信息
+  // 和旧会话输出继续堆在当前缓冲区里。
+  if (forceNew) {
+    terminal?.clear();
+    resetGutterTimestamps();
+  }
   if (forceNew && session.value) await closeSession(false);
   createTerminal();
   // A retry is only worth it for fast failures (boot-restore races with
@@ -4470,6 +4510,15 @@ async function attachSession(sessionId: string, retryReference: string = initial
     reconnectAttempt.value = 0;
     await afterSessionConnected();
   } catch (cause) {
+    // 编辑连接后宿主会销毁旧会话；此时继续回附没有恢复对象，直接用最新配置
+    // 创建新会话，而不是把 "No live SSH session" 当作终态错误展示。
+    if (!disposed && isSessionGoneError(cause)) {
+      reconnectAttempt.value = 0;
+      reconnectPending.value = false;
+      await requestHostReopenConnection();
+      await openSession(true);
+      return;
+    }
     if (!shouldReattachTerminal({ disposed, state: terminalState.value, expectedSessionId: sessionId, currentSessionId: retryReference })) {
       terminalState.value = "error";
       reconnectPending.value = false;
@@ -8516,6 +8565,7 @@ async function initialize() {
   ]);
   transportReuseState = createSessionTransportReuseState(hostContext.value);
   locale.value = api.locale || "zh-CN";
+  startConnectionNameSync(api);
   // UI 状态恢复必须等 pluginStore 水合（宿主 storage 白名单键异步灌入）：
   // 否则 workbenchUi 镜像与 setup 期的 sftp-pane-open 等键全部读到空档，
   // 布局偏好整组"不持久"（issue #178 的半个根因，另一半是宿主缺桥）。
