@@ -541,7 +541,7 @@ server 连环 15s 超时直至最长 handler 到期；Agent 误判"超时=没跑
    300s 再退出。真机对照：`ssh_exec sleep 15` 运行中 `ping` t+0.0s 即回
    （旧行为需等 15s）。
 2. **`ssh_run_bg` / `ssh_task_status`**（工具 25→27）：nohup 脱离会话启动 +
-   服务器侧 `/tmp/.dbx-ssh-tasks/<taskId>.log`（含 `EXIT_<code>` 完成标记与
+   服务器侧操作系统临时目录下的每任务 `mktemp -d` 目录（含 `EXIT_<code>` 完成标记与
    `.pid` 存活文件），状态轮询跨断线/跨会话。与 `ssh_exec` 同过危险命令确认
    门与只读写门（`is_write_tool` + assess 扩展）。
 3. **pre-exec 断线自动重试**：`run_tool` 兜底分支失败丢池照旧；命令启动前的
@@ -2886,7 +2886,7 @@ churn、安全门对抗输入。**发现即修、修完即回归**，共 7 处�
   maxUploadBytes 交替），每次即时可见；持久化文档 <4 KiB 恒定形状、数据目录
   零新增文件（无逐写累积）；超天花板值仍在 churn 后被拒（clamp 语义不退化）。
 - **run_bg/task_status 离线语义 churn**：任务表本体在**远端主机**
-  （`/tmp/.dbx-ssh-tasks` nohup 日志），进程内无注册表可泄漏——离线可测面
+  （OS 临时目录下 `mktemp -d` 的 nohup 日志），进程内无注册表可泄漏——离线可测面
   为两个输出解析器，300 轮 start/running/done/missing 循环解析恒等（如实
   说明：远端表不属本进程泄漏面）。
 
@@ -2952,8 +2952,8 @@ churn、安全门对抗输入。**发现即修、修完即回归**，共 7 处�
   恰含灾难串的命令会要求一次确认——拦截代价是一次显式确认，方向安全。
 - smoke `protocol robustness` 段的 select 看门狗为 POSIX 实现（macOS/Linux
   验证通过；Windows 侧 smoke 从未在族内跑过）。
-- run_bg 远端任务表（`/tmp/.dbx-ssh-tasks`）残留清理属宿主运维面，进程内
-  无对应状态可测。
+- run_bg 远端任务表（OS 临时目录下 `mktemp -d` 目录）残留清理由操作系统
+  临时目录策略承担，进程内无对应状态可测。
 
 ## 第六轮（2026-09-13）schema 收敛：description 回填 / 缺参枚举 / 单行上限
 

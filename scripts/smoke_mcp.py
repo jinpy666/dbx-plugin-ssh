@@ -286,9 +286,15 @@ def live_round_trip(proc: subprocess.Popen, args, id_base: int) -> None:
     task = call_tool(proc, next_id, "ssh_run_bg", {
         **connection, "command": "echo bg-probe-start && sleep 2 && echo bg-probe-done",
     })
-    # SEC-4: the log lives under the remote user's $HOME/.dbx-ssh-tasks
-    # (0700, out of co-tenant reach), named by taskId — never /tmp.
-    assert task["logPath"].endswith(f"/.dbx-ssh-tasks/{task['taskId']}.log"), task
+    # The staging dir is a per-task `mktemp -d` workspace inside the remote
+    # temp directory (0700, random name): the server's own tmp reaper
+    # reclaims it once the log goes stale, so $HOME never accumulates task
+    # files. The random name also keeps a co-tenant from pre-creating or
+    # symlink-baiting the path.
+    log_path = task["logPath"]
+    assert "/dbx-ssh-tasks." in log_path, task
+    assert log_path.endswith(f"/{task['taskId']}.log"), task
+    assert not log_path.startswith("~"), task
     assert task["pollWith"] == "ssh_task_status", task
     status = {}
     for _ in range(20):
@@ -910,7 +916,7 @@ def dead_bridge_section(args: argparse.Namespace) -> None:
             ("ssh_exec", {"connectionId": "ghost-1", "command": "echo hi"}),
             ("sftp_stat", {"connectionId": "ghost-1", "path": "/tmp"}),
             ("ssh_task_status", {
-                "connectionId": "ghost-1", "logPath": "/tmp/.dbx-ssh-tasks/x.log",
+                "connectionId": "ghost-1", "logPath": "/tmp/dbx-ssh-tasks.AbCdEf1234/x.log",
             }),
         ):
             error = call_tool_error(proc, next_id, tool, tool_args)

@@ -6,6 +6,26 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+- **`ssh_run_bg` 后端任务日志改落操作系统临时目录**。此前后台任务把日志和 pid 文件写在服务器
+  `~/.dbx-ssh-tasks/`，任务跑完也不回收，长期使用会在远端家目录堆积垃圾。现在每次任务用
+  `mktemp -d` 在操作系统临时目录（`$TMPDIR`，默认 `/tmp`）下建一个 0700、随机名的私有目录，
+  日志落在其中；这类目录由系统自身的临时目录清理策略（systemd-tmpfiles / macOS periodic /
+  tmpwatch）按保留期自动回收。随机目录名同时保留了原有的抗预占语义——共租用户无法事先创建或
+  用符号链接劫持任务路径（早前把目录挪进家目录正是为了这一点）。临时目录不可用的主机仍回退到
+  家目录下的 `mktemp -d` 目录。响应新增说明：远端未回显 `LOG=` 时 `logPath` 为空并附
+  `warning` 字段，不再回落到一个可能不存在的猜测路径。
+  **`ssh_run_bg` task logs now land in the OS temp directory.** Background tasks used to write
+  their log and pid file to `~/.dbx-ssh-tasks/` on the remote host and never cleaned up, so
+  long-term use left clutter in the remote home directory. Each task now gets a `mktemp -d`
+  directory (mode 0700, random name) under the OS temp dir (`$TMPDIR`, `/tmp` by default) and
+  logs into it, so the server's own tmp reaper (systemd-tmpfiles, macOS periodic, tmpwatch)
+  reclaims it on its retention schedule. The random directory name preserves the
+  anti-preemption property that motivated moving into `$HOME` earlier — a co-tenant cannot
+  pre-create or symlink-bait the task path. Hosts where the temp dir is unusable still fall
+  back to a `mktemp -d` directory under `$HOME`. The response also changes shape when the
+  remote never echoes `LOG=`: `logPath` is empty and a `warning` field explains why, instead
+  of falling back to a guessed path that may not exist.
+
 ## [0.7.11-beta.2] — 2026-10-28
 
 > 预发布基线说明延续 0.7.11-beta.1：调度任务（task-provider）功能声明继续摘除——DBX 上游尚未发布宿主侧 task-provider 能力。
