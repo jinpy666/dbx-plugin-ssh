@@ -501,7 +501,12 @@ def main() -> None:
         print("protocol negotiation ok: version echo + server/discover")
 
         send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        tools = recv(proc, 2)["result"]["tools"]
+        listing = recv(proc, 2)["result"]
+        # MCP 2026-07-28 cacheable list envelope: ttlMs/cacheScope are
+        # mandatory there (strict client validation, no fallback);
+        # 0/private = never cache — connection state changes out-of-band.
+        assert listing["ttlMs"] == 0 and listing["cacheScope"] == "private", listing
+        tools = listing["tools"]
         names = [tool["name"] for tool in tools]
         missing = [name for name in EXPECTED_TOOLS if name not in names]
         assert not missing, f"missing tools: {missing}"
