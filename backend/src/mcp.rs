@@ -1783,7 +1783,7 @@ impl McpState {
     }
 
     /// `ssh_run_bg`: stages a long-running command detached on the remote
-    /// host (nohup, output appended to `~/.dbx-ssh-tasks/<taskId>.log`)
+    /// host (nohup, output appended to `<tempdir>/dbx-ssh-tasks.*/<taskId>.log`)
     /// and returns immediately. The server-side log file is the task's
     /// durable record: status polling reattaches over a fresh connection, so
     /// flapping networks, disconnects, and MCP-host wait caps never lose
@@ -1797,11 +1797,21 @@ impl McpState {
         let task_id = format!("bg-{stamp}-{}", std::process::id() % 100_000);
         // Single-quote escape for embedding inside the remote `sh -c '...'`.
         let escaped = command.replace('\'', "'\\''");
-        // The task dir lives under $HOME (never a shared /tmp path another
-        // local user could pre-create or symlink-bait) and is created 0700 so
-        // task logs/pids stay private to the remote account.
+        // The task workspace lives in the remote OS temp directory so the
+        // server's own tmp reaper (systemd-tmpfiles, macOS periodic, tmpwatch)
+        // reclaims it once the job is done and the log goes stale — nothing
+        // accumulates in $HOME. `mktemp -d` creates the directory atomically
+        // under a random name with mode 0700, so a co-tenant on a shared /tmp
+        // can neither pre-create nor symlink-bait the task path (the SEC-4
+        // concern that had pushed an earlier design into $HOME). $HOME is
+        // kept only as a fallback for hosts where the temp dir is unusable.
+        // $TMPDIR often ends in a slash (macOS), so strip it before joining
+        // rather than emitting a `//` in the user-visible logPath.
         let remote = format!(
-            "d=\"$HOME/.dbx-ssh-tasks\"; mkdir -p -m 700 \"$d\" || exit 3; f=\"$d/{task_id}.log\"; : > \"$f\"; \
+            "t=\"${{TMPDIR:-/tmp}}\"; t=\"${{t%/}}\"; \
+             d=$(mktemp -d \"$t/dbx-ssh-tasks.XXXXXXXXXX\" 2>/dev/null) \
+               || d=$(mktemp -d \"$HOME/.dbx-ssh-tasks.XXXXXXXXXX\") || exit 3; \
+             f=\"$d/{task_id}.log\"; : > \"$f\"; \
              nohup sh -c '{escaped}; s=$?; echo EXIT_$s' >> \"$f\" 2>&1 & p=$!; \
              echo \"$p\" > \"$f.pid\"; echo \"PID=$p\"; echo \"LOG=$f\""
         );
@@ -1815,15 +1825,23 @@ impl McpState {
                 outcome.exit_code, outcome.output
             ));
         }
-        let default_log = format!("~/.dbx-ssh-tasks/{task_id}.log");
-        let (pid, log_path) = parse_bg_start_output(&outcome.output, default_log);
-        Ok(json!({
+        // The directory name is random now, so there is no derivable
+        // fallback path: an empty logPath plus a warning is honest, where
+        // guessing a path would make the next probe report MISSING.
+        let (pid, log_path) = parse_bg_start_output(&outcome.output, String::new());
+        let mut payload = json!({
             "taskId": task_id,
             "pid": pid,
             "logPath": log_path,
             "pollWith": "ssh_task_status",
-            "note": "Running detached (nohup). Poll ssh_task_status(logPath); output survives disconnects and session restarts.",
-        }))
+            "note": "Running detached (nohup) in the server's temp directory. Poll ssh_task_status(logPath); output survives disconnects and session restarts, and the OS reclaims the log directory on its own tmp cleanup schedule.",
+        });
+        if payload["logPath"].as_str().is_some_and(str::is_empty) {
+            payload["warning"] = json!(
+                "The remote did not echo LOG=; the task is running but its log path is unknown. Look for the newest dbx-ssh-tasks.* directory in the server's temp directory."
+            );
+        }
+        Ok(payload)
     }
 
     /// `ssh_task_status`: polls a task started by `ssh_run_bg` through its
@@ -4198,8 +4216,10 @@ fn stored_connection_from_arguments(arguments: &Value) -> Result<StoredConnectio
 }
 
 /// Parses the `PID=` / `LOG=` lines emitted by the `ssh_run_bg` staging
-/// command. Falls back to the derived default log path when the remote
-/// never echoed `LOG=`.
+/// command. Falls back to `default_log` when the remote never echoed `LOG=`;
+/// the staging directory is a random `mktemp -d` name, so callers that
+/// cannot know it in advance pass an empty default and surface the missing
+/// path to the caller instead of guessing.
 fn parse_bg_start_output(output: &str, default_log: String) -> (String, String) {
     let mut pid = String::new();
     let mut log_path = default_log;
@@ -4472,7 +4492,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "ssh_run_bg",
-            "description": "Start a long-running command detached on the remote host (nohup; output appended to ~/.dbx-ssh-tasks/<taskId>.log) and return immediately with taskId/pid/logPath. Survives disconnects, host wait caps, and session restarts because the output lives on the server. Poll with ssh_task_status(logPath). Same safety gates as ssh_exec: destructive patterns need confirmDestructive: true, read-only connections refuse it.",
+            "description": "Start a long-running command detached on the remote host (nohup; output appended to a per-task log inside the server's temp directory, e.g. /tmp/dbx-ssh-tasks.XXXXXXXXXX/<taskId>.log) and return immediately with taskId/pid/logPath. The task directory is created with mktemp -d (mode 0700, random name) so the server's own tmp cleanup reclaims it automatically once the job is done. Survives disconnects, host wait caps, and session restarts because the output lives on the server. Poll with ssh_task_status(logPath). Same safety gates as ssh_exec: destructive patterns need confirmDestructive: true, read-only connections refuse it.",
             "inputSchema": {
                 "type": "object",
                 "properties": connection_properties(&[
@@ -4998,17 +5018,23 @@ mod tests {
     #[test]
     fn parses_bg_start_markers_with_default_log_fallback() {
         let (pid, log) = parse_bg_start_output(
-            "PID=4242\nLOG=/tmp/.dbx-ssh-tasks/bg-1-2.log\n",
-            "/tmp/.dbx-ssh-tasks/default.log".to_string(),
+            "PID=4242\nLOG=/tmp/dbx-ssh-tasks.AbCdEf1234/bg-1-2.log\n",
+            "/tmp/dbx-ssh-tasks.default/bg-1-2.log".to_string(),
         );
         assert_eq!(pid, "4242");
-        assert_eq!(log, "/tmp/.dbx-ssh-tasks/bg-1-2.log");
+        assert_eq!(log, "/tmp/dbx-ssh-tasks.AbCdEf1234/bg-1-2.log");
 
         // A remote without echo output (busybox edge) still yields the
-        // derived default path.
-        let (pid, log) = parse_bg_start_output("", "/tmp/.dbx-ssh-tasks/x.log".to_string());
+        // caller-supplied default rather than a guess.
+        let (pid, log) = parse_bg_start_output("", "/tmp/dbx-ssh-tasks.x/x.log".to_string());
         assert_eq!(pid, "");
-        assert_eq!(log, "/tmp/.dbx-ssh-tasks/x.log");
+        assert_eq!(log, "/tmp/dbx-ssh-tasks.x/x.log");
+
+        // The staging dir name is random, so the production call site passes
+        // an empty default and reports the unknown path instead of guessing.
+        let (pid, log) = parse_bg_start_output("PID=4242\n", String::new());
+        assert_eq!(pid, "4242");
+        assert!(log.is_empty());
     }
 
     #[test]
@@ -6942,21 +6968,21 @@ mod tests {
 
     /// Reliability round 5 (churn): the `ssh_run_bg` / `ssh_task_status`
     /// offline surface is the two output parsers (the task table itself
-    /// lives on the remote host under ~/.dbx-ssh-tasks — there is no
+    /// lives on the remote host in its temp directory — there is no
     /// in-process registry to leak). 300 start→running→done→missing cycles
     /// must parse identically every time.
     #[test]
     fn bg_task_parsers_stay_stable_under_churn() {
-        let start = "PID=4242\nLOG=/tmp/.dbx-ssh-tasks/bg-1.log";
+        let start = "PID=4242\nLOG=/tmp/dbx-ssh-tasks.AbCdEf1234/bg-1.log";
         let running = "STATE=RUNNING\nPID_ALIVE=yes\n===TAIL===\nworking\n";
         let done = "STATE=DONE\nCODE=EXIT_0\nPID_ALIVE=no\n===TAIL===\nEXIT_0\n";
         let missing = "STATE=MISSING\n===TAIL===\n";
         for cycle in 0..300 {
             assert_eq!(
-                parse_bg_start_output(start, "/tmp/.dbx-ssh-tasks/default.log".to_string()),
+                parse_bg_start_output(start, String::new()),
                 (
                     "4242".to_string(),
-                    "/tmp/.dbx-ssh-tasks/bg-1.log".to_string()
+                    "/tmp/dbx-ssh-tasks.AbCdEf1234/bg-1.log".to_string()
                 ),
                 "bg start drifted at cycle {cycle}"
             );
@@ -7868,7 +7894,7 @@ mod tests {
                     json!({ "connectionId": "ghost", "command": "uptime" })
                 }
                 "ssh_task_status" => {
-                    json!({ "connectionId": "ghost", "logPath": "/tmp/.dbx-ssh-tasks/x.log" })
+                    json!({ "connectionId": "ghost", "logPath": "/tmp/dbx-ssh-tasks.AbCdEf1234/x.log" })
                 }
                 "sftp_upload" => json!({ "connectionId": "ghost",
                     "localPath": "/tmp/in", "remotePath": "/tmp/out" }),

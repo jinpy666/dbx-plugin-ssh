@@ -162,7 +162,7 @@ MCP 调用方是 LLM，`sftp_upload`（本地读）与 `sftp_download`（本地�
 | --- | --- |
 | `ssh_list_connections` | 列出已保存连接的元数据（id / name / host / port / username / authentication / readOnly），参数无；**仅元数据，任何密钥只出布尔标志位，绝不出值**。数据源为 DBX 应用本地桥（`source: "dbx-app-bridge"`）；桥不可用或应用版本过旧时降级为"仅本会话注册表"（`source: "session-registry"`）并附 `note` 字段说明（详见「方式二」的「connectionId 从哪来」） |
 | `ssh_exec` / `ssh_exec_sudo` | 非交互远程命令；sudo 版注入密码并自动应答 2FA/TOTP。TOTP 支持多密钥（换行/分号分隔）：跨调用自动轮换，优先未过期且未使用过的验证码，重放窗口内已提交的码不再注入。两者均受危险命令确认门约束（见下节），只读连接上 `ssh_exec` 仅放行白名单巡检命令，配置了连接 sudo 白名单时特权命令还须命中白名单条目（见下节）。两者均支持可选 `runInTerminal`（见「AI 终端同步执行」）；stdio 模式传 `true` 且带 `connectionId` 时自动转发到运行中的 DBX app（未运行则唤起），在 app 的可见终端里执行。**超过 ~10 秒的命令请改用 `ssh_run_bg`**（宿主等待上限与防重复执行见「长任务与断线恢复」） |
-| `ssh_run_bg` | 把长命令以 nohup 方式脱离会话启动，立即返回 `taskId`/`pid`/`logPath`；输出落在服务器 `/tmp/.dbx-ssh-tasks/<taskId>.log`，断线、超时、换会话均不丢。与 `ssh_exec` 同受危险命令确认门与只读写门约束 |
+| `ssh_run_bg` | 把长命令以 nohup 方式脱离会话启动，立即返回 `taskId`/`pid`/`logPath`；输出落在服务器**操作系统临时目录**下的每任务目录（`mktemp -d`，如 `/tmp/dbx-ssh-tasks.AbCdEf1234/<taskId>.log`，0700 随机名），断线、超时、换会话均不丢，且由操作系统自身的临时目录清理策略（systemd-tmpfiles / macOS periodic / tmpwatch）回收，不在家目录堆积。与 `ssh_exec` 同受危险命令确认门与只读写门约束 |
 | `ssh_multi_exec` | 一条命令在多个**已保存连接**上聚合执行并逐目标回结果（隐藏通道语义，不经可见终端/agentTerminalMode）。`targets`：1–10 个连接引用（connectionId/connectionName），保序去重，任一未解析整体拒绝；`mode` parallel（默认，并发）/ sequential（顺序）；`stopOnError` 仅 sequential 生效（首败即停）；`confirmDestructive` 一次覆盖全部目标的灾难门；**不提供 sudo**（提权走单目标 `ssh_exec_sudo`）。逐目标独立过只读白名单门（连接只读时仅放行巡检命令）。stdio 独立模式无注册表，targets 解析即报引导 |
 | `ssh_terminal_input` | 向连接的**存活 DBX 终端**注入原始输入（交互应答 / Ctrl+C / 方向键语义；终端必须已打开）。`\n`/`\r\n` 折叠为 Enter，NUL 剥离，8 KiB 截断；`appendNewline` 默认 false（交互应答自带 `\r`，要执行键入命令置 true）。**输出不收集**——终端本身可见，要收集输出用 `ssh_exec{runInTerminal:true}`。门禁：只读连接仅放行纯控制序列；灾难行需 `confirmDestructive: true`（只读上一律拒绝）；sudo 行受连接 sudo 白名单约束。stdio 模式无工作台 PTY，调用报引导错误 |
 | `ssh_task_status` | 轮询 `ssh_run_bg` 任务：`state`（running/done/missing）、完成后的 `exitCode`、pid 存活状态与输出尾部（`tailBytes`，200–16000）。通过服务器侧日志文件查询，天然跨连接/跨会话 |
@@ -316,7 +316,8 @@ confirm fail-closed 与 scope fail-closed（含 list 在作用域下可用）。
    在途请求 drain 至多 300 秒再退出。响应可能乱序返回，JSON-RPC 以 id 关联，
    语义不变。
 2. **后台任务工具**：`ssh_run_bg` + `ssh_task_status` 把"nohup + 日志文件 +
-   轮询"产品化。日志与 pid 文件存放在服务器 `/tmp/.dbx-ssh-tasks/`，是任务的
+   轮询"产品化。日志与 pid 文件存放在服务器**操作系统临时目录**下的每任务
+   `mktemp -d` 目录（0700、随机名，默认随系统 tmp 清理策略回收），是任务的
    持久记录——宿主放弃等待、连接反复断开、sidecar 重启、换一个会话，都能重新
    连上查询进度与最终退出码。`run_to_completion` 超时错误文本会提示"命令可能
    仍在远程运行"，引导调用方先查证再重试，避免双实例互等包管理器锁。
