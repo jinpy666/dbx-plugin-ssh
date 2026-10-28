@@ -2079,6 +2079,11 @@ const ALT_SCREEN_MODES: [u16; 3] = [47, 1047, 1049];
 /// terminal-mode switch split by the transport is never lost.
 const MAX_ESCAPE_CARRY: usize = 32;
 
+/// Longest input line kept for the sudo-context check. Real command lines are
+/// far shorter; the cap only keeps a paste of a huge blob from growing the
+/// watcher's buffer without bound.
+const MAX_INPUT_LINE_LEN: usize = 4096;
+
 /// Returns the last visible line of a chunk when the chunk still looks like a
 /// live prompt: few lines, prompt starting at column 0. Screen dumps are
 /// rejected here so their content can never be mistaken for a prompt.
@@ -2102,16 +2107,27 @@ pub(crate) fn prompt_tail_line(normalized: &str) -> Option<&str> {
     Some(last)
 }
 
-/// True when the chunk's last line is shaped like a password prompt: it ends
-/// with the prompt colon and opens with one of the built-in password patterns.
-/// A YAML `password: value` key, a grep hit or a log line ends with its value
-/// (or is indented), so it never matches.
-pub(crate) fn is_password_prompt_line(normalized: &str) -> bool {
-    let Some(line) = prompt_tail_line(normalized) else {
-        return false;
-    };
+/// How much context a password prompt line carries on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PasswordPromptShape {
+    /// sudo names itself: `[sudo] password for <user>:`. Self-identifying, so
+    /// it can be answered on sight.
+    SudoNamed,
+    /// A bare `password:` / `passphrase:` / `密码:` line. macOS sudo and
+    /// passphrase readers print exactly this, but so do `docker login`,
+    /// `passwd` and every other password consumer — the text alone cannot
+    /// tell them apart, so this shape only counts right after a sudo command.
+    Bare,
+}
+
+/// Classifies the chunk's last line as a password prompt when it ends with the
+/// prompt colon and opens with one of the built-in password patterns. A YAML
+/// `password: value` key, a grep hit or a log line ends with its value (or is
+/// indented), so it never matches.
+pub(crate) fn password_prompt_shape(normalized: &str) -> Option<PasswordPromptShape> {
+    let line = prompt_tail_line(normalized)?;
     if !(line.ends_with(':') || line.ends_with('：')) {
-        return false;
+        return None;
     }
     let lower = line.to_lowercase();
     // sudo names its own prompt and may follow the lecture sentence, so an
@@ -2119,11 +2135,265 @@ pub(crate) fn is_password_prompt_line(normalized: &str) -> bool {
     // have to open the line — prompt column 0 — so a nested YAML key, a log
     // continuation or a diff hunk never qualifies.
     if lower.contains("[sudo] password for") {
-        return true;
+        return Some(PasswordPromptShape::SudoNamed);
     }
     PASSWORD_PROMPT_PATTERS
         .iter()
         .any(|pattern| lower.starts_with(pattern))
+        .then_some(PasswordPromptShape::Bare)
+}
+
+/// Shell wrappers that prefix a real command without becoming it. Their own
+/// arguments (a duration, a nice level) still need skipping, which
+/// [`next_command_word`] handles.
+fn is_command_word_wrapper(word: &str) -> bool {
+    matches!(
+        word,
+        "command"
+            | "nohup"
+            | "exec"
+            | "time"
+            | "builtin"
+            | "env"
+            | "nice"
+            | "ionice"
+            | "timeout"
+            | "setsid"
+            | "stdbuf"
+            | "unbuffer"
+            | "chronic"
+            | "eatmydata"
+    )
+}
+
+/// True when a `NAME=value` word is a leading environment assignment.
+fn is_env_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && !name.starts_with(|ch: char| ch.is_ascii_digit())
+}
+
+/// True when a token is a wrapper's own argument rather than the command it
+/// wraps: an option (`-n`, `--preserve-status`) or a bare duration/count
+/// (`10s`, `5`, `0.5`).
+fn is_wrapper_argument(word: &str) -> bool {
+    if word.starts_with('-') {
+        return true;
+    }
+    word.chars()
+        .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | 's' | 'm' | 'h' | 'd'))
+        && word.chars().any(|ch| ch.is_ascii_digit())
+}
+
+/// Strips quotes from one token so `"sudo"` and `'sudo'` compare equal.
+fn unquote(word: &str) -> &str {
+    word.trim_matches(|ch| matches!(ch, '\'' | '"'))
+}
+
+/// True when a command word is `sudo`, including path-qualified forms
+/// (`/usr/bin/sudo`, `./sudo`).
+fn is_sudo_command(word: &str) -> bool {
+    let word = unquote(word);
+    word == "sudo"
+        || word
+            .strip_suffix("/sudo")
+            .is_some_and(|prefix| !prefix.is_empty())
+}
+
+/// Depth cap for nested shells/substitutions so pathological input cannot
+/// recurse without bound.
+const MAX_COMMAND_NESTING: usize = 4;
+
+/// Splits a command line into the segments a shell would run, breaking at
+/// top-level `;`, `&`, `|`, `&&`, `||`, newlines and subshell parentheses.
+/// Quotes are respected so `sh -c 'a; b'` stays one segment.
+fn split_shell_segments(line: &str, out: &mut Vec<String>) {
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(active) = quote {
+            current.push(ch);
+            if ch == active {
+                quote = None;
+            } else if ch == '\\' && active == '"' {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            ';' | '&' | '|' | '\n' | '(' | ')' => {
+                // Collapse `&&`/`||`: the second character is the same
+                // separator and would only produce an empty segment.
+                if matches!(ch, '&' | '|') && chars.peek() == Some(&ch) {
+                    chars.next();
+                }
+                let segment = current.trim();
+                if !segment.is_empty() {
+                    out.push(segment.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let segment = current.trim();
+    if !segment.is_empty() {
+        out.push(segment.to_string());
+    }
+}
+
+/// Returns the leading `NAME=value` / wrapper tokens' remainder: the command
+/// word of a segment, plus whatever follows it.
+fn command_word_and_rest(segment: &str) -> Option<(&str, &str)> {
+    let mut rest = segment.trim();
+    loop {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let word = parts.next()?;
+        let tail = parts.next().unwrap_or("").trim_start();
+        if word.is_empty() {
+            return None;
+        }
+        let bare = unquote(word.trim_start_matches('\\'));
+        if is_env_assignment(bare) {
+            rest = tail;
+            continue;
+        }
+        if is_command_word_wrapper(bare) {
+            // Skip the wrapper's own arguments before the wrapped command.
+            let mut remaining = tail;
+            loop {
+                let mut inner = remaining.splitn(2, char::is_whitespace);
+                let next = inner.next().unwrap_or("");
+                if next.is_empty() {
+                    return None;
+                }
+                if is_wrapper_argument(unquote(next)) {
+                    remaining = inner.next().unwrap_or("").trim_start();
+                    continue;
+                }
+                // `timeout 10s nice -n 5 sudo x`: recurse through the chain.
+                break;
+            }
+            rest = remaining;
+            continue;
+        }
+        return Some((bare, tail));
+    }
+}
+
+/// Extracts `-c` payloads and `$(…)` / backtick substitutions from a segment
+/// so their inner command lines get judged too.
+fn nested_command_strings(segment: &str) -> Vec<String> {
+    let mut nested = Vec::new();
+    let mut after_c = false;
+    for token in segment.split_whitespace() {
+        if after_c {
+            nested.push(unquote(token).to_string());
+            after_c = false;
+            continue;
+        }
+        if token == "-c" {
+            after_c = true;
+            continue;
+        }
+        // Combined short options (`bash -lc "…"`, `bash -ec "…"`): the `-c`
+        // letter inside the bundle still makes its next argument a script.
+        if let Some(bundle) = token.strip_prefix('-') {
+            if !bundle.starts_with('-') && bundle.chars().any(|ch| ch == 'c') {
+                after_c = true;
+            }
+        }
+    }
+    // Command substitution: `$(...)` and `` `...` ``.
+    let mut rest = segment;
+    while let Some(start) = rest.find("$(") {
+        let after = &rest[start + 2..];
+        let mut depth = 1usize;
+        let mut end = None;
+        for (index, ch) in after.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        nested.push(after[..end].to_string());
+        rest = &after[end + 1..];
+    }
+    let mut backtick_rest = segment;
+    while let Some(start) = backtick_rest.find('`') {
+        let after = &backtick_rest[start + 1..];
+        let Some(end) = after.find('`') else { break };
+        nested.push(after[..end].to_string());
+        backtick_rest = &after[end + 1..];
+    }
+    nested
+}
+
+/// True when any command on the submitted input line is a sudo invocation.
+///
+/// This is the general rule behind in-terminal Quick Sudo: a bare `Password:`
+/// prompt is answered only when sudo is what the operator actually started.
+/// It is deliberately a *command* question, not a tool list — `podman login`,
+/// `gh auth login`, `mysql -p`, `psql`, `ssh-add`, `gpg`, `passwd` and every
+/// other password consumer are excluded by the same rule, and any new tool is
+/// covered without touching this list.
+///
+/// Separators, wrappers and nesting are followed so the common real-world
+/// spellings all arm the watcher (`make && sudo make install`,
+/// `timeout 30 sudo x`, `sh -c 'sudo ls'`, `$(which sudo) -v`), while a mere
+/// mention does not (`grep sudo log`, `echo sudo`, `docker login sudo.example.com`).
+pub(crate) fn submitted_command_uses_sudo(line: &str) -> bool {
+    fn scan(line: &str, depth: usize) -> bool {
+        if depth > MAX_COMMAND_NESTING {
+            return false;
+        }
+        let mut segments = Vec::new();
+        split_shell_segments(line, &mut segments);
+        for segment in &segments {
+            if let Some((word, _rest)) = command_word_and_rest(segment) {
+                if is_sudo_command(word) {
+                    return true;
+                }
+            }
+            // Scripts handed to a shell (`sh -c 'sudo ls'`) and command
+            // substitutions run commands of their own, wherever they appear.
+            for nested in nested_command_strings(segment) {
+                if scan(&nested, depth + 1) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    scan(line, 0)
+}
+
+/// True when a connection's `remote_command` runs sudo. That command replaces
+/// the interactive shell, so the watcher never sees a typed line and has to be
+/// seeded from the configuration instead. Judged by the same parser as typed
+/// input, so a mere mention (`echo sudo`) does not arm the watcher.
+pub(crate) fn remote_command_invokes_sudo(command: &str) -> bool {
+    submitted_command_uses_sudo(command)
 }
 
 /// What the state machine decided to type into the terminal.
@@ -2143,6 +2413,12 @@ pub struct TerminalAutoSudo {
     sudo_pending: bool,
     password_sent: bool,
     otp_sent: bool,
+    /// True while the command the user last submitted was a sudo invocation,
+    /// so a bare `Password:` prompt belongs to sudo. `docker login`, `passwd`
+    /// and `ssh-add` print the same line and must stay untouched.
+    sudo_context: bool,
+    /// Input of the line still being typed (no terminator seen yet).
+    input_line: String,
     /// 推迟的 OTP 应答（并发同靶场景）：同一 otp_ledger_scope（user@host:port）
     /// 的多个终端会话几乎同时弹出 OTP 提示时，当前窗口唯一的码已被先到的
     /// 会话提交，重放保护会拒绝重复注入——后到的提示不应就此晾死，而是
@@ -2164,6 +2440,8 @@ impl TerminalAutoSudo {
             sudo_pending: false,
             password_sent: false,
             otp_sent: false,
+            sudo_context: false,
+            input_line: String::new(),
             otp_deferred_kind: None,
             otp_deferred_until: None,
             alt_screen: false,
@@ -2238,6 +2516,70 @@ impl TerminalAutoSudo {
         }
     }
 
+    /// Seeds the sudo context for sessions whose command comes from the
+    /// connection instead of the keyboard (`remote_command`, e.g. `sudo -i`):
+    /// there is no submitted input line to derive it from.
+    pub fn seed_sudo_context(&mut self, active: bool) {
+        self.sudo_context = active;
+    }
+
+    /// Records keystrokes typed by the user so a submitted command line can
+    /// tell sudo's bare `Password:` prompt from every other program's. Only
+    /// real operator input reaches this: the watcher's own answers are written
+    /// straight to the channel, never back through the input queue.
+    pub fn note_input(&mut self, data: &[u8]) {
+        // Escape sequences (arrows, function keys) only move the cursor or
+        // edit the line, so their effect cannot be reconstructed reliably —
+        // drop them and keep the plain text. A line the user edited with the
+        // cursor keys may therefore be misread, but it errs toward "not sudo",
+        // which only costs a manual password entry.
+        let text = String::from_utf8_lossy(data);
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\r' | '\n' => self.commit_input_line(),
+                '\x03' | '\x15' => self.input_line.clear(),
+                '\x7f' | '\x08' => {
+                    self.input_line.pop();
+                }
+                '\x1b' => {
+                    // CSI: `ESC [ params final`; SS3: `ESC O char`.
+                    match chars.peek() {
+                        Some('[') => {
+                            chars.next();
+                            for param in chars.by_ref() {
+                                if ('\x40'..='\x7e').contains(&param) {
+                                    break;
+                                }
+                            }
+                        }
+                        Some('O') => {
+                            chars.next();
+                            chars.next();
+                        }
+                        _ => {}
+                    }
+                }
+                control if control.is_control() => {}
+                printable => {
+                    if self.input_line.len() < MAX_INPUT_LINE_LEN {
+                        self.input_line.push(printable);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Evaluates the finished input line for the next prompt classification.
+    fn commit_input_line(&mut self) {
+        let line = std::mem::take(&mut self.input_line);
+        if line.trim().is_empty() {
+            // A bare Enter on the previous prompt is not a command.
+            return;
+        }
+        self.sudo_context = submitted_command_uses_sudo(&line);
+    }
+
     /// Feeds one terminal output chunk and returns the answer to type back
     /// (without the carriage return), if any prompt was answered.
     pub fn observe(&mut self, chunk: &str) -> Option<(AutoSudoKind, String)> {
@@ -2263,6 +2605,9 @@ impl TerminalAutoSudo {
             self.otp_sent = false;
             self.otp_deferred_kind = None;
             self.otp_deferred_until = None;
+            // The submitted command has finished: whatever it asked for is
+            // answered, and the next prompt belongs to a new program.
+            self.sudo_context = false;
             return None;
         }
         let lower = normalized.to_lowercase();
@@ -2274,7 +2619,28 @@ impl TerminalAutoSudo {
         // would move an indented file line into the prompt column.
         let shape_text = strip_ansi_control_sequences(&chunk.replace('\r', "\n"));
         let prompt_line = prompt_tail_line(&shape_text).is_some();
-        let password_prompt = is_password_prompt_line(&shape_text);
+        let password_shape = password_prompt_shape(&shape_text);
+        // sudo is the only program whose password prompt the watcher may answer
+        // from text alone: `[sudo] password for` names itself. A bare
+        // `Password:` line is equally what `docker login`, `podman login`,
+        // `passwd`, `ssh-add` and every other password consumer print, so it
+        // counts only while the command the user just submitted was a sudo
+        // invocation.
+        let password_prompt = match password_shape {
+            Some(PasswordPromptShape::SudoNamed) => true,
+            Some(PasswordPromptShape::Bare) => {
+                if !self.sudo_context && !auth.password.is_empty() {
+                    // Make "why wasn't my password typed?" answerable from the
+                    // log: the watcher saw a bare prompt but deliberately left
+                    // it to the program the operator started.
+                    eprintln!(
+                        "[ssh] terminal auto-sudo: bare password prompt left to the running program (not a sudo command; configure a password prompt hint if this one really is sudo)"
+                    );
+                }
+                self.sudo_context
+            }
+            None => false,
+        };
 
         if self.sudo_pending {
             match kind {
@@ -2308,6 +2674,12 @@ impl TerminalAutoSudo {
             }
             self.sudo_pending = true;
             self.password_sent = true;
+            // One-shot: the context was earned by the submitted command and is
+            // spent here. A later program started from a shell prompt must earn
+            // its own, or `sudo -v && docker login` would leave it armed.
+            if matches!(password_shape, Some(PasswordPromptShape::Bare)) {
+                self.sudo_context = false;
+            }
             return Some((AutoSudoKind::Password, auth.password.clone()));
         }
 
@@ -3222,9 +3594,204 @@ mod tests {
         // A cat/grep dump is long, so it cannot be a live prompt.
         let dump = "spring:\n  datasource:\n    url: jdbc:mysql://db:3306/app\n    username: app\n    password:\n    driver: com.zaxxer.hikari.HikariDataSource\n    lazy: true\n    pool-name: main\npassword:\n";
         assert_eq!(auto.observe(dump), None);
+        // A standalone bare prompt with no sudo command behind it is another
+        // program's (docker login, passwd): the watcher stays out.
+        auto.note_input(b"cat conf.yml\r");
+        assert_eq!(auto.observe("Password:\n"), None);
         // A real prompt, even behind the echoed command, still answers.
         assert_eq!(
             auto.observe("user@host:~$ sudo ls\n[sudo] password for user:"),
+            Some((AutoSudoKind::Password, "pw".to_string()))
+        );
+    }
+
+    /// `docker login` prints a bare `Password: ` line that is
+    /// character-for-character sudo's macOS prompt. Typing the sudo password
+    /// into it both breaks the login and leaks the credential, so a bare
+    /// prompt is answered only when the submitted command was a sudo call.
+    #[test]
+    fn terminal_auto_sudo_leaves_bare_password_prompts_to_other_programs() {
+        let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+        // No command submitted: a bare prompt belongs to whatever just ran.
+        assert_eq!(auto.observe("Password: "), None);
+        // docker login is not sudo, even though its prompt looks identical.
+        auto.note_input(b"docker login registry.example.com\r");
+        assert_eq!(auto.observe("Username: "), None);
+        auto.note_input(b"hktkosl1099\r");
+        assert_eq!(auto.observe("Password: "), None);
+        // Typing a password afterwards leaves the watcher unarmed too.
+        auto.note_input(b"my-secret\r");
+        assert_eq!(auto.observe("Login Succeeded\n"), None);
+    }
+
+    /// The same bare prompt is sudo's own when the submitted line invoked sudo.
+    #[test]
+    fn terminal_auto_sudo_answers_bare_prompt_after_sudo_command() {
+        let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+        auto.note_input(b"sudo docker ps\r");
+        assert_eq!(
+            auto.observe("Password: "),
+            Some((AutoSudoKind::Password, "pw".to_string()))
+        );
+        // The context is spent, so a second bare prompt in the same sequence
+        // does not get a second password injected.
+        assert_eq!(auto.observe("Password: "), None);
+    }
+
+    /// The rule is "did the operator start sudo", not a list of tools. Every
+    /// interactive password consumer must therefore stay untouched without
+    /// being named anywhere in the implementation.
+    #[test]
+    fn terminal_auto_sudo_leaves_every_other_password_tool_alone() {
+        let consumers = [
+            "podman login quay.io",
+            "podman login --username u quay.io",
+            "docker login",
+            "nerdctl login",
+            "buildah login quay.io",
+            "skopeo login quay.io",
+            "oc login https://api.example.com",
+            "kubectl config set-credentials u --password-stdin",
+            "gh auth login",
+            "glab auth login",
+            "aws configure",
+            "mysql -u root -p",
+            "psql -U postgres",
+            "mongo -u admin -p",
+            "redis-cli --pass secret",
+            "ssh-add ~/.ssh/id_ed25519",
+            "ssh-keygen -p -f ~/.ssh/id_rsa",
+            "gpg --export-secret-keys",
+            "openssl enc -aes-256-cbc -in f",
+            "passwd",
+            "passwd someuser",
+            "htpasswd -c .htpasswd user",
+            "smbclient //host/share -U user",
+            "ftp example.com",
+            "sftp example.com",
+            "rsync -e ssh host:/a ./b",
+            "git push https://user@host/repo",
+            "npm login",
+            "pip config set global.index-url x",
+            "vault login",
+            "consul acl bootstrap",
+            "ssh host sudo.example.com",
+            "chpasswd",
+            "sudoers_parser",
+        ];
+        for line in consumers {
+            let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+            auto.note_input(format!("{line}\r").as_bytes());
+            assert_eq!(
+                auto.observe("Password: "),
+                None,
+                "{line:?} is not sudo and must not be auto-answered"
+            );
+        }
+    }
+
+    /// Real sudo spellings, including indirection, must all arm the watcher.
+    #[test]
+    fn terminal_auto_sudo_recognizes_indirect_sudo_invocations() {
+        let sudo_lines = [
+            "sudo ls",
+            "sudo -i",
+            "sudo -u root bash",
+            "/usr/bin/sudo ls",
+            "./sudo ls",
+            "make && sudo make install",
+            "cd /tmp; sudo rm -rf x",
+            "a||sudo b",
+            "a&&sudo b",
+            "ls | sudo tee out",
+            "SUDO_ASKPASS=x sudo ls",
+            "LS=1 nohup sudo ls",
+            "command sudo ls",
+            "time sudo ls",
+            "nice -n 5 sudo ls",
+            "timeout 30s sudo ls",
+            "timeout --signal=9 10 sudo x",
+            "sudo -E env LS=1 ls",
+            "\"sudo\" ls",
+            "sh -c 'sudo ls'",
+            "bash -lc \"sudo -v\"",
+            "echo $(sudo which ls)",
+            "echo `sudo printenv PATH`",
+        ];
+        for line in sudo_lines {
+            let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+            auto.note_input(format!("{line}\r").as_bytes());
+            assert_eq!(
+                auto.observe("Password: "),
+                Some((AutoSudoKind::Password, "pw".to_string())),
+                "{line:?} starts sudo and must be answered"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_auto_sudo_sudo_context_survives_wrappers_and_operators() {
+        for line in ["sudo -v", "cd /tmp && sudo make", "SUDO_ASKPASS=x sudo ls"] {
+            let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+            auto.note_input(format!("{line}\r").as_bytes());
+            assert_eq!(
+                auto.observe("Password:"),
+                Some((AutoSudoKind::Password, "pw".to_string())),
+                "line {line:?} should arm the watcher"
+            );
+        }
+        // A mere mention of sudo in an argument is not a sudo invocation.
+        for line in [
+            "grep sudo log",
+            "echo sudo",
+            "docker login sudo.example.com",
+        ] {
+            let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+            auto.note_input(format!("{line}\r").as_bytes());
+            assert_eq!(
+                auto.observe("Password:"),
+                None,
+                "line {line:?} must not arm"
+            );
+        }
+    }
+
+    #[test]
+    fn submitted_command_uses_sudo_reads_the_command_word() {
+        assert!(submitted_command_uses_sudo("sudo ls"));
+        assert!(submitted_command_uses_sudo("  sudo   -u root ls "));
+        assert!(submitted_command_uses_sudo("/usr/bin/sudo ls"));
+        assert!(submitted_command_uses_sudo("sudo"));
+        assert!(submitted_command_uses_sudo("ls | sudo tee out"));
+        assert!(submitted_command_uses_sudo("LS=1 nohup sudo ls"));
+        assert!(!submitted_command_uses_sudo(""));
+        assert!(!submitted_command_uses_sudo("sudoedit /etc/hosts"));
+        assert!(!submitted_command_uses_sudo("echo sudo ls"));
+        assert!(!submitted_command_uses_sudo("grep -r sudo ."));
+        assert!(!submitted_command_uses_sudo("docker login"));
+        // A shell prompt inside the typed text does not fake a command start.
+        assert!(!submitted_command_uses_sudo("printf 'x' ; echo done"));
+    }
+
+    #[test]
+    fn remote_command_sudo_seeds_the_context() {
+        for command in ["sudo -i", "sh -c 'sudo ls'", "/usr/bin/sudo -u root bash"] {
+            assert!(
+                remote_command_invokes_sudo(command),
+                "{command:?} runs sudo"
+            );
+        }
+        for command in ["", "bash -l", "echo sudo", "vim /etc/hosts"] {
+            assert!(
+                !remote_command_invokes_sudo(command),
+                "{command:?} does not run sudo"
+            );
+        }
+        // A seeded context answers the bare prompt the remote command opens.
+        let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+        auto.seed_sudo_context(remote_command_invokes_sudo("sudo -i"));
+        assert_eq!(
+            auto.observe("Password: "),
             Some((AutoSudoKind::Password, "pw".to_string()))
         );
     }

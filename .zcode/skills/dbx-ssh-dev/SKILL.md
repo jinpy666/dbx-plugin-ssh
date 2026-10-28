@@ -71,6 +71,7 @@ scripts/test.sh             # 全套：cargo test → 前端三件套 → releas
                             #   → MCP stdio smoke → 宿主安装管线集成测试（all green 才算过）
 scripts/smoke_test.py       # 无 UI 全链路冒烟：连接→挑战→PTY→SFTP→关闭
 scripts/smoke_fs_test.py    # 新能力冒烟（sudo/sftp_ext/keys，17 用例）
+scripts/smoke_sudo_prompt_scope.py  # 终端自动应答作用域：非 sudo 的裸 Password: 不抢答
 scripts/smoke_mcp.py        # --mcp stdio 模式冒烟
 scripts/sidecar_client.py   # stdio-framed 协议客户端库（直接驱动 sidecar 调试）
 ```
