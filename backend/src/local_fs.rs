@@ -313,9 +313,7 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
     script.push_str(&format!(
         "$ok=New-Object System.Windows.Forms.Button;$ok.Text='OK';$ok.DialogResult='OK';$ok.SetBounds(270,{button_y},80,26);$f.Controls.Add($ok);$f.AcceptButton=$ok;"
     ));
-    script.push_str(concat!(
-        "if($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){$sel=$radios | Where-Object {$_.Checked} | Select-Object -First 1;[Console]::Out.Write($sel.Text)}",
-    ));
+    script.push_str("if($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){$sel=$radios | Where-Object {$_.Checked} | Select-Object -First 1;[Console]::Out.Write($sel.Text)}");
     let mut utf16le = Vec::with_capacity(script.len() * 2);
     for unit in script.encode_utf16() {
         utf16le.extend_from_slice(&unit.to_le_bytes());
