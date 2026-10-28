@@ -4,19 +4,20 @@ SSH/SFTP 插件有两种被 MCP 调用的方式。**推荐使用 DBX MCP 桥**�
 
 ## 方式一：DBX MCP 桥（推荐）
 
-DBX 的 MCP 服务器（`dbx mcp` 或桌面内置 MCP）内置两个通用插件桥工具：
+DBX 的 MCP 服务器（`dbx mcp` 或桌面内置 MCP）把插件工具聚合为三个 meta 工具：
 
 | 工具 | 说明 |
 | --- | --- |
-| `dbx_list_plugin_tools` | 列出所有已装插件贡献的 MCP 工具（含本插件的 16 个 SSH/SFTP 工具及其 JSON Schema） |
-| `dbx_call_plugin_tool` | 调用插件工具；传 `connectionId` 即引用 DBX 已保存的 SSH 连接，凭据由 DBX 解析转发，**工具参数里不出现任何密码** |
+| `dbx_plugin_list` | 列出所有贡献 MCP 工具的已装插件（插件 id、名称、工具数） |
+| `dbx_plugin_tools` | 列出一个插件的工具清单（名称、描述、JSON Schema、access 等级、是否需选连接） |
+| `dbx_plugin_call` | 调用插件工具；宿主解析 `connectionId` 并以标准 lifecycle payload 转发凭据，**工具参数里不出现任何密码** |
 
 典型调用流（MCP 客户端视角）：
 
 ```
-dbx_list_connections                      → 找到 SSH 连接 id
-dbx_list_plugin_tools                     → 发现 io.dbx.ssh 的 ssh_exec / sftp_* 等工具
-dbx_call_plugin_tool {
+dbx_plugin_list                            → 找到插件 id "io.dbx.ssh"
+dbx_plugin_tools { pluginId: "io.dbx.ssh" } → 发现 ssh_exec / sftp_* 等工具
+dbx_plugin_call {
   pluginId: "io.dbx.ssh",
   tool: "ssh_exec_sudo",
   connectionId: "<DBX 连接 id>",
@@ -24,11 +25,19 @@ dbx_call_plugin_tool {
 }
 ```
 
+> 历史注：宿主早期版本以平铺工具 `dbx_list_plugin_tools`/`dbx_call_plugin_tool` 暴露同一桥接；现行版本改为上述三个 meta 工具（懒模式），平铺视图保留给显式选择 flat/both 的用户。
+
+暴露条件（三关全过才可见，缺一即隐藏）：
+
+1. **插件 manifest 声明 `type: "mcp"` 贡献**（本插件已声明：`io.dbx.ssh.mcp`，`external_tools: true`，外部精简面 12 个工具逐个标注 `access`：`read`/`write`/`full`——外部面只暴露声明了 access 的工具，MCP annotations 不能替代；known-hosts 管理、连接清单、会话关闭等本地管理类刻意不对外声明，sidecar 16 个工具仅在 stdio 模式全量可用）。宿主对 `deny_unknown_fields` 的旧版本会把整份 manifest 视为不可读，因此 `engines.dbx` 需含此能力的发行版（当前 `>=0.6.31` 满足）。
+2. **MCP 插件工具模式为懒模式**：DBX 设置里 `pluginToolsMode` 选 `lazy`（只有 meta 工具）或 `both`（meta + 平铺并存）；`dbx-mcp` 进程也可用环境变量 `DBX_MCP_PLUGIN_TOOLS=lazy|both` 覆盖（`flat`/默认 auto 不暴露 meta 工具）。
+3. **插件级 grant 授权**：DBX MCP 设置里按插件授权（默认未授权），grant 的 access ceiling 必须覆盖该工具的声明等级（例如 `ssh_exec` 标 `full`，ceiling 也要 `full` 才可见）；可再按工具启用/禁用收窄。
+
 实现细节：
 
-- 桥由宿主 `dbx-mcp` 提供（`LocalBackend`），通过标准 sidecar 协议调用插件的 `mcp/tools`（工具发现）与 `mcp/call`（工具执行）方法；连接凭据以标准 connection lifecycle payload 转发（`PluginHost::connection_params_standalone`），与工作台连接共用同一份配置——包括跳板链、Quick Sudo、TOTP、提示词、`auth_flow_mode` 等全部设置项。
+- 桥由宿主 `dbx-mcp` 提供（`LocalBackend`），通过标准 sidecar 协议调用插件的 `mcp/tools`（工具发现）与 `mcp/call`（工具执行）方法；连接凭据以标准 connection lifecycle payload 转发（`PluginHost::connection_params_standalone`），与工作台连接共用同一份配置——包括跳板链、Quick Sudo、TOTP、提示词、`auth_flow_mode` 等全部设置项。`dbx_plugin_call` 为逐次判定：过宿主全局 MCP 策略后仍要过插件内部门（只读连接白名单、灾难命令确认、confirm 权限档、connectionScope）。
 - 插件侧按 `connectionId` 维护连接池，断线自动重连；主机密钥沿用插件的 known_hosts 存储（首次未知主机需先在工作台连接一次确认，或在方式二中用 TOFU）。
-- Scoped AI 会话中 `dbx_call_plugin_tool` 被禁用（可能触发变更操作），`dbx_list_plugin_tools` 保持可见。
+- Scoped AI 会话中 `dbx_plugin_call` 被禁用（可能触发变更操作），`dbx_plugin_list`/`dbx_plugin_tools` 保持可见。
 
 ### 客户端配置示例
 

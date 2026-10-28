@@ -15,12 +15,15 @@
 
 ## 方式一：DBX MCP 桥（推荐）
 
-DBX 的 MCP 服务器（`dbx mcp` 或桌面内置 MCP）内置两个通用桥工具：
+DBX 的 MCP 服务器（`dbx mcp` 或桌面内置 MCP）把插件工具聚合为三个 meta 工具：
 
 | 工具 | 说明 |
 | --- | --- |
-| `dbx_list_plugin_tools` | 列出所有已装插件贡献的 MCP 工具（含本插件 31 个工具及其 JSON Schema、annotations） |
-| `dbx_call_plugin_tool` | 调用插件工具；传 `connectionId` 即引用 DBX 已保存的 SSH 连接，凭据由 DBX 解析转发 |
+| `dbx_plugin_list` | 列出所有贡献 MCP 工具的已装插件（含本插件 io.dbx.ssh 的 SSH/SFTP 工具，外部精简面声明 12 个） |
+| `dbx_plugin_tools` | 列出一个插件的工具清单（JSON Schema、access 等级、是否需选连接） |
+| `dbx_plugin_call` | 调用插件工具；传 `connectionId` 即引用 DBX 已保存的 SSH 连接，凭据由 DBX 解析转发 |
+
+> 需 DBX MCP 设置插件工具模式为 `lazy`/`both`，并在 MCP 设置里对 io.dbx.ssh 完成插件级授权（access ceiling ≥ 工具声明等级），否则插件不出现在 `dbx_plugin_list`。详见 docs/MCP.zh-CN.md「方式一」。
 
 客户端配置示例：
 
@@ -38,9 +41,9 @@ DBX 的 MCP 服务器（`dbx mcp` 或桌面内置 MCP）内置两个通用桥工
 典型调用流：
 
 ```
-dbx_list_connections                      → 找到 SSH 连接 id
-dbx_list_plugin_tools                     → 发现 io.dbx.ssh 的工具
-dbx_call_plugin_tool {
+dbx_plugin_list                            → 找到插件 id
+dbx_plugin_tools { pluginId: "io.dbx.ssh" } → 发现 io.dbx.ssh 的工具
+dbx_plugin_call {
   pluginId: "io.dbx.ssh",
   tool: "ssh_exec_sudo",
   connectionId: "<DBX 连接 id>",

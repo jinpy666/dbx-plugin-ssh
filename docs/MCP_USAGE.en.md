@@ -16,13 +16,19 @@ live in the [SSH MCP reference](MCP.zh-CN.md).
 
 ## Option 1: DBX MCP bridge (recommended)
 
-DBX's MCP server (`dbx mcp` or the desktop built-in MCP) ships two generic
-bridge tools:
+DBX's MCP server (`dbx mcp` or the desktop built-in MCP) aggregates plugin
+tools behind three meta tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `dbx_list_plugin_tools` | List the MCP tools contributed by every installed plugin (all 31 tools of this plugin with their JSON Schema and annotations) |
-| `dbx_call_plugin_tool` | Call a plugin tool; pass a `connectionId` to reference a saved SSH connection — credentials are resolved host-side |
+| `dbx_plugin_list` | List every installed plugin that contributes MCP tools (including this plugin's SSH/SFTP tools — 12 declared on the trimmed external surface) |
+| `dbx_plugin_tools` | List one plugin's tools (JSON Schema, access level, connection requirement) |
+| `dbx_plugin_call` | Call a plugin tool; pass a `connectionId` to reference a saved SSH connection — credentials are resolved host-side |
+
+> Requires the MCP plugin-tools mode set to `lazy`/`both` in DBX settings, plus a
+> per-plugin grant for io.dbx.ssh (access ceiling ≥ the tool's declared level);
+> otherwise the plugin stays hidden from `dbx_plugin_list`. See
+> docs/MCP.zh-CN.md ("方式一") for details.
 
 Client configuration example:
 
@@ -40,9 +46,9 @@ Client configuration example:
 Typical call flow:
 
 ```
-dbx_list_connections                      → find the SSH connection id
-dbx_list_plugin_tools                     → discover io.dbx.ssh tools
-dbx_call_plugin_tool {
+dbx_plugin_list                            → find the plugin id
+dbx_plugin_tools { pluginId: "io.dbx.ssh" } → discover io.dbx.ssh tools
+dbx_plugin_call {
   pluginId: "io.dbx.ssh",
   tool: "ssh_exec_sudo",
   connectionId: "<DBX connection id>",

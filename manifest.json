@@ -1334,6 +1334,36 @@
           "default_visible": true
         }
       ]
+    },
+    {
+      "type": "mcp",
+      "id": "io.dbx.ssh.mcp",
+      "description": "SSH exec and SFTP tools for saved connections",
+      "external_tools": true,
+      "toolsets": [
+        {
+          "id": "exec",
+          "title": "Remote execution"
+        },
+        {
+          "id": "sftp",
+          "title": "SFTP files"
+        }
+      ],
+      "tools": {
+        "ssh_exec": { "toolset": "exec", "access": "full" },
+        "ssh_exec_sudo": { "toolset": "exec", "access": "full" },
+        "ssh_multi_exec": { "toolset": "exec", "access": "full" },
+        "ssh_terminal_input": { "toolset": "exec", "access": "full" },
+        "ssh_run_bg": { "toolset": "exec", "access": "full" },
+        "ssh_task_status": { "toolset": "exec", "access": "read" },
+        "sftp_list_dir": { "toolset": "sftp", "access": "read" },
+        "sftp_stat": { "toolset": "sftp", "access": "read" },
+        "sftp_read_file": { "toolset": "sftp", "access": "read" },
+        "sftp_upload": { "toolset": "sftp", "access": "write" },
+        "sftp_download": { "toolset": "sftp", "access": "write" },
+        "sftp_write_file": { "toolset": "sftp", "access": "write" }
+      }
     }
   ],
   "localizations": {
@@ -1351,6 +1381,10 @@
         "io.dbx.ssh.tunnels": {
           "label": "Port forwards",
           "description": "Manage SSH port forwards without opening a terminal."
+        },
+        "io.dbx.ssh.mcp": {
+          "label": "SSH",
+          "description": "SSH exec and SFTP tools for saved connections"
         },
         "io.dbx.ssh.manage-tunnels": {
           "label": "Port forwards"
@@ -1657,6 +1691,10 @@
           "label": "Redirecciones de puertos",
           "description": "Administra redirecciones SSH sin abrir una terminal."
         },
+        "io.dbx.ssh.mcp": {
+          "label": "SSH",
+          "description": "Herramientas SSH exec y SFTP para conexiones guardadas"
+        },
         "io.dbx.ssh.manage-tunnels": {
           "label": "Redirecciones de puertos"
         },
@@ -1961,6 +1999,10 @@
         "io.dbx.ssh.tunnels": {
           "label": "Inoltri porta",
           "description": "Gestisci gli inoltri SSH senza aprire un terminale."
+        },
+        "io.dbx.ssh.mcp": {
+          "label": "SSH",
+          "description": "Strumenti SSH exec e SFTP per le connessioni salvate"
         },
         "io.dbx.ssh.manage-tunnels": {
           "label": "Inoltri porta"
@@ -2267,6 +2309,10 @@
           "label": "ポート転送",
           "description": "ターミナルを開かずに SSH ポート転送を管理します。"
         },
+        "io.dbx.ssh.mcp": {
+          "label": "SSH",
+          "description": "保存済み接続向けの SSH exec および SFTP ツール"
+        },
         "io.dbx.ssh.manage-tunnels": {
           "label": "ポート転送"
         },
@@ -2571,6 +2617,10 @@
         "io.dbx.ssh.tunnels": {
           "label": "Encaminhamentos de porta",
           "description": "Gerencie encaminhamentos SSH sem abrir um terminal."
+        },
+        "io.dbx.ssh.mcp": {
+          "label": "SSH",
+          "description": "Ferramentas SSH exec e SFTP para conexões salvas"
         },
         "io.dbx.ssh.manage-tunnels": {
           "label": "Encaminhamentos de porta"
@@ -2877,6 +2927,10 @@
           "label": "端口映射",
           "description": "无需打开终端即可管理 SSH 端口转发。"
         },
+        "io.dbx.ssh.mcp": {
+          "label": "SSH",
+          "description": "已保存连接的 SSH 执行与 SFTP 工具"
+        },
         "io.dbx.ssh.manage-tunnels": {
           "label": "端口映射"
         },
@@ -3181,6 +3235,10 @@
         "io.dbx.ssh.tunnels": {
           "label": "連接埠映射",
           "description": "無需開啟終端即可管理 SSH 連接埠轉發。"
+        },
+        "io.dbx.ssh.mcp": {
+          "label": "SSH",
+          "description": "已儲存連線的 SSH 執行與 SFTP 工具"
         },
         "io.dbx.ssh.manage-tunnels": {
           "label": "連接埠映射"
