@@ -6,6 +6,8 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.11-beta.3] — 2026-10-28
+
 - **`ssh_run_bg` 后端任务日志改落操作系统临时目录**。此前后台任务把日志和 pid 文件写在服务器
   `~/.dbx-ssh-tasks/`，任务跑完也不回收，长期使用会在远端家目录堆积垃圾。现在每次任务用
   `mktemp -d` 在操作系统临时目录（`$TMPDIR`，默认 `/tmp`）下建一个 0700、随机名的私有目录，
