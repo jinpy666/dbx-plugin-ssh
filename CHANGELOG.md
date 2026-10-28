@@ -6,6 +6,20 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.11] — 2026-10-28
+
+- **0.7.11 正式版**。汇总 beta.1～beta.3：MCP 只读控权加固与后台任务日志移入操作系统临时目录；SFTP 大文件下载并发多流提速；连接后自动启用已保存端口映射；sz/ZMODEM 完成后自动定位下载目录；终端路径补全、缓存编辑范围与动态候选调度修复；文件预览恢复滚动条。
+  **0.7.11 stable.** Includes the beta.1–beta.3 changes: stronger MCP read-only enforcement and OS-temp storage for background task logs; concurrent multi-stream downloads for large SFTP files; automatic startup of saved port forwards on connect; automatic reveal of the download folder after sz/ZMODEM; terminal path-completion, cached edit-range and dynamic-generator fixes; and restored scrollbars in file previews.
+
+- **SFTP 交互与连接生命周期优化**。文件列表改为响应式比例列与双行名称，权限以 POSIX 符号显示，文件类型解析忽略 URL 查询参数与 fragment；目录树、快捷路径与拖拽上传的视觉层级统一。连接改名后 tab 标题实时跟随并保留多会话编号；旧会话因连接编辑失效时使用最新配置重建，不再停留在回附错误，重建前清理旧终端缓冲避免登录信息堆积；主动删除连接仍不自动重连。
+  **SFTP interaction and connection lifecycle improvements.** The file list now uses responsive proportional columns and two-line names, shows POSIX permissions, and ignores URL query strings and fragments when resolving file types; the directory tree, quick paths and drag-upload presentation share a consistent visual hierarchy. Tabs now follow connection renames while preserving session numbers. When editing a connection invalidates the old session, the workbench reconnects with the latest configuration instead of parking on an attach error, clearing the old terminal buffer so login banners do not accumulate; intentional connection deletion still does not trigger reconnects.
+
+- **Windows 连接导入修复**。修复 Windows 原生导入文件选择对话框，并正确解码 Xshell 导出包中的 GBK 中文条目名。
+  **Windows connection import fixes.** Fixes the native import picker on Windows and decodes GBK Chinese entry names in Xshell export archives correctly.
+
+- **宿主基线与版本标识**。`engines.dbx` 提升为 `>=0.6.59`：当前 MCP `tools/access` 声明由该版本首次支持，旧宿主会拒绝整份 manifest，不能继续宣称兼容。manifest / Cargo 版本同步为 `0.7.11`，RDP `client_build` 更新为 711。调度任务（task-provider）声明继续摘除，待 DBX 上游发布对应能力后恢复。
+  **Host baseline and version identity.** `engines.dbx` now requires `>=0.6.59`, the first host release that supports the current MCP `tools/access` declarations; older hosts reject the whole manifest and must not be offered an incompatible update. The manifest and Cargo versions move to `0.7.11`, and the RDP `client_build` becomes 711. The scheduler task-provider declaration stays withheld until DBX ships the corresponding host capability.
+
 ## [0.7.11-beta.3] — 2026-10-28
 
 - **`ssh_run_bg` 后端任务日志改落操作系统临时目录**。此前后台任务把日志和 pid 文件写在服务器

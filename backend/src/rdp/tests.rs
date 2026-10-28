@@ -1178,7 +1178,7 @@ fn vendored_sspi_marks_ntlmv1_and_lm_as_unsupported() {
 
 #[test]
 fn client_build_encodes_the_package_version() {
-    assert_eq!(client_build(), 700); // 0.7.x-beta 家族：minor 段带 -beta 后缀按 0 计 → (0*100+7)*100+0
+    assert_eq!(client_build(), 711); // 0.7.11 正式版 → (0*100+7)*100+11
 }
 
 #[test]

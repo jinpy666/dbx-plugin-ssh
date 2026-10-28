@@ -38,7 +38,7 @@ def tree_digest(crate_dir: Path) -> str:
     edit to the tree changes the digest.
     """
     digest = hashlib.sha256()
-    files = sorted(path for path in crate_dir.rglob("*") if path.is_file())
+    files = sorted((path for path in crate_dir.rglob("*") if path.is_file()), key=lambda path: path.relative_to(crate_dir).as_posix())
     for path in files:
         rel = path.relative_to(crate_dir).as_posix()
         data = path.read_bytes().replace(b"\r\n", b"\n")

@@ -13,7 +13,7 @@
 | `ironrdp-connector` | 0.10.0 | Devolutions/IronRDP | crates.io 0.10.0 tarball sha256 `d5898b3f1fcaca0f9b923b1463e158aeb64dfdec4ac361b7c086492466ff341c` + NyaTerm 副本差异（见下文）；树 tree-sha256 `e6d35b48b1df61fdaec6059717d5ca03a3acf7a589185b4f651ab364d8a14ce6` | MIT OR Apache-2.0 |
 | `ironrdp-tls` | 0.2.2 | Devolutions/IronRDP | crates.io 0.2.2 tarball sha256 `ea5f0bb732e33159834f06a687f5415dae1a82c71c123c1c3a3689d41ed47645` + NyaTerm 副本差异（含 TLS 主机名校验放宽，见下文）；树 tree-sha256 `24e8fb91fed71198ade471114824e3a5a3b16dfda2e7fb374651d682a723f67c` | MIT OR Apache-2.0 |
 | `picky` | 7.0.0-rc.25 | Devolutions/picky-rs | crates.io 7.0.0-rc.25 tarball sha256 `c1ae9cd78eb1d61be4790713d28368cf71c844218fcd91542768805423f02666` + NyaTerm 副本差异（见下文）；树 tree-sha256 `a413a5693b1aaf66a639000d39c869d3e27083ed611dc0a2de9447b947465160` | MIT OR Apache-2.0 |
-| `sspi` | 0.21.0 | Devolutions/sspi-rs | crates.io 0.21.0 tarball sha256 `3db83308ba07f6c54141f7e34a167353f81250fe8ccab87e90c323f4390b0fb0` + NyaTerm 副本差异（见下文）；树 tree-sha256 `ed6df5ed345cad981eb28ea4af322bdee90ee7b92a7ee2854738d70c78a1c59b` | MIT OR Apache-2.0 |
+| `sspi` | 0.21.0 | Devolutions/sspi-rs | crates.io 0.21.0 tarball sha256 `3db83308ba07f6c54141f7e34a167353f81250fe8ccab87e90c323f4390b0fb0` + NyaTerm 副本差异（见下文）；树 tree-sha256 `b549047fdfc1b5c59b2207cad93387179143534080e8a23fff8100cf38912e7d` | MIT OR Apache-2.0 |
 
 `tree-sha256` 是**补丁后 vendored 树**的确定性内容哈希（文件按相对路径排序、
 内容按 LF 规范化后流入 SHA-256），由 `verify_rdp_vendor_integrity.py` 默认校验：
