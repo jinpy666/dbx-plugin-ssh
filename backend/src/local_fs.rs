@@ -291,7 +291,7 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;",
         "Add-Type -AssemblyName System.Windows.Forms;",
         "$f=New-Object System.Windows.Forms.Form;",
-        "$f.Text='Import connections';$f.Width=380;$f.Height=400;",
+        "$f.Text='Import connections';",
         "$f.FormBorderStyle='FixedDialog';$f.MaximizeBox=$false;$f.MinimizeBox=$false;$f.TopMost=$true;$f.StartPosition='CenterScreen';",
         "$l=New-Object System.Windows.Forms.Label;",
         "$l.Text='Choose the source of the sessions to import:';$l.SetBounds(12,10,340,20);$f.Controls.Add($l);",
@@ -305,9 +305,15 @@ fn pick_source_dialog(labels: &[&str]) -> Result<Option<String>, String> {
             text = powershell_quote(label),
         ));
     }
-    script.push_str("$radios[0].Checked=$true;");
+    let button_y = 40 + labels.len() * 30 + 10;
+    script.push_str(&format!(
+        "$radios[0].Checked=$true;$f.ClientSize=New-Object System.Drawing.Size(366,{});",
+        button_y + 38
+    ));
+    script.push_str(&format!(
+        "$ok=New-Object System.Windows.Forms.Button;$ok.Text='OK';$ok.DialogResult='OK';$ok.SetBounds(270,{button_y},80,26);$f.Controls.Add($ok);$f.AcceptButton=$ok;"
+    ));
     script.push_str(concat!(
-        "$ok=New-Object System.Windows.Forms.Button;$ok.Text='OK';$ok.DialogResult='OK';$ok.SetBounds(270,360,80,26);$f.Controls.Add($ok);$f.AcceptButton=$ok;",
         "if($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){$sel=$radios | Where-Object {$_.Checked} | Select-Object -First 1;[Console]::Out.Write($sel.Text)}",
     ));
     let mut utf16le = Vec::with_capacity(script.len() * 2);

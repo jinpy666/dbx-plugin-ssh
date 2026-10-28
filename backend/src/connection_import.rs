@@ -396,7 +396,19 @@ pub fn parse_xshell(zip_bytes: &[u8]) -> Result<Vec<ImportedSession>, String> {
                 "Xshell archive entry '{name}' exceeds the per-entry size limit"
             ));
         }
-        let text = String::from_utf8_lossy(&content);
+        // Xshell on Windows commonly writes UTF-16 with a BOM, including
+        // session files inside .xts exports. Preserve UTF-8 exports as well.
+        let text = if content.starts_with(&[0xff, 0xfe]) {
+            encoding_rs::UTF_16LE.decode(&content).0
+        } else if content.starts_with(&[0xfe, 0xff]) {
+            encoding_rs::UTF_16BE.decode(&content).0
+        } else {
+            String::from_utf8_lossy(
+                content
+                    .strip_prefix(&[0xef, 0xbb, 0xbf])
+                    .unwrap_or(&content),
+            )
+        };
         if let Some(session) = parse_xsh_file(&name, &text) {
             push_preview_session(&mut sessions, session)?;
         }
@@ -2938,6 +2950,44 @@ mod tests {
         assert_eq!(sessions[1].username, "root");
         assert!(sessions[1].group_path.is_empty());
         assert_eq!(sessions[1].auth, ImportedAuth::None);
+    }
+
+    #[test]
+    fn xshell_parses_utf16_and_utf8_bom_sessions() {
+        use std::io::Write;
+        let mut zip = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut zip);
+            for (name, bom, little_endian) in [
+                ("le.xsh", [0xff, 0xfe], true),
+                ("be.xsh", [0xfe, 0xff], false),
+            ] {
+                writer
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(&bom).unwrap();
+                for unit in WEB_XSH.encode_utf16() {
+                    writer
+                        .write_all(&if little_endian {
+                            unit.to_le_bytes()
+                        } else {
+                            unit.to_be_bytes()
+                        })
+                        .unwrap();
+                }
+            }
+            writer
+                .start_file("utf8.xsh", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(&[0xef, 0xbb, 0xbf]).unwrap();
+            writer.write_all(WEB_XSH.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        let sessions = parse_xshell(&zip.into_inner()).unwrap();
+        assert_eq!(sessions.len(), 3);
+        assert!(sessions
+            .iter()
+            .all(|session| session.host == "192.168.1.20"));
     }
 
     #[test]
