@@ -140,7 +140,7 @@ const context = localOnlyContext
   workbenchId: "visual-workbench",
   restored: false,
   surface: surfaceFixture,
-  workbenchState: { sftpPath: "/home/demo", splitRatio: 58, paneOrder: "terminal-left", visibleColumns: ["size", "modified", "owner", "group", "permissions"] },
+  workbenchState: { sftpPath: "/home/demo", splitRatio: 58, paneOrder: "terminal-left", visibleColumns: ["modified", "size", "kind"] },
   // ?proto=rdp 模拟一条 RDP 连接（RDP 连接级 UI 门控走查：SSH/SFTP 专属工具
   // 条整类隐藏，连接协议由 openSession 路由到 RDP 会话）。协议形态对齐真实
   // 宿主：宿主推给 webview 的 connection 上下文【不带】external_config.protocol

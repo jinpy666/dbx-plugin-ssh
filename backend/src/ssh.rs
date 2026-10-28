@@ -1155,7 +1155,9 @@ enum TerminalCommand {
     InstallPromptHook {
         shell: RemoteShell,
     },
-    Close,
+    Close {
+        reason: Option<&'static str>,
+    },
 }
 
 /// Enqueue keyboard input with bounded backpressure instead of dropping it
@@ -2251,7 +2253,9 @@ impl SshRuntime {
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         for session_id in session_ids {
-            let _ = self.close_session(&session_id).await;
+            let _ = self
+                .close_session_with_reason(&session_id, Some("connection-disconnect"))
+                .await;
         }
         self.stop_sudo_keepalive(connection_id).await;
         Ok(())
@@ -2578,7 +2582,12 @@ impl SshRuntime {
         let auto_record_emitter = emitter.clone();
         let auto_record_slot = Arc::clone(&entry.session_recorder);
         let auto_record_connection_id = entry.connection_id.clone();
+        let defer_initial_prompt =
+            interactive_shell_session(spawn_exec.as_deref(), &connection.remote_command);
         tokio::spawn(async move {
+            let mut initial_output = defer_initial_prompt.then_some(Vec::new());
+            let initial_output_started = defer_initial_prompt.then_some(Instant::now());
+            let mut disconnect_reason = None;
             let mut directory_filter = DirectoryHandshakeFilter::default();
             let mut directory_tracking_enabled = false;
             // #90：ZMODEM 触发检测（远端 sz 发起的 ZRQINIT）。字节全透传，
@@ -2595,6 +2604,13 @@ impl SshRuntime {
             loop {
                 tokio::select! {
                     _ = directory_timeout.tick() => {
+                        if initial_output_started.is_some_and(|started| started.elapsed() >= REMOTE_SHELL_DETECTION_TIMEOUT + Duration::from_secs(1)) {
+                            if let Some(data) = initial_output.take() {
+                                if !data.is_empty() {
+                                    publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                                }
+                            }
+                        }
                         if let Some(data) = directory_filter.flush_if_timed_out() {
                             // 与主数据路径同一检测器：握手窗口里冲刷的字节同样
                             // 参与 ZMODEM 触发检测（#90）。字节照常发布，检测器
@@ -2672,42 +2688,51 @@ impl SshRuntime {
                             if directory_tracking_enabled {
                                 continue;
                             }
+                            let deferring_initial_prompt = initial_output.is_some();
+                            if let Some(data) = initial_output.take().map(strip_trailing_prompt).filter(|data| !data.is_empty()) {
+                                publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                            }
                             directory_tracking_enabled = true;
                             directory_filter.begin(directory_tracking_marker(&directory_marker_id));
-                            publish_terminal(
-                                &task_id,
-                                TerminalStream::Stdout,
-                                b"\r\x1b[2K".to_vec(),
-                                &replay,
-                                &emitter,
-                            ).await;
+                            if !deferring_initial_prompt {
+                                publish_terminal(
+                                    &task_id,
+                                    TerminalStream::Stdout,
+                                    b"\r\x1b[2K".to_vec(),
+                                    &replay,
+                                    &emitter,
+                                ).await;
+                            }
                             let script = directory_tracking_script(&directory_marker_id, remote_shell);
                             if channel.data(script.as_bytes()).await.is_err() { break; }
                         }
                         Some(TerminalCommand::InstallPromptHook { shell }) => {
-                            // Silent session-open arming: unsupported shells are
-                            // skipped without the toggle's unavailable event,
-                            // and an already-armed hook (user-facing toggle
-                            // raced ahead) is left untouched. No `\r\x1b[2K`
-                            // line clear either — the typed line lands before
-                            // the first prompt and the handshake filter hides
-                            // its echo, so nothing on screen is disturbed.
-                            if !matches!(shell, RemoteShell::Bash | RemoteShell::Zsh) {
-                                continue;
+                            // Detection normally finishes after the shell's first
+                            // prompt. Hold that prompt off-screen and publish only
+                            // the post-install one, instead of clearing an already
+                            // visible line and causing a flash.
+                            let buffered = initial_output.take();
+                            if matches!(shell, RemoteShell::Bash | RemoteShell::Zsh) && !directory_tracking_enabled {
+                                if let Some(data) = buffered.map(strip_trailing_prompt).filter(|data| !data.is_empty()) {
+                                    publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                                }
+                                remote_shell = shell;
+                                directory_tracking_enabled = true;
+                                directory_filter.begin(directory_tracking_marker(&directory_marker_id));
+                                let script = directory_tracking_script(&directory_marker_id, shell);
+                                if channel.data(script.as_bytes()).await.is_err() { break; }
+                            } else {
+                                if let Some(data) = buffered.filter(|data| !data.is_empty()) {
+                                    publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                                }
                             }
-                            if directory_tracking_enabled {
-                                continue;
-                            }
-                            remote_shell = shell;
-                            directory_tracking_enabled = true;
-                            directory_filter.begin(directory_tracking_marker(&directory_marker_id));
-                            let script = directory_tracking_script(&directory_marker_id, shell);
-                            if channel.data(script.as_bytes()).await.is_err() { break; }
                         }
-                        Some(TerminalCommand::Close) | None => {
+                        Some(TerminalCommand::Close { reason }) => {
+                            disconnect_reason = reason;
                             let _ = channel.close().await;
                             break;
                         }
+                        None => break,
                     },
                     message = channel.wait() => {
                         let (data, stream) = match message {
@@ -2718,10 +2743,16 @@ impl SshRuntime {
                             // 「远端主动 EOF/Close」与流自然结束，为下一轮定位
                             // 是哪一侧先收线留下凭据（DBX 插件日志可见）。
                             Some(msg @ (ChannelMsg::Eof | ChannelMsg::Close)) => {
+                                if let Some(data) = initial_output.take().filter(|data| !data.is_empty()) {
+                                    publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                                }
                                 eprintln!("[ssh] terminal session {task_id}: channel ended by remote ({msg:?})");
                                 break;
                             }
                             None => {
+                                if let Some(data) = initial_output.take().filter(|data| !data.is_empty()) {
+                                    publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                                }
                                 eprintln!("[ssh] terminal session {task_id}: channel stream ended");
                                 break;
                             }
@@ -2841,6 +2872,12 @@ impl SshRuntime {
                                 }
                             }
                         }
+                        if stream == TerminalStream::Stdout {
+                            if let Some(buffer) = initial_output.as_mut() {
+                                buffer.extend_from_slice(&data);
+                                continue;
+                            }
+                        }
                         let Some(data) = directory_filter.filter(&data) else { continue; };
                         // #90 ZMODEM 触发检测：远端 `sz` 用 ZRQINIT 开启下载会
                         // 话。ZMODEM 下载接收已由前端 sentry（zmodem.js）承接，
@@ -2903,11 +2940,7 @@ impl SshRuntime {
             .await;
             let _ = emitter.event(
                 "ssh/session/state",
-                json!({
-                    "sessionId": task_id,
-                    "connectionId": entry.connection_id,
-                    "state": "disconnected"
-                }),
+                session_disconnected_event(&task_id, &entry.connection_id, disconnect_reason),
             );
             let removed = sessions.write().await.remove(&task_id);
             if let Some(removed) = removed {
@@ -3777,6 +3810,14 @@ impl SshRuntime {
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), String> {
+        self.close_session_with_reason(session_id, None).await
+    }
+
+    async fn close_session_with_reason(
+        &self,
+        session_id: &str,
+        reason: Option<&'static str>,
+    ) -> Result<(), String> {
         // Teardown runs while the session is still registered so remote
         // listener cancellation can ride the (still open) SSH handle.
         self.stop_session_forwards(session_id).await;
@@ -3815,7 +3856,7 @@ impl SshRuntime {
         // 退出（spontaneous 路径有完整的会话收尾）。
         let _ = tokio::time::timeout(
             Duration::from_secs(2),
-            session.terminal_tx.send(TerminalCommand::Close),
+            session.terminal_tx.send(TerminalCommand::Close { reason }),
         )
         .await;
         session.transport_lease.release().await;
@@ -13277,6 +13318,38 @@ fn decode_stream_text(carry: &mut Vec<u8>, data: &[u8]) -> String {
     text
 }
 
+fn session_disconnected_event(
+    session_id: &str,
+    connection_id: &str,
+    reason: Option<&'static str>,
+) -> Value {
+    let mut payload = json!({
+        "sessionId": session_id,
+        "connectionId": connection_id,
+        "state": "disconnected"
+    });
+    if let Some(reason) = reason {
+        payload["reason"] = Value::from(reason);
+    }
+    payload
+}
+
+/// Drops the unterminated prompt line at the end of startup output. Earlier
+/// banners keep their original bytes and trailing newline; a prompt-only
+/// buffer becomes empty. Output already ending on a line boundary has no
+/// trailing prompt to remove and passes through unchanged.
+fn strip_trailing_prompt(mut data: Vec<u8>) -> Vec<u8> {
+    if data.is_empty() || data.ends_with(b"\n") || data.ends_with(b"\r") {
+        return data;
+    }
+    if let Some(index) = data.iter().rposition(|byte| matches!(byte, b'\n' | b'\r')) {
+        data.truncate(index + 1);
+        data
+    } else {
+        Vec::new()
+    }
+}
+
 /// Installs the per-prompt OSC 7 hook for one interactive shell session
 /// (issue t8y2/dbx#10750): bash gets a `PROMPT_COMMAND` prepend, zsh a
 /// `precmd_functions` entry, each emitting `ESC]7;file://$HOST$PWD BEL`
@@ -15128,6 +15201,33 @@ matrix-ed25519";
         // handshake window; bash's PROMPT_COMMAND fires on the next prompt.
         assert!(zsh.ends_with("\r \r"));
         assert!(bash.ends_with("\r"));
+    }
+
+    #[test]
+    fn startup_prompt_is_removed_without_touching_the_banner() {
+        assert_eq!(
+            strip_trailing_prompt(b"Welcome!\r\nroot@host:~# ".to_vec()),
+            b"Welcome!\r\n".to_vec()
+        );
+        assert_eq!(
+            strip_trailing_prompt(b"root@host:~# ".to_vec()),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            strip_trailing_prompt(b"banner\n".to_vec()),
+            b"banner\n".to_vec()
+        );
+        assert_eq!(strip_trailing_prompt(Vec::new()), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn disconnect_reason_is_only_present_for_intentional_lifecycle_disconnects() {
+        let network = session_disconnected_event("s1", "c1", None);
+        assert_eq!(network["state"], "disconnected");
+        assert!(network.get("reason").is_none());
+
+        let deleted = session_disconnected_event("s1", "c1", Some("connection-disconnect"));
+        assert_eq!(deleted["reason"], "connection-disconnect");
     }
 
     #[test]

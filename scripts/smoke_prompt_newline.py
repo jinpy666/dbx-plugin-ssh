@@ -104,6 +104,15 @@ def main() -> None:
     if not pump_until(lambda s: s.count(OSC7) >= 1, 45, "first OSC 7 frame"):
         fail("no OSC 7 frame within 45s — prompt hook did not arm", client)
     print(f"OSC 7 frames after open: {stream.count(OSC7)}")
+    first_osc7 = stream.find(OSC7)
+    if b"\r\x1b[2K" in stream[:first_osc7]:
+        fail("initial prompt was cleared on-screen instead of being held back", client)
+    if not pump_until(lambda s: s.count(b":~$ ") >= 1, 5, "post-install prompt"):
+        fail(f"post-install prompt did not arrive: {stream!r}", client)
+    prompt_count = stream.count(b":~$ ")
+    if prompt_count != 1:
+        fail(f"expected exactly one visible prompt after open, got {prompt_count}: {stream!r}", client)
+    print("initial prompt is held back; exactly one post-install prompt is visible ✓")
 
     # 2) the issue scenario: output without a trailing newline, then the next
     #    prompt — the hook must emit an OSC 7 frame AFTER the un-newlined

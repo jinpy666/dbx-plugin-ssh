@@ -6,14 +6,15 @@ type SftpSortColumn = "name" | "size" | "modified";
 import { computed, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import { filterSftpEntries } from "../lib/sftpFileFilters";
 import { computeWindow } from "../lib/virtualWindow";
+import { sftpColumnTrack, sftpGridMinWidth, sftpNameTrack } from "../lib/sftpGrid";
 import { ArrowDown, ArrowUp, ArrowUpDown } from "@lucide/vue";
 
 // 列表条目的最小结构（App.vue 的 SftpEntry 为局部接口，按消费字段收敛）。
 type ListingEntry = { uri: string; name: string; kind: SftpEntryKind; size?: number; modifiedAt?: number; owner?: string; group?: string; permissions?: string; lossy?: boolean };
 
 /** SFTP 列表布局：排序（目录优先 + 名称/大小/时间）、搜索防抖过滤、
- * 类型/隐藏过滤联动、grid 列宽（名称列弹性 + 拖拽 resize + 持久化经
- * persistState）、虚拟滚动窗口（30px 行高 + overscan）。 */
+ * 类型/隐藏过滤联动、响应式 grid 列宽（比例分配 + 拖拽调整下限 + 持久化经
+ * persistState）、虚拟滚动窗口（44px 行高 + overscan）。 */
 export function useSftpListLayout(options: {
   entries: Ref<ListingEntry[]>;
   sort: Ref<{ column: SftpSortColumn; direction: "asc" | "desc" }>;
@@ -44,32 +45,26 @@ const sortedEntries = computed(() => {
   });
 });
 const sftpGridStyle = computed(() => {
-  // 名称列：未拖过 = 弹性填充剩余空间；拖动后锁定为固定宽度。
-  const nameTrack = sftpNameWidth.value != null ? `${sftpNameWidth.value}px` : `minmax(${NAME_COLUMN_MIN}px, 1fr)`;
-  const cols: string[] = [nameTrack];
+  // 全部列按比例分配剩余空间，手动拖宽只抬升对应列的最小宽度；
+  // 达到可读下限后才通过 .file-rows 横向滚动兜底。
   const nameMin = sftpNameWidth.value ?? NAME_COLUMN_MIN;
-  const list: SftpColumn[] = ["size", "modified", "owner", "group", "permissions"];
-  for (const col of list) {
-    if (visibleColumns.value.includes(col)) {
-      cols.push(`${sftpColumnWidths[col]}px`);
-    }
-  }
-  // 总宽超出容器时靠 .file-rows 的 overflow:auto 出横向滚动条。
-  let minWidth = nameMin + 16; // + 左右 padding
-  for (const col of list) if (visibleColumns.value.includes(col)) minWidth += sftpColumnWidths[col] + 6; // 6px column-gap
+  const cols: string[] = [sftpNameTrack(nameMin)];
+  const list: SftpColumn[] = ["modified", "size", "kind", "owner", "group"];
+  const columns = list.filter((column) => visibleColumns.value.includes(column));
+  for (const column of columns) cols.push(sftpColumnTrack(column, sftpColumnWidths[column]));
   return {
     gridTemplateColumns: cols.join(" "),
-    minWidth: `${minWidth}px`,
+    minWidth: `${sftpGridMinWidth(nameMin, columns, sftpColumnWidths)}px`,
   };
 });
 const sftpFiltersActive = computed(() => sftpSearch.value.trim() !== "" || sftpTypeFilter.value !== "all" || sftpShowHidden.value);
 const visibleEntries = computed(() => filterSftpEntries(sortedEntries.value, sftpSearch.value, sftpTypeFilter.value, sftpShowHidden.value));
 
 // —— 文件列表窗口化（虚拟滚动）——
-// 渲染层只挂可见窗口的行（.file-row 30px + 上下 spacer 撑总高，滚动条比例
+// 渲染层只挂可见窗口的行（.file-row 44px + 上下 spacer 撑总高，滚动条比例
 // 真实）；选中、范围选择等逻辑层始终作用于全量 visibleEntries，与窗口无关。
 // 方案：docs/SFTP_LIST_VIRTUAL_SCROLL_PLAN.zh-CN.md。
-const FILE_ROW_HEIGHT_PX = 30;
+const FILE_ROW_HEIGHT_PX = 44;
 const FILE_ROW_OVERSCAN = 10;
 const fileRowsEl = ref<HTMLElement | null>(null);
 const fileRowsViewportHeight = ref(0);

@@ -45,6 +45,7 @@ export function usePluginEvents(options: {
   rdpCertRemember: Ref<boolean>;
   connectLog: ConnectLog;
   scheduleSessionReconnect: () => void;
+  cancelSessionReconnect: () => void;
   reconnectPending: Ref<boolean>;
   // 本地/telnet/vnc/serial 会话域
   localSession: Ref<{ sessionId: string; shell: string } | null>;
@@ -89,6 +90,7 @@ export function usePluginEvents(options: {
     rdpCertRemember,
     connectLog,
     scheduleSessionReconnect,
+    cancelSessionReconnect,
     reconnectPending,
     localSession,
     markLocalExited,
@@ -184,9 +186,14 @@ export function usePluginEvents(options: {
     }
     if (event.method === "ssh/session/state" && event.params.sessionId === session.value?.sessionId) {
       if (event.params.state === "disconnected") {
-        // Transport dropped (network flap, server restart): auto-reconnect with
-        // a bounded backoff ladder instead of parking on a dead terminal.
-        scheduleSessionReconnect();
+        if (event.params.reason === "connection-disconnect") {
+          // 用户主动删除连接：停在本状态，不把刚删除的连接重新打开。
+          cancelSessionReconnect();
+        } else {
+          // Transport dropped (network flap, server restart): auto-reconnect with
+          // a bounded backoff ladder instead of parking on a dead terminal.
+          scheduleSessionReconnect();
+        }
       }
       return;
     }

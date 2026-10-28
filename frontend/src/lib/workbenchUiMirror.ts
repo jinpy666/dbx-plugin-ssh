@@ -22,6 +22,7 @@ export interface WorkbenchUiMirror {
   sftpPaneOpen?: boolean;
   visibleColumns?: string[];
   columnsV2?: boolean;
+  columnsV3?: boolean;
   sftpColumnWidths?: Record<string, number>;
   sftpNameWidth?: number | null;
   sftpShowHidden?: boolean;

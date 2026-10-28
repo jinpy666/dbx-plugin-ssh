@@ -2,7 +2,7 @@
 // null/非数组整体收敛为空数组、null 行与无名/无 uri 行丢弃、缺 kind 降级
 // 为 file（渲染占位而非整表丢弃/比较器抛错）。
 import { describe, expect, it } from "vitest";
-import { sanitizeSftpEntries, sanitizeVisibleColumns, sftpEntryIconKind } from "./sftpEntries";
+import { formatSftpPermissions, sanitizeSftpEntries, sanitizeVisibleColumns, sftpEntryIconKind, sftpFileTypeName } from "./sftpEntries";
 
 describe("sanitizeSftpEntries", () => {
   it("returns an empty array for null / non-array payloads", () => {
@@ -92,29 +92,63 @@ describe("sanitizeSftpEntries", () => {
 
 describe("sanitizeVisibleColumns", () => {
   it("falls back to the default columns for non-array payloads", () => {
-    expect(sanitizeVisibleColumns(undefined)).toEqual(["size", "modified", "owner", "group", "permissions"]);
-    expect(sanitizeVisibleColumns(null)).toEqual(["size", "modified", "owner", "group", "permissions"]);
-    expect(sanitizeVisibleColumns("size")).toEqual(["size", "modified", "owner", "group", "permissions"]);
+    expect(sanitizeVisibleColumns(undefined)).toEqual(["modified", "size", "kind"]);
+    expect(sanitizeVisibleColumns(null)).toEqual(["modified", "size", "kind"]);
+    expect(sanitizeVisibleColumns("size")).toEqual(["modified", "size", "kind"]);
   });
 
   it("keeps only known columns and drops junk entries", () => {
-    expect(sanitizeVisibleColumns(["size", "owner", "group", "permissions", "evil"])).toEqual([
-      "size",
-      "owner",
-      "group",
-      "permissions",
-    ]);
-    // 旧版本持久化状态（没有 owner/group）原样保留。
-    expect(sanitizeVisibleColumns(["modified", "permissions"])).toEqual(["modified", "permissions"]);
+    expect(sanitizeVisibleColumns(["size", "owner", "group", "permissions", "evil"])).toEqual(["size", "owner", "group"]);
+    // 独立权限列已并入名称第二行，旧偏好只丢弃该列，不影响其他选择。
+    expect(sanitizeVisibleColumns(["modified", "permissions"])).toEqual(["modified"]);
   });
 
   it("falls back to defaults when nothing usable remains", () => {
-    expect(sanitizeVisibleColumns([])).toEqual(["size", "modified", "owner", "group", "permissions"]);
-    expect(sanitizeVisibleColumns([42, null])).toEqual(["size", "modified", "owner", "group", "permissions"]);
+    expect(sanitizeVisibleColumns([])).toEqual(["modified", "size", "kind"]);
+    expect(sanitizeVisibleColumns([42, null])).toEqual(["modified", "size", "kind"]);
   });
 
-  it("accepts the new owner/group columns from persisted state", () => {
-    expect(sanitizeVisibleColumns(["size", "owner", "group"])).toEqual(["size", "owner", "group"]);
+  it("accepts kind and owner/group columns from persisted state", () => {
+    expect(sanitizeVisibleColumns(["size", "kind", "owner", "group"])).toEqual(["size", "kind", "owner", "group"]);
+  });
+});
+
+describe("sftpFileTypeName", () => {
+  it("returns a lowercase extension for the kind column", () => {
+    expect(sftpFileTypeName("Archive.TAR.GZ")).toBe("gz");
+    expect(sftpFileTypeName("server.LOG")).toBe("log");
+  });
+
+  it("ignores URL query strings and fragments when reading the extension", () => {
+    expect(sftpFileTypeName("photo.JPG?Expires=1780717009&Signature=abc")).toBe("jpg");
+    expect(sftpFileTypeName("report.PDF#page=3")).toBe("pdf");
+  });
+
+  it("returns an empty label for extensionless files and dotfiles", () => {
+    expect(sftpFileTypeName("README")).toBe("");
+    expect(sftpFileTypeName(".gitignore")).toBe("");
+    expect(sftpFileTypeName(" trailing.")).toBe("");
+  });
+});
+
+describe("formatSftpPermissions", () => {
+  it("renders POSIX permission bits with the entry type", () => {
+    expect(formatSftpPermissions("0755", "directory")).toBe("drwxr-xr-x");
+    expect(formatSftpPermissions("0644", "file")).toBe("-rw-r--r--");
+    expect(formatSftpPermissions("0600", "file")).toBe("-rw-------");
+    expect(formatSftpPermissions("0777", "symlink")).toBe("lrwxrwxrwx");
+  });
+
+  it("preserves setuid, setgid and sticky bits", () => {
+    expect(formatSftpPermissions("4755", "file")).toBe("-rwsr-xr-x");
+    expect(formatSftpPermissions("2751", "file")).toBe("-rwxr-s--x");
+    expect(formatSftpPermissions("1777", "directory")).toBe("drwxrwxrwt");
+    expect(formatSftpPermissions("1776", "directory")).toBe("drwxrwxrwT");
+  });
+
+  it("passes through existing symbolic or missing values", () => {
+    expect(formatSftpPermissions("drwxr-xr-x", "directory")).toBe("drwxr-xr-x");
+    expect(formatSftpPermissions(undefined, "file")).toBe("");
   });
 });
 

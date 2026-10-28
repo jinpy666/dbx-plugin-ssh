@@ -36,27 +36,29 @@ export function sftpEntryIconKind(kind: string | undefined): "folder" | "file" |
   return "file";
 }
 
-/** 可选显示列；`owner`/`group` 默认关闭（issue #34：默认不显示，避免打扰现有用户）。 */
-export type SftpColumn = "size" | "modified" | "permissions" | "owner" | "group";
+/** 可选显示列；属主与属组默认收起，权限并入名称列第二行。 */
+export type SftpColumn = "size" | "modified" | "kind" | "permissions" | "owner" | "group";
 
-const KNOWN_COLUMNS: readonly SftpColumn[] = ["size", "modified", "permissions", "owner", "group"];
+const KNOWN_COLUMNS: readonly SftpColumn[] = ["modified", "size", "kind", "owner", "group"];
 
-/** 持久化状态没有可用列偏好时的默认列（全开 5 列）。 */
-export const DEFAULT_VISIBLE_COLUMNS: SftpColumn[] = ["size", "modified", "owner", "group", "permissions"];
+/** 默认采用名称 / 修改时间 / 大小 / 类型，给文件名保留主要空间。 */
+export const DEFAULT_VISIBLE_COLUMNS: SftpColumn[] = ["modified", "size", "kind"];
 
 /** 各列默认宽度（px）；name 列自动伸缩不占固定值。 */
 export const DEFAULT_COLUMN_WIDTHS: Record<SftpColumn, number> = {
   size: 80,
   modified: 130,
+  kind: 64,
   owner: 100,
   group: 100,
   permissions: 90,
 };
 
-/** 每列最小宽度（px）：修改时间 72（短日期可读），其余 68。 */
+/** 每列最小宽度（px）：修改时间 72（短日期可读），其余 60–68。 */
 export const COLUMN_MIN_WIDTHS: Record<SftpColumn, number> = {
   size: 68,
   modified: 72,
+  kind: 60,
   owner: 68,
   group: 68,
   permissions: 68,
@@ -75,6 +77,31 @@ export function sanitizeVisibleColumns(value: unknown): SftpColumn[] {
       typeof column === "string" && (KNOWN_COLUMNS as readonly string[]).includes(column),
   );
   return columns.length > 0 ? columns : [...DEFAULT_VISIBLE_COLUMNS];
+}
+
+export function sftpFileTypeName(name: string): string {
+  const cleanName = name.split(/[?#]/)[0];
+  const dot = cleanName.lastIndexOf(".");
+  return dot > 0 && dot < cleanName.length - 1 ? cleanName.slice(dot + 1).toLowerCase() : "";
+}
+
+export function formatSftpPermissions(permissions: string | undefined, kind: SftpEntryKind): string {
+  if (!permissions) return "";
+  if (!/^[0-7]{3,4}$/.test(permissions)) return permissions;
+  const mode = Number.parseInt(permissions, 8);
+  const type = kind === "directory" ? "d" : kind === "symlink" ? "l" : "-";
+  const triplets = [
+    { shift: 6, special: 0o4000, executable: "s", inert: "S" },
+    { shift: 3, special: 0o2000, executable: "s", inert: "S" },
+    { shift: 0, special: 0o1000, executable: "t", inert: "T" },
+  ];
+  const bits = triplets.map(({ shift, special, executable, inert }) => {
+    const value = (mode >> shift) & 0o7;
+    const text = `${value & 0o4 ? "r" : "-"}${value & 0o2 ? "w" : "-"}${value & 0o1 ? "x" : "-"}`;
+    if (mode & special) return `${text.slice(0, 2)}${value & 0o1 ? executable : inert}`;
+    return text;
+  });
+  return `${type}${bits.join("")}`;
 }
 
 function optionalString(value: unknown): string | undefined {

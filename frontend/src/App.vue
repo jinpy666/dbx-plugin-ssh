@@ -304,10 +304,12 @@ import {
   COLUMN_WIDTH_MAX,
   DEFAULT_COLUMN_WIDTHS,
   DEFAULT_VISIBLE_COLUMNS,
+  formatSftpPermissions,
   NAME_COLUMN_MAX,
   NAME_COLUMN_MIN,
   sanitizeVisibleColumns,
   sftpEntryIconKind,
+  sftpFileTypeName,
   type SftpColumn,
 } from "./lib/sftpEntries";
 import { fileIcon, fileIconClass } from "./lib/fileIcons";
@@ -507,8 +509,10 @@ interface WorkbenchState {
   visibleColumns?: SftpColumn[];
   sftpColumnWidths?: Partial<Record<SftpColumn, number>>;
   sftpNameWidth?: number | null;
-  /** 列配置版本标记：六列默认（issue #35）上线后的一次性迁移，老偏好重置为全开。 */
+  /** 旧六列布局的版本标记。 */
   columnsV2?: boolean;
+  /** 双行名称与类型列布局的版本标记。 */
+  columnsV3?: boolean;
   /** RDP 会话内用户选择的桌面尺寸（P0-2）：恢复 tab 时优先于连接表单 rdp_resolution。 */
   rdpWidth?: number;
   rdpHeight?: number;
@@ -1654,9 +1658,11 @@ const serialInputQueue = createTerminalInputQueue({
 
 const locale = ref("zh-CN");
 const t = (key: string, values: Record<string, string | number> = {}) => workbenchMessage(locale.value, key, values);
-// 宿主用 iframe 的 document.title 命名工作台标签：标题跟随 locale，
-// 中文环境显示「终端」而不是静态的英文插件名。
-watch(locale, (value) => { document.title = workbenchMessage(value, "pluginName"); }, { immediate: true });
+// 宿主用 iframe 的 document.title 命名工作台标签：连接名实时跟随宿主上下文，
+// 未提供名称时回落到本地化的插件名，改名无需重建工作台。
+watch([locale, () => (hostContext.value.connection as { name?: string } | undefined)?.name], ([value, name]) => {
+  document.title = name || workbenchMessage(value, "pluginName");
+}, { immediate: true });
 // html lang 同步跟随 locale：屏幕阅读器/拼写检查按它选语言，滞留 zh-CN 会让
 // 其他语种读错音（i18n 走查实录：locale=ja 时翻译已切换而 lang 仍为 zh-CN）。
 watch(locale, (value) => { document.documentElement.lang = value; }, { immediate: true });
@@ -1934,7 +1940,7 @@ function applyWorkbenchLayoutPrefs() {
   if (prefs.sftpPaneOpen !== undefined) sftpPaneOpen.value = prefs.sftpPaneOpen;
   if (prefs.visibleColumns) visibleColumns.value = sanitizeVisibleColumns(prefs.visibleColumns);
   if (prefs.sftpColumnWidths) {
-    const allCols: SftpColumn[] = ["size", "modified", "owner", "group", "permissions"];
+    const allCols: SftpColumn[] = ["size", "modified", "kind", "owner", "group", "permissions"];
     for (const col of allCols) {
       const num = prefs.sftpColumnWidths[col];
       if (typeof num === "number") sftpColumnWidths[col] = Math.max(COLUMN_MIN_WIDTHS[col], Math.min(COLUMN_WIDTH_MAX, num));
@@ -1975,14 +1981,15 @@ function restoreUiState() {
   // 恢复的 tab 用 per-workbench 状态；全新工作台回落全局偏好（pluginStore）。
   followDirectory.value = panelSurface.value ? false : resolveDirectoryFollow(state, loadDirectoryFollowPref());
   sudoMode.value = state.sudoMode === true && canWrite.value;
-  // 一次性迁移：六列默认上线前的旧偏好重置为全开（之后用户自定义照常持久化）。
-  const legacyColumns = state.visibleColumns != null && state.columnsV2 !== true;
+  // 一次性迁移：双行名称与类型列上线前的列偏好重置为新默认；权限并入名称列，
+  // 之后的自定义选择照常持久化。
+  const legacyColumns = state.visibleColumns != null && state.columnsV3 !== true;
   if (legacyColumns) visibleColumns.value = [...DEFAULT_VISIBLE_COLUMNS];
   else if (state.visibleColumns != null) visibleColumns.value = sanitizeVisibleColumns(state.visibleColumns);
   // 恢复列宽，未知列或越界用默认值兜底；state 无该列宽度时保持当前值
   // （布局偏好层已写入的值或默认值）。
   const saved = state.sftpColumnWidths || {};
-  const allCols: SftpColumn[] = ["size", "modified", "owner", "group", "permissions"];
+  const allCols: SftpColumn[] = ["size", "modified", "kind", "owner", "group", "permissions"];
   for (const col of allCols) {
     const raw = saved[col];
     if (typeof raw === "number") sftpColumnWidths[col] = Math.max(COLUMN_MIN_WIDTHS[col], Math.min(COLUMN_WIDTH_MAX, raw));
@@ -2015,6 +2022,7 @@ function writeWorkbenchState() {
     sftpPaneOpen: sftpPaneOpen.value,
     visibleColumns: visibleColumns.value,
     columnsV2: true,
+    columnsV3: true,
     sftpColumnWidths: { ...sftpColumnWidths } as Record<string, number>,
     sftpNameWidth: sftpNameWidth.value,
     sftpShowHidden: sftpShowHidden.value,
@@ -4113,6 +4121,7 @@ const {
   reconnectNextAt,
   reconnectDelayMs,
   scheduleSessionReconnect,
+  cancelSessionReconnect,
 } = useSessionReconnect({
   t,
   terminalState, terminalError,
@@ -7854,7 +7863,7 @@ const { handlePluginEvent } = usePluginEvents({
   t, session, terminalState, showError, showNotice,
   terminalDiag, batchBarSourceId, applyRemoteBatchBarState,
   hostKeyPrompt, rdpCertPrompt, rdpCertRemember, connectLog,
-  scheduleSessionReconnect, reconnectPending,
+  scheduleSessionReconnect, cancelSessionReconnect, reconnectPending,
   localSession, markLocalExited,
   telnetSession, telnetState, telnetError, markTelnetClosed,
   vncSession, vncState, vncError, markVncClosed,
@@ -9369,7 +9378,7 @@ watch(historyScope, () => {
               <button class="icon-button icon-violet" :title="t('customizeColumns')" :aria-label="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
             </PopoverAnchor>
             <PopoverContent class="popover columns-popover" align="end" :side-offset="5">
-            <label v-for="column in (['size', 'modified', 'owner', 'group', 'permissions'] as SftpColumn[])" :key="column"><input type="checkbox" :checked="visibleColumns.includes(column)" @change="toggleColumn(column)" />{{ t(column) }}</label>
+            <label v-for="column in (['modified', 'size', 'kind', 'owner', 'group'] as SftpColumn[])" :key="column"><input type="checkbox" :checked="visibleColumns.includes(column)" @change="toggleColumn(column)" />{{ column === "kind" ? t("sftpKind") : t(column) }}</label>
             <hr class="columns-popover-separator" />
             <label :title="t('sftpPane.defaultOpenHint')"><input type="checkbox" :checked="sftpPaneDefaultOpen" @change="toggleSftpPaneDefaultOpen" />{{ t("sftpPane.defaultOpen") }}</label>
             <label :title="t('sftpPane.autoConnectHint')"><input type="checkbox" :checked="sftpAutoConnect" @change="toggleSftpAutoConnect" />{{ t("sftpPane.autoConnect") }}</label>
@@ -10456,11 +10465,11 @@ watch(historyScope, () => {
             <div ref="fileRowsEl" class="file-rows" @scroll.passive="onFileRowsScroll" @contextmenu="onFileAreaContextMenu">
               <div class="file-header" :style="sftpGridStyle">
                 <button class="col-wrap" @click="toggleSort('name')">{{ t("name") }}<component :is="sortIcon('name')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('name', e)" /></button>
-                <button v-if="visibleColumns.includes('size')" class="col-wrap" @click="toggleSort('size')">{{ t("size") }}<component :is="sortIcon('size')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('size', e)" /></button>
                 <button v-if="visibleColumns.includes('modified')" class="col-wrap" @click="toggleSort('modified')">{{ t("modified") }}<component :is="sortIcon('modified')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('modified', e)" /></button>
+                <button v-if="visibleColumns.includes('size')" class="col-wrap" @click="toggleSort('size')">{{ t("size") }}<component :is="sortIcon('size')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('size', e)" /></button>
+                <span v-if="visibleColumns.includes('kind')" class="col-wrap">{{ t("sftpKind") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('kind', e)" /></span>
                 <span v-if="visibleColumns.includes('owner')" class="col-wrap" :title="t('owner')">{{ t("owner") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('owner', e)" /></span>
                 <span v-if="visibleColumns.includes('group')" class="col-wrap" :title="t('group')">{{ t("group") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('group', e)" /></span>
-                <span v-if="visibleColumns.includes('permissions')" class="col-wrap">{{ t("permissions") }}<span class="col-resizer" @pointerdown="(e) => onColResizeStart('permissions', e)" /></span>
               </div>
               <!-- 加载态不再占列表流内空间（原先 v-if + .empty 的 120px 会把整个
                    目录列表往下顶，换目录/刷新时画面上下跳）。改为 .file-table 上的
@@ -10496,29 +10505,34 @@ watch(historyScope, () => {
                     aria-hidden="true"
                   />
                   <FileText v-else />
-                  <input
-                    v-if="renamingPath === entry.uri"
-                    v-model="renameDraft"
-                    class="rename-input"
-                    :disabled="renameSubmitting"
-                    @click.stop
-                    @dblclick.stop
-                    @keydown.enter.stop="commitRename(entry)"
-                    @keydown.escape.stop="renamingPath = ''"
-                    @blur="commitRename(entry)"
-                  />
-                  <span v-else :title="linkTargetTitle(entry)">{{ entry.name }}</span>
-                  <TriangleAlert
-                                      v-if="entry.lossy"
-                                      class="sftp-lossy-icon"
-                                      :title="t('sftpName.lossyTitle')"
-                                    />
+                  <span class="file-name-body">
+                    <span class="file-name-line">
+                      <input
+                        v-if="renamingPath === entry.uri"
+                        v-model="renameDraft"
+                        class="rename-input"
+                        :disabled="renameSubmitting"
+                        @click.stop
+                        @dblclick.stop
+                        @keydown.enter.stop="commitRename(entry)"
+                        @keydown.escape.stop="renamingPath = ''"
+                        @blur="commitRename(entry)"
+                      />
+                      <span v-else class="file-name-label" :title="linkTargetTitle(entry)">{{ entry.name }}</span>
+                      <TriangleAlert
+                        v-if="entry.lossy"
+                        class="sftp-lossy-icon"
+                        :title="t('sftpName.lossyTitle')"
+                      />
+                    </span>
+                    <span v-if="entry.permissions" class="file-name-permissions">{{ formatSftpPermissions(entry.permissions, entry.kind) }}</span>
+                  </span>
                 </span>
-                <span v-if="visibleColumns.includes('size')" class="numeric">{{ entry.kind === "file" ? formatBytes(entry.size) : "" }}</span>
                 <span v-if="visibleColumns.includes('modified')">{{ formatModified(entry.modifiedAt) }}</span>
+                <span v-if="visibleColumns.includes('size')">{{ entry.kind === "file" ? formatBytes(entry.size) : "--" }}</span>
+                <span v-if="visibleColumns.includes('kind')">{{ entry.kind === "directory" ? t("sftpFilter.folders") : sftpFileTypeName(entry.name) || t("sftpFilter.files") }}</span>
                 <span v-if="visibleColumns.includes('owner')" class="mono" :title="entry.owner">{{ entry.owner || "-" }}</span>
                 <span v-if="visibleColumns.includes('group')" class="mono" :title="entry.group">{{ entry.group || "-" }}</span>
-                <span v-if="visibleColumns.includes('permissions')" class="mono">{{ entry.permissions }}</span>
               </button>
               <div v-if="virtualFileWindow.padBottom" :style="{ height: `${virtualFileWindow.padBottom}px` }" aria-hidden="true"></div>
               <div v-if="!loadingFiles && !visibleEntries.length" class="empty">{{ entries.length ? t("sftpSearch.noMatch") : t("emptyFolder") }}</div>
@@ -10603,7 +10617,7 @@ watch(historyScope, () => {
           </div>
           </div>
         </div>
-        <div v-if="dragActive" class="drop-overlay"><FileUp /><strong>{{ t("upload") }}</strong></div>
+        <div v-if="dragActive" class="drop-overlay"><Download /><strong>{{ t("upload") }}</strong></div>
       </section>
     </section>
 

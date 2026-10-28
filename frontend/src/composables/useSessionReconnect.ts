@@ -77,6 +77,13 @@ function scheduleSessionReconnect() {
   terminalError.value = t("transportDisconnected");
 }
 
+function cancelSessionReconnect() {
+  window.clearTimeout(reconnectTimer.value);
+  reconnectAttempt.value = 0;
+  reconnectPending.value = false;
+  reconnectCountdown.value = null;
+  terminalState.value = "disconnected";
+}
 
   onBeforeUnmount(() => {
     window.clearTimeout(reconnectTimer.value);
@@ -93,5 +100,6 @@ function scheduleSessionReconnect() {
     reconnectNextAt,
     reconnectDelayMs,
     scheduleSessionReconnect,
+    cancelSessionReconnect,
   };
 }

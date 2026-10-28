@@ -525,21 +525,21 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .sftp-side-spacer { flex: 1 1 auto; }
 .sftp-side-body { flex: 1 1 auto; overflow: auto; overflow-x: hidden; padding: 4px 3px; }
 .sftp-side-quick { display: flex; flex-direction: column; gap: 1px; }
-.sftp-side-quick button { display: flex; min-width: 0; align-items: center; gap: 7px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; padding: 5px 6px; color: var(--foreground); font-size: 12px; text-align: left; white-space: nowrap; }
-.sftp-side-quick button svg { width: 14px; height: 14px; flex: 0 0 14px; color: var(--muted-foreground); stroke-width: 1.7; }
+.sftp-side-quick button { display: flex; min-width: 0; height: 28px; align-items: center; gap: 4px; border: 0; border-radius: var(--radius); background: transparent; cursor: pointer; padding: 0 6px; color: var(--foreground); font-size: 13px; text-align: left; white-space: nowrap; }
+.sftp-side-quick button svg { width: 15px; height: 15px; flex: 0 0 15px; color: var(--warning, #d97706); fill: color-mix(in srgb, var(--warning, #d97706) 78%, transparent); stroke-width: 1.7; }
 .sftp-side-quick button span { overflow: hidden; text-overflow: ellipsis; }
-.sftp-side-quick button:hover { background: var(--accent); }
+.sftp-side-quick button:hover { background: color-mix(in srgb, var(--accent) 65%, transparent); }
 .sftp-side-quick button.is-current { background: var(--accent); }
 .sftp-side-quick button.is-current svg { color: var(--primary); }
 
-.sftp-tree-row { display: flex; align-items: center; gap: 2px; width: 100%; height: 24px; padding-right: 4px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; color: var(--foreground); font-size: 12px; white-space: nowrap; text-align: left; }
-.sftp-tree-row:hover { background: var(--accent); }
+.sftp-tree-row { display: flex; align-items: center; gap: 4px; width: 100%; height: 28px; padding-right: 5px; border: 0; border-radius: var(--radius); background: transparent; cursor: pointer; color: var(--foreground); font-size: 13px; white-space: nowrap; text-align: left; }
+.sftp-tree-row:hover { background: color-mix(in srgb, var(--accent) 65%, transparent); }
 .sftp-tree-row.is-current { background: var(--accent); }
 .sftp-tree-row.is-current .sftp-tree-name { color: var(--primary); font-weight: 600; }
-.sftp-tree-caret { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 14px; width: 14px; height: 14px; border: 0; border-radius: 3px; background: transparent; cursor: pointer; color: var(--muted-foreground); padding: 0; }
+.sftp-tree-caret { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 15px; width: 15px; height: 15px; border: 0; border-radius: 3px; background: transparent; cursor: pointer; color: var(--muted-foreground); padding: 0; }
 .sftp-tree-caret svg { width: 11px; height: 11px; }
 .sftp-tree-caret:hover { background: color-mix(in srgb, var(--muted-foreground) 20%, transparent); color: var(--foreground); }
-.sftp-tree-row > svg.sftp-tree-dir-icon { width: 13px; height: 13px; flex: 0 0 13px; color: var(--muted-foreground); }
+.sftp-tree-row > svg.sftp-tree-dir-icon { width: 15px; height: 15px; flex: 0 0 15px; color: var(--warning, #d97706); fill: color-mix(in srgb, var(--warning, #d97706) 78%, transparent); }
 .sftp-tree-name { overflow: hidden; text-overflow: ellipsis; }
 .sftp-tree-spinner { width: 9px; height: 9px; border: 1.5px solid var(--muted-foreground); border-top-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
 
@@ -592,10 +592,9 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .popover textarea:focus { border-color: color-mix(in srgb, var(--primary) 70%, var(--border)); }
 
 .file-table { position: relative; display: flex; min-height: 0; flex: 1; flex-direction: column; }
-.file-header, .file-row { display: grid; min-width: 100%; align-items: center; column-gap: 6px; padding: 0 8px; }
-.file-header { position: sticky; top: 0; z-index: 3; height: 28px; min-height: 28px; border-bottom: 1px solid var(--border); background: var(--background); box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 8%, transparent); color: var(--muted-foreground); font-size: 11px; user-select: none; }
+.file-header, .file-row { display: grid; min-width: 100%; align-items: center; column-gap: 16px; padding: 0 10px; }
+.file-header { position: sticky; top: 0; z-index: 3; height: 28px; min-height: 28px; border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent); background: var(--background); color: var(--muted-foreground); font-size: 11px; user-select: none; }
 .file-header button { display: flex; min-width: 0; height: 22px; align-items: center; justify-content: space-between; gap: 4px; border-radius: 3px; padding: 0 3px; text-align: left; color: inherit; }
-.file-header button:nth-child(n + 2) { justify-content: flex-end; }
 .file-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-rows { min-height: 0; flex: 1; overflow: auto; }
 /* 文件列表是全局"隐藏滚动条"规则（*::-webkit-scrollbar{display:none}）的例外：
@@ -630,15 +629,22 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
    .file-table 上（不参与布局），换目录/刷新时列表不再上下跳。pointer-events
    保持 none，滚动与既有按钮的 disabled 守卫行为不变。 */
 .sftp-loading-veil { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; background: color-mix(in srgb, var(--background) 62%, transparent); color: var(--muted-foreground); font-size: 12px; pointer-events: none; }
-.file-row { width: 100%; height: 30px; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); border-radius: 0; background: transparent; text-align: left; color: var(--foreground); font-size: 12px; cursor: default; }
+.file-row { width: 100%; height: 44px; border: 0; border-radius: var(--radius); background: transparent; text-align: left; color: var(--foreground); font-size: 13px; cursor: default; }
 .file-row:hover { background: color-mix(in srgb, var(--accent) 65%, transparent); }
 .file-row.selected, .file-row.selected:hover { background: var(--accent); color: var(--accent-foreground); }
 .file-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-name { gap: 7px; }
-.file-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row > span:not(.file-name) { color: var(--muted-foreground); font-size: 12px; }
+.file-row.selected > span { color: inherit; }
+.file-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.file-name > svg { width: 17px; height: 17px; flex: 0 0 17px; }
+.file-name-body { display: flex; min-width: 0; flex: 1; flex-direction: column; line-height: 1.2; }
+.file-name-line { display: flex; min-width: 0; align-items: center; gap: 4px; }
+.file-name-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-name-permissions { color: var(--muted-foreground); font-family: var(--terminal-font-family); font-size: 10px; font-weight: 400; line-height: 14px; }
+.file-row.selected .file-name-permissions { color: inherit; opacity: 0.75; }
 /* gb18030 最小方案：不可解码文件名警示标记（U+FFFD 条目），不占格子只贴名后。 */
 .sftp-lossy-icon { flex: none; width: 13px; height: 13px; color: var(--destructive, #d93025); }
-.folder-icon { color: var(--warning); fill: color-mix(in srgb, var(--warning) 16%, transparent); }
+.folder-icon { color: var(--warning, #d97706); fill: color-mix(in srgb, var(--warning, #d97706) 78%, transparent); }
 /* 文件类型图标（files 插件 fileIcons 移植）：媒体/代码/归档给主题色，
    办公文档与未知类型保持中性灰，避免整列表彩虹化。 */
 .file-name svg.ssh-fi-image { color: color-mix(in srgb, var(--info) 72%, var(--muted-foreground)); }
@@ -666,6 +672,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 
 .drop-overlay { position: absolute; z-index: 12; inset: 4px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; border: 2px dashed var(--primary); border-radius: var(--radius); background: color-mix(in srgb, var(--primary) 11%, var(--background)); color: var(--foreground); pointer-events: none; }
 .drop-overlay svg { width: 28px; height: 28px; }
+.sftp-pane.drag-active .file-table { opacity: 0.4; }
+.sftp-pane .drop-overlay { border-width: 1px; background: color-mix(in srgb, var(--primary) 3%, transparent); }
+.sftp-pane .drop-overlay svg { width: 56px; height: 56px; flex: 0 0 56px; color: var(--foreground); stroke-width: 1.5; }
+.sftp-pane .drop-overlay strong { color: var(--foreground); font-size: 18px; font-weight: 600; }
 
 /* 工具栏 popover 已迁移 reka Popover：内容 portal 到 body、floating-ui 定位 +
    碰撞翻转，基础壳（背景/边框/阴影/圆角）由 wrapper 工具类提供；此处只保留

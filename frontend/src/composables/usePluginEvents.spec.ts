@@ -30,6 +30,7 @@ function buildHarness(overrides: HarnessOptions = {}) {
     rdpCertRemember: ref(false),
     connectLog: { entries: ref([]), push: vi.fn(), clear: vi.fn() },
     scheduleSessionReconnect,
+    cancelSessionReconnect: vi.fn(),
     reconnectPending: ref(false),
     localSession: ref<{ sessionId: string; shell: string } | null>(null),
     markLocalExited: vi.fn(),
@@ -73,6 +74,18 @@ describe("usePluginEvents session lifecycle isolation (issue #193a)", () => {
     expect(scheduleSessionReconnect).not.toHaveBeenCalled();
 
     // 自己的传输断开才进重连梯子。
+    handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-A", state: "disconnected" }));
+    expect(scheduleSessionReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels reconnect after an intentional connection delete but keeps transport recovery", () => {
+    const cancelSessionReconnect = vi.fn();
+    const { handlePluginEvent, scheduleSessionReconnect } = buildHarness({ cancelSessionReconnect });
+
+    handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-A", state: "disconnected", reason: "connection-disconnect" }));
+    expect(cancelSessionReconnect).toHaveBeenCalledTimes(1);
+    expect(scheduleSessionReconnect).not.toHaveBeenCalled();
+
     handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-A", state: "disconnected" }));
     expect(scheduleSessionReconnect).toHaveBeenCalledTimes(1);
   });
