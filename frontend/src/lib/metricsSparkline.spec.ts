@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pushSample, sparklinePath, METRICS_SAMPLE_CAPACITY } from "./metricsSparkline";
+import { pushSample, smoothSparklinePath, sparklinePath, METRICS_SAMPLE_CAPACITY } from "./metricsSparkline";
 
 describe("metrics sparkline sample ring", () => {
   it("appends samples and caps the window at 60 entries", () => {
@@ -42,5 +42,16 @@ describe("metrics sparkline path", () => {
 
   it("clamps oversized values to the top edge", () => {
     expect(sparklinePath([20, 10], 30, 10)).toBe("0,0 30,5");
+  });
+
+  it("smooths real samples into cubic curves and optional closed areas", () => {
+    const line = smoothSparklinePath("0,18 30,4 60,10");
+    expect(line).toContain("M 0,18 C");
+    expect(line).toContain("60,10");
+    expect(line).not.toContain("Z");
+    const area = smoothSparklinePath("0,18 30,4 60,10", 18);
+    expect(area).toContain("L 60,18 L 0,18 Z");
+    expect(smoothSparklinePath("")).toBe("");
+    expect(smoothSparklinePath("0,9")).toBe("M 0,9");
   });
 });

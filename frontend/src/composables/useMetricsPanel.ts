@@ -10,7 +10,7 @@ export interface ServerMetrics {
   hostname?: string | null;
   kernel?: string | null;
   uptimeSeconds?: number | null;
-  cpu?: { cores?: number | null; percent?: number | null; load1?: number | null; load5?: number | null; load15?: number | null };
+  cpu?: { cores?: number | null; percent?: number | null; corePercents?: number[]; load1?: number | null; load5?: number | null; load15?: number | null };
   memory?: { totalBytes?: number; availableBytes?: number; usedBytes?: number; swapTotalBytes?: number; swapUsedBytes?: number };
   disks?: Array<{ filesystem: string; mount: string; totalBytes: number; usedBytes: number; availableBytes: number; percentUsed: number }>;
   // Extensions reported by newer sidecars; when absent the network and
@@ -74,7 +74,7 @@ const metricSamples = reactive({ rx: [] as number[], tx: [] as number[], cpu: []
 function recordMetricSamples() {
   let rx = 0;
   let tx = 0;
-  for (const net of metrics.value?.network ?? []) {
+  for (const net of filterNetworkInterfaces(metrics.value?.network)) {
     rx += Math.max(0, net.rxRate || 0);
     tx += Math.max(0, net.txRate || 0);
   }
@@ -97,9 +97,12 @@ const visibleNetworkInterfaces = computed(() => filterNetworkInterfaces(metrics.
 const metricsDistroBadge = computed<DistroBadge | null>(() => (metrics.value ? distroBadge(metrics.value.osId, metrics.value.osPretty) : null));
 
 let metricsTimer = 0;
+const metricsLive = ref(true);
+const metricsRefreshMs = ref(5000);
 
 async function refreshMetrics() {
   if (!session.value) return;
+  const startedAt = Date.now();
   metricsLoading.value = true;
   try {
     metrics.value = await window.dbxPlugin.invoke<ServerMetrics>("ssh/metrics", { sessionId: session.value.sessionId }, { timeoutMs: 30_000 });
@@ -112,10 +115,32 @@ async function refreshMetrics() {
     metricsError.value = t("metricsRefreshFailed");
   } finally {
     metricsLoading.value = false;
+    if (metricsOpen.value && metricsLive.value) {
+      scheduleMetricsPolling(Math.max(0, metricsRefreshMs.value - (Date.now() - startedAt)));
+    }
   }
 }
 
-// 悬浮指标卡：打开即刷新并启动 5s 轮询；不阻塞终端/SFTP 操作，随时开关。
+function scheduleMetricsPolling(delayMs = metricsRefreshMs.value) {
+  window.clearTimeout(metricsTimer);
+  if (!metricsOpen.value || !metricsLive.value) return;
+  metricsTimer = window.setTimeout(() => {
+    if (metricsOpen.value && metricsLive.value && !metricsLoading.value) void refreshMetrics();
+  }, delayMs);
+}
+
+function setMetricsRefreshMs(value: number) {
+  metricsRefreshMs.value = [1000, 2000, 5000].includes(value) ? value : 5000;
+  scheduleMetricsPolling();
+}
+
+function toggleMetricsLive() {
+  metricsLive.value = !metricsLive.value;
+  scheduleMetricsPolling();
+  if (metricsLive.value && metricsOpen.value) void refreshMetrics();
+}
+
+// 悬浮指标卡：打开即刷新并按当前周期轮询；不阻塞终端/SFTP 操作。
 // 与 SFTP transfers 抽屉、Recordings 浮层同位渲染，打开其一互斥关闭其余，
 // 避免内容叠字（mock 页实测）。
 function toggleMetrics() {
@@ -127,37 +152,14 @@ function toggleMetrics() {
   recordingsOpen.value = false;
   metricsOpen.value = true;
   void backfillMetricsHistory();
-  void refreshMetrics();
-  window.clearInterval(metricsTimer);
-  metricsTimer = window.setInterval(() => {
-    if (metricsOpen.value && !metricsLoading.value) void refreshMetrics();
-  }, 5000);
+  if (!metricsLoading.value) void refreshMetrics();
+  scheduleMetricsPolling();
 }
 
 function closeMetrics() {
   metricsOpen.value = false;
-  window.clearInterval(metricsTimer);
+  window.clearTimeout(metricsTimer);
 }
-
-// Peak rate across every interface normalizes the per-interface bars; the
-// network/process sections only render when the sidecar reports the fields,
-// so older backends simply hide them.
-const metricsRatePeak = computed(() => {
-  let peak = 0;
-  for (const net of metrics.value?.network ?? []) peak = Math.max(peak, net.rxRate, net.txRate);
-  return peak > 0 ? peak : 1;
-});
-
-function networkRateShare(net: { rxRate: number; txRate: number }) {
-  return Math.min(100, Math.round((Math.max(net.rxRate, net.txRate) / metricsRatePeak.value) * 100));
-}
-
-// 列宽要放得下 7 位 PID、常见用户名与带天数的 etime（单元格 ellipsis 会截断关键值）；
-// 浮层同步放宽到 448px，满宽时命令列不窄于加宽前；终端面板窄于约 464px 时浮层被
-// calc 钳制、命令列会被压缩，属已接受行为。管理表总宽仍超浮层，横向滚动是既有状态。
-// 句柄/端口两列（M13-B）加入后总宽进一步增加，同样接受横向滚动。
-const metricsProcGridStyle = { gridTemplateColumns: "64px 80px 56px 56px minmax(0, 1fr)" };
-const procGridStyle = { gridTemplateColumns: "64px 80px 56px 56px 96px 56px 96px minmax(0, 1fr) 132px" };
 
 // —— F2：指标历史回填 + 进程管理 ———
 
@@ -216,7 +218,7 @@ async function killProcessRow(row: ProcessRow, signal: 15 | 9) {
 
 
 onBeforeUnmount(() => {
-  window.clearInterval(metricsTimer);
+  window.clearTimeout(metricsTimer);
 });
 
 // 换会话清空采样环（跨重连不残留旧趋势）。
@@ -248,12 +250,12 @@ watch(() => session.value?.sessionId, (next, previous) => {
     visibleNetworkInterfaces,
     metricsDistroBadge,
     refreshMetrics,
+    metricsLive,
+    metricsRefreshMs,
+    setMetricsRefreshMs,
+    toggleMetricsLive,
     toggleMetrics,
     closeMetrics,
-    metricsRatePeak,
-    networkRateShare,
-    metricsProcGridStyle,
-    procGridStyle,
     backfillMetricsHistory,
     toggleProcessPanel,
     refreshProcessList,

@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/t8y2/dbx/main/plugins/manifest.schema.json",
   "manifest_version": 1,
   "id": "io.dbx.ssh",
-  "name": "Terminal",
+  "name": "SSH",
   "version": "0.7.11",
   "publisher": "jinpy",
   "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
@@ -1368,7 +1368,7 @@
   ],
   "localizations": {
     "en": {
-      "name": "Terminal",
+      "name": "SSH",
       "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
       "contributions": {
         "io.dbx.ssh.connection": {},
@@ -1398,7 +1398,7 @@
       }
     },
     "es": {
-      "name": "Terminal",
+      "name": "SSH",
       "description": "Terminal SSH, gestor SFTP y operaciones remotas en DBX.",
       "contributions": {
         "io.dbx.ssh.local": {
@@ -1707,7 +1707,7 @@
       }
     },
     "it": {
-      "name": "Terminal",
+      "name": "SSH",
       "description": "Terminale SSH, gestore SFTP e operazioni remote in DBX.",
       "contributions": {
         "io.dbx.ssh.local": {
@@ -2016,7 +2016,7 @@
       }
     },
     "ja": {
-      "name": "Terminal",
+      "name": "SSH",
       "description": "SSH ターミナル、SFTP ファイル管理、リモート運用をまとめた DBX プラグイン。",
       "contributions": {
         "io.dbx.ssh.local": {
@@ -2325,7 +2325,7 @@
       }
     },
     "pt-BR": {
-      "name": "Terminal",
+      "name": "SSH",
       "description": "Terminal SSH, gestor SFTP e operações remotas no DBX.",
       "contributions": {
         "io.dbx.ssh.local": {
@@ -2634,7 +2634,7 @@
       }
     },
     "zh-CN": {
-      "name": "终端",
+      "name": "SSH",
       "description": "面向服务器运维的终端：交互式会话、SFTP 文件传输、远程命令和受控运维操作集中在一个界面。",
       "contributions": {
         "io.dbx.ssh.local": {

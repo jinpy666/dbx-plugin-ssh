@@ -26,6 +26,7 @@ import {
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { normalizeBatchTargets } from "../lib/batchSend";
 import {
   dockerEngineParams,
@@ -524,28 +525,28 @@ const running = (container: DockerContainer): boolean => container.state === "ru
 
     <!-- 容器表 -->
     <div v-else class="docker-table-wrap">
-      <table class="docker-table">
-        <thead>
-          <tr>
-            <th>{{ props.t("docker.colName") }}</th>
-            <th>{{ props.t("docker.colImage") }}</th>
-            <th>{{ props.t("docker.colState") }}</th>
-            <th>{{ props.t("docker.colPorts") }}</th>
-            <th class="docker-col-actions">{{ props.t("docker.colActions") }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="container in containers" :key="container.id">
-            <td class="docker-cell-name" :title="container.id">
+      <Table class="docker-table">
+        <TableHeader>
+          <TableRow>
+            <TableHead>{{ props.t("docker.colName") }}</TableHead>
+            <TableHead>{{ props.t("docker.colImage") }}</TableHead>
+            <TableHead>{{ props.t("docker.colState") }}</TableHead>
+            <TableHead>{{ props.t("docker.colPorts") }}</TableHead>
+            <TableHead class="docker-col-actions">{{ props.t("docker.colActions") }}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow v-for="container in containers" :key="container.id">
+            <TableCell class="docker-cell-name" :title="container.id">
               <strong class="mono">{{ container.name || container.id.slice(0, 12) }}</strong>
-            </td>
-            <td class="docker-cell-image mono" :title="container.image">{{ container.image }}</td>
-            <td class="docker-cell-state">
+            </TableCell>
+            <TableCell class="docker-cell-image mono" :title="container.image">{{ container.image }}</TableCell>
+            <TableCell class="docker-cell-state">
               <span class="docker-badge" :class="dockerStateClass(container.state)">{{ container.state }}</span>
               <small class="docker-status" :title="container.status">{{ container.status }}</small>
-            </td>
-            <td class="docker-cell-ports mono" :title="container.ports">{{ container.ports || "–" }}</td>
-            <td class="docker-col-actions">
+            </TableCell>
+            <TableCell class="docker-cell-ports mono" :title="container.ports">{{ container.ports || "–" }}</TableCell>
+            <TableCell class="docker-col-actions">
               <Popover :open="rowMenu.isOpen(container.id)" @update:open="(open: boolean) => { if (!open) rowMenu.close(); }">
                 <PopoverAnchor as-child>
                   <button
@@ -596,10 +597,10 @@ const running = (container: DockerContainer): boolean => container.state === "ru
                   </button>
                 </PopoverContent>
               </Popover>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+            </TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
       <p v-if="mode === 'ssh'" class="docker-hint">{{ props.t("docker.terminalHint") }}</p>
     </div>
 
@@ -744,9 +745,12 @@ const running = (container: DockerContainer): boolean => container.state === "ru
 .docker-table-wrap {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 0;
   min-width: 0;
-  /* 列多超出面板宽时横向滚动兜底（面板本身可拖宽，见 App.vue 的 docker divider）。 */
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 12px;
+  background: var(--popover);
+  /* 列多超出工作台宽度时横向滚动兜底。 */
   overflow-x: auto;
   /* 内容过宽时用户找不到滚动入口——全局 `*::-webkit-scrollbar{display:none}`
      把 wrap 的滚动条也藏了。这里作为例外显式恢复（同 .file-rows 模式）：
@@ -755,8 +759,8 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   scrollbar-color: color-mix(in srgb, var(--foreground) 25%, transparent) transparent;
 }
 
-.docker-table-wrap::-webkit-scrollbar { display: block; height: 10px; width: 10px; }
-.docker-table-wrap::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--foreground) 25%, transparent); border-radius: 5px; }
+.docker-table-wrap::-webkit-scrollbar { display: block; height: 8px; width: 8px; }
+.docker-table-wrap::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--foreground) 25%, transparent); border-radius: 4px; }
 .docker-table-wrap::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--foreground) 40%, transparent); }
 .docker-table-wrap::-webkit-scrollbar-track { background: transparent; }
 
@@ -766,22 +770,29 @@ const running = (container: DockerContainer): boolean => container.state === "ru
      行分隔线本就只画在各 cell 的 border-bottom 上，spacing 0 视觉等价。 */
   border-collapse: separate;
   border-spacing: 0;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .docker-table th {
-  text-align: left;
-  font-weight: 600;
-  opacity: 0.6;
-  padding: 2px 6px 4px;
+  height: 32px;
+  padding: 0 10px;
   border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  font-size: 10px;
+  font-weight: 600;
+  text-align: left;
+  vertical-align: middle;
+  opacity: 0.6;
   white-space: nowrap;
 }
 
 .docker-table td {
-  padding: 4px 6px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.15));
-  vertical-align: top;
+  vertical-align: middle;
+}
+
+.docker-table tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 /* 列设最小宽度：窄面板下表格总宽超过容器 → wrap 横向滚动展示完整内容，
@@ -851,6 +862,10 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   z-index: 2;
   background: var(--popover);
   box-shadow: -1px 0 0 var(--border, rgba(128, 128, 128, 0.25));
+}
+
+.docker-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent) 45%, var(--popover));
 }
 
 /* 行操作悬浮下拉：触发器（⌄，终端回填成功短暂显示 ✓）+ hover 菜单。 */

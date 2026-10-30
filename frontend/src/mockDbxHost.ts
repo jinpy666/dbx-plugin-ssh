@@ -182,6 +182,9 @@ const theme: DbxPluginTheme = {
 };
 theme.tokens["--color-primary"] = light ? "rgb(23 23 23)" : "rgb(59 130 246)";
 theme.tokens["--color-primary-foreground"] = "rgb(255 255 255)";
+theme.tokens["--color-success"] = light ? "rgb(22 163 74)" : "rgb(74 222 128)";
+theme.tokens["--color-warning"] = light ? "rgb(217 119 6)" : "rgb(251 191 36)";
+theme.tokens["--color-info"] = light ? "rgb(37 99 235)" : "rgb(96 165 250)";
 // The real host installs these resolved tokens on <html> before loading the
 // iframe. Mirror that precedence so the plugin theme bridge does not read the
 // Tailwind fallback aliases back into themselves in the visual fixture.
@@ -1356,6 +1359,15 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
       result = { success: true, output: "● nginx.service - A high performance web server\n   Loaded: loaded (/lib/systemd/system/nginx.service; enabled)\n   Active: active (running) since Mon 2026-08-24 09:12:31 UTC; 3 days ago", exitCode: 0 };
     }
   }
+  else if (method === "ssh/metrics/history") {
+    const samples = Array.from({ length: 24 }, (_, index) => ({
+      cpuPercent: 12 + Math.round(18 * (0.5 + 0.5 * Math.sin(index * 0.8)) + (index === 15 ? 28 : 0)),
+      memoryPercent: 32 + Math.round(22 * index / 23),
+      rxRate: 8_000 + Math.round(52_000 * (0.5 + 0.5 * Math.sin(index * 0.65)) + (index === 11 || index === 19 ? 45_000 : 0)),
+      txRate: 4_000 + Math.round(16_000 * (0.5 + 0.5 * Math.cos(index * 0.7))),
+    }));
+    result = { samples };
+  }
   else if (method === "ssh/metrics") {
     // ?err=metrics 模拟采集失败：dock 面板信息带走降级占位（CPU/MEM –%、
     // tooltip 携带原因），验证「失败可见」分支而非静默消失。
@@ -1372,7 +1384,7 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
       uptimeSeconds: 1_234_567,
       osId: "ubuntu",
       osPretty: "Ubuntu 22.04.5 LTS",
-      cpu: { cores: 8, percent: 23.4, load1: 0.42, load5: 0.51, load15: 0.48 },
+      cpu: { cores: 8, percent: 23.4, corePercents: [14, 23, 18, 11, 8, 15, 12, 9], load1: 0.42, load5: 0.51, load15: 0.48 },
       memory: { totalBytes, availableBytes, usedBytes: totalBytes - availableBytes, swapTotalBytes: 2_147_483_648, swapUsedBytes: 0 },
       disks: [
         { filesystem: "/dev/sda1", mount: "/", totalBytes: 52_723_200_512, usedBytes: 24_023_981_056, availableBytes: 26_005_927_936, percentUsed: 48 },
@@ -1388,6 +1400,8 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
         { name: "lo", rxRate: wave(1_200, 800), txRate: wave(1_200, 800), rxTotal: 5_555_555, txTotal: 5_555_555 },
         // 超长网卡名夹具：同上，锁定 disk-row 截断。
         { name: "br-0f17c3a9d2e4-docker-custom-network", rxRate: wave(2_400, 1_800), txRate: wave(1_800, 1_200), rxTotal: 12_345_678, txTotal: 8_765_432 },
+        { name: "docker0", rxRate: 0, txRate: 0, rxTotal: 0, txTotal: 0 },
+        { name: "veth-idle", rxRate: 0, txRate: 0, rxTotal: 0, txTotal: 0 },
       ],
       processes: [
         { pid: 1, user: "root", cpuPercent: 0.1, memPercent: 0.4, command: "systemd" },

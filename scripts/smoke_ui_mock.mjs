@@ -154,6 +154,7 @@ try {
   await expect(page, ".terminal-pane", "terminal pane");
   await expect(page, ".toolbar-actions", "toolbar actions");
   await expect(page, ".toolbar-separator", "toolbar separator");
+  check("standalone run-command entry is removed", await page.locator('button[title="Run command"]').count() === 0);
 
   console.log("==> SSH toolbar port-forward manager");
   await page.locator('button[title="Port forwards"]').click();
@@ -164,6 +165,108 @@ try {
   mkdirSync(SHOT_DIR, { recursive: true });
   await page.screenshot({ path: `${SHOT_DIR}/01-workbench.png`, fullPage: false });
   console.log(`  screenshot: docs/screenshots-ui-mock/01-workbench.png`);
+
+  console.log("==> server metrics: overview, tabs and refresh controls");
+  await page.locator('button[title="Server metrics"]').click();
+  await expect(page, ".metrics-panel", "metrics panel opens");
+  check("four real summary cards", await page.locator(".metric-summary-card").count() === 4);
+  await expectText(page, ".metrics-title-row", "web-01.demo.internal", "metrics hostname");
+  await page.evaluate(() => {
+    const bridge = window.dbxPlugin;
+    const invoke = bridge.invoke.bind(bridge);
+    window.__metricInvocations = [];
+    bridge.invoke = (method, ...args) => {
+      if (method === "ssh/metrics") window.__metricInvocations.push(performance.now());
+      return invoke(method, ...args);
+    };
+  });
+  await expect(page, ".metrics-overview-disks", "disk mounts included on overview");
+  check("eight real CPU cores on overview", await page.locator(".metrics-core-item").count() === 8);
+  await expect(page, ".metrics-overview .gpu-npu-section", "GPU/NPU remains on overview");
+  await page.locator(".metrics-tabs button").nth(1).click();
+  await expect(page, ".metrics-process-page", "process tab opens");
+  const cleanTabSelection = await page.evaluate(() => {
+    const tabs = [...document.querySelectorAll(".metrics-tabs button")];
+    const selected = tabs.find((tab) => tab.getAttribute("data-state") === "active");
+    return selected?.textContent?.includes("Processes") === true && tabs.filter((tab) => tab !== selected).every((tab) => getComputedStyle(tab).backgroundColor === "rgba(0, 0, 0, 0)");
+  });
+  check("inactive tabs keep transparent backgrounds", cleanTabSelection);
+  const processToolbarAligned = await page.evaluate(() => {
+    const title = document.querySelector(".metrics-process-title")?.getBoundingClientRect();
+    const sort = document.querySelector(".proc-sort-select")?.getBoundingClientRect();
+    return !!title && !!sort && Math.abs((title.top + title.height / 2) - (sort.top + sort.height / 2)) < 1;
+  });
+  check("process title and sort select share a center line", processToolbarAligned);
+  await page.locator(".process-row").first().waitFor({ state: "visible", timeout: 15_000 });
+  const processActionsStay = await page.evaluate(() => {
+    const table = document.querySelector(".metrics-proc-table");
+    const action = document.querySelector(".process-row .process-actions-cell");
+    if (!table || !action) return false;
+    const before = action.getBoundingClientRect().right;
+    table.scrollLeft = table.scrollWidth;
+    const after = action.getBoundingClientRect().right;
+    table.scrollLeft = 0;
+    return getComputedStyle(action).position === "sticky" && table.scrollWidth > table.clientWidth && Math.abs(before - after) < 1;
+  });
+  check("process actions stay visible during horizontal scroll", processActionsStay);
+  await page.screenshot({ path: `${SHOT_DIR}/01a2-processes.png`, fullPage: false });
+  await page.fill(".metrics-search input", "nginx");
+  check("process search filters rows", await page.locator(".process-row").count() === 1);
+  await page.locator(".metrics-interval").click();
+  await page.locator('[role="option"]').filter({ hasText: "1s" }).first().click();
+  check("refresh interval applies", (await page.locator(".metrics-interval").textContent())?.includes("1s"));
+  const oneSecondStart = await page.evaluate(() => window.__metricInvocations.length);
+  await sleep(2_200);
+  const oneSecondCalls = await page.evaluate((start) => window.__metricInvocations.length - start, oneSecondStart);
+  check("1s interval triggers real requests", oneSecondCalls >= 2, `observed ${oneSecondCalls} calls in 2.2s`);
+  await page.locator(".metrics-interval").click();
+  await page.locator('[role="option"]').filter({ hasText: "5s" }).first().click();
+  await sleep(1_100);
+  const fiveSecondStart = await page.evaluate(() => window.__metricInvocations.length);
+  await sleep(2_200);
+  const fiveSecondCalls = await page.evaluate((start) => window.__metricInvocations.length - start, fiveSecondStart);
+  check("5s interval replaces the 1s timer", fiveSecondCalls === 0, `observed ${fiveSecondCalls} calls in 2.2s`);
+  await page.locator('button[aria-label="Pause refresh"]').click();
+  await expect(page, 'button[aria-label="Resume refresh"]', "pause switches to resume");
+  await page.locator(".metrics-tabs button").nth(2).click();
+  await expectText(page, ".metrics-detail-page", "/data", "disk detail tab");
+  check("disk warning stays visible", await page.locator('.metrics-detail-row .dbx-progress[data-tone="danger"]').count() === 1);
+  await page.locator(".metrics-tabs button").nth(3).click();
+  await expectText(page, ".metrics-detail-page", "eth0", "network detail tab");
+  check("network rates have no fake utilization bars", await page.locator(".metrics-detail-page .dbx-progress").count() === 0);
+  check("idle virtual interfaces stay hidden", await page.locator(".metrics-detail-row", { hasText: "docker0" }).count() === 0 && await page.locator(".metrics-detail-row", { hasText: "veth-idle" }).count() === 0);
+  await page.screenshot({ path: `${SHOT_DIR}/01a3-network.png`, fullPage: false });
+  await page.locator(".metrics-tabs button").nth(0).click();
+  const activeTabFits = await page.evaluate(() => {
+    const list = document.querySelector(".metrics-tabs-list")?.getBoundingClientRect();
+    const active = document.querySelector(".metrics-tabs button[data-state='active']")?.getBoundingClientRect();
+    return !!list && !!active && active.top >= list.top && active.bottom <= list.bottom && active.left >= list.left && active.right <= list.right;
+  });
+  check("active tab stays inside the rounded list", activeTabFits);
+  check("exactly one tab is selected", await page.locator('.metrics-tabs button[data-state="active"]').count() === 1);
+  await page.screenshot({ path: `${SHOT_DIR}/01b-metrics.png`, fullPage: false });
+  console.log("  screenshot: docs/screenshots-ui-mock/01b-metrics.png");
+  await page.locator(".metrics-tabs button").nth(4).click();
+  await expect(page, ".metrics-docker-page .docker-panel", "Docker mounts as sibling tab");
+  const dockerActionsStay = await page.evaluate(() => {
+    const table = document.querySelector(".docker-table-wrap");
+    const action = document.querySelector(".docker-table tbody td.docker-col-actions");
+    if (!table || !action) return false;
+    const before = action.getBoundingClientRect().right;
+    table.scrollLeft = table.scrollWidth;
+    const after = action.getBoundingClientRect().right;
+    table.scrollLeft = 0;
+    const overflows = table.scrollWidth > table.clientWidth;
+    return getComputedStyle(action).position === "sticky" && (!overflows || Math.abs(before - after) < 1);
+  });
+  check("Docker actions stay visible during horizontal scroll", dockerActionsStay);
+  await page.screenshot({ path: `${SHOT_DIR}/01c-docker.png`, fullPage: false });
+  console.log("  screenshot: docs/screenshots-ui-mock/01c-docker.png");
+  await page.locator('button[title="Containers (Docker / Podman)"], button[data-tooltip="Containers (Docker / Podman)"]').click();
+  check("whale closes unified workbench", await page.locator(".metrics-panel").count() === 0);
+  await page.locator('button[title="Containers (Docker / Podman)"], button[data-tooltip="Containers (Docker / Podman)"]').click();
+  await expect(page, ".metrics-docker-page .docker-panel", "whale reopens Docker tab");
+  await page.locator(".metrics-header-actions .icon-button:last-child").click();
 
   // --- global quick commands: manage in Settings, execute in toolbar -------
   console.log("==> quick commands: settings-managed global store add");

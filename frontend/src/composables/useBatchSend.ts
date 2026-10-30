@@ -87,7 +87,7 @@ watch(panelSurface, (panel) => {
 const batchSaveMode = ref(false);
 const batchSaveName = ref("");
 const batchSaving = ref(false);
-// 命令条 ↑↓ 浏览历史（与命令弹窗共用 commandHistory 一份存储）。
+// 命令条 ↑↓ 浏览历史（与终端历史面板共用 commandHistory 一份存储）。
 const batchHistoryIndex = ref(-1);
 const batchHistoryBackup = ref("");
 // 跨工作台同步源标识：sidecar 把本端状态广播给所有 webview，各端按 source
@@ -239,7 +239,7 @@ function pickBatchQuick(item: QuickCommand) {
   broadcastBatchBarState(true);
 }
 
-// 命令条 ↑↓ 浏览历史（与命令弹窗同一份 commandHistory，弹窗/命令条互相可见）。
+// 命令条 ↑↓ 浏览历史（与终端历史面板共用 commandHistory，历史来源保持一致）。
 function browseBatchHistoryUp() {
   batchHistoryBackup.value = batchHistoryIndex.value === -1 ? batchDraft.value : batchHistoryBackup.value;
   const step = browseCommandHistory(commandHistory.value, batchHistoryIndex.value, "up", batchHistoryBackup.value);

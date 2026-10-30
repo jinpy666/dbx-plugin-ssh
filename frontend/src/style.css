@@ -488,24 +488,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   .connect-card-endpoint-target svg { animation: none; }
 }
 .divider { position: relative; z-index: 4; width: 1px; flex: 0 0 1px; background: var(--border); cursor: col-resize; }
-/* 命中区加宽到 7px：1px 视觉线几乎抓不到（SFTP 分栏与 Docker 面板拖宽共用）。 */
+/* 命中区加宽到 7px：1px 视觉线几乎抓不到（SFTP 分栏拖拽）。 */
 .divider::after { content: ""; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px; }
 .divider:hover { background: color-mix(in srgb, var(--foreground) 38%, var(--border)); }
 .sftp-pane { position: relative; z-index: 0; flex: 1; overflow: hidden; }
-/* Docker 浮层（鲸鱼按钮开合，metrics-float 同款）：挂终端面板内右上角，
-   出现即自右缘向左覆盖终端一角，不占分栏、永不遮挡 SFTP 面板；z=6 与
-   指标/录制浮条同族（同开时按 DOM 序后挂者置顶）。宽度沿用旧停靠面板的
-   口径：容器表 5 列 + 7 个操作按钮自然宽约 670px，给 min(680px, 100%-16px)，
-   更窄由 .docker-panel 自身 overflow:auto 横向滚动。 */
-.docker-float { position: absolute; z-index: 6; top: 8px; right: 8px; display: flex; width: min(680px, calc(100% - 16px)); max-height: calc(100% - 16px); flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--popover); box-shadow: var(--shadow-popover); }
-.docker-float > header { display: flex; min-height: 34px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 3px 4px 3px 12px; }
-.docker-float h2 { margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
-.docker-float > .docker-panel { flex: 1 1 auto; min-height: 0; }
-/* 左缘拖拽手柄（issue #170）：骑在左缘上的 7px 竖条，向左拖 = 变宽
-   （纯计算 lib/dockerPanelWidth，300..720 钳制 + pluginStore 持久化）。
-   命中区左右各外扩 3px，落在浮层圆角外不遮挡内容；拖拽中光标全程列向。 */
-.docker-float-resize { position: absolute; z-index: 7; top: 0; bottom: 0; left: -3px; width: 7px; cursor: col-resize; touch-action: none; }
-.docker-float-resize:hover, .docker-float.resize-active .docker-float-resize { background: color-mix(in srgb, var(--primary) 35%, transparent); }
 .sftp-pane.drag-active { background: color-mix(in srgb, var(--primary) 4%, var(--background)); }
 
 /* SFTP 面板主体：左侧 tree/quick 双 tab 侧栏（可收起为窄条）+ 右侧文件区。
@@ -835,12 +821,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   .follow-directory-control { display: none; }
 }
 
-/* Quick sudo command dialog */
 .quick-sudo-control { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
-.command-modal { width: min(640px, 100%); }
-.command-modal > textarea { min-height: 96px; resize: vertical; font-family: var(--terminal-font-family); line-height: 1.45; }
 .command-output { display: flex; min-height: 96px; max-height: 40vh; overflow: auto; flex-direction: column; align-items: flex-start; gap: 8px; margin: 0; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: color-mix(in srgb, var(--muted) 45%, transparent); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
-.command-exit { color: var(--muted-foreground); font-size: 10px; }
 
 /* 批量发送命令条（Electerm quick-command bar 风格）：常驻贴终端底部，回车即发送。
    命令条约 35px 高，宿主让位 42px 留出 7px 间隙；浮层偏移同步上移。 */
@@ -888,8 +870,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .quick-command-global-hint { margin: 0 4px 6px; font-size: 10px; color: var(--muted-foreground); }
 
 /* Server metrics floating card and permissions */
-/* 悬浮卡挂在终端面板内部右上角：只遮挡终端一角，永不遮挡 SFTP 面板。 */
-.metrics-float { position: absolute; z-index: 6; top: 8px; right: 8px; display: flex; width: min(448px, calc(100% - 16px)); max-height: calc(100% - 16px); flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--popover); box-shadow: var(--shadow-popover); }
+/* 悬浮卡挂在终端区域内，永不遮挡 SFTP 面板。 */
+.metrics-float { position: absolute; z-index: 6; top: 8px; right: 8px; display: flex; width: min(520px, calc(100% - 16px)); max-height: calc(100% - 16px); flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--popover); box-shadow: var(--shadow-popover); }
+/* 监控工作台从工具栏按钮下方展开：紧凑宽浮层、内容驱动高度。 */
+.metrics-workbench-float { z-index: 9; top: 8px; right: 8px; left: auto; width: min(600px, calc(100% - 16px)); height: auto; max-height: calc(100% - 16px); transform: none; border-radius: 14px; }
 /* 高占用进程行（CPU≥50% / 内存≥30%）警示色强调，扫一眼就能定位大户。 */
 .proc-hot { color: var(--warning); font-weight: 600; }
 .metrics-float > header { display: flex; min-height: 34px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 3px 4px 3px 12px; }
@@ -899,15 +883,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .metrics-float h2 .metrics-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .metrics-float-body { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; gap: 10px; overflow: auto; padding: 10px 12px; }
 .metrics-host { color: var(--muted-foreground); font-weight: 400; }
-.metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-/* 三级信息层级（对齐现代监控面板观感）：大数字 22px/700 抓眼 → xs 标签 →
-   10px mono 副信息；卡片留白与圆角走令牌。 */
-.metric-card { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; background: color-mix(in srgb, var(--muted) 40%, transparent); }
-.metric-card strong { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.2; font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* 运行时长等长文本卡片独占整行，不在两列网格里被挤压折行。 */
-.metric-card--wide { grid-column: 1 / -1; }
-.metric-card > span { color: var(--foreground); font-size: 11px; font-weight: 500; }
-.metric-card small { color: var(--muted-foreground); font-family: var(--terminal-font-family); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .metrics-disks { display: flex; flex-direction: column; gap: 6px; margin: 0; }
 .disk-row { display: grid; grid-template-columns: minmax(70px, 130px) 1fr auto; align-items: center; gap: 10px; font-size: 11px; }
 /* 超长挂载点/网卡名不得外溢压到进度条与数值列：第一列截断省略，完整值走 title。 */

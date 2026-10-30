@@ -34,3 +34,24 @@ export function sparklinePath(values: readonly number[], width: number, height: 
   });
   return points.join(" ");
 }
+
+export function smoothSparklinePath(points: string, baseline?: number): string {
+  const values = points.trim().split(/\s+/).filter(Boolean).map((point) => point.split(",").map(Number));
+  if (values.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y))) return "";
+  if (!values.length) return "";
+  const [firstX, firstY] = values[0];
+  let path = `M ${firstX},${firstY}`;
+  for (let index = 0; index < values.length - 1; index += 1) {
+    const previous = values[Math.max(0, index - 1)];
+    const current = values[index];
+    const next = values[index + 1];
+    const after = values[Math.min(values.length - 1, index + 2)];
+    const cp1x = current[0] + (next[0] - previous[0]) / 6;
+    const cp1y = current[1] + (next[1] - previous[1]) / 6;
+    const cp2x = next[0] - (after[0] - current[0]) / 6;
+    const cp2y = next[1] - (after[1] - current[1]) / 6;
+    path += ` C ${cp1x},${cp1y} ${cp2x},${cp2y} ${next[0]},${next[1]}`;
+  }
+  if (baseline != null) path += ` L ${values.at(-1)![0]},${baseline} L ${firstX},${baseline} Z`;
+  return path;
+}

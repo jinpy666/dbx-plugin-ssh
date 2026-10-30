@@ -80,9 +80,9 @@ describe("GpuNpuMonitor", () => {
     // 引号里带逗号的卡名原样展示。
     expect(wrapper.find(".gpu-npu-card-name").text()).toBe("NVIDIA GeForce RTX 3090, 24GB");
     expect(wrapper.find(".gpu-npu-badge").text()).toBe("P2");
-    const bar = wrapper.find("progress");
-    expect((bar.element as HTMLProgressElement).value).toBeCloseTo(33.33, 1);
-    expect(bar.classes()).not.toContain("disk-warn");
+    const bar = wrapper.find(".dbx-progress");
+    expect(Number(bar.attributes("aria-valuenow"))).toBeCloseTo(33.33, 1);
+    expect(bar.attributes("data-tone")).toBe("info");
     const rows = wrapper.findAll(".gpu-npu-process-row");
     expect(rows).toHaveLength(1);
     expect(rows[0].text()).toContain("4321");
@@ -92,7 +92,7 @@ describe("GpuNpuMonitor", () => {
   it("warns above 85 percent memory usage", () => {
     const hot = { ...GPU_FIXTURE, gpus: [{ ...GPU_FIXTURE.gpus[0], usedMem: 22_000 * 1024 * 1024, processes: [] }] };
     const wrapper = mount(GpuNpuMonitor, { props: { locale: "en", gpu: hot } });
-    expect(wrapper.find("progress").classes()).toContain("disk-warn");
+    expect(wrapper.find(".dbx-progress").attributes("data-tone")).toBe("danger");
     // 无进程时落到空态文案。
     expect(wrapper.text()).toContain("No compute processes");
   });
@@ -111,7 +111,7 @@ describe("GpuNpuMonitor", () => {
     });
     expect(wrapper.findAll(".gpu-npu-card")).toHaveLength(2);
     expect(wrapper.text()).toContain("CANN 8.0.RC1");
-    const bars = wrapper.findAll("progress");
+    const bars = wrapper.findAll(".dbx-progress");
     expect(bars).toHaveLength(2);
     // HBM 列存在时第二张卡的内存行走 HBM 文案。
     const npuSection = wrapper.findAll(".gpu-npu-card")[1];

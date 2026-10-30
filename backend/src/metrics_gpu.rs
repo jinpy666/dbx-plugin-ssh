@@ -172,7 +172,7 @@ pub async fn collect_gpu_overview(handle: &Handle<SshClient>) -> Result<serde_js
     let outcome = exec_plain(
         handle,
         &gpu_overview_script(),
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(3),
         &[],
     )
     .await?;
@@ -184,7 +184,7 @@ pub async fn collect_npu_overview(handle: &Handle<SshClient>) -> Result<serde_js
     let outcome = exec_plain(
         handle,
         &npu_overview_script(),
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(3),
         &[],
     )
     .await?;

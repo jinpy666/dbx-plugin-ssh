@@ -53,12 +53,12 @@ describe("filterNetworkInterfaces", () => {
     expect(rows.map((r) => r.name)).toEqual(["eth0", "br-39c0"]);
   });
 
-  it("falls back to the full list when everything would be hidden", () => {
+  it("returns an empty list instead of padding the panel with idle virtual interfaces", () => {
     const rows = filterNetworkInterfaces([
       { name: "lo", rxRate: 0, txRate: 0 },
       { name: "veth123", rxRate: 0, txRate: 0 },
     ]);
-    expect(rows).toHaveLength(2);
+    expect(rows).toEqual([]);
   });
 
   it("returns [] for null input", () => {

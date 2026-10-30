@@ -42,16 +42,15 @@ export function filterDiskMounts<T extends DiskMountView>(disks: T[] | null | un
   );
 }
 
-/** 网卡行去噪：零流量的虚拟网卡折叠；全部折叠时返回原列表（避免空区的困惑）。 */
+/** 网卡行去噪：零流量的虚拟网卡折叠；全部闲置时由面板展示空态。 */
 export function filterNetworkInterfaces<T extends NetworkInterfaceView>(
   interfaces: T[] | null | undefined,
 ): T[] {
   if (!Array.isArray(interfaces)) return [];
-  const visible = interfaces.filter(
+  return interfaces.filter(
     (net) =>
       !VIRTUAL_NET_PREFIX.test(net.name) ||
       (net.rxRate ?? 0) > 0 ||
       (net.txRate ?? 0) > 0,
   );
-  return visible.length > 0 ? visible : interfaces;
 }

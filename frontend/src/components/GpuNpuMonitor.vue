@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { workbenchMessage } from "../lib/i18n";
 import { formatBytes } from "../lib/format";
+import { Progress } from "./ui/progress";
 import {
   acceleratorSectionsPresent,
   memoryPercent,
@@ -89,7 +90,7 @@ function deviceKeyTitle(device: NpuDeviceView) {
           </div>
           <div v-if="card.totalMem" class="disk-row">
             <span class="mono">{{ t("metricsGpu.memory") }}</span>
-            <progress :value="memShare(card.usedMem, card.totalMem)" max="100" :class="{ 'disk-warn': memShare(card.usedMem, card.totalMem) >= 85 }" />
+            <Progress :value="memShare(card.usedMem, card.totalMem)" :tone="memShare(card.usedMem, card.totalMem) >= 85 ? 'danger' : 'info'" />
             <span class="numeric" :title="`${formatBytes(card.usedMem ?? 0)} / ${formatBytes(card.totalMem)} · ${Math.round(memShare(card.usedMem, card.totalMem))}%`">{{ formatBytes(card.usedMem ?? 0) }} / {{ formatBytes(card.totalMem) }} · {{ Math.round(memShare(card.usedMem, card.totalMem)) }}%</span>
           </div>
           <div v-if="card.processes.length" class="gpu-npu-processes">
@@ -121,7 +122,7 @@ function deviceKeyTitle(device: NpuDeviceView) {
           </div>
           <div v-if="device.totalMem" class="disk-row">
             <span class="mono">{{ device.memoryLabel === "hbm" ? t("metricsNpu.hbm") : t("metricsGpu.memory") }}</span>
-            <progress :value="memShare(device.usedMem, device.totalMem)" max="100" :class="{ 'disk-warn': memShare(device.usedMem, device.totalMem) >= 85 }" />
+            <Progress :value="memShare(device.usedMem, device.totalMem)" :tone="memShare(device.usedMem, device.totalMem) >= 85 ? 'danger' : 'info'" />
             <span class="numeric">{{ formatBytes(device.usedMem ?? 0) }} / {{ formatBytes(device.totalMem) }} · {{ Math.round(memShare(device.usedMem, device.totalMem)) }}%</span>
           </div>
           <div v-if="device.processes.length" class="gpu-npu-processes">
@@ -140,8 +141,7 @@ function deviceKeyTitle(device: NpuDeviceView) {
 </template>
 
 <style scoped>
-/* 对齐 style.css 的 .metric-card / .metrics-grid：同样的边框、圆角、底色
-   token 与 auto-fit 网格，保证与监控面板其余卡片视觉一致。 */
+/* 与监控摘要卡共享边框、圆角和底色令牌；auto-fit 网格随面板宽度换列。 */
 .gpu-npu-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .gpu-npu-card { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; background: color-mix(in srgb, var(--muted) 40%, transparent); overflow: hidden; }
 .gpu-npu-card-head { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }

@@ -42,13 +42,20 @@ const METRICS_SCRIPT: &str = concat!(
     "else boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^[^=]*= *\\([0-9][0-9]*\\).*/\\1/p'); ",
     "[ -n \"$boot\" ] && echo \"uptime=$(( $(date +%s) - boot ))\"; fi; ",
     "echo \"nproc=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null)\"; ",
-    // Network + processes run before the --mem--/--cpu--/--df-- sections so
-    // the base parser safely skips these lines (its section state is still
-    // empty here and none of the key=value prefixes can match).
+    // Linux CPU and network counters share the same one-second sample window.
+    "cpu_first=''; if [ -r /proc/stat ]; then cpu_first=$(grep -E '^cpu([0-9]| )' /proc/stat); fi; ",
     "echo '--net--'; ",
     "if [ -r /proc/net/dev ]; then cat /proc/net/dev 2>/dev/null; ",
     "elif command -v netstat >/dev/null 2>&1; then netstat -ibn 2>/dev/null; fi; ",
-    "echo '--net2--'; sleep 1; ",
+    "echo '--net-wait--'; sleep 1; ",
+    "echo '--cpu--'; ",
+    "if [ -r /proc/stat ]; then printf '%s\\n' \"$cpu_first\"; grep -E '^cpu([0-9]| )' /proc/stat; ",
+    // macOS: `iostat -c 2` takes two samples 1s apart; the second is a real
+    // delta. The us/sy/id columns sit at a variable offset (per-disk columns
+    // precede them), so anchor on the header row and re-emit the percentages
+    // as two synthetic tick rows for the shared delta parser.
+    "else iostat -c 2 2>/dev/null | awk 'NR==2{for(i=1;i<=NF;i++) if($i==\"id\") c=i} END{if(c){us=$(c-2); sy=$(c-1); id=$c; if (us ~ /^[0-9]+$/ && sy ~ /^[0-9]+$/ && id ~ /^[0-9]+$/) printf \"cpu  0 0 0 0 0\\ncpu  %d 0 0 %d 0\\n\", us+sy, id}}'; fi; ",
+    "echo '--cpu-end--'; echo '--net2--'; ",
     "if [ -r /proc/net/dev ]; then cat /proc/net/dev 2>/dev/null; ",
     "elif command -v netstat >/dev/null 2>&1; then netstat -ibn 2>/dev/null; fi; ",
     "echo '--ps--'; ",
@@ -77,13 +84,6 @@ const METRICS_SCRIPT: &str = concat!(
     "pskb=$(($(sysctl -n vm.pagesize 2>/dev/null || sysctl -n hw.pagesize 2>/dev/null)/1024)); ",
     "vm_stat 2>/dev/null | awk -v pskb=\"$pskb\" '/Pages free:/{f=$NF} /Pages inactive:/{ia=$NF} /Pages speculative:/{sp=$NF} END{gsub(/\\./,\"\",f); gsub(/\\./,\"\",ia); gsub(/\\./,\"\",sp); if (f!=\"\") printf \"MemAvailable: %d kB\\n\", (f+ia+sp)*pskb}'; ",
     "sysctl -n vm.swapusage 2>/dev/null | awk -F'[ =M]+' '{if ($2 != \"\") printf \"SwapTotal: %d kB\\nSwapFree: %d kB\\n\", $2*1024, $6*1024}'; fi; ",
-    "echo '--cpu--'; ",
-    "if [ -r /proc/stat ]; then head -n 1 /proc/stat; sleep 0.4; head -n 1 /proc/stat; ",
-    // macOS: `iostat -c 2` takes two samples 1s apart; the second is a real
-    // delta. The us/sy/id columns sit at a variable offset (per-disk columns
-    // precede them), so anchor on the header row and re-emit the percentages
-    // as two synthetic tick rows for the shared delta parser.
-    "else iostat -c 2 2>/dev/null | awk 'NR==2{for(i=1;i<=NF;i++) if($i==\"id\") c=i} END{if(c){us=$(c-2); sy=$(c-1); id=$c; if (us ~ /^[0-9]+$/ && sy ~ /^[0-9]+$/ && id ~ /^[0-9]+$/) printf \"cpu  0 0 0 0 0\\ncpu  %d 0 0 %d 0\\n\", us+sy, id}}'; fi; ",
     "echo '--df--'; df -kP 2>/dev/null | tail -n +2 | head -n 24; ",
     // Distribution identification (IMPL_PLAN §1.5): both standard paths,
     // first present wins; neither existing (BSD, busybox minimal) leaves the
@@ -97,14 +97,19 @@ const METRICS_SCRIPT: &str = concat!(
 /// see [`merge_accelerator_sections`]).
 pub async fn collect_metrics(handle: &Handle<SshClient>) -> Result<serde_json::Value, String> {
     // Plugin-internal collector: no client setEnv so locale overrides on the
-    // connection cannot reshape the output this parser expects.
-    let outcome = exec_plain(
-        handle,
-        METRICS_SCRIPT,
-        std::time::Duration::from_secs(30),
-        &[],
-    )
-    .await?;
+    // connection cannot reshape the output this parser expects. Optional
+    // accelerator probes must not add their latency to the base sample.
+    let (outcome, gpu, npu) = tokio::join!(
+        exec_plain(
+            handle,
+            METRICS_SCRIPT,
+            std::time::Duration::from_secs(30),
+            &[],
+        ),
+        metrics_gpu::collect_gpu_overview(handle),
+        metrics_gpu::collect_npu_overview(handle)
+    );
+    let outcome = outcome?;
     if outcome.exit_code != 0 && outcome.output.is_empty() {
         // output 被条件保证为空，格式化它只会产出 "failed: " 空因；退出码
         // 是这里唯一可用的线索。
@@ -114,7 +119,7 @@ pub async fn collect_metrics(handle: &Handle<SshClient>) -> Result<serde_json::V
         ));
     }
     let mut metrics = parse_metrics_output(&outcome.output);
-    merge_accelerator_sections(handle, &mut metrics).await;
+    merge_accelerator_sections(&mut metrics, gpu, npu);
     Ok(metrics)
 }
 
@@ -149,16 +154,16 @@ fn collect_local_metrics_with_shell(shell: &str) -> Result<serde_json::Value, St
     Ok(parse_metrics_output(&text))
 }
 
-/// Runs the GPU and NPU probes concurrently and merges the results under the
-/// `gpu` / `npu` top-level keys. Best-effort by design: a failed probe (no
+/// Merges the concurrently collected accelerator results under the `gpu` /
+/// `npu` top-level keys. Best-effort by design: a failed probe (no
 /// accelerator, restricted driver, exec hiccup) degrades to
 /// `{"available": false}` so it can never fail the base metrics collection,
 /// and [`project_metrics_sections`] treats the keys like any other section.
-async fn merge_accelerator_sections(handle: &Handle<SshClient>, metrics: &mut serde_json::Value) {
-    let (gpu, npu) = tokio::join!(
-        metrics_gpu::collect_gpu_overview(handle),
-        metrics_gpu::collect_npu_overview(handle)
-    );
+fn merge_accelerator_sections(
+    metrics: &mut serde_json::Value,
+    gpu: Result<serde_json::Value, String>,
+    npu: Result<serde_json::Value, String>,
+) {
     if let Some(object) = metrics.as_object_mut() {
         object.insert(
             "gpu".to_string(),
@@ -187,6 +192,12 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
         let top_memory = serde_json::to_value(parse_process_lines(section_of(output, "--psm--")))
             .unwrap_or_default();
         object.insert("topMemory".to_string(), top_memory);
+        let core_percents = parse_core_cpu_percents(output);
+        if !core_percents.is_empty() {
+            if let Some(cpu) = object.get_mut("cpu") {
+                cpu["corePercents"] = serde_json::json!(core_percents);
+            }
+        }
         // Distribution identification (IMPL_PLAN §1.5): `osId` / `osPretty`
         // are omitted entirely when the host has no readable os-release —
         // old callers and the frontend treat absence as "no badge".
@@ -200,6 +211,51 @@ pub fn parse_metrics_output(output: &str) -> serde_json::Value {
     }
     merge_inode_usage(&mut root, section_of(output, "--dfi--"));
     root
+}
+
+fn parse_core_cpu_percents(output: &str) -> Vec<f64> {
+    let mut samples: BTreeMap<u32, (Vec<i64>, Vec<i64>)> = BTreeMap::new();
+    for line in section_of(output, "--cpu--").lines() {
+        let mut fields = line.split_whitespace();
+        let Some(name) = fields.next() else { continue };
+        let Some(core) = name
+            .strip_prefix("cpu")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let values = fields
+            .filter_map(|field| field.parse::<i64>().ok())
+            .collect::<Vec<_>>();
+        if values.len() < 5 {
+            continue;
+        }
+        let entry = samples.entry(core).or_default();
+        if entry.0.is_empty() {
+            entry.0 = values;
+        } else {
+            entry.1 = values;
+        }
+    }
+    samples
+        .into_iter()
+        .filter_map(|(_, (first, second))| {
+            if first.len() != second.len() || first.is_empty() {
+                return None;
+            }
+            let delta = second
+                .iter()
+                .zip(&first)
+                .map(|(next, previous)| next - previous)
+                .collect::<Vec<_>>();
+            let total: i64 = delta.iter().sum();
+            if total <= 0 {
+                return None;
+            }
+            let idle = delta[3] + delta[4];
+            Some(((total - idle) as f64 * 1000.0 / total as f64).round() / 10.0)
+        })
+        .collect()
 }
 
 /// Strips one optional layer of single or double quotes from an os-release
@@ -1081,6 +1137,27 @@ eth0: 100    1 0 0 0 0 0 0 50 1 0 0 0 0 0 0
         assert!(
             parse_process_lines("PID USER %CPU %MEM COMMAND\nnot-a-pid line here\n").is_empty()
         );
+    }
+
+    #[test]
+    fn parses_per_core_cpu_deltas_and_ignores_aggregate_only_samples() {
+        let output = "\
+--cpu--
+cpu  100 0 100 800 0 0 0 0 0 0
+cpu0 100 0 100 800 0 0 0 0 0 0
+cpu1 100 0 100 0 800 0 0 0 0 0
+cpu  150 0 150 850 0 0 0 0 0 0
+cpu0 100 0 100 850 0 0 0 0 0 0
+cpu1 200 0 200 0 900 0 0 0 0 0
+";
+        assert_eq!(parse_core_cpu_percents(output), vec![0.0, 66.7]);
+        let metrics = parse_metrics_output(output);
+        assert_eq!(metrics["cpu"]["corePercents"], json!([0.0, 66.7]));
+        assert!(parse_core_cpu_percents(MACOS_FIXTURE).is_empty());
+        assert!(metrics["cpu"]["corePercents"].is_array());
+        assert!(parse_metrics_output(MACOS_FIXTURE)["cpu"]
+            .get("corePercents")
+            .is_none());
     }
 
     #[test]

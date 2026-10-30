@@ -72,7 +72,6 @@ import {
   Square,
   SquarePlus,
   ListPlus,
-  SquareTerminal,
   Star,
   Terminal as TerminalIcon,
   TextSelect,
@@ -215,7 +214,6 @@ import type { DownloadConflictPolicy } from "./lib/downloadPrefs";
 import { commandMarkerTooltip, formatCommandDuration, Osc633CommandParser, runningCommandElapsedMs, type Osc633StreamUpdates } from "./lib/terminalCommandMarkers";
 import { batchProgressPercent, type BatchProgressState } from "./lib/sftpBatchProgress";
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
-import { sanitizeCommandOutput } from "./lib/terminalOutputText";
 import { normalizeTerminalInputBytes } from "./lib/terminalInput";
 import { type TerminalSyncOutput } from "./lib/terminalModeQueries";
 import { installMacWebkitInputFallback } from "./lib/terminalWebkitInput";
@@ -283,7 +281,6 @@ import { useSftpArchive } from "./composables/useSftpArchive";
 import { useSftpPathHistory } from "./composables/useSftpPathHistory";
 import { useSymlink } from "./composables/useSymlink";
 import { useZmodem } from "./composables/useZmodem";
-import { useCommandDialog } from "./composables/useCommandDialog";
 import { useExternalEdits } from "./composables/useExternalEdits";
 import { useSftpSidebar } from "./composables/useSftpSidebar";
 import { useBatchSend } from "./composables/useBatchSend";
@@ -383,12 +380,11 @@ import TerminalGutter from "./components/TerminalGutter.vue";
 import CommandSuggestions from "./components/CommandSuggestions.vue";
 import CompletionMenu from "./components/CompletionMenu.vue";
 import ConnectingCard from "./components/ConnectingCard.vue";
-import GpuNpuMonitor from "./components/GpuNpuMonitor.vue";
+import MetricsPanel from "./components/MetricsPanel.vue";
 import FolderPickerDialog from "./components/FolderPickerDialog.vue";
 import FileOpenWithMenu from "./components/FileOpenWithMenu.vue";
 import SideNavPanel from "./components/SideNavPanel.vue";
 import DockerPanel from "./components/DockerPanel.vue";
-import { dockerPanelWidthStyle, DOCKER_PANEL_WIDTH_DEFAULT, DOCKER_PANEL_WIDTH_STORE_KEY, dockerPanelWidthAfterDrag, persistDockerPanelWidth, sanitizeDockerPanelWidth } from "./lib/dockerPanelWidth";
 import DockerWhaleLogo from "./components/DockerWhaleLogo.vue";
 import { Switch } from "./components/ui/switch";
 import { defaultPatternFor, newCustomEditorId, resolveEditorForFile, sanitizeEditorConfig, type CustomEditor, type EditorConfig, type KnownEditor, type ResolvedEditor } from "./lib/editorRules";
@@ -565,11 +561,6 @@ interface DownloadInfo {
   skippedCount?: number;
 }
 
-interface ExecResult {
-  output: string;
-  exitCode: number;
-}
-
 interface DiskUsage {
   filesystem: string;
   mount: string;
@@ -591,7 +582,7 @@ const TERMINAL_PENDING_FRAME_LIMIT = 1024;
 // 命令历史 / 终端字号：pluginStore 持久化（敏感命令不入持久层；快速命令已迁 sidecar，见 QUICK_COMMANDS_KEY）。
 const COMMAND_HISTORY_KEY = "ssh-command-history";
 // 执行时间并行映射（Warp 式 history 面板的右侧相对时间）：command → 最近一次
-// 执行时刻。不改 commandHistory（string[]）的形状——suggestion/ghost/命令弹窗
+// 执行时刻。不改 commandHistory（string[]）的形状——suggestion/ghost/批量命令条
 // 多处消费零波及；时间只有面板用。
 const COMMAND_HISTORY_TIMES_KEY = "ssh-command-history-times";
 const COMMAND_HISTORY_META_KEY = "ssh-command-history-meta";
@@ -883,7 +874,7 @@ const blankMenu = ref(false);
 const sideMenu = ref<{ path: string }>();
 const commandRunning = ref(false);
 // 命令历史按作用域隔离（scope = 连接 id；本地/串口终端各占固定桶）：↑ history
-// 面板/建议/ghost/命令弹窗只读当前作用域的桶，多终端（多连接）历史不再互串
+// 面板/建议/ghost/批量命令条只读当前作用域的桶，多终端（多连接）历史不再互串
 // ——以终端的历史为准。三个 pluginStore 键保持单键（宿主 storage 无列键、
 // 按连接动态键不可声明，同 ssh-docker-engine 先例），值内分桶；旧版全局环
 // 一次性迁入 local 桶，SSH 连接以各自 shell 历史文件回填（loadRemoteShellHistory）。
@@ -944,9 +935,6 @@ const commandHistoryMeta = computed<Record<string, import("./lib/historyPanel").
     historyMetaBuckets.value = { ...historyMetaBuckets.value, [historyScope.value]: next };
   },
 });
-// 命令历史浏览态（命令弹窗 ↑↓）；index 为 -1 表示未在浏览历史，作用域切换时作废。
-const commandHistoryIndex = ref(-1);
-const commandHistoryBackup = ref("");
 // 快速命令：用户自定义片段（≤20 条），全局存储在插件数据目录（sidecar），
 // 所有连接/工作台共享；状态与 PTY 写入语义收口在 composables/useQuickCommands。
 const {
@@ -1847,7 +1835,6 @@ const terminalErrorFriendly = computed(() => {
 });
 // Reconnect countdown lifecycle: while the backoff loop is pending a 250ms
 // tick recomputes the pure countdown; any exit from "reconnecting" stops it.
-const commandOutputText = computed(() => (commandResult.value ? sanitizeCommandOutput(commandResult.value.output) : ""));
 // Hover tooltip for the terminal command marker strip: full command, exit
 // code, duration and working directory (localized, multi-line).
 const commandMarkerDetails = computed(() => commandMarkerTooltip(
@@ -3500,7 +3487,7 @@ function readEchoTextBeforeCursor(): string | null {
 
 // ---------------------------------------------------------------------------
 // 命令输入建议浮层（P1-1）：采集→抑制门→检索→定位→按键消费。
-// 采集走三条真实来源：① 命令弹窗/命令条执行（已入 commandHistory）；
+// 采集走三条真实来源：① 批量命令条执行（已入 commandHistory）；
 // ② OSC 633 shell-integration E 帧（applyCommandMarker）；③ 回车行兜底
 // 采集（trackPendingInput 的 \r 分支 → captureEnterLine，覆盖无 shell
 // integration 的 SSH/本地会话——远端没装 integration 时 E 帧不存在，
@@ -5508,46 +5495,16 @@ const {
 // 这里只保留工具栏入口的开关状态。
 const forwardsOpen = ref(false);
 
-// Docker 浮层（三迁：SFTP tab → 分栏停靠 → metrics-float 同款浮层）：工具条
-// 鲸鱼按钮开合，面板挂在终端面板内右上角（.docker-float），出现即自右缘向左
-// 覆盖终端一角，不占分栏宽度；关闭即卸载并停轮询。面板本体仍由 DockerPanel
-// 自治（会话解析/轮询/动作/引擎设置都在组件内）。
-const dockerPanelOpen = ref(false);
-// 面板宽度（issue #170）：左缘拖拽手柄调宽（300..720，lib/dockerPanelWidth
-// 纯计算），pluginStore 持久化、启动水合；内联宽度保留 calc 容器守卫。
-function loadDockerPanelWidth(): number {
-  try {
-    return sanitizeDockerPanelWidth(pluginStore.getItem(DOCKER_PANEL_WIDTH_STORE_KEY)) ?? DOCKER_PANEL_WIDTH_DEFAULT;
-  } catch {
-    return DOCKER_PANEL_WIDTH_DEFAULT;
+// 监控与 Docker 共用同一工作台；Docker 只在对应 tab 激活时挂载并轮询。
+const metricsTab = ref<"overview" | "processes" | "disks" | "network" | "docker">("overview");
+const dockerPanelOpen = computed(() => metricsOpen.value && metricsTab.value === "docker");
+function toggleDockerPanel() {
+  if (dockerPanelOpen.value) {
+    closeMetrics();
+    return;
   }
-}
-const dockerPanelWidth = ref(loadDockerPanelWidth());
-const dockerPanelResizing = ref(false);
-function startDockerPanelResize(event: PointerEvent) {
-  event.preventDefault();
-  const startX = event.clientX;
-  const startWidth = dockerPanelWidth.value;
-  dockerPanelResizing.value = true;
-  const handle = event.currentTarget as HTMLElement;
-  const move = (next: PointerEvent) => {
-    // 浮层锚右缘、左缘拖拽：向左拖 = 变宽（纯计算在 lib，钳制在内）。
-    dockerPanelWidth.value = dockerPanelWidthAfterDrag({ startWidth, startX, currentX: next.clientX });
-  };
-  const release = () => {
-    handle.removeEventListener("pointermove", move);
-    handle.removeEventListener("pointerup", release);
-    handle.removeEventListener("pointercancel", release);
-    if (handle.hasPointerCapture(event.pointerId)) {
-      try { handle.releasePointerCapture(event.pointerId); } catch { /* 已被隐式释放 */ }
-    }
-    dockerPanelResizing.value = false;
-    persistDockerPanelWidth(dockerPanelWidth.value);
-  };
-  handle.setPointerCapture(event.pointerId);
-  handle.addEventListener("pointermove", move);
-  handle.addEventListener("pointerup", release);
-  handle.addEventListener("pointercancel", release);
+  metricsTab.value = "docker";
+  if (!metricsOpen.value) toggleMetrics();
 }
 
 // 关键词高亮：规则表 CRUD 收口在 composables/useHighlightRules（渲染引擎在下方）。
@@ -7588,27 +7545,6 @@ function persistCommandHistory() {
   }
 }
 
-// 命令执行弹窗：状态/执行/历史浏览收口在 composables/useCommandDialog。
-const {
-  commandOpen,
-  commandDraft,
-  commandUseSudo,
-  commandExecId,
-  commandResult,
-  commandError,
-  openCommandDialog,
-  handleCommandInputKeydown,
-  browseCommandHistoryUp,
-  browseCommandHistoryDown,
-  rerunHistoryCommand,
-  clearCommandHistory,
-  runCommand,
-  cancelCommand,
-} = useCommandDialog({
-  showError, session, commandRunning, commandHistory, commandHistoryIndex, commandHistoryBackup, persistCommandHistory,
-  commandHistoryTimes, pushTerminalCommandHistory, persistCommandHistoryTimes,
-});
-
 // —— 执行时间映射（Warp 式 history 面板右侧相对时间）：分桶 wire 为
 // Record<scope, [{c,t}]>，读回经 sanitizeHistoryTimesBuckets，写前逐桶按本
 // 作用域历史环修剪。——
@@ -7646,8 +7582,8 @@ function persistCommandHistoryMeta() {
 
 /**
  * 终端命令历史的统一采集口：命令环 + 执行时间映射同步推进、一并持久化。
- * 五个采集点（trackPendingInput 回车行兜底 / OSC 633 E 帧 / 命令弹窗
- * runCommand / 批量发送 / 建议自动执行）共用，保证环与时间映射不漂移。
+ * 四个采集点（trackPendingInput 回车行兜底 / OSC 633 E 帧 / 批量发送 /
+ * 建议自动执行）共用，保证环与时间映射不漂移。
  */
 function pushTerminalCommandHistory(command: string) {
   commandHistory.value = pushCommandHistory(commandHistory.value, command, commandHistoryLimit.value);
@@ -7939,22 +7875,19 @@ const {
     metricsLoading,
     metricsError,
     metricSamples,
-    recordMetricSamples,
     metricsRxSparkline,
-    metricsTxSparkline,
     metricsCpuSparkline,
     metricsMemSparkline,
     visibleDiskMounts,
     visibleNetworkInterfaces,
     metricsDistroBadge,
     refreshMetrics,
+    metricsLive,
+    metricsRefreshMs,
+    setMetricsRefreshMs,
+    toggleMetricsLive,
     toggleMetrics,
     closeMetrics,
-    metricsRatePeak,
-    networkRateShare,
-    metricsProcGridStyle,
-    procGridStyle,
-    backfillMetricsHistory,
     toggleProcessPanel,
     refreshProcessList,
     sortedProcessRows,
@@ -8194,9 +8127,8 @@ function showTransferHistoryMenu(event: MouseEvent, entry: TransferHistoryEntry)
  * 打开任一同族弹出层前调用，先关掉全部兄弟弹出层与右键菜单，再由各 toggle
  * 设定自身状态。族成员 = 模板 class="popover" 的九个弹出层（quick-commands /
  * agent-mode / highlight-rules / connection-info / columns / transfer /
- * batch-targets / bookmark-save / path-history）。语义差异说明：metrics 浮层
- * （.metrics-float，closeMetrics 自带轮询清理）、Docker 浮层（.docker-float，
- * 与 metrics 同款右上浮层）与批量保存态（batchSaveMode，cancelBatchBarSave
+ * batch-targets / bookmark-save / path-history）。语义差异说明：统一监控工作台
+ * （closeMetrics 自带轮询清理）与批量保存态（batchSaveMode，cancelBatchBarSave
  * 带草稿清理）不属于本族，仍由 Esc 链单独收口；
  * batch-targets 弹层另有 mousedown-capture 点空白收起，此处再关一次幂等无害。
  */
@@ -8315,7 +8247,6 @@ const modalOpenStates = computed(() => [
   watchModifiedQueue.value.length > 0,
   // 自定义编辑器命令弹窗（编辑器映射增强），模板顺序在 watch 确认弹窗之后。
   customEditorOpen.value,
-  commandOpen.value,
   profilesOpen.value,
   auditOpen.value,
   auditClearOpen.value,
@@ -8459,10 +8390,6 @@ function onDocumentKeydown(event: KeyboardEvent) {
     operationDialog.value = null;
     return;
   }
-  if (commandOpen.value) {
-    commandOpen.value = false;
-    return;
-  }
   if (alertTriageOpen.value) {
     alertTriageOpen.value = false;
     return;
@@ -8489,13 +8416,11 @@ function onDocumentKeydown(event: KeyboardEvent) {
   }
   // 右键菜单与九个工具栏 popover 均已迁移 reka（ContextMenu/Popover）：Esc 与外点
   // 由 reka 自行消费（见上方 content 守卫），不再占 Esc 链一层。本层只剩
-  // 指标/录制浮层、Docker 浮层（.metrics-float/.docker-float 非 reka）与
-  // 批量保存态（带草稿清理）。
-  if (metricsOpen.value || recordingsOpen.value || batchSaveMode.value || dockerPanelOpen.value) {
+  // 统一监控工作台、录制浮层与批量保存态（带草稿清理）。
+  if (metricsOpen.value || recordingsOpen.value || batchSaveMode.value) {
     if (batchSaveMode.value) cancelBatchBarSave();
     if (metricsOpen.value) closeMetrics();
     if (recordingsOpen.value) recordingsOpen.value = false;
-    if (dockerPanelOpen.value) dockerPanelOpen.value = false;
   }
 }
 
@@ -8525,15 +8450,6 @@ function parentPath(path: string) {
   const normalized = path.replace(/\/+$/, "");
   const index = normalized.lastIndexOf("/");
   return index <= 0 ? "/" : normalized.slice(0, index);
-}
-
-function formatUptime(seconds: number) {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  if (days >= 1) return t("uptimeDays", { count: days, hours });
-  if (hours >= 1) return t("uptimeHours", { count: hours, minutes });
-  return t("uptimeMinutes", { count: minutes });
 }
 
 function formatModified(value?: number) {
@@ -9057,13 +8973,6 @@ function flagHintsSource(command: string): string {
   return FLAG_HINTS[command]?.source ?? "";
 }
 
-// 命令历史作用域切换（连接切换 / SSH↔本地 / 本地↔串口）：命令弹窗的历史
-// 浏览态随环换桶作废，避免 ↑↓ 指向另一作用域的下标/草稿。放 setup 尾部：
-// watch 创建即求值 historyScope，引用的 connectionId/serialSession 在前段。
-watch(historyScope, () => {
-  commandHistoryIndex.value = -1;
-  commandHistoryBackup.value = "";
-});
 </script>
 
 <template>
@@ -9321,16 +9230,13 @@ watch(historyScope, () => {
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
-        <!-- Docker 浮层（鲸鱼 logo 独立入口，metrics-float 同款右上浮层）：
-             SFTP 面板关闭时也可达；local 模式保留——本机 daemon（Docker
-             Desktop/OrbStack）场景照常可用。面板自治，关闭即卸载停轮询。 -->
-        <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="dockerPanelOpen = !dockerPanelOpen"><DockerWhaleLogo /></button>
+        <!-- 鲸鱼按钮打开统一工作台并定位 Docker tab；再次点击关闭。 -->
+        <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="toggleDockerPanel"><DockerWhaleLogo /></button>
         <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
           <Switch size="sm" :model-value="followDirectory" :disabled="!connected || panelSurface" @update:model-value="setDirectoryTracking" />
           <span>{{ t("followTerminal") }}</span>
         </label>
         <span class="toolbar-separator" aria-hidden="true" />
-        <button v-if="!localUiMode" class="icon-button icon-neutral" :title="t('commandTitle')" :aria-label="t('commandTitle')" :disabled="!connected" @click="openCommandDialog"><SquareTerminal /></button>
         <button v-if="!localUiMode && !panelSurface" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
         <div>
           <Popover :open="quickMenuOpen" @update:open="(open) => { if (!open) quickMenuOpen = false; }">
@@ -9969,128 +9875,43 @@ watch(historyScope, () => {
           <button v-if="serialUploadBusy" class="trzsz-cancel" :title="t('cancel')" :aria-label="t('cancel')" @click="cancelSerialUpload"><X /></button>
           <button v-else class="trzsz-cancel" :title="t('close')" :aria-label="t('close')" @click="serialUpload = initialSerialUploadState()"><X /></button>
         </div>
-        <section v-if="metricsOpen" class="metrics-float">
-          <header>
-            <h2>{{ t("metrics") }}<span v-if="metricsDistroBadge" class="distro-badge" :style="{ backgroundColor: metricsDistroBadge.color }" :title="metricsDistroBadge.name">{{ metricsDistroBadge.label }}</span><span v-if="metrics?.hostname" class="metrics-host" :title="metrics.hostname"> · {{ metrics.hostname }}</span></h2>
-            <button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="closeMetrics"><X /></button>
-          </header>
-          <div class="metrics-float-body">
-            <div v-if="metricsLoading && !metrics" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
-            <p v-else-if="metricsError" class="task-error">{{ metricsError }} <button class="link-button" @click="refreshMetrics">{{ t("refresh") }}</button></p>
-            <template v-else-if="metrics">
-              <div class="metrics-grid">
-                <div class="metric-card">
-                  <strong>{{ metrics.cpu?.percent ?? "–" }}%</strong>
-                  <span>{{ t("metricsCpu") }}</span>
-                  <small v-if="metrics.cpu?.cores">{{ metrics.cpu.cores }} vCPU · {{ metrics.cpu?.load1 ?? "–" }} / {{ metrics.cpu?.load5 ?? "–" }} / {{ metrics.cpu?.load15 ?? "–" }}</small>
-                </div>
-                <div class="metric-card">
-                  <strong>{{ metrics.memory?.totalBytes ? Math.round(((metrics.memory.usedBytes ?? 0) / metrics.memory.totalBytes) * 100) : "–" }}%</strong>
-                  <span>{{ t("metricsMemory") }}</span>
-                  <small v-if="metrics.memory?.totalBytes">{{ formatBytes(metrics.memory.usedBytes) }} / {{ formatBytes(metrics.memory.totalBytes) }}<template v-if="metrics.memory.swapTotalBytes"> · {{ t("metricsSwap") }} {{ formatBytes(metrics.memory.swapUsedBytes ?? 0) }}</template></small>
-                </div>
-                <div class="metric-card metric-card--wide" v-if="metrics.uptimeSeconds != null">
-                  <strong>{{ formatUptime(metrics.uptimeSeconds) }}</strong>
-                  <span>{{ t("metricsUptime") }}</span>
-                  <small v-if="metrics.kernel">{{ metrics.kernel }}</small>
-                </div>
-              </div>
-              <div v-if="metricsCpuSparkline || metricsMemSparkline" class="metrics-disks metrics-trend">
-                <div class="disk-row"><span class="mono">{{ t("metricsCpu") }}</span><svg class="metrics-sparkline metrics-trend-line" width="120" height="18" viewBox="0 0 120 18" role="img" aria-label="cpu trend"><polyline :points="metricsCpuSparkline" fill="none" style="stroke: var(--info)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" /></svg><span class="numeric">{{ Math.round(metricSamples.cpu.at(-1) ?? 0) }}%</span></div>
-                <div class="disk-row"><span class="mono">{{ t("metricsMemory") }}</span><svg class="metrics-sparkline metrics-trend-line" width="120" height="18" viewBox="0 0 120 18" role="img" aria-label="memory trend"><polyline :points="metricsMemSparkline" fill="none" style="stroke: var(--success)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" /></svg><span class="numeric">{{ Math.round(metricSamples.mem.at(-1) ?? 0) }}%</span></div>
-              </div>
-              <div v-if="visibleDiskMounts.length" class="metrics-disks">
-                <div v-for="disk in visibleDiskMounts" :key="disk.mount" class="disk-row">
-                  <span class="mono" :title="disk.mount">{{ disk.mount }}</span>
-                  <progress :value="Math.min(100, disk.percentUsed)" max="100" :class="{ 'disk-warn': disk.percentUsed >= 85 }" />
-                  <span class="numeric">{{ formatBytes(disk.usedBytes) }} / {{ formatBytes(disk.totalBytes) }} · {{ Math.round(disk.percentUsed) }}%</span>
-                </div>
-              </div>
-              <div v-if="visibleNetworkInterfaces.length">
-                <h3 class="settings-section-title metrics-net-title">
-                  <span>{{ t("metricsNetwork") }}</span>
-                  <span v-if="metricsRxSparkline || metricsTxSparkline" class="metrics-sparkline-group">
-                    <svg class="metrics-sparkline" width="60" height="18" viewBox="0 0 60 18" role="img" aria-label="rx"><polyline :points="metricsRxSparkline" fill="none" style="stroke: var(--info)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" /></svg>
-                    <svg class="metrics-sparkline" width="60" height="18" viewBox="0 0 60 18" role="img" aria-label="tx"><polyline :points="metricsTxSparkline" fill="none" style="stroke: var(--success)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" /></svg>
-                  </span>
-                </h3>
-                <div class="metrics-disks">
-                  <div
-                    v-for="net in visibleNetworkInterfaces"
-                    :key="net.name"
-                    class="disk-row"
-                    :title="`rx ${formatBytes(net.rxTotal)} · tx ${formatBytes(net.txTotal)}`"
-                  >
-                    <span class="mono" :title="net.name">{{ net.name }}</span>
-                    <progress :value="networkRateShare(net)" max="100" />
-                    <span class="numeric">↓ {{ formatRate(net.rxRate) }} · ↑ {{ formatRate(net.txRate) }}</span>
-                  </div>
-                </div>
-              </div>
-              <GpuNpuMonitor :locale="locale" :gpu="metrics.gpu" :npu="metrics.npu" />
-              <div v-if="metrics.processes?.length">
-                <h3 class="settings-section-title metrics-proc-title"><span>{{ t("metricsProc") }}</span><button class="link-button" @click="toggleProcessPanel">{{ t(processesOpen ? "procCollapse" : "procManage") }}</button></h3>
-                <div class="file-header" :style="metricsProcGridStyle">
-                  <span>{{ t("metricsProcPid") }}</span>
-                  <span>{{ t("metricsProcUser") }}</span>
-                  <span class="numeric">{{ t("metricsProcCpu") }}</span>
-                  <span class="numeric">{{ t("metricsProcMem") }}</span>
-                  <span>{{ t("metricsProcCommand") }}</span>
-                </div>
-                <div v-for="proc in metrics.processes" :key="proc.pid" class="file-row" :style="metricsProcGridStyle">
-                  <span class="mono">{{ proc.pid }}</span>
-                  <span class="mono">{{ proc.user }}</span>
-                  <span class="numeric" :class="{ 'proc-hot': proc.cpuPercent >= 50 }">{{ proc.cpuPercent }}%</span>
-                  <span class="numeric" :class="{ 'proc-hot': proc.memPercent >= 30 }">{{ proc.memPercent }}%</span>
-                  <span class="mono" :title="proc.command">{{ proc.command }}</span>
-                </div>
-              </div>
-              <div v-if="processesOpen" class="proc-manage">
-                <div class="command-history-header">
-                  <span>{{ t("procTitle", { count: processRows.length }) }}</span>
-                  <span class="batch-target-actions">
-                    <button class="link-button" @click="refreshProcessList">{{ t("refresh") }}</button>
-                  </span>
-                </div>
-                <div class="proc-sort-row">
-                  <label v-for="key in (['cpu', 'mem', 'pid', 'fd', 'ports'] as const)" :key="key" class="proc-sort-option">
-                    <input type="radio" name="procSort" :value="key" v-model="processSortKey" />{{ t(`procSort.${key}`) }}
-                  </label>
-                </div>
-                <div v-if="processLoading && !visibleProcessRows.length" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
-                <div v-else-if="!visibleProcessRows.length" class="empty compact">{{ t("procEmpty") }}</div>
-                <template v-else>
-                  <div class="file-header" :style="procGridStyle">
-                    <span>{{ t("metricsProcPid") }}</span>
-                    <span>{{ t("metricsProcUser") }}</span>
-                    <span class="numeric">{{ t("metricsProcCpu") }}</span>
-                    <span class="numeric">{{ t("metricsProcMem") }}</span>
-                    <span>{{ t("procEtime") }}</span>
-                    <span class="numeric">{{ t("procFd") }}</span>
-                    <span>{{ t("procPorts") }}</span>
-                    <span>{{ t("metricsProcCommand") }}</span>
-                    <span></span>
-                  </div>
-                  <div v-for="proc in visibleProcessRows" :key="proc.pid" class="file-row" :style="procGridStyle">
-                    <span class="mono">{{ proc.pid }}</span>
-                    <span class="mono">{{ proc.user }}</span>
-                    <span class="numeric" :class="{ 'proc-hot': proc.cpuPercent >= 50 }">{{ proc.cpuPercent }}%</span>
-                    <span class="numeric" :class="{ 'proc-hot': proc.memPercent >= 30 }">{{ proc.memPercent }}%</span>
-                    <span class="mono">{{ proc.etime }}</span>
-                    <span class="numeric mono">{{ proc.fdCount ?? "—" }}</span>
-                    <span class="mono" :title="proc.listenPorts?.join(', ')">{{ proc.listenPorts?.length ? proc.listenPorts.join(", ") : "—" }}</span>
-                    <span class="mono" :title="proc.command">{{ proc.command }}</span>
-                    <span class="proc-kill-group">
-                      <button class="link-button" @click="killProcessRow(proc, 15)">{{ t("procKill") }}</button>
-                      <button class="link-button proc-kill-force" @click="killProcessRow(proc, 9)">{{ t("procKillForce") }}</button>
-                    </span>
-                  </div>
-                  <p v-if="sortedProcessRows.length > visibleProcessRows.length" class="muted metrics-hint">{{ t("procCapped", { shown: visibleProcessRows.length, total: sortedProcessRows.length }) }}</p>
-                </template>
-              </div>
-              <p class="metrics-hint muted">{{ t("metricsRefreshHint") }}</p>
+        <section v-if="metricsOpen" class="metrics-float metrics-workbench-float">
+          <MetricsPanel
+            v-model="metricsTab"
+            :locale="locale"
+            :metrics="metrics"
+            :loading="metricsLoading"
+            :error="metricsError"
+            :distro-badge="metricsDistroBadge"
+            :endpoint="connection.host"
+            :live="metricsLive"
+            :refresh-ms="metricsRefreshMs"
+            :samples="metricSamples"
+            :cpu-sparkline="metricsCpuSparkline"
+            :mem-sparkline="metricsMemSparkline"
+            :rx-sparkline="metricsRxSparkline"
+            :disks="visibleDiskMounts"
+            :networks="visibleNetworkInterfaces"
+            :processes-open="processesOpen"
+            :process-count="processRows.length"
+            :total-sorted-count="sortedProcessRows.length"
+            :process-loading="processLoading"
+            :process-sort-key="processSortKey"
+            :visible-process-rows="visibleProcessRows"
+            :process-cap="PROCESS_VISIBLE_LIMIT"
+            @close="closeMetrics"
+            @refresh="refreshMetrics"
+            @toggle-live="toggleMetricsLive"
+            @set-refresh-ms="setMetricsRefreshMs"
+            @toggle-processes="toggleProcessPanel"
+            @refresh-processes="refreshProcessList"
+            @set-process-sort="processSortKey = $event"
+            @kill="killProcessRow"
+          >
+            <template #docker>
+              <DockerPanel :t="t" :session-id="session?.sessionId ?? ''" :connection-id="connectionId" />
             </template>
-          </div>
+          </MetricsPanel>
         </section>
         <!-- 录制记录浮条：列出 .cast 录制，可回放/导出/删除；
              M14 增加名称+内容搜索（命中行摘录）与 transcript 导出。 -->
@@ -10128,19 +9949,6 @@ watch(historyScope, () => {
               </article>
             </template>
           </div>
-        </section>
-        <!-- Docker 浮层（metrics-float 同款）：挂终端面板内右上角，出现即自右缘
-             向左覆盖终端一角，不占分栏、永不遮挡 SFTP 面板；X/Esc 随时可关，
-             关闭即卸载停轮询。与指标/录制浮条同角族（同开时后挂者置顶，语义同
-             recordings）。内嵌引擎设置 Popover 与确认/日志 Dialog 仍 portal 到
-             body。宽度按容器表自然宽给足，窄屏收 100%-16px。 -->
-        <section v-if="dockerPanelOpen" class="docker-float" :class="{ 'resize-active': dockerPanelResizing }" :style="{ width: dockerPanelWidthStyle(dockerPanelWidth) }">
-          <div class="docker-float-resize" role="separator" aria-orientation="vertical" :aria-valuenow="dockerPanelWidth" :title="t('docker.dockerResizeHint')" @pointerdown="startDockerPanelResize" />
-          <header>
-            <h2>{{ t("docker.toolbarTitle") }}</h2>
-            <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="dockerPanelOpen = false"><X /></button>
-          </header>
-          <DockerPanel :t="t" :session-id="session?.sessionId ?? ''" :connection-id="connectionId" />
         </section>
         <!-- 回放弹窗：xterm 重放 + 倍速/进度/GIF 导出 -->
         <div v-if="replayState" class="replay-overlay" @click.self="closeReplay">
@@ -10818,53 +10626,6 @@ watch(historyScope, () => {
       </DialogContent>
     </Dialog>
 
-    <Dialog :open="commandOpen" @update:open="(open) => { if (!open) commandOpen = false; }">
-      <DialogContent class="modal command-modal" @escape-key-down.prevent>
-        <header><DialogTitle>{{ t("commandTitle") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="commandOpen = false"><X /></button></header>
-        <textarea
-          v-model="commandDraft"
-          class="mono"
-          rows="5"
-          spellcheck="false"
-          autofocus
-          :placeholder="t('commandPlaceholder')"
-          :disabled="commandRunning"
-          @keydown="handleCommandInputKeydown"
-        />
-        <div v-if="commandHistory.length" class="command-history">
-          <div class="command-history-header">
-            <span>{{ t("commandHistoryTitle") }}</span>
-            <button class="link-button" @click="clearCommandHistory">{{ t("commandHistoryClear") }}</button>
-          </div>
-          <div class="command-history-list">
-            <button
-              v-for="item in commandHistory"
-              :key="item"
-              class="command-history-item mono"
-              :title="t('commandHistoryResend')" :aria-label="t('commandHistoryResend')"
-              @click="rerunHistoryCommand(item)"
-            >{{ item }}</button>
-          </div>
-        </div>
-        <label class="quick-sudo-control" :title="t('quickSudoHint')">
-          <Switch v-model="commandUseSudo" size="sm" :disabled="commandRunning" />
-          <span>{{ t("quickSudo") }}</span>
-        </label>
-        <div v-if="commandRunning" class="command-output"><Loader2 class="spinning" /><span>{{ t("commandRunning") }}</span></div>
-        <pre v-else-if="commandResult" class="command-output mono">{{ commandOutputText || t("commandNoOutput") }}<span class="command-exit">exit {{ commandResult.exitCode }}</span></pre>
-        <p v-if="commandError" class="task-error">{{ commandError }}</p>
-        <footer>
-          <button @click="commandOpen = false">{{ t("close") }}</button>
-          <button v-if="commandRunning" @click="cancelCommand"><X />{{ t("commandCancel") }}</button>
-          <button class="primary-button" :disabled="!commandDraft.trim() || commandRunning" @click="runCommand">
-            <Loader2 v-if="commandRunning" class="spinning" />
-            <SquareTerminal v-else />
-            {{ t("commandRun") }}
-          </button>
-        </footer>
-      </DialogContent>
-    </Dialog>
-
     <Dialog :open="!!chmodTarget" @update:open="(open) => { if (!open) chmodTarget = undefined; }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="chmodTarget">
@@ -11500,12 +11261,7 @@ watch(historyScope, () => {
 /* 工具栏 A+/A- 字号步进按钮（复用 Ctrl+滚轮的 clampFontSize 语义） */
 .font-step-label { font-size: 11px; font-weight: 600; line-height: 1; letter-spacing: 0; }
 
-/* 命令历史下拉（命令弹窗内）：↑↓ 浏览 + 点击一键重发 */
-.command-history { display: flex; flex-direction: column; gap: 4px; }
 .command-history-header { display: flex; align-items: center; justify-content: space-between; color: var(--muted-foreground); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
-.command-history-list { display: flex; max-height: 168px; flex-direction: column; gap: 1px; overflow: auto; }
-.command-history-item { display: block; width: 100%; overflow: hidden; border: 1px solid transparent; border-radius: 4px; padding: 4px 8px; background: transparent; color: var(--foreground); font-size: 11px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-.command-history-item:hover { background: var(--accent); border-color: var(--border); }
 
 /* 快速命令栏（工具栏下拉）：M32-A3 后只剩"列表 + 搜索 + 执行"；
    新建/编辑/导入样式随管理视图迁入 QuickCommandsSection。 */
