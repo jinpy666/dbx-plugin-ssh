@@ -6,6 +6,14 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.12] — 2026-10-30
+
+- **监控与运维体验全面升级**。服务器指标改为紧凑卡片与逐核视图，CPU 与网络共用 1 秒采样窗口，GPU/NPU 探测并行且最多等待 3 秒；进程和 Docker 表格统一使用 UI Table 组件，固定操作列并支持横向滚动；网络接口移除误导性的相对峰值进度条，折叠零流量虚拟接口；权限码支持一键显示/隐藏，隐藏后文件名与图标单行居中并记住偏好。
+  **Monitoring and operations experience upgraded.** Server metrics now use compact cards and per-core views, with CPU and network sharing a 1-second sampling window and parallel GPU/NPU probes capped at 3 seconds. Process and Docker tables share the UI Table component, sticky actions and horizontal scrolling. Misleading relative-rate bars and idle virtual interfaces are removed from the network view. POSIX permissions can be toggled with a persisted preference, collapsing file names and icons into a centered single-line row when hidden.
+
+- **终端与界面清理**。移除与终端重复的“运行命令”弹窗，插件显示名调整为 SSH，避免加载时出现“终端 · 终端”；修复进程工具栏对齐和 Tabs 选中态。
+  **Terminal and UI cleanup.** Removes the redundant Run Command dialog, renames the plugin display to SSH to avoid a duplicated Terminal · Terminal loading label, and fixes process-toolbar alignment and tab selection styling.
+
 ## [0.7.11] — 2026-10-28
 
 - **0.7.11 正式版**。汇总 beta.1～beta.3：MCP 只读控权加固与后台任务日志移入操作系统临时目录；SFTP 大文件下载并发多流提速；连接后自动启用已保存端口映射；sz/ZMODEM 完成后自动定位下载目录；终端路径补全、缓存编辑范围与动态候选调度修复；文件预览恢复滚动条。
