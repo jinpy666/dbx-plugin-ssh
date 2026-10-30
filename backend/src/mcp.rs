@@ -935,7 +935,17 @@ impl McpState {
                 "supportedVersions": SUPPORTED_PROTOCOL_VERSIONS,
                 "capabilities": { "tools": { "listChanged": false } },
             })),
-            "tools/list" => Ok(json!({ "tools": tool_definitions() })),
+            // 2026-07-28 turns list results into a cacheable envelope:
+            // `ttlMs` + `cacheScope` are mandatory there and validated
+            // strictly (no catch-all fallback). `0`/`private` = never
+            // cache — connection state changes out-of-band and tool
+            // output can name hosts and paths. Older peers ignore the
+            // extra fields, same as the `resultType` stamp below.
+            "tools/list" => Ok(json!({
+                "ttlMs": 0,
+                "cacheScope": "private",
+                "tools": tool_definitions(),
+            })),
             "tools/call" => {
                 let name = params
                     .get("name")
@@ -5704,6 +5714,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list["result"]["resultType"], "complete");
+        // 2026-07-28 缓存信封：列表结果必须带 ttlMs/cacheScope（严格校验、
+        // 无兜底）；0/private = 永不缓存（连接态会带外变化）。
+        assert_eq!(list["result"]["ttlMs"], 0);
+        assert_eq!(list["result"]["cacheScope"], "private");
         let tools = list["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools
             .iter()
