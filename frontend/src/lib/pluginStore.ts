@@ -39,6 +39,7 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-command-history-meta",
   "ssh-sftp-pane-open",
   "ssh-follow-directory",
+  "ssh-sftp-show-permissions",
   "ssh-sftp-side-tab",
   "ssh-sftp-side-collapsed",
   "ssh-terminal-select-copy",

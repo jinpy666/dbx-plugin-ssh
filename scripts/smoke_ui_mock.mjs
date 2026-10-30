@@ -1175,6 +1175,25 @@ try {
   });
   const overlayCountAfterLeave = await page.locator(".sftp-pane .drop-overlay").count();
   check("#197 dragleave without drop clears the upload overlay", overlayCountAfterLeave === 0, `overlay count=${overlayCountAfterLeave}`);
+
+  console.log("==> SFTP permission visibility preference");
+  await page.locator('button[title="Customize columns"]').click();
+  await page.locator(".columns-popover label").filter({ hasText: "Show permissions" }).click();
+  check("permission labels hide immediately", await page.locator(".file-name-permissions").count() === 0);
+  const singleLineAligned = await page.locator(".file-row").first().evaluate((row) => {
+    const icon = row.querySelector(".file-name > svg")?.getBoundingClientRect();
+    const label = row.querySelector(".file-name-label")?.getBoundingClientRect();
+    return row.getBoundingClientRect().height === 32 && !!icon && !!label && Math.abs((icon.top + icon.height / 2) - (label.top + label.height / 2)) < 1;
+  });
+  check("hidden permissions collapse to a centered single-line row", singleLineAligned);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await sleep(2_500);
+  if (await page.locator(".sftp-pane").count() === 0) await page.locator('button[title="Open SFTP panel"], button[data-tooltip="Open SFTP panel"]').first().click();
+  await expect(page, ".sftp-pane", "sftp pane restored after permission preference reload");
+  check("hidden permission preference survives reload", await page.locator(".file-name-permissions").count() === 0);
+  await page.locator('button[title="Customize columns"]').click();
+  await page.locator(".columns-popover label").filter({ hasText: "Show permissions" }).click();
+  check("permission labels restore", await page.locator(".file-name-permissions").count() > 0 && await page.locator(".file-row").first().evaluate((row) => row.getBoundingClientRect().height === 44));
   await page.locator('button[title="Collapse SFTP panel"], button[data-tooltip="Collapse SFTP panel"]').first().click();
 
   if (pageError.length) {

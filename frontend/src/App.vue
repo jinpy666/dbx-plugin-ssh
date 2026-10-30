@@ -305,6 +305,7 @@ import {
   formatSftpPermissions,
   NAME_COLUMN_MAX,
   NAME_COLUMN_MIN,
+  parseSftpPermissionVisibility,
   sanitizeVisibleColumns,
   sftpEntryIconKind,
   sftpFileTypeName,
@@ -786,6 +787,8 @@ const followDirectory = ref(loadDirectoryFollowPref());
 // 浏览目录（初始值 "/"，拼根路径会被服务器以权限拒绝）。
 const terminalCwd = ref("");
 const directoryTrackingSupported = ref<boolean | undefined>();
+const SFTP_SHOW_PERMISSIONS_KEY = "ssh-sftp-show-permissions";
+const showSftpPermissions = ref(parseSftpPermissionVisibility(pluginStore.getItem(SFTP_SHOW_PERMISSIONS_KEY)));
 const visibleColumns = ref<SftpColumn[]>([...DEFAULT_VISIBLE_COLUMNS]);
 /** 每列当前宽度（px）。 */
 const sftpColumnWidths = reactive<Record<SftpColumn, number>>({ ...DEFAULT_COLUMN_WIDTHS });
@@ -7749,6 +7752,11 @@ function toggleColumnsMenu() {
   columnsOpen.value = next;
 }
 
+function toggleSftpPermissions() {
+  showSftpPermissions.value = !showSftpPermissions.value;
+  pluginStore.setItem(SFTP_SHOW_PERMISSIONS_KEY, String(showSftpPermissions.value));
+}
+
 function toggleTransferPanel() {
   const next = !transferPanelOpen.value;
   closeToolbarPopovers();
@@ -9335,6 +9343,7 @@ function flagHintsSource(command: string): string {
             </PopoverAnchor>
             <PopoverContent class="popover columns-popover" align="end" :side-offset="5">
             <label v-for="column in (['modified', 'size', 'kind', 'owner', 'group'] as SftpColumn[])" :key="column"><input type="checkbox" :checked="visibleColumns.includes(column)" @change="toggleColumn(column)" />{{ column === "kind" ? t("sftpKind") : t(column) }}</label>
+            <label><input type="checkbox" :checked="showSftpPermissions" @change="toggleSftpPermissions" />{{ t("sftpShowPermissions") }}</label>
             <hr class="columns-popover-separator" />
             <label :title="t('sftpPane.defaultOpenHint')"><input type="checkbox" :checked="sftpPaneDefaultOpen" @change="toggleSftpPaneDefaultOpen" />{{ t("sftpPane.defaultOpen") }}</label>
             <label :title="t('sftpPane.autoConnectHint')"><input type="checkbox" :checked="sftpAutoConnect" @change="toggleSftpAutoConnect" />{{ t("sftpPane.autoConnect") }}</label>
@@ -10320,7 +10329,7 @@ function flagHintsSource(command: string): string {
                  定位/碰撞/Esc/外点关闭均由 reka 承担。 -->
             <ContextMenu :open="!!(fileMenu || blankMenu)" @update:open="(open) => { if (!open) { fileMenu = undefined; blankMenu = false; } }">
               <ContextMenuTrigger as-child>
-            <div ref="fileRowsEl" class="file-rows" @scroll.passive="onFileRowsScroll" @contextmenu="onFileAreaContextMenu">
+            <div ref="fileRowsEl" class="file-rows" :class="{ 'file-rows--permissions-hidden': !showSftpPermissions }" @scroll.passive="onFileRowsScroll" @contextmenu="onFileAreaContextMenu">
               <div class="file-header" :style="sftpGridStyle">
                 <button class="col-wrap" @click="toggleSort('name')">{{ t("name") }}<component :is="sortIcon('name')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('name', e)" /></button>
                 <button v-if="visibleColumns.includes('modified')" class="col-wrap" @click="toggleSort('modified')">{{ t("modified") }}<component :is="sortIcon('modified')" /><span class="col-resizer" @pointerdown="(e) => onColResizeStart('modified', e)" /></button>
@@ -10383,7 +10392,7 @@ function flagHintsSource(command: string): string {
                         :title="t('sftpName.lossyTitle')"
                       />
                     </span>
-                    <span v-if="entry.permissions" class="file-name-permissions">{{ formatSftpPermissions(entry.permissions, entry.kind) }}</span>
+                    <span v-if="showSftpPermissions && entry.permissions" class="file-name-permissions">{{ formatSftpPermissions(entry.permissions, entry.kind) }}</span>
                   </span>
                 </span>
                 <span v-if="visibleColumns.includes('modified')">{{ formatModified(entry.modifiedAt) }}</span>

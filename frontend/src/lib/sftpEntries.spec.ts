@@ -2,7 +2,7 @@
 // null/非数组整体收敛为空数组、null 行与无名/无 uri 行丢弃、缺 kind 降级
 // 为 file（渲染占位而非整表丢弃/比较器抛错）。
 import { describe, expect, it } from "vitest";
-import { formatSftpPermissions, sanitizeSftpEntries, sanitizeVisibleColumns, sftpEntryIconKind, sftpFileTypeName } from "./sftpEntries";
+import { formatSftpPermissions, parseSftpPermissionVisibility, sanitizeSftpEntries, sanitizeVisibleColumns, sftpEntryIconKind, sftpFileTypeName } from "./sftpEntries";
 
 describe("sanitizeSftpEntries", () => {
   it("returns an empty array for null / non-array payloads", () => {
@@ -110,6 +110,16 @@ describe("sanitizeVisibleColumns", () => {
 
   it("accepts kind and owner/group columns from persisted state", () => {
     expect(sanitizeVisibleColumns(["size", "kind", "owner", "group"])).toEqual(["size", "kind", "owner", "group"]);
+  });
+});
+
+describe("parseSftpPermissionVisibility", () => {
+  it("shows permissions by default and restores an explicit hidden preference", () => {
+    expect(parseSftpPermissionVisibility(undefined)).toBe(true);
+    expect(parseSftpPermissionVisibility(null)).toBe(true);
+    expect(parseSftpPermissionVisibility("true")).toBe(true);
+    expect(parseSftpPermissionVisibility(false)).toBe(false);
+    expect(parseSftpPermissionVisibility("false")).toBe(false);
   });
 });
 

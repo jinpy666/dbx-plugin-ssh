@@ -23,6 +23,7 @@ describe("ssh pluginStore wiring", () => {
         "ssh-command-history-meta",
         "ssh-follow-directory",
         "ssh-sftp-pane-open",
+        "ssh-sftp-show-permissions",
         "ssh-sftp-side-tab",
         "ssh-sftp-side-collapsed",
         "ssh-terminal-select-copy",

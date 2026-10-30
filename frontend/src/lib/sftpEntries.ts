@@ -79,6 +79,10 @@ export function sanitizeVisibleColumns(value: unknown): SftpColumn[] {
   return columns.length > 0 ? columns : [...DEFAULT_VISIBLE_COLUMNS];
 }
 
+export function parseSftpPermissionVisibility(value: unknown): boolean {
+  return value !== false && value !== "false";
+}
+
 export function sftpFileTypeName(name: string): string {
   const cleanName = name.split(/[?#]/)[0];
   const dot = cleanName.lastIndexOf(".");
