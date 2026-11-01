@@ -51,6 +51,8 @@ const props = defineProps<{
    * 工作台会话为准，缺省时才回落旧启发式。 */
   sessionId?: string;
   connectionId?: string;
+  /** 当前工作台目标：显式本机模式不得被其他存活 SSH 会话覆盖。 */
+  targetMode?: "ssh" | "local";
 }>();
 
 interface DockerContainer {
@@ -160,17 +162,29 @@ function applyEngineSettings(): void {
 }
 
 async function resolveMode(): Promise<PanelMode> {
+  // 本地工作台由 App 明确标记：不能被其他存活 SSH 会话覆盖。
+  if (props.targetMode === "local") {
+    sessionId.value = "";
+    mode.value = "local";
+    adoptConnection("");
+    return "local";
+  }
   // 工作台绑定会话优先（#168）：有 sessionId prop 就严格绑定本工作台的
-  // 连接，绝不按“全局最新会话”抢别人的机器；连接变化时下一次轮询重绑。
+  // 连接，绝不按“全局最新会话”猜测其他机器。
   if (props.sessionId) {
-    if (props.sessionId !== sessionId.value) {
-      sessionId.value = props.sessionId;
-      mode.value = "ssh";
-      adoptConnection(props.connectionId || "");
-    }
+    sessionId.value = props.sessionId;
+    mode.value = "ssh";
+    adoptConnection(props.connectionId || "");
     return "ssh";
   }
-  if (mode.value === "ssh" && sessionId.value) return "ssh";
+  if (props.targetMode === "ssh") {
+    // 显式 SSH 工作台失去当前会话时，不要沿用之前缓存的旧 session。
+    sessionId.value = "";
+    mode.value = "ssh";
+    adoptConnection(props.connectionId || "");
+  } else if (mode.value === "ssh" && sessionId.value) {
+    return "ssh";
+  }
   try {
     const response = await window.dbxPlugin.invoke<{ sessions: unknown }>("ssh/sessions/list");
     const targets = normalizeBatchTargets(response.sessions)
@@ -218,12 +232,22 @@ const pollPaused = ref(false);
 
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let consecutiveFailures = 0;
+let targetRevision = 0;
+let refreshQueued = false;
 
 async function refresh(): Promise<void> {
-  if (loading.value) return;
-  await resolveMode();
+  if (loading.value) {
+    refreshQueued = true;
+    return;
+  }
   loading.value = true;
+  const revision = targetRevision;
   try {
+    await resolveMode();
+    if (revision !== targetRevision) {
+      refreshQueued = true;
+      return;
+    }
     const payload = dockerListPayload(
       await window.dbxPlugin.invoke<unknown>(
         "docker/list",
@@ -231,6 +255,10 @@ async function refresh(): Promise<void> {
         { timeoutMs: LIST_TIMEOUT_MS },
       ),
     );
+    if (revision !== targetRevision) {
+      refreshQueued = true;
+      return;
+    }
     containers.value = payload.containers;
     available.value = payload.available;
     needsSudo.value = payload.needsSudo;
@@ -238,13 +266,33 @@ async function refresh(): Promise<void> {
     consecutiveFailures = 0;
     pollPaused.value = false;
   } catch (cause) {
+    if (revision !== targetRevision) {
+      refreshQueued = true;
+      return;
+    }
     consecutiveFailures += 1;
     listError.value = cause instanceof Error ? cause.message : String(cause);
     if (consecutiveFailures >= POLL_MAX_FAILURES) stopPolling();
   } finally {
     loading.value = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      void refresh();
+    }
   }
 }
+
+watch(
+  () => [props.targetMode, props.sessionId, props.connectionId],
+  () => {
+    targetRevision += 1;
+    containers.value = [];
+    available.value = null;
+    needsSudo.value = false;
+    listError.value = "";
+    void refresh();
+  },
+);
 
 function startPolling(): void {
   stopPolling();

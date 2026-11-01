@@ -16,8 +16,9 @@ const metrics: ServerMetrics = {
 const processRow = { pid: 812, ppid: 1, user: "www-data", cpuPercent: 12.6, memPercent: 3.1, etime: "01:23", state: "S", command: "nginx: worker process", fdCount: 64, listenPorts: [80, 443] };
 const otherRow = { ...processRow, pid: 1042, user: "demo", command: "htop", listenPorts: [] };
 
-function mountPanel(overrides: Record<string, unknown> = {}) {
+function mountPanel(overrides: Record<string, unknown> = {}, slots: Record<string, string> = {}) {
   const wrapper = mount(MetricsPanel, {
+    slots,
     props: {
       locale: "en",
       modelValue: "overview",
@@ -130,5 +131,14 @@ describe("MetricsPanel", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["docker"]);
     expect(wrapper.find(".metrics-docker-page").exists()).toBe(true);
+  });
+
+  it("renders Docker slot without waiting for metrics data", () => {
+    const wrapper = mountPanel(
+      { modelValue: "docker", metrics: undefined, loading: false },
+      { docker: "<div data-testid='docker-content'>Docker containers</div>" },
+    );
+    expect(wrapper.find('[data-testid="docker-content"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("Docker containers");
   });
 });

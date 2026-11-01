@@ -103,3 +103,70 @@ describe.skipIf(platform() === "win32")("Docker terminal shell selection (#182)"
     expect(result.status).toBe(1);
   });
 });
+
+describe("Docker workbench target", () => {
+  it("uses local Docker even when another SSH session is connected", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    vi.stubGlobal("dbxPlugin", {
+      invoke: async (method: string, params: Record<string, unknown> = {}) => {
+        calls.push({ method, params });
+        if (method === "ssh/sessions/list") {
+          return { sessions: [{ sessionId: "other-ssh", connectionId: "other-connection", connected: true }] };
+        }
+        if (method === "docker/list") return { available: true, containers: [] };
+        throw new Error(`Unexpected host call: ${method}`);
+      },
+    });
+    const wrapper = mount(DockerPanel, {
+      attachTo: document.body,
+      props: {
+        t: (key: string) => key,
+        targetMode: "local",
+        sessionId: "stale-ssh-session",
+        connectionId: "stale-ssh-connection",
+      },
+    });
+
+    await flushPromises();
+
+    expect(calls.filter((call) => call.method === "ssh/sessions/list")).toHaveLength(0);
+    expect(calls.filter((call) => call.method === "docker/list").map((call) => call.params)).toEqual([
+      { target: "local" },
+    ]);
+    wrapper.unmount();
+  });
+
+  it("refreshes against the new target when the workbench switches modes", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    vi.stubGlobal("dbxPlugin", {
+      invoke: async (method: string, params: Record<string, unknown> = {}) => {
+        calls.push({ method, params });
+        if (method === "ssh/sessions/list") return { sessions: [] };
+        if (method === "docker/list") return { available: true, containers: [] };
+        throw new Error(`Unexpected host call: ${method}`);
+      },
+    });
+    const wrapper = mount(DockerPanel, {
+      attachTo: document.body,
+      props: {
+        t: (key: string) => key,
+        targetMode: "ssh",
+        sessionId: "ssh-session",
+        connectionId: "ssh-connection",
+      },
+    });
+
+    await flushPromises();
+    await wrapper.setProps({ targetMode: "local", sessionId: "", connectionId: "" });
+    await flushPromises();
+    await wrapper.setProps({ targetMode: "ssh", sessionId: "next-ssh-session", connectionId: "next-ssh-connection" });
+    await flushPromises();
+
+    expect(calls.filter((call) => call.method === "docker/list").map((call) => call.params)).toEqual([
+      { sessionId: "ssh-session" },
+      { target: "local" },
+      { sessionId: "next-ssh-session" },
+    ]);
+    wrapper.unmount();
+  });
+});

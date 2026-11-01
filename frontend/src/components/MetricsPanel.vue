@@ -195,7 +195,10 @@ function onSelectProcessSort(value: unknown) {
     </Tabs>
 
     <div class="metrics-content">
-      <div v-if="loading && !metrics" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
+      <section v-if="activeTab === 'docker'" class="metrics-docker-page">
+        <slot name="docker" />
+      </section>
+      <div v-else-if="loading && !metrics" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
       <p v-else-if="error" class="task-error">{{ error }} <button class="link-button" @click="emit('refresh')">{{ t("refresh") }}</button></p>
 
       <template v-else-if="metrics">
@@ -354,9 +357,6 @@ function onSelectProcessSort(value: unknown) {
           </article>
         </section>
 
-        <section v-else class="metrics-docker-page">
-          <slot name="docker" />
-        </section>
       </template>
     </div>
   </div>

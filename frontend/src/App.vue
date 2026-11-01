@@ -9918,7 +9918,12 @@ function flagHintsSource(command: string): string {
             @kill="killProcessRow"
           >
             <template #docker>
-              <DockerPanel :t="t" :session-id="session?.sessionId ?? ''" :connection-id="connectionId" />
+              <DockerPanel
+                :t="t"
+                :target-mode="localTerminalActive ? 'local' : 'ssh'"
+                :session-id="localTerminalActive ? '' : session?.sessionId ?? ''"
+                :connection-id="localTerminalActive ? '' : connectionId"
+              />
             </template>
           </MetricsPanel>
         </section>
