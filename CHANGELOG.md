@@ -6,6 +6,14 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.13-beta.1] — 2026-11-02
+
+- **用户反馈四项修复（#243/#254/#253/#255）**。文件预览滚动条改为常驻可见（此前 thin 值在新版 Chromium/WebKit 引擎下被回退成闲置隐藏的系统 overlay 滚动条）；sz/ZMODEM 大文件传输不再因补发缓存洪溢误判会话失效，改为跳到最新输出并保持连接；Windows stdio 模式按平台定位 app-data（`%APPDATA%\com.dbx.app`），不再需要手动设置 `DBX_APP_DATA_DIR`；补齐 4 个 MCP 工具的 manifest 权限声明（`ssh_close`、`ssh_list_known_hosts`、`ssh_list_connections`、`ssh_remove_known_host`），AI 授权页恢复全部 16 个工具。
+  **Four community-reported fixes.** Preview scrollbars are now persistently visible (a non-auto `scrollbar-width` had disabled the custom scrollbar styling in newer Chromium/WebKit engines). Large sz/ZMODEM transfers no longer kill the session when the replay buffer overflows — the terminal resyncs to the latest output instead. Windows stdio mode resolves the app-data directory per platform (`%APPDATA%\com.dbx.app`), so `DBX_APP_DATA_DIR` is no longer required. The manifest now declares permission levels for the four missing MCP tools, restoring all 16 tools on the AI authorization page.
+
+- **终端焦点加固（#247）与 Docker 面板本地目标**。点击终端宿主时在捕获阶段显式聚焦输入区，规避宿主 WebView 下 WebGL 画布层吞掉焦点传递的输入失效；Docker 面板支持本地/SSH 目标模式，本地终端场景直接查看本机容器。
+  **Terminal focus hardening and Docker local target.** Clicking the terminal host now focuses the xterm input area in the capture phase, working around WebView focus loss on the WebGL canvas layer. The Docker panel gains a local/SSH target mode so the local terminal scenario inspects the machine's own containers.
+
 ## [0.7.12] — 2026-10-30
 
 - **监控与运维体验全面升级**。服务器指标改为紧凑卡片与逐核视图，CPU 与网络共用 1 秒采样窗口，GPU/NPU 探测并行且最多等待 3 秒；进程和 Docker 表格统一使用 UI Table 组件，固定操作列并支持横向滚动；网络接口移除误导性的相对峰值进度条，折叠零流量虚拟接口；权限码支持一键显示/隐藏，隐藏后文件名与图标单行居中并记住偏好。
