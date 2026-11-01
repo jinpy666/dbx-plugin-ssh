@@ -4819,6 +4819,55 @@ mod tests {
         }
     }
 
+    /// 契约（issue #255）：manifest mcp 贡献的 tools 必须与 [`TOOL_NAMES`]
+    /// 一一对应。缺声明的工具宿主直接拒绝开放（「未在插件 manifest 中声明
+    /// 权限级别」），AI 侧整组工具不可用——新增工具时 manifest 与常量必须
+    /// 同步增删。
+    #[test]
+    fn manifest_mcp_tools_cover_exactly_tool_names() {
+        let manifest: Value = serde_json::from_str(include_str!("../../manifest.json"))
+            .expect("manifest.json must be valid JSON");
+        let mut declared: Vec<&str> = Vec::new();
+        for c in manifest["contributions"]
+            .as_array()
+            .expect("manifest contributions")
+            .iter()
+            .filter(|c| c["type"].as_str() == Some("mcp"))
+        {
+            declared.extend(
+                c["tools"]
+                    .as_object()
+                    .expect("mcp tools")
+                    .keys()
+                    .map(String::as_str),
+            );
+        }
+        let mut declared_sorted = declared.clone();
+        declared_sorted.sort_unstable();
+        let mut expected: Vec<&str> = TOOL_NAMES.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            declared_sorted, expected,
+            "manifest mcp tools 与 TOOL_NAMES 漂移：缺声明 = 未开放，多余 = 死配置"
+        );
+        // access 三值约束与宿主授权档位（只读/读写/完全）对齐。
+        for c in manifest["contributions"].as_array().unwrap() {
+            if c["type"].as_str() != Some("mcp") {
+                continue;
+            }
+            for (name, decl) in c["tools"].as_object().unwrap() {
+                assert!(
+                    matches!(decl["access"].as_str(), Some("read" | "write" | "full")),
+                    "{name} access 必须是 read/write/full"
+                );
+                assert!(
+                    matches!(decl["toolset"].as_str(), Some("exec" | "sftp")),
+                    "{name} toolset 必须是已声明的 exec/sftp"
+                );
+            }
+        }
+    }
+
     #[test]
     fn annotation_hints_align_with_gate_classification() {
         let definitions = tool_definitions();
