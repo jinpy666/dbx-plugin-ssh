@@ -345,7 +345,9 @@ confirm fail-closed 与 scope fail-closed（含 list 在作用域下可用）。
 
 - **stdio 方式亦可转发**：stdio 模式传 `runInTerminal: true` 时，sidecar 通过 DBX
   app 的本地 TCP 桥（`<app-data>/mcp-bridge-port`，可用 `DBX_APP_DATA_DIR` 重定向；
-  app 未运行会尝试 `open -a DBX.app` 唤起，可用 `DBX_APP_LAUNCH_CMD` 自定义）把调用
+  未设置时按平台定位 app-data：macOS `~/Library/Application Support/com.dbx.app`、
+  Windows `%APPDATA%\com.dbx.app`（#253）、Linux `$XDG_DATA_HOME`/`~/.local/share`
+  下的 `com.dbx.app`；app 未运行会尝试 `open -a DBX.app` 唤起，可用 `DBX_APP_LAUNCH_CMD` 自定义）把调用
   转发到 **app 自己的插件 sidecar**——与工作台同一进程，命令出现在 app 终端里。
   转发要求 `connectionId` 指向 DBX 已保存的连接（凭据由 app 侧解析，不经 stdio 调用方）。
   `connectionId` 已随全部连接类工具的 inputSchema 声明，严格校验的 stdio 客户端

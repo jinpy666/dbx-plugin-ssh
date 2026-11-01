@@ -592,12 +592,17 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .file-rows::-webkit-scrollbar-track { background: transparent; }
 /* 预览弹窗是同一全局规则的例外（#243）：yml/json/log 长文档内部可滚却无
    滚动条，用户无法直接定位；为 CodeMirror 文本/编辑区、hex 与 Markdown
-   渲染容器恢复滚动条，配色与 .file-rows 同款。 */
+   渲染容器恢复滚动条，配色与 .file-rows 同款。
+   注意这里只能写 scrollbar-width: auto——0.7.11 的 thin 在 Chromium ≥121 与
+   新版 WebKit 中会因「标准滚动条属性非 auto 即禁用 ::-webkit-scrollbar 自
+   定义」而失效，滚回系统 overlay 滚动条（macOS 闲置时完全不可见），用户实
+   测仍无滚动条；auto 压掉全局 none 并让 webkit 自定义样式接管（常驻可见）。
+   同理不得写 scrollbar-color，它同样触发该禁用，thumb/track 配色全在下方
+   的 ::-webkit-scrollbar 规则里。 */
 .ssh-preview .cm-scroller,
 .ssh-preview-hex,
 .ssh-preview .wb-md-render {
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--foreground) 25%, transparent) transparent;
+  scrollbar-width: auto;
 }
 .ssh-preview .cm-scroller::-webkit-scrollbar,
 .ssh-preview-hex::-webkit-scrollbar,

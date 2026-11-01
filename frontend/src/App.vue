@@ -1323,6 +1323,7 @@ let terminalWheelHandler: ((event: WheelEvent) => void) | undefined;
 // 点击定位光标（iTerm2 风格）：按下位置记忆 + 松开时判定“原地点击”。
 let terminalMouseDownHandler: ((event: MouseEvent) => void) | undefined;
 let terminalMouseUpHandler: ((event: MouseEvent) => void) | undefined;
+let terminalHostFocusHandler: (() => void) | undefined;
 let terminalMouseMoveHandler: ((event: MouseEvent) => void) | undefined;
 let ghostSelectionGuardHostMouseDownHandler: (() => void) | undefined;
 let ghostSelectionGuardHostMouseMoveHandler: ((event: MouseEvent) => void) | undefined;
@@ -2476,6 +2477,12 @@ function createTerminal() {
   terminalHost.value.addEventListener("mousedown", terminalMouseDownHandler);
   terminalMouseUpHandler = (event) => handleTerminalMouseUp(event);
   terminalHost.value.addEventListener("mouseup", terminalMouseUpHandler);
+  // #247 加固：宿主 WKWebView 下 WebGL 画布层可能吞掉 mousedown 的焦点传递
+  // （DOM 渲染点行元素正常聚焦，WebGL 渲染点 canvas 后 textarea 不聚焦→无法
+  // 键入）。capture 阶段在 xterm 内部处理之前显式聚焦；xterm 焦点链正常时
+  // 是幂等 no-op，选中拖拽不受影响（focus 在 mousedown 即达成）。
+  terminalHostFocusHandler = () => terminal?.focus();
+  terminalHost.value.addEventListener("mousedown", terminalHostFocusHandler, true);
   // #220 守卫接线：mousedown/mouseup 只喂状态机（真实拖选不干预），mousemove
   // 做无按键扩展判定——两拍窗口内选区串持续变化即清一次。监听挂终端宿主，
   // 与既有 per-terminal 处理器同生命周期（onBeforeUnmount 成对摘除）。
@@ -4089,8 +4096,14 @@ function drainTerminalFrames() {
     void window.dbxPlugin.invoke<ReplayResult>("ssh/terminal/replay", { sessionId: session.value.sessionId, afterSequence: lastSequence })
       .then((result) => {
         if (!result.complete) {
-          terminalState.value = "error";
-          terminalError.value = t("sessionUnrecoverable");
+          // 环形缓冲（2 MiB）已淘汰洞前缀：活会话不能误判成已退出——sz/ZMODEM
+          // 大文件传输的 PTY 洪流必然冲垮补发窗口（issue #254）。resync 到缓冲
+          // 尾部并保住会话；丢掉的输出若是 zmodem 二进制流，传输由 zmodem 自身
+          // 的重传/用户重跑兜底，与本地终端「补发不完整只 resync」同一策略。
+          pendingTerminalFrames.clear();
+          lastSequence = result.tailSequence;
+          replayNoProgress = 0;
+          showNotice(t("replayGapResynced"));
           return;
         }
         // The replay returned healthy but the hole below firstPending is still
@@ -8788,6 +8801,7 @@ onBeforeUnmount(() => {
     if (terminalWheelHandler) terminalHost.value.removeEventListener("wheel", terminalWheelHandler, true);
     if (terminalMouseDownHandler) terminalHost.value.removeEventListener("mousedown", terminalMouseDownHandler);
     if (terminalMouseUpHandler) terminalHost.value.removeEventListener("mouseup", terminalMouseUpHandler);
+    if (terminalHostFocusHandler) terminalHost.value.removeEventListener("mousedown", terminalHostFocusHandler, true);
     if (ghostSelectionGuardHostMouseDownHandler) terminalHost.value.removeEventListener("mousedown", ghostSelectionGuardHostMouseDownHandler, true);
     if (ghostSelectionGuardHostMouseMoveHandler) terminalHost.value.removeEventListener("mousemove", ghostSelectionGuardHostMouseMoveHandler);
     window.removeEventListener("mouseup", onWindowMouseUpGhostGuard, true);

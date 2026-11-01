@@ -20,7 +20,48 @@ const PORT_FILE_NAME: &str = "mcp-bridge-port";
 /// Plugin identity the bridge expects for this sidecar's calls.
 const PLUGIN_ID: &str = "io.dbx.ssh";
 /// Fallback app-data location when `DBX_APP_DATA_DIR` is unset (macOS).
+#[cfg(target_os = "macos")]
 const DEFAULT_APP_DATA_SUBPATH: &str = "Library/Application Support/com.dbx.app";
+
+/// `<app_data_dir>` resolution order: env `DBX_APP_DATA_DIR`, then the host
+/// OS's per-platform app-data location for `com.dbx.app` (issue #253: the
+/// fallback previously joined the macOS subpath onto `$HOME` on every
+/// platform, so Windows stdio mode never found `%APPDATA%\com.dbx.app` and
+/// always fell back to the session registry unless `DBX_APP_DATA_DIR` was
+/// set by hand).
+fn default_app_data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("DBX_APP_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        return Some(dir);
+    }
+    platform_app_data_dir()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(DEFAULT_APP_DATA_SUBPATH))
+}
+
+#[cfg(windows)]
+fn platform_app_data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .map(|dir| dir.join("com.dbx.app"))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn platform_app_data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME").filter(|dir| !dir.as_os_str().is_empty()) {
+        return Some(PathBuf::from(dir).join("com.dbx.app"));
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/share/com.dbx.app"))
+}
 /// Budget for the local TCP hop.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Teaching-mode approval (up to 120s) happens inside the bridge call, so the
@@ -33,20 +74,6 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 /// How long `ensure_app_bridge` keeps polling for the port after a launch
 /// attempt.
 pub const DEFAULT_ENSURE_WAIT: Duration = Duration::from_secs(30);
-
-/// `<app_data_dir>` resolution order: env `DBX_APP_DATA_DIR`, then
-/// `$HOME/Library/Application Support/com.dbx.app`.
-fn default_app_data_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("DBX_APP_DATA_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| !dir.as_os_str().is_empty())
-    {
-        return Some(dir);
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(DEFAULT_APP_DATA_SUBPATH))
-}
 
 /// Reads the bridge port the app published (decimal, whitespace-tolerant).
 /// A missing or corrupted file yields `None`.
