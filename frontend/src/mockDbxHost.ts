@@ -34,6 +34,10 @@ const slowSessionOpenMs = Math.max(0, Number(fixtureParams.get("slow")) || 0) * 
 // ?fresh=1 让 sessions/list 返回空——首屏不走 reattach 而走 ssh/session/open，
 // 供连接成功过渡动画（success 卡片）等 open 路径的浏览器视觉验证。
 const freshSessionOpen = fixtureParams.get("fresh") === "1";
+// ?bp=1 让 mock 远端在会话首刷后补发 `CSI ? 2004 h`（把 xterm 的
+// modes.bracketedPasteMode 协商位置 1），供「远端协商开启 bracketed paste 后
+// 粘贴被包裹」的走查与单测。真实远端（vim 8+）正是会话就绪后发 2004h 的形态。
+const bracketedPasteFixture = fixtureParams.get("bp") === "1";
 // 初始 locale 支持 ?locale= 覆盖（镜像真实桥 api.locale）；运行时经
 // __dbxMockSetLocale 切换——镜像真桥 updateLocale 的"改字段 + onEvent 投递
 // {type:"env", locale}"语义（真桥无 onLocaleChange 订阅，X-P2/P5 对齐），
@@ -843,7 +847,7 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     // so continuing the global counter here would leave a permanent hole at
     // the old tail and spin the client's replay loop.
     sequence = 0;
-    setTimeout(() => emitTerminal(terminalTranscript), 30);
+    setTimeout(() => emitTerminal(bracketedPasteFixture ? `${terminalTranscript}\u001b[?2004h` : terminalTranscript), 30);
     scheduleDisconnect();
     result = { sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, connected: true, sequence: 0, chunkSize: 262144, directoryTrackingSupported: true };
   } else if (method === "ssh/terminal/replay") result = { frameCount: 0, firstAvailableSequence: 1, tailSequence: sequence, complete: true };
@@ -876,7 +880,7 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
       directoryTrackingSupported: true,
       replay: { complete: true, frameCount: 0, firstAvailableSequence: sequence + 1, tailSequence: sequence },
     };
-    setTimeout(() => emitTerminal(terminalTranscript), 30);
+    setTimeout(() => emitTerminal(bracketedPasteFixture ? `${terminalTranscript}\u001b[?2004h` : terminalTranscript), 30);
     scheduleDisconnect();
   }
   else if (method === "sftp/list" || method === "sudo/listDir") result = { entries: mockList(String((params as Record<string, unknown>)?.path || "/")) };
@@ -1900,6 +1904,11 @@ window.dbxPlugin = {
     // 让 WKWebView/Chromium 的按键投递差异可以在无宿主环境下复现。
     if (bytes.byteLength > 8) {
       const echoed = new TextDecoder().decode(bytes.subarray(8));
+      // 走查/单测观测口：记录进站的 ssh 终端输入负载（8 字节序号之后的原文）。
+      // bracketed paste 包裹验收的落点——窗口侧断言 `CSI 200~ … 201~` 哨兵。
+      const captureHost = window as unknown as { __mockSshInputPayloads?: string[] };
+      captureHost.__mockSshInputPayloads ??= [];
+      captureHost.__mockSshInputPayloads.push(echoed);
       // 真实 PTY 的 onlcr 会把 \r 转成 \r\n；夹具直发 \r 只会让光标回到行首、
       // 后续回显互相覆盖（建议命令/批量发送走查时表现为"命令消失"）。
       // canonical 行规程把控制键按 caret 记法回显成可打印文本（↑ → 字面

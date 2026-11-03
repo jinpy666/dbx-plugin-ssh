@@ -2,7 +2,7 @@
 // 右键/粘贴/响铃等终端行为在 terminalBehavior.spec.ts。本文件只覆盖不可配置的
 // 门禁与搜索辅助逻辑。
 import { describe, expect, it } from "vitest";
-import { canAcceptFileDrop, canAcceptTerminalDrop, transferBusyPaneClass, BRACKETED_PASTE_END, BRACKETED_PASTE_START, createTerminalCopyCache, isApplePlatform, isTerminalSelectAllShortcut, normalizeDropTargetDir, resolveDropTargetDir, resolveTerminalKeyAction, resolveTerminalPasteText, resolveTerminalRightClickAction, sanitizeSearchOptions, sanitizeSelectCopyEnabled, terminalSearchSeedFromSelection, wrapBracketedPaste } from "./terminalInteraction";
+import { canAcceptFileDrop, canAcceptTerminalDrop, transferBusyPaneClass, BRACKETED_PASTE_END, BRACKETED_PASTE_START, bracketedPasteWirePayload, createTerminalCopyCache, isApplePlatform, isTerminalSelectAllShortcut, normalizeDropTargetDir, resolveDropTargetDir, resolveTerminalKeyAction, resolveTerminalPasteText, resolveTerminalRightClickAction, sanitizeSearchOptions, sanitizeSelectCopyEnabled, terminalSearchSeedFromSelection, wrapBracketedPaste } from "./terminalInteraction";
 
 describe("terminal interaction preferences (select-to-copy / right-click-paste)", () => {
   it("defaults select-to-copy to enabled and only honors an explicit 'false'", () => {
@@ -172,6 +172,22 @@ describe("bracketed paste wire wrap (DECSET 2004, vi normal-mode paste truncatio
     expect(wrapBracketedPaste("", true)).toBe("");
     expect(BRACKETED_PASTE_START).toBe("\u001b[200~");
     expect(BRACKETED_PASTE_END).toBe("\u001b[201~");
+  });
+});
+
+describe("bracketed paste wire decision (sendConfirmedPaste 分支直证)", () => {
+  const PAYLOAD = "echo vi-paste";
+
+  it("wraps a negotiated paste and passes a non-negotiated one through", () => {
+    expect(bracketedPasteWirePayload(PAYLOAD, { negotiated: true })).toBe("\u001b[200~" + PAYLOAD + "\u001b[201~");
+    expect(bracketedPasteWirePayload(PAYLOAD, { negotiated: false })).toBe(PAYLOAD);
+  });
+
+  it("never wraps the imitative-typing lane (rerunLocalCommand needs the live Enter)", () => {
+    // 重跑命令通道即使 2004 已协商也裸发：包裹里的 \r 会被远端当作粘贴
+    // 内容而不执行，命令跑不起来。
+    expect(bracketedPasteWirePayload(PAYLOAD, { negotiated: true, imitativeTyping: true })).toBe(PAYLOAD);
+    expect(bracketedPasteWirePayload(PAYLOAD, { negotiated: false, imitativeTyping: true })).toBe(PAYLOAD);
   });
 });
 

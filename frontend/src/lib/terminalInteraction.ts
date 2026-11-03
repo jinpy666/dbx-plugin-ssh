@@ -227,6 +227,16 @@ export function wrapBracketedPaste(payload: string, negotiated: boolean): string
 }
 
 /**
+ * 粘贴上线形态的决策口（sendConfirmedPaste 的 wire 分支抽在这里，让「协商
+ * 才包裹 / 仿键入永远裸发」三分支可被单测直证——Codex review #261 P2：
+ * 只测 wrapBracketedPaste 纯函数时，sendConfirmedPaste 内的协商判定与
+ * rerunLocalCommand 的仿键入豁免没有覆盖。）
+ */
+export function bracketedPasteWirePayload(payload: string, options: { negotiated: boolean; imitativeTyping?: boolean }): string {
+  return options.imitativeTyping === true ? payload : wrapBracketedPaste(payload, options.negotiated);
+}
+
+/**
  * 终端拖拽「当前目录」落点的解析顺序：shell 的 OSC 7/633 跟踪 cwd 优先（就
  * 是用户说的"终端 cwd"），其次回落远端主目录（连接时已由 sftp/home 探测）；
  * 主目录也拿不到（旧 sidecar）才用调用方兜底值。终端拖拽只在 SFTP 面板关闭
