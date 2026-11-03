@@ -1196,6 +1196,38 @@ try {
   check("permission labels restore", await page.locator(".file-name-permissions").count() > 0 && await page.locator(".file-row").first().evaluate((row) => row.getBoundingClientRect().height === 44));
   await page.locator('button[title="Collapse SFTP panel"], button[data-tooltip="Collapse SFTP panel"]').first().click();
 
+  // --- bracketed paste wrap: negotiated 2004 wraps paste bytes, plain page 播 ---
+  console.log("==> bracketed paste wrap (vi normal-mode paste truncation fix)");
+  // 覆盖 sendConfirmedPaste 的 wire 分支：未协商 2004 的会话粘贴字节原样落
+  // PTY（历史行为回归），?bp=1 协商后的会话自动补 `CSI 200~ … 201~` 哨兵
+  // （vi/vim 普通模式不再把粘贴当命令吃掉）。观测点是 mock 的
+  // __mockSshInputPayloads（ssh/terminal/in 那 8 字节序号之后的负载）。
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "echo noBpPaste");
+    document.querySelector(".terminal-host").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await sleep(300);
+  const rawPastePayload = await page.evaluate(() => (window.__mockSshInputPayloads || []).at(-1));
+  check("paste on a non-negotiated session reaches the PTY unwrapped", rawPastePayload === "echo noBpPaste", `payload=${JSON.stringify(rawPastePayload)}`);
+
+  const bpPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  try {
+    await bpPage.goto(`${baseUrl}?render=dom&bp=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await sleep(3_000); // mock bridging + ?bp=1 2004h negotiation wave
+    await expect(bpPage, ".terminal-host", "bp fixture terminal host");
+    await bpPage.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData("text/plain", "echo BpPaste");
+      document.querySelector(".terminal-host").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    });
+    await sleep(300);
+    const bpPayload = await bpPage.evaluate(() => (window.__mockSshInputPayloads || []).at(-1));
+    check("negotiated paste is wrapped in CSI 200~/201~ sentinels", bpPayload === "\u001b[200~echo BpPaste\u001b[201~", `payload=${JSON.stringify(bpPayload)}`);
+  } finally {
+    await bpPage.close();
+  }
+
   if (pageError.length) {
     failures.push(`page errors: ${pageError.slice(0, 3).join(" | ")}`);
   }

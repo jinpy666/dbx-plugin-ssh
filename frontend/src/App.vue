@@ -108,7 +108,7 @@ import {
   normalizeDropTargetDir,
   resolveDropTargetDir,
   transferBusyPaneClass,
-  wrapBracketedPaste,
+  bracketedPasteWirePayload,
   type TerminalSearchOptions,
 } from "./lib/terminalInteraction";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
@@ -7496,9 +7496,7 @@ async function sendConfirmedPaste(text: string, options?: { imitativeTyping?: bo
   // 粘贴字节当命令吃掉（PTY 复现：无包裹截断头 18 字节、有包裹完整落盘）。
   // 仿键入通道（重跑命令要立刻回车执行）不包裹，否则回车被 2004 吞执行不了。
   const negotiated = Boolean(terminal?.modes.bracketedPasteMode) && terminalBehavior.value.bracketedPaste;
-  const wirePayload = options?.imitativeTyping
-    ? payload
-    : wrapBracketedPaste(payload, negotiated);
+  const wirePayload = bracketedPasteWirePayload(payload, { negotiated, imitativeTyping: options?.imitativeTyping === true });
   sendTerminalBytes(new TextEncoder().encode(wirePayload));
   terminal?.focus();
 }
