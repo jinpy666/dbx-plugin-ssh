@@ -6,6 +6,11 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.13-beta.2] — 2026-11-03
+
+- **vi/vim 普通模式粘贴首部被吃修复（#260）**。在 vi 编辑器里粘贴多行文本时，开头若干字节会丢失、只剩中段（如粘 5 行只剩 `T=2` 起的内容）。根因是粘贴的字节在远端处于 vi 普通模式时被逐字解释成编辑命令（`D/B/X/_` 是命令，`S` 还会清行并进入插入模式），并非丢数据。现在终端在远端协商开启 bracketed paste（DECSET 2004，vim 8+ 默认支持）后会把粘贴自动包上 `CSI 200~…201~`，vim 将其整体按粘贴对象处理，普通模式粘贴也能完整落盘；重跑最近命令等「仿键入」通道仍然裸发，保证回车立即执行。老版 nvi 等不协商 2004 的编辑器请先按 `i` 进入插入模式再粘贴。
+  **vi normal-mode paste truncation fixed (#260).** Pasting multi-line text into vi/vim could eat leading bytes and keep only the middle segment. Root cause: with the remote in vi normal mode, pasted bytes were interpreted as editor commands — not data loss. The terminal now wraps paste bytes in bracketed-paste sentinels (`CSI 200~…201~`) whenever the remote negotiates mode 2004 (default since vim 8+), so even normal-mode paste lands intact. The imitative-typing lane (rerun last command) stays unwrapped so the trailing Enter executes immediately. Legacy editors that never negotiate 2004 (e.g. old nvi) still need insert mode (`i`) before pasting.
+
 ## [0.7.13-beta.1] — 2026-11-02
 
 - **用户反馈四项修复（#243/#254/#253/#255）**。文件预览滚动条改为常驻可见（此前 thin 值在新版 Chromium/WebKit 引擎下被回退成闲置隐藏的系统 overlay 滚动条）；sz/ZMODEM 大文件传输不再因补发缓存洪溢误判会话失效，改为跳到最新输出并保持连接；Windows stdio 模式按平台定位 app-data（`%APPDATA%\com.dbx.app`），不再需要手动设置 `DBX_APP_DATA_DIR`；补齐 4 个 MCP 工具的 manifest 权限声明（`ssh_close`、`ssh_list_known_hosts`、`ssh_list_connections`、`ssh_remove_known_host`），AI 授权页恢复全部 16 个工具。
