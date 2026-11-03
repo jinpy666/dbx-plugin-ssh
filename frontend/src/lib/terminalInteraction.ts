@@ -205,6 +205,28 @@ export function normalizeDropTargetDir(raw: string): string | null {
 }
 
 /**
+ * Bracketed paste wrap (DECSET 2004) for the wire form of a terminal paste.
+ *
+ * 插件的粘贴路径不走 xterm 自身的 onPaste（`interceptTerminalPaste` 拦截后
+ * 直接写字节进 PTY），所以 xterm 不会替我们加 `CSI 200~ … CSI 201~` 包裹。
+ * 远端 vim 协商开启 2004 后，收到的无包裹粘贴在**普通模式**下会被逐字解释
+ * 成 vi 命令（D/B/X/_ 都是命令、S 清行并切入插入模式），首部内容被吃掉只剩
+ * 中段——"vi 里粘贴头部截断"报告的根因。带包裹时 vim 把整块作为粘贴对象
+ * 落入缓冲区，普通模式同样安全（PTY 复现实测三例全通过）。
+ *
+ * 条件由调用方判断：xterm 已跟踪到远端开启 2004（`terminal.modes.bracketedPasteMode`）
+ * 且用户开着 bracketedPaste 设置；`rerunLocalCommand` 这类"仿键入、回车要
+ * 立刻执行"的通道传 negotiated=false 原样放行。
+ */
+export const BRACKETED_PASTE_START = "\u001b[200~";
+export const BRACKETED_PASTE_END = "\u001b[201~";
+
+export function wrapBracketedPaste(payload: string, negotiated: boolean): string {
+  if (!negotiated || !payload) return payload;
+  return BRACKETED_PASTE_START + payload + BRACKETED_PASTE_END;
+}
+
+/**
  * 终端拖拽「当前目录」落点的解析顺序：shell 的 OSC 7/633 跟踪 cwd 优先（就
  * 是用户说的"终端 cwd"），其次回落远端主目录（连接时已由 sftp/home 探测）；
  * 主目录也拿不到（旧 sidecar）才用调用方兜底值。终端拖拽只在 SFTP 面板关闭

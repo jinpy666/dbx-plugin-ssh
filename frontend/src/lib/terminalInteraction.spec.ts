@@ -2,7 +2,7 @@
 // 右键/粘贴/响铃等终端行为在 terminalBehavior.spec.ts。本文件只覆盖不可配置的
 // 门禁与搜索辅助逻辑。
 import { describe, expect, it } from "vitest";
-import { canAcceptFileDrop, canAcceptTerminalDrop, transferBusyPaneClass, createTerminalCopyCache, isApplePlatform, isTerminalSelectAllShortcut, normalizeDropTargetDir, resolveDropTargetDir, resolveTerminalKeyAction, resolveTerminalPasteText, resolveTerminalRightClickAction, sanitizeSearchOptions, sanitizeSelectCopyEnabled, terminalSearchSeedFromSelection } from "./terminalInteraction";
+import { canAcceptFileDrop, canAcceptTerminalDrop, transferBusyPaneClass, BRACKETED_PASTE_END, BRACKETED_PASTE_START, createTerminalCopyCache, isApplePlatform, isTerminalSelectAllShortcut, normalizeDropTargetDir, resolveDropTargetDir, resolveTerminalKeyAction, resolveTerminalPasteText, resolveTerminalRightClickAction, sanitizeSearchOptions, sanitizeSelectCopyEnabled, terminalSearchSeedFromSelection, wrapBracketedPaste } from "./terminalInteraction";
 
 describe("terminal interaction preferences (select-to-copy / right-click-paste)", () => {
   it("defaults select-to-copy to enabled and only honors an explicit 'false'", () => {
@@ -159,7 +159,24 @@ describe("terminal drop prompt target directory", () => {
   });
 });
 
+describe("bracketed paste wire wrap (DECSET 2004, vi normal-mode paste truncation)", () => {
+  const PAYLOAD = "DBX_TEST=1\nDBX_TEST=2";
+
+  it("wraps the payload only when the remote negotiated mode 2004", () => {
+    expect(wrapBracketedPaste(PAYLOAD, true)).toBe("\u001b[200~" + PAYLOAD + "\u001b[201~");
+    // 未协商（老 nvi / 用户关掉 bracketedPaste）：原样放行，不给 vi 塞包裹序列。
+    expect(wrapBracketedPaste(PAYLOAD, false)).toBe(PAYLOAD);
+  });
+
+  it("keeps the empty payload empty and exposes the exact sentinel bytes", () => {
+    expect(wrapBracketedPaste("", true)).toBe("");
+    expect(BRACKETED_PASTE_START).toBe("\u001b[200~");
+    expect(BRACKETED_PASTE_END).toBe("\u001b[201~");
+  });
+});
+
 describe("terminal drop default target resolution", () => {
+
   it("uses the shell cwd tracked via OSC 7/633 whenever it is known", () => {
     expect(resolveDropTargetDir({ terminalCwd: "/home/u/work", sftpHome: "/home/u", fallback: "/var/data" })).toBe("/home/u/work");
     // Tracked cwd wins even when it differs from the remote home.

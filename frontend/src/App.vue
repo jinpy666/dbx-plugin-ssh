@@ -108,6 +108,7 @@ import {
   normalizeDropTargetDir,
   resolveDropTargetDir,
   transferBusyPaneClass,
+  wrapBracketedPaste,
   type TerminalSearchOptions,
 } from "./lib/terminalInteraction";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
@@ -5146,7 +5147,8 @@ async function rerunLocalCommand(command: string) {
   if (!localSession.value) return;
   const payload = command.replace(/\r\n|\r|\n/g, "\r") + "\r";
   trackPendingInput(payload);
-  await sendConfirmedPaste(payload);
+  // 仿键入：回车要立刻执行，不套 2004 包裹（包裹会让远端把回车当粘贴内容）。
+  await sendConfirmedPaste(payload, { imitativeTyping: true });
 }
 
 async function restartLocalTerminal(shellOverride?: string) {
@@ -7471,7 +7473,7 @@ watch(rendererWebglEffective, (next) => {
   webglRenderer.value = syncWebglRenderer(terminal, next, webglRenderer.value, () => new WebglAddon(), webglRecoveryOptions());
 });
 
-async function sendConfirmedPaste(text: string) {
+async function sendConfirmedPaste(text: string, options?: { imitativeTyping?: boolean }) {
   // 粘贴文本变换的唯一收口：所有粘贴路径（原生 Ctrl+V、右键/菜单粘贴、中键粘贴）
   // 都经这里，保证「去首尾空白 / 换行折空格」只实现一次、不会分叉。
   // 默认两开关均为关闭，因此这里的默认行为与改动前逐字节一致。
@@ -7488,7 +7490,16 @@ async function sendConfirmedPaste(text: string) {
   if (terminalTransferBusy.value) return;
   if (!session.value && !localSession.value && !telnetSession.value && !serialSession.value) return;
   trackPendingInput(payload);
-  sendTerminalBytes(new TextEncoder().encode(payload));
+  // vi 普通模式粘贴截断的修复：远端协商了 DECSET 2004（terminal.modes.
+  // bracketedPasteMode，受 bracketedPaste 设置总闸）就把上线字节包成
+  // `CSI 200~ … CSI 201~`，vim 会把整块按粘贴对象处理，普通模式不再把
+  // 粘贴字节当命令吃掉（PTY 复现：无包裹截断头 18 字节、有包裹完整落盘）。
+  // 仿键入通道（重跑命令要立刻回车执行）不包裹，否则回车被 2004 吞执行不了。
+  const negotiated = Boolean(terminal?.modes.bracketedPasteMode) && terminalBehavior.value.bracketedPaste;
+  const wirePayload = options?.imitativeTyping
+    ? payload
+    : wrapBracketedPaste(payload, negotiated);
+  sendTerminalBytes(new TextEncoder().encode(wirePayload));
   terminal?.focus();
 }
 
