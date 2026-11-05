@@ -6,6 +6,15 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.13-beta.3] — 2026-11-05
+
+- **sz/ZMODEM（含 trzsz）下载后自动定位落盘目录修复（#245）**。0.7.11 起宣传的「收完自动在系统文件管理器定位下载目录」在桌面版实际不会触发：下载走了宿主 fileTransfer 保存通道，而自动定位与完成通知里的「在文件夹中显示」依赖 sidecar 本机落盘通道返回的本机路径——桌面版上这条路径不会被走到。现在三条下载链路（SFTP / sz / trzsz）统一落盘通道优先级：本机可落盘优先走 sidecar（下载目录设置、「每次询问」、「在文件夹中显示」全部生效），仅 web/docker 无本机文件系统时走宿主 fileTransfer 流式保存，最后浏览器/宿主 saveFile 兜底。**行为变化**：桌面端 sz/trzsz 保存从「逐文件弹原生保存框」变为「直接落下载目录（与 SFTP 一致）」。
+  **Auto-reveal for sz/ZMODEM (and trzsz) downloads fixed (#245).** The auto-reveal promised since 0.7.11 never fired on desktop: downloads went through the host fileTransfer channel, while reveal and the "reveal in folder" button depend on the local path returned by the sidecar sink. All three download lanes (SFTP / sz / trzsz) now share one sink-priority contract — local sidecar sink first (download-dir preference, ask-each-time and reveal all work), host fileTransfer only for web/docker, browser/host saveFile as the last resort. **Behavior change**: on desktop, sz/trzsz saving switches from a per-file native save dialog to landing directly in the download directory (same as SFTP).
+- **终端「半屏」自愈看门狗（#262）**。宿主切换标签页时沙箱 iframe 短暂脱离，一次终端尺寸同步可能被静默吞掉或被零尺寸守卫丢弃，回切后不再有触发信号，行列停在旧值、内容只占窗口一角。新增看门狗周期比对终端实际行列与容器应有行列，失配即自动补偿 refit（约 1 秒内自愈），不依赖宿主可见性事件。
+  **Terminal fit watchdog (#262).** When the host switches tabs, the sandboxed iframe detaches briefly and one terminal resize sync can be silently dropped; after returning, no signal fires again and the terminal keeps stale rows/columns, rendering only part of the pane. A watchdog now compares the proposed geometry with xterm's actual rows/columns and compensates with a refit on mismatch (~1s self-heal), independent of host visibility events.
+- **自动重连后回到原工作目录（#270）**。连接中断自动重连后，新 shell 从 home 目录启动，用户不注意会在错误路径下操作。现在重连成功后自动 `cd` 回断开前的工作目录：路径取自终端 OSC 7 / OSC 633 / OSC 1337 上报（跨重连存活），经单引号转义与控制字符守卫后走输入队列注入，与用户键入同通道；无法确定路径时静默保持现状行为。同时修复重连提示误读 SFTP 面板路径的问题，七语提示改为「已回到原目录」。
+  **Restore the working directory after auto-reconnect (#270).** After an auto-reconnect the fresh shell started in home. The terminal now automatically `cd`s back to the pre-disconnect directory: the path comes from the terminal-side OSC 7 / OSC 633 / OSC 1337 reports, is single-quote escaped with control-character guards, and is injected through the same input queue as user keystrokes; when no path is known the previous behavior is kept. Also fixed the reconnect notice reading the SFTP panel path instead of the terminal cwd; notices in all seven languages now say "restored working directory".
+
 ## [0.7.13-beta.2] — 2026-11-03
 
 - **vi/vim 普通模式粘贴首部被吃修复（#260）**。在 vi 编辑器里粘贴多行文本时，开头若干字节会丢失、只剩中段（如粘 5 行只剩 `T=2` 起的内容）。根因是粘贴的字节在远端处于 vi 普通模式时被逐字解释成编辑命令（`D/B/X/_` 是命令，`S` 还会清行并进入插入模式），并非丢数据。现在终端在远端协商开启 bracketed paste（DECSET 2004，vim 8+ 默认支持）后会把粘贴自动包上 `CSI 200~…201~`，vim 将其整体按粘贴对象处理，普通模式粘贴也能完整落盘；重跑最近命令等「仿键入」通道仍然裸发，保证回车立即执行。老版 nvi 等不协商 2004 的编辑器请先按 `i` 进入插入模式再粘贴。
