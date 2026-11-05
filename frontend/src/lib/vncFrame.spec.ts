@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCtrlAltDelKeyEvents,
   buildVncCompositionKeyEvents,
   decodeVncFramePatch,
   mapKeyboardEventToVncKeysym,
@@ -144,6 +145,19 @@ describe("keysym mapping", () => {
       { kind: "key", keysym: 0x61, pressed: false },
       { kind: "key", keysym: 0x01004e2d, pressed: true },
       { kind: "key", keysym: 0x01004e2d, pressed: false },
+    ]);
+  });
+
+  // issue #264：Windows Server 登录界面的 SAS 序列。本机 webview 拦截
+  // Ctrl+Alt+Del，只能显式按键：三键按下后按相反顺序释放。
+  it("builds the Ctrl+Alt+Del SAS sequence (down Ctrl,Alt,Del then reverse release)", () => {
+    expect(buildCtrlAltDelKeyEvents()).toEqual([
+      { kind: "key", keysym: 0xffe3, pressed: true }, // Control_L
+      { kind: "key", keysym: 0xffe9, pressed: true }, // Alt_L
+      { kind: "key", keysym: 0xffff, pressed: true }, // Delete
+      { kind: "key", keysym: 0xffff, pressed: false },
+      { kind: "key", keysym: 0xffe9, pressed: false },
+      { kind: "key", keysym: 0xffe3, pressed: false },
     ]);
   });
 });
