@@ -14,10 +14,12 @@ import {
 } from "../lib/terminalTrzsz";
 import { sampleTransferSpeed, type TransferSpeedSample } from "../lib/transferSpeed";
 import { standaloneArrayBuffer } from "../lib/standaloneBuffer";
+import { chooseTransferSinkChannel } from "../lib/downloadPrefs";
 
 /** trzsz (trz / tsz)：官方 trzsz.js TrzszFilter 常驻下行流，announce 自动接管。
  * 传输的协议协商/收发全在 filter 内，插件只负责：选文件（浏览器 File API）、
- * 下载落盘（宿主 fileTransfer 优先、浏览器 <a download> 兜底）、进度 overlay。
+ * 下载落盘（sidecar 本机落盘优先、fileTransfer 次之、浏览器 <a download> 兜底，
+ * 见 chooseTransferSinkChannel）、进度 overlay。
  * 终端数据流集成点（dispatchTerminalOutput / 输入路由 / fit 列宽）仍在 App.vue。 */
 export function useTrzsz(options: {
   t: (key: string, values?: Record<string, string | number>) => string;
@@ -250,81 +252,87 @@ function onTrzszPickCancel() {
 }
 
 /**
- * 下载落盘：优先宿主 fileTransfer API（optional 1.1 特性，逐文件 beginSave/
- * write/finish）；沙箱 iframe（fileTransfer 缺失）走 sidecar 落盘——与 GIF
- * 导出同路，支持下载目录设置与「每次询问」；web/docker（sidecar 不在本机）
- * 回退浏览器 <a download>（与 SFTP 下载链路同一兜底写法）。
+ * 下载落盘通道与 SFTP/zmodem 下载链路同一优先级契约（chooseTransferSinkChannel，
+ * issue #245）：本机可落盘 → sidecar 落盘（与 GIF 导出同路，支持下载目录设置
+ * 与「每次询问」，本机路径供「在文件夹中显示」）；否则宿主 fileTransfer API
+ * （optional 1.1 特性，逐文件 beginSave/write/finish 流式保存）；两者皆缺 →
+ * 浏览器/宿主 saveFile 兜底。
  */
 async function saveTrzszDownloadedFiles(files: readonly TrzszDownloadFile[]) {
-  const fileTransfer = window.dbxPlugin.fileTransfer;
   const saving = files.filter((file) => !file.isDirectory && file.byteLength > 0);
   if (!saving.length) return;
-  if (!fileTransfer) {
-    const local = await probeLocalCapabilities();
-    if (!local?.canSaveLocal) {
-      // issue #93：沙箱 iframe 内 <a download> 被浏览器静默丢弃，改为宿主
-      // host.saveFile 单次落盘（取消/无桥/超限抛错走 showError）。
-      for (const file of saving) await saveHostFile(file.chunks, file.fileName);
-      return;
-    }
-    // 「使用默认地址」关闭时按批次只问一次，整批落同一目录；取消则整批不保存。
-    let targetDir = "";
-    let setDefaultAfter = false;
-    if (!loadDownloadUseDefaultDir()) {
-      const chosen = await askDownloadTarget(saving[0].fileName);
-      if (chosen === undefined) return;
-      targetDir = chosen.dir.trim();
-      setDefaultAfter = chosen.setDefault;
-    }
-    const dir = targetDir || loadDownloadDir() || undefined;
-    let lastSaved: { localPath: string; name: string } | undefined;
-    for (const file of saving) {
-      // 冲突策略逐文件生效：ask 撞名逐个询问，取消只跳过该文件。
-      const conflict = await resolveDownloadConflictFor(dir || "", file.fileName);
-      if (conflict === undefined) continue;
-      const merged = new Uint8Array(file.byteLength);
-      let offset = 0;
-      for (const chunk of file.chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
-      lastSaved = await window.dbxPlugin.invoke<{ localPath: string; name: string }>("local/saveFile", {
-        name: file.fileName,
-        dataBase64: window.dbxPlugin.encodeBase64(merged),
-        targetDir: dir,
-        conflict: conflict === "overwrite" ? "overwrite" : undefined,
-      });
-    }
-    if (lastSaved) {
-      const savedPath = lastSaved.localPath;
-      showNotice(saving.length === 1
-        ? t("downloadedTo", { name: lastSaved.name, path: savedPath })
-        : t("downloadedToDir", { count: saving.length, path: dir || savedPath.replace(/[\\/][^\\/]+$/, "") }), [
-        { label: t("revealInFolder"), run: () => void revealTransferTarget(savedPath) },
-      ]);
-    }
-    if (setDefaultAfter) applyChosenDirAsDefault(targetDir);
+  const channel = await chooseTransferSinkChannel({
+    hasFileTransfer: !!window.dbxPlugin.fileTransfer,
+    probeLocalCapabilities,
+  });
+  if (channel === "hostSave") {
+    // issue #93：沙箱 iframe 内 <a download> 被浏览器静默丢弃，改为宿主
+    // host.saveFile 单次落盘（取消/无桥/超限抛错走 showError）。
+    for (const file of saving) await saveHostFile(file.chunks, file.fileName);
     return;
   }
-  for (const file of saving) {
-    // 契约：用户取消原生保存框返回 null——取消整批（与 SFTP 下载取消语义一致）。
-    const target = await fileTransfer.beginSave({ name: file.fileName, size: file.byteLength });
-    if (!target) throw new Error(t("transferStatus.cancelled"));
-    try {
-      let offset = 0;
-      for (const chunk of file.chunks) {
-        // issue #116：宿主桥 write 分支把 payload 直放 postMessage transfer
-        // 列表，Uint8Array 视图会被 Chromium 拒绝（transferable type），必须
-        // 交独立 ArrayBuffer。
-        const write = await fileTransfer.write(target.handleId, offset, standaloneArrayBuffer(chunk));
-        offset = write.nextOffset;
+  if (channel === "fileTransfer") {
+    const fileTransfer = window.dbxPlugin.fileTransfer;
+    if (!fileTransfer) return;
+    for (const file of saving) {
+      // 契约：用户取消原生保存框返回 null——取消整批（与 SFTP 下载取消语义一致）。
+      const target = await fileTransfer.beginSave({ name: file.fileName, size: file.byteLength });
+      if (!target) throw new Error(t("transferStatus.cancelled"));
+      try {
+        let offset = 0;
+        for (const chunk of file.chunks) {
+          // issue #116：宿主桥 write 分支把 payload 直放 postMessage transfer
+          // 列表，Uint8Array 视图会被 Chromium 拒绝（transferable type），必须
+          // 交独立 ArrayBuffer。
+          const write = await fileTransfer.write(target.handleId, offset, standaloneArrayBuffer(chunk));
+          offset = write.nextOffset;
+        }
+        await fileTransfer.finish(target.handleId);
+      } catch (cause) {
+        await fileTransfer.cancel(target.handleId).catch(() => undefined);
+        throw cause;
       }
-      await fileTransfer.finish(target.handleId);
-    } catch (cause) {
-      await fileTransfer.cancel(target.handleId).catch(() => undefined);
-      throw cause;
     }
+    return;
   }
+  // sidecar 本机落盘。
+  // 「使用默认地址」关闭时按批次只问一次，整批落同一目录；取消则整批不保存。
+  let targetDir = "";
+  let setDefaultAfter = false;
+  if (!loadDownloadUseDefaultDir()) {
+    const chosen = await askDownloadTarget(saving[0].fileName);
+    if (chosen === undefined) return;
+    targetDir = chosen.dir.trim();
+    setDefaultAfter = chosen.setDefault;
+  }
+  const dir = targetDir || loadDownloadDir() || undefined;
+  let lastSaved: { localPath: string; name: string } | undefined;
+  for (const file of saving) {
+    // 冲突策略逐文件生效：ask 撞名逐个询问，取消只跳过该文件。
+    const conflict = await resolveDownloadConflictFor(dir || "", file.fileName);
+    if (conflict === undefined) continue;
+    const merged = new Uint8Array(file.byteLength);
+    let offset = 0;
+    for (const chunk of file.chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    lastSaved = await window.dbxPlugin.invoke<{ localPath: string; name: string }>("local/saveFile", {
+      name: file.fileName,
+      dataBase64: window.dbxPlugin.encodeBase64(merged),
+      targetDir: dir,
+      conflict: conflict === "overwrite" ? "overwrite" : undefined,
+    });
+  }
+  if (lastSaved) {
+    const savedPath = lastSaved.localPath;
+    showNotice(saving.length === 1
+      ? t("downloadedTo", { name: lastSaved.name, path: savedPath })
+      : t("downloadedToDir", { count: saving.length, path: dir || savedPath.replace(/[\\/][^\\/]+$/, "") }), [
+      { label: t("revealInFolder"), run: () => void revealTransferTarget(savedPath) },
+    ]);
+  }
+  if (setDefaultAfter) applyChosenDirAsDefault(targetDir);
 }
 
 /** 终端输入路由（route === "trzsz"）：传输中键入进 filter（Ctrl+C 停传输），
