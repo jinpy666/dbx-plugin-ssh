@@ -11,6 +11,7 @@ import {
 } from "../lib/terminalZmodem";
 import { sampleTransferSpeed, type TransferSpeedSample } from "../lib/transferSpeed";
 import { standaloneArrayBuffer } from "../lib/standaloneBuffer";
+import { chooseTransferSinkChannel } from "../lib/downloadPrefs";
 
 /** ZMODEM 上传/下载（sentry 常驻下行流 + rz 菜单上传 + 远端 sz 自动接收）：
  * 检测/协商/进度/落盘/收尾。与 trzsz 同一条终端输出分发链
@@ -330,20 +331,17 @@ function startZmodemReceive(session: ZmodemSession) {
   });
 }
 
-/** 按批次选一次落盘通道（与 useTrzsz.saveTrzszDownloadedFiles 同一优先级：
- * 宿主 fileTransfer → sidecar 本机落盘（可设下载目录/每次询问）→ 浏览器
- * saveFile 兜底）。取消目录选择视为放弃整批接收。 */
+/** 按批次选一次落盘通道（与 useTrzsz.saveTrzszDownloadedFiles、SFTP 下载链路
+ * 同一优先级契约，见 chooseTransferSinkChannel）：本机可落盘 → sidecar（下载
+ * 目录设置/冲突处理；且只有 sidecar 写 receiveLastSavedPath，完成后的
+ * 「在文件夹中显示」才可用，issue #245）→ 宿主 fileTransfer 流式保存 →
+ * 浏览器/宿主 saveFile 兜底。取消目录选择视为放弃整批接收。 */
 async function chooseReceiveChannel(firstFileName: string): Promise<void> {
-  if (window.dbxPlugin.fileTransfer) {
-    receiveChannel = "fileTransfer";
-    return;
-  }
-  const local = await probeLocalCapabilities().catch(() => undefined);
-  if (!local?.canSaveLocal) {
-    receiveChannel = "hostSave";
-    return;
-  }
-  receiveChannel = "sidecar";
+  receiveChannel = await chooseTransferSinkChannel({
+    hasFileTransfer: !!window.dbxPlugin.fileTransfer,
+    probeLocalCapabilities,
+  });
+  if (receiveChannel !== "sidecar") return;
   let targetDir = "";
   let setDefaultAfter = false;
   if (!loadDownloadUseDefaultDir()) {
