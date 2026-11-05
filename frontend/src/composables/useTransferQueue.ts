@@ -50,6 +50,8 @@ const transferDownloadLimitState = ref(0);
 const transferDuplicateState = ref<TransferDuplicatePolicy>("rename");
 
 const transferTasks = reactive<Record<string, TransferTask>>({});
+// issue #272：上传占位卡的本地 key 序号（占位卡在 start RPC 落地前顶住面板）。
+let pendingUploadCardSeq = 0;
 // 断点续传（F1）：暂停中的任务（两分片之间生效）；等待恢复的回调登记表。
 const pausedTaskIds = reactive(new Set<string>());
 const pauseWaiters = new Map<string, Array<() => void>>();
@@ -379,9 +381,19 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
   // Absent（评审 M-4）：文件夹批量 ask 模式已逐文件预检过不存在，跳过二次
   // sftp/exists（千文件目录少一半往返）。
   let uploadName = name;
+  // issue #272：占位卡。exists/rename-unique/upload-start 多次往返 + 大文件
+  // 压缩决策落地前，面板先有一张「排队中」卡——否则 100M+ 文件拖入后是一段
+  // 空白等待，让人误以为拖拽没成功。转正时沿用 joinedAt 保持活跃区排序稳定
+  // （issue #18）；重复目标放弃与 start 抛错两条未转正路径在下方显式清除。
+  const pendingKey = `pending-upload-${++pendingUploadCardSeq}`;
+  const pendingJoinedAt = Date.now();
+  transferTasks[pendingKey] = { taskId: pendingKey, direction: "upload", fileName: name, size, transferred: 0, status: "queued", joinedAt: pendingJoinedAt, batchId: options?.batchId };
   if (!resume && !options?.duplicatePreCheckedAbsent) {
     const resolved = await resolveUploadDuplicateName(name, dir);
-    if (!resolved.proceed) return false;
+    if (!resolved.proceed) {
+      delete transferTasks[pendingKey];
+      return false;
+    }
     uploadName = resolved.name;
   }
   // UploadSudo：车道在任务启动当刻定死，start 与 finish 必须同道（sidecar
@@ -389,15 +401,24 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
   const sudoLane = sudoUpload();
   const startMethod = sudoLane ? "sudo/upload/start" : "sftp/upload/start";
   const finishMethod = sudoLane ? "sudo/upload/finish" : "sftp/upload/finish";
-  const info = await window.dbxPlugin.invoke<{ taskId: string; chunkSize: number; resumeOffset?: number; compression?: string }>(startMethod, resume
-    ? { sessionId: session.value.sessionId, remotePath: resume.remotePath, size, resumeTaskId: resume.taskId }
-    : { sessionId: session.value.sessionId, remotePath: joinRemote(dir, uploadName), size, mode: options?.lzpack ? "lzpack" : undefined });
+  let info: { taskId: string; chunkSize: number; resumeOffset?: number; compression?: string };
+  try {
+    info = await window.dbxPlugin.invoke<{ taskId: string; chunkSize: number; resumeOffset?: number; compression?: string }>(startMethod, resume
+      ? { sessionId: session.value.sessionId, remotePath: resume.remotePath, size, resumeTaskId: resume.taskId }
+      : { sessionId: session.value.sessionId, remotePath: joinRemote(dir, uploadName), size, mode: options?.lzpack ? "lzpack" : undefined });
+  } catch (cause) {
+    // start 未落地（#272）：占位卡没有真任务可交接，移除后原样抛出，批次
+    // 编排照常记失败；已落地任务的失败路径不在本段管辖（progress/finish 事件结算）。
+    delete transferTasks[pendingKey];
+    throw cause;
+  }
   const startOffset = info.resumeOffset ?? 0;
   // 压缩通道标记（M33）：start 响应即带决策结果，任务卡建卡时就点徽标；
   // 后续 progress 事件（恒带 compression）接手维护，回退时以 none 清除。
   // ST10：显式 lzpack 由调用方 options 声明（响应 compression 恒 none，
   // 交付 <目标名>.dbxz 由后端保证）。
-  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "upload", fileName: uploadName, size, transferred: startOffset, compression: info.compression === "gzip" ? "gzip" : options?.lzpack ? "lzpack" : undefined, status: startOffset > 0 ? "running" : "queued", joinedAt: Date.now(), batchId: options?.batchId };
+  delete transferTasks[pendingKey];
+  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "upload", fileName: uploadName, size, transferred: startOffset, compression: info.compression === "gzip" ? "gzip" : options?.lzpack ? "lzpack" : undefined, status: startOffset > 0 ? "running" : "queued", joinedAt: pendingJoinedAt, batchId: options?.batchId };
   try {
     let offset = startOffset;
     while (offset < size) {
