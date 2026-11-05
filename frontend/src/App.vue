@@ -118,6 +118,7 @@ import { createTerminalInputQueue, terminalInputChannel, TerminalInputTimeoutErr
 import { SERIAL_STREAM_STDIN, isKnownStreamTag, supportsBinaryInput } from "./lib/serialTerminalFrames";
 import { describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS } from "./lib/terminalReconnect";
 import { TERMINAL_TRANSPORT_PROBE_TIMEOUT_MS, useTerminalTransportWatch } from "./composables/useTerminalTransportWatch";
+import { useTerminalFitWatch } from "./composables/useTerminalFitWatch";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
 import { decideConnectRetry, isDuplicatedTransportUnavailableError } from "./lib/connectRetry";
 import { reopenHostConnection } from "./lib/hostReopen";
@@ -4180,6 +4181,17 @@ const terminalTransportWatch = useTerminalTransportWatch({
   ),
   attachSession,
 });
+// issue #262 防御修复：宿主切 tab 令沙箱 iframe 短暂脱离时 scheduleFit 的
+// fit 抛错被静默吞掉/零尺寸守卫丢弃，回切后 ResizeObserver 不再触发，行列
+// 停在旧值呈现"半屏"。看门狗按周期比对 proposeDimensions 与实际行列，失配
+// 即补偿 refit（无活跃会话时空转）。
+const terminalFitWatch = useTerminalFitWatch({
+  hasActiveSession: () => !!(activeTerminalSessionId || session.value?.sessionId || localSession.value || telnetSession.value),
+  getProposedDimensions: () => (terminal && fitAddon ? fitAddon.proposeDimensions() : undefined),
+  getTerminalDimensions: () => (terminal ? { cols: terminal.cols, rows: terminal.rows } : undefined),
+  scheduleFit,
+});
+terminalFitWatch.start();
 // 连接卡片四态与手动重连入口：收口在 composables/useConnectCard（会话主干
 // openSession/closeSession/宿主重开留守 App.vue，经 options 注入）。
 const { connectCardState, connectLogEntries, reconnect, cancelConnect, startConnect, reconnectNow } = useConnectCard({
