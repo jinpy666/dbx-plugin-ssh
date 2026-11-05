@@ -220,6 +220,7 @@ import { normalizeTerminalInputBytes } from "./lib/terminalInput";
 import { type TerminalSyncOutput } from "./lib/terminalModeQueries";
 import { installMacWebkitInputFallback } from "./lib/terminalWebkitInput";
 import { formatBytes, formatRate } from "./lib/format";
+import { formatHistoryDuration, formatHistoryStartedAt } from "./lib/transferHistory";
 import { resolveAppearance } from "./lib/appearance";
 import { isDbxPluginTheme, onHostThemeChange, themeToAppearance } from "./lib/hostTheme";
 import { AGENT_MODES } from "./lib/agentTerminal";
@@ -9530,7 +9531,7 @@ function flagHintsSource(command: string): string {
               <ContextMenuTrigger as-child>
                 <article class="transfer-card transfer-history-card" @contextmenu="showTransferHistoryMenu($event, entry)">
                   <div class="transfer-title"><FileUp v-if="entry.direction === 'upload'" /><Download v-else /><span :title="entry.fileName">{{ entry.fileName || entry.taskId }}</span></div>
-                  <div class="transfer-meta"><span>{{ t(`transferStatus.${entry.status}`) }}</span><span>{{ formatBytes(entry.size) }}</span></div>
+                  <div class="transfer-meta"><span>{{ t(`transferStatus.${entry.status}`) }}</span><span>{{ formatBytes(entry.size) }}</span><span v-if="formatHistoryStartedAt(entry.startedAt)" :title="formatHistoryDuration(entry.startedAt, entry.finishedAt) || undefined">{{ formatHistoryStartedAt(entry.startedAt) }}</span></div>
                   <p v-if="entry.localPath" class="transfer-path mono" :title="entry.localPath">{{ entry.localPath }}</p>
                   <p v-if="entry.error" class="task-error">{{ entry.error }}</p>
                 </article>
