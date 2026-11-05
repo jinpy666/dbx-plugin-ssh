@@ -350,6 +350,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .terminal-pane, .sftp-pane { display: flex; height: 100%; min-width: 0; min-height: 0; flex-direction: column; background: var(--background); }
 .terminal-pane { position: relative; flex-grow: 0; flex-shrink: 0; overflow: hidden; background: var(--ssh-terminal-background); }
 .terminal-pane.drag-active { background: color-mix(in srgb, var(--primary) 5%, var(--ssh-terminal-background)); }
+/* issue #264：VNC 画布右上角的 SAS 浮钮——Windows Server 登录界面的
+   Ctrl+Alt+Del 被本机 webview 拦截，只能显式按键序列发送；运行期常驻，
+   z-index 高于 VncSurface 画布（terminal-overlay 同层）。 */
+.vnc-sas-button { position: absolute; top: 10px; right: 10px; z-index: 2; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--border); background: color-mix(in srgb, var(--background) 88%, transparent); color: var(--foreground); font-size: 12px; cursor: pointer; opacity: 0.85; }
+.vnc-sas-button:hover { opacity: 1; border-color: var(--primary); }
 .terminal-pane .drop-overlay strong { max-width: 92%; font-size: 13px; word-break: break-all; }
 /* 内边距必须挂在 .xterm（terminal.element）而非宿主 div 上：FitAddon 只读
    element 自身的 padding 做行数扣减，挂在宿主上会多算一行、底行溢出可视区

@@ -420,7 +420,7 @@ import {
 // handleBinary 的 vnc/frame/{id} 分支接入。
 import VncConnectDialog, { type VncConnectOptions } from "./components/VncConnectDialog.vue";
 import VncSurface from "./components/VncSurface.vue";
-import type { VncInputEvent } from "./lib/vncFrame";
+import { buildCtrlAltDelKeyEvents, type VncInputEvent } from "./lib/vncFrame";
 // RDP 会话（nyaterm-parity P3-4）：画布与 VNC 同构（同一 44 字节 patch 头，
 // 解码复用 vncFrame），输入走扫描码/unicode 双通道，证书确认走
 // connection/challenge kind=rdp-certificate 分支。
@@ -4963,6 +4963,17 @@ function sendVncInput(event: VncInputEvent) {
   const sessionId = vncSession.value?.sessionId;
   if (!sessionId) return;
   void window.dbxPlugin.invoke("vnc/input", { sessionId, ...event }).catch(() => undefined);
+}
+
+// issue #264：Windows Server 登录界面要按 Ctrl+Alt+Del 解锁，但本机 webview
+// 把该组合键拦在插件之外（VncSurface 对 ctrl/meta 组合一律不转发）。SAS 只能
+// 显式按键序列发送；逐条 await 保证 sidecar mpsc 里的按下/释放顺序不被打乱。
+async function sendVncCtrlAltDel() {
+  const sessionId = vncSession.value?.sessionId;
+  if (!sessionId) return;
+  for (const event of buildCtrlAltDelKeyEvents()) {
+    await window.dbxPlugin.invoke("vnc/input", { sessionId, ...event }).catch(() => undefined);
+  }
 }
 
 function sendVncClipboard(text: string) {
@@ -9578,6 +9589,9 @@ function flagHintsSource(command: string): string {
              帧从 vnc/frame/{id} 二进制通道进入；键盘/鼠标由画布采集后经
              keysym 映射发 vnc/input。连接态/退出覆盖层沿用 terminal-overlay。 -->
         <VncSurface v-if="isVncMode" ref="vncSurface" class="vnc-surface" :scale-mode="vncScaleMode" @input="sendVncInput" @clipboard-out="sendVncClipboard" />
+        <!-- issue #264：SAS 浮钮——Windows Server 登录界面需要 Ctrl+Alt+Del，
+             本机组合键被宿主拦截，只能由此显式发送按键序列。 -->
+        <button v-if="isVncMode && vncState === 'running'" type="button" class="vnc-sas-button" @click="sendVncCtrlAltDel">{{ t("vnc.sendCtrlAltDel") }}</button>
         <!-- RDP 画布（nyaterm-parity P3-4）：盖在 xterm 之上（z-index 2），帧从
              rdp/frame/{id} 二进制通道进入（与 vnc/frame 同一 44 字节 patch 头）；
              键盘经扫描码映射、鼠标/滚轮原样映射发 rdp/input，服务端光标形状

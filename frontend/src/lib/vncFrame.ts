@@ -233,6 +233,21 @@ export function buildVncCompositionKeyEvents(text: string): VncInputEvent[] {
   return events;
 }
 
+/** issue #264：Windows Server 登录界面的 SAS 序列。本机 webview 把
+ * Ctrl+Alt+Del 当作本机组合键拦截（VncSurface 对所有 ctrl/meta 组合不转发），
+ * 唯一通路是显式按键事件：Control_L ↓ → Alt_L ↓ → Delete ↓，再按相反
+ * 顺序释放——与实体键盘的 SAS 语义一致。 */
+export function buildCtrlAltDelKeyEvents(): VncInputEvent[] {
+  return [
+    { kind: "key", keysym: XK.ControlLeft, pressed: true },
+    { kind: "key", keysym: XK.AltLeft, pressed: true },
+    { kind: "key", keysym: XK.Delete, pressed: true },
+    { kind: "key", keysym: XK.Delete, pressed: false },
+    { kind: "key", keysym: XK.AltLeft, pressed: false },
+    { kind: "key", keysym: XK.ControlLeft, pressed: false },
+  ];
+}
+
 /** DOM MouseEvent.buttons 位集 → RFB 按钮掩码。 */
 export function pointerButtonMask(buttons: number): number {
   let mask = 0;

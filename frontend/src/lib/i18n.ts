@@ -7949,6 +7949,7 @@ const vncMessages: Record<string, Record<string, string>> = {
     "vnc.openConfirm": "The current session will be closed before the VNC session opens. Reconnect afterwards if needed.",
     "vnc.clipboardSent": "Clipboard text sent to the remote desktop",
     "vnc.clipboardReceived": "Remote clipboard text copied locally",
+    "vnc.sendCtrlAltDel": "Send Ctrl+Alt+Del",
   },
   "zh-CN": {
     "vnc.open": "新建 VNC 会话",
@@ -7974,6 +7975,7 @@ const vncMessages: Record<string, Record<string, string>> = {
     "vnc.openConfirm": "打开 VNC 会话前将关闭当前会话，之后可按需重新连接。",
     "vnc.clipboardSent": "剪贴板文本已发送到远端桌面",
     "vnc.clipboardReceived": "远端剪贴板文本已复制到本地",
+    "vnc.sendCtrlAltDel": "发送 Ctrl+Alt+Del",
   },
   "zh-TW": {
     "vnc.open": "新增 VNC 工作階段",
@@ -7999,6 +8001,7 @@ const vncMessages: Record<string, Record<string, string>> = {
     "vnc.openConfirm": "開啟 VNC 工作階段前將關閉目前工作階段，之後可視需要重新連線。",
     "vnc.clipboardSent": "剪貼簿文字已傳送到遠端桌面",
     "vnc.clipboardReceived": "遠端剪貼簿文字已複製到本機",
+    "vnc.sendCtrlAltDel": "傳送 Ctrl+Alt+Del",
   },
   es: {
     "vnc.open": "Nueva sesión VNC",
@@ -8024,6 +8027,7 @@ const vncMessages: Record<string, Record<string, string>> = {
     "vnc.openConfirm": "La sesión actual se cerrará antes de abrir la sesión VNC. Reconecta después si lo necesitas.",
     "vnc.clipboardSent": "Texto del portapapeles enviado al escritorio remoto",
     "vnc.clipboardReceived": "Texto del portapapeles remoto copiado localmente",
+    "vnc.sendCtrlAltDel": "Enviar Ctrl+Alt+Del",
   },
   it: {
     "vnc.open": "Nuova sessione VNC",
@@ -8049,6 +8053,7 @@ const vncMessages: Record<string, Record<string, string>> = {
     "vnc.openConfirm": "La sessione attuale verrà chiusa prima di aprire la sessione VNC. Riconnetti in seguito se necessario.",
     "vnc.clipboardSent": "Testo degli appunti inviato al desktop remoto",
     "vnc.clipboardReceived": "Testo degli appunti remoti copiato localmente",
+    "vnc.sendCtrlAltDel": "Invia Ctrl+Alt+Del",
   },
   ja: {
     "vnc.open": "新規 VNC セッション",
@@ -8074,6 +8079,7 @@ const vncMessages: Record<string, Record<string, string>> = {
     "vnc.openConfirm": "VNC セッションを開く前に現在のセッションを閉じます。必要であれば後で再接続してください。",
     "vnc.clipboardSent": "クリップボードのテキストをリモートデスクトップへ送信しました",
     "vnc.clipboardReceived": "リモートのクリップボードテキストをローカルにコピーしました",
+    "vnc.sendCtrlAltDel": "Ctrl+Alt+Del を送信",
   },
   "pt-BR": {
     "vnc.open": "Nova sessão VNC",
@@ -8099,6 +8105,7 @@ const vncMessages: Record<string, Record<string, string>> = {
     "vnc.openConfirm": "A sessão atual será encerrada antes de abrir a sessão VNC. Reconecte depois se precisar.",
     "vnc.clipboardSent": "Texto da área de transferência enviado à área de trabalho remota",
     "vnc.clipboardReceived": "Texto da área de transferência remota copiado localmente",
+    "vnc.sendCtrlAltDel": "Enviar Ctrl+Alt+Del",
   },
 };
 for (const locale of Object.keys(vncMessages)) {
