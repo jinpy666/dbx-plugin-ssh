@@ -52,6 +52,30 @@ export function describeReconnectRestoredNotice(options: { wasReconnecting: bool
   return { key: "reconnectRestored.plain", values: {} };
 }
 
+/**
+ * Builds the `cd` command injected into the fresh shell's PTY stdin after an
+ * auto-reconnect, restoring the pre-disconnect working directory (issue #270).
+ * The sidecar tears the session down on disconnect, so the new shell always
+ * starts in home; the only surviving cwd authority is the terminal-side OSC 7 /
+ * OSC 633 / OSC 1337 report. Injection goes through the same input queue as
+ * user keystrokes, so PTY buffering keeps the bytes until the shell reads them.
+ *
+ * Guards (refuse rather than escape what cannot be safe): control characters
+ * (incl. newline/CR — a real OSC 7 path never carries them, and they would
+ * smuggle extra lines into the shell), empty input, and paths over 4096 chars
+ * return null so the caller silently degrades to today's no-restore behavior.
+ * A leading `-` gets a `./` prefix instead of a `--` separator (fish/PowerShell
+ * compatibility); single quotes are escaped as `'\''` per the repo's
+ * shell-quoting red line.
+ */
+export function buildRestoreCwdCommand(path: string): string | null {
+  const trimmed = String(path || "").trim();
+  if (!trimmed || trimmed.length > 4096) return null;
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) return null;
+  const safe = trimmed.startsWith("-") ? `./${trimmed}` : trimmed;
+  return `cd '${safe.replace(/'/g, `'\\''`)}'\r`;
+}
+
 export interface ReconnectCountdown {
   /** Seconds until the retry fires, clamped at 0. */
   seconds: number;

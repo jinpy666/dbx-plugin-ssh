@@ -116,7 +116,7 @@ import { createOutputGate } from "./lib/terminalBackpressure";
 import { createGhostSelectionGuard } from "./lib/terminalGhostSelectionGuard";
 import { createTerminalInputQueue, terminalInputChannel, TerminalInputTimeoutError } from "./lib/terminalInputQueue";
 import { SERIAL_STREAM_STDIN, isKnownStreamTag, supportsBinaryInput } from "./lib/serialTerminalFrames";
-import { describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS } from "./lib/terminalReconnect";
+import { buildRestoreCwdCommand, describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS } from "./lib/terminalReconnect";
 import { TERMINAL_TRANSPORT_PROBE_TIMEOUT_MS, useTerminalTransportWatch } from "./composables/useTerminalTransportWatch";
 import { useTerminalFitWatch } from "./composables/useTerminalFitWatch";
 import { classifyConnectError, connectErrorKey } from "./lib/connectError";
@@ -4642,7 +4642,15 @@ async function afterSessionConnected() {
   // which working directory context it resumed with (pure-function chosen).
   if (reconnectWasPending.value) {
     reconnectWasPending.value = false;
-    const restored = describeReconnectRestoredNotice({ wasReconnecting: true, path: currentPath.value });
+    // #270 重连恢复原工作目录：新 shell 从 home 启动，把 cd 经输入队列写入
+    // 新 PTY（与用户键入同通道，PTY 缓冲保证 shell 未就绪也不丢字）。cwd 取
+    // 终端侧 terminalCwd（OSC 7/633/1337 上报，跨重连存活）——不再读 SFTP
+    // 面板路径（那是另一条目录体系，跨主机串目录）。无 cwd（裸 sh 无 OSC 7）
+    // 或含控制字符时 buildRestoreCwdCommand 返回 null，静默降级为现状行为。
+    const restoredCwd = terminalCwd.value;
+    const restoreCommand = restoredCwd ? buildRestoreCwdCommand(restoredCwd) : null;
+    if (restoreCommand && connectedSessionId) terminalInputQueue.enqueue(connectedSessionId, new TextEncoder().encode(restoreCommand));
+    const restored = describeReconnectRestoredNotice({ wasReconnecting: true, path: restoredCwd });
     // Dock panel surface：目录提示属 SFTP/目录跟随域，面板里不弹。
     if (restored && !panelSurface.value) showNotice(t(restored.key, restored.values));
   }
