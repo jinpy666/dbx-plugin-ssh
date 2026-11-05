@@ -6275,6 +6275,12 @@ const {
   rememberPathHistory: (path) => rememberPathHistory(path),
   closePathHistoryMenu: () => { pathHistoryOpen.value = false; },
   onListingLoaded: () => { sftpListingLoaded.value = true; },
+  // issue #268：路径栏提交的是文件而非目录时，以双击同款入口打开预览
+  // （预览里就有「在外部编辑器中打开」）。openEntry 在下方 useFilePreview
+  // 里定义，回调只在用户交互时触发，不构成初始化顺序依赖。
+  openPathBarFile: (target) => {
+    void openEntry({ uri: target, name: target.split("/").filter(Boolean).pop() || target, kind: "file" });
+  },
 });
 
 function togglePaneOrder() {

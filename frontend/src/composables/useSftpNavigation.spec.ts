@@ -32,6 +32,7 @@ function setupHarness() {
   const directoryTrackingSupported = ref<boolean | undefined>(undefined);
   const notices: string[] = [];
   const showError = vi.fn();
+  const openPathBarFile = vi.fn();
 
   const nav = useSftpNavigation({
     t: (key, values) => (values?.path !== undefined ? `${key}:${values.path}` : key),
@@ -64,6 +65,7 @@ function setupHarness() {
     hydrateLinkTargets: () => undefined,
     rememberPathHistory: () => undefined,
     closePathHistoryMenu: () => undefined,
+    openPathBarFile: openPathBarFile,
   });
 
   return {
@@ -71,6 +73,7 @@ function setupHarness() {
     sftpSoftError: nav.sftpSoftError,
     sftpError, sftpErrorOpen, sftpErrorKey,
     entries, loadingFiles,
+    currentPath, openPathBarFile,
   };
 }
 
@@ -188,5 +191,50 @@ describe("useSftpNavigation quiet failure mode (issue #209)", () => {
     releaseFirst({ entries: [{ uri: "/home/user/stale", name: "stale", kind: "file" }] });
     await first;
     expect(h.entries.value).toEqual([]);
+  });
+});
+
+// issue #268：路径栏提交的是文件而非目录时——list 对 ENOTDIR 只回笼统的
+// "SFTP operation failed: Failure" 原始错误串。提交后补一次 stat：是文件就
+// 转双击同款预览入口（清掉横幅）；真是目录（权限拒绝等）或 stat 也失败则
+// 维持原横幅不动。
+describe("路径栏提交文件路径 (#268)", () => {
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  it("list 失败且 stat 为文件：转预览入口并清横幅", async () => {
+    const h = setupHarness();
+    h.currentPath.value = "/etc/docker/daemon.json";
+    h.invoke.mockRejectedValueOnce(new Error("SFTP operation failed: Failure"));
+    h.invoke.mockResolvedValueOnce({ kind: "file" });
+    h.nav.submitPathInput();
+    await flush();
+    await flush();
+    expect(h.openPathBarFile).toHaveBeenCalledWith("/etc/docker/daemon.json");
+    expect(h.sftpError.value).toBe("");
+    expect(h.sftpErrorOpen.value).toBe(false);
+  });
+
+  it("stat 为目录（权限拒绝等）：维持原错误横幅", async () => {
+    const h = setupHarness();
+    h.currentPath.value = "/root/locked";
+    h.invoke.mockRejectedValueOnce(new Error("SFTP operation failed: Permission denied"));
+    h.invoke.mockResolvedValueOnce({ kind: "directory" });
+    h.nav.submitPathInput();
+    await flush();
+    await flush();
+    expect(h.openPathBarFile).not.toHaveBeenCalled();
+    expect(h.sftpError.value).toBe("SFTP operation failed: Permission denied");
+  });
+
+  it("stat 也失败：维持原错误横幅", async () => {
+    const h = setupHarness();
+    h.currentPath.value = "/gone";
+    h.invoke.mockRejectedValueOnce(new Error("SFTP operation failed: No such file"));
+    h.invoke.mockRejectedValueOnce(new Error("stat boom"));
+    h.nav.submitPathInput();
+    await flush();
+    await flush();
+    expect(h.openPathBarFile).not.toHaveBeenCalled();
+    expect(h.sftpError.value).toBe("SFTP operation failed: No such file");
   });
 });

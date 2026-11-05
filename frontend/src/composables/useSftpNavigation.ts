@@ -57,8 +57,10 @@ export function useSftpNavigation(options: {
   closePathHistoryMenu: () => void;
   /** 首次列目录成功的回调：App 侧据此置"本会话已加载"标记（#179 惰性连接判定）。 */
   onListingLoaded?: () => void;
+  /** 路径栏提交的是文件而非目录时（issue #268）：App 侧以双击同款入口打开预览。 */
+  openPathBarFile?: (path: string) => void;
 }) {
-  const { t, showNotice, showError, session, sudoMode, connected, canWrite, currentPath, entries, loadingFiles, sftpError, sftpErrorOpen, sftpErrorKey, sftpHomePath, visibleColumns, followDirectory, directoryParser, selectedPath, directoryTrackingSupported, clearRowSelection, parentPath, normalizeRemotePath, getPendingTerminalInput, persistState, refreshDiskUsage, persistDirectoryFollowPref, resetLinkTargets, hydrateLinkTargets, rememberPathHistory, closePathHistoryMenu, onListingLoaded } = options;
+  const { t, showNotice, showError, session, sudoMode, connected, canWrite, currentPath, entries, loadingFiles, sftpError, sftpErrorOpen, sftpErrorKey, sftpHomePath, visibleColumns, followDirectory, directoryParser, selectedPath, directoryTrackingSupported, clearRowSelection, parentPath, normalizeRemotePath, getPendingTerminalInput, persistState, refreshDiskUsage, persistDirectoryFollowPref, resetLinkTargets, hydrateLinkTargets, rememberPathHistory, closePathHistoryMenu, onListingLoaded, openPathBarFile } = options;
 
 async function loadHome() {
   if (!session.value) return;
@@ -83,7 +85,14 @@ const listEpoch = createRequestEpoch();
 // #209 安静失败态（跟随/自动首拉失败落这里，不出全局横幅；App.vue 渲染）。
 const sftpSoftError = ref<SftpSoftError | null>(null);
 
-async function loadDirectory(path = currentPath.value, fromTerminal = false, quiet = false) {
+async function loadDirectory(path = currentPath.value, fromTerminal = false, quiet = false): Promise<void> {
+  await loadDirectoryStatus(path, fromTerminal, quiet);
+}
+
+// issue #268：带结果版本——true=成功，false=本次请求失败，undefined=无会话/
+// 被新请求顶替（stale）。仅 submitPathInput 的文件兜底使用；对外仍暴露 void
+// 版本，避免波及其他把 loadDirectory 当 Promise<void> 注入的调用方。
+async function loadDirectoryStatus(path = currentPath.value, fromTerminal = false, quiet = false): Promise<boolean | undefined> {
   if (!session.value) return;
   const normalized = normalizeRemotePath(path);
   const epochId = listEpoch.next();
@@ -111,6 +120,9 @@ async function loadDirectory(path = currentPath.value, fromTerminal = false, qui
     persistState();
     void refreshDiskUsage();
     sftpSoftError.value = null;
+    // issue #268：submitPathInput 的文件兜底需要区分成功/失败/被新请求顶替
+    // （stale 返回 undefined，不触发兜底）。
+    return true;
   } catch (cause) {
     if (!listEpoch.isCurrent(epochId)) return;
     const message = cause instanceof Error ? cause.message : String(cause);
@@ -144,6 +156,7 @@ async function loadDirectory(path = currentPath.value, fromTerminal = false, qui
       }
     }
     else { sftpError.value = message; sftpErrorKey.value += 1; sftpErrorOpen.value = true; }
+    return false;
   } finally {
     if (listEpoch.isCurrent(epochId)) loadingFiles.value = false;
   }
@@ -227,7 +240,21 @@ function submitPathInput() {
   const target = resolveRemotePath(currentPath.value, sftpHomePath.value || undefined);
   currentPath.value = target;
   pathBarEditing.value = false;
-  void loadDirectory(target);
+  void loadDirectoryStatus(target).then((loaded) => {
+    // issue #268：路径栏输入的是文件而非目录时，SFTP list 对 ENOTDIR 只回
+    // 笼统的 "SFTP operation failed" 原始错误串。补一次 stat：目标存在且不是
+    // 目录 → 清横幅、走双击同款预览入口（预览里就有外部编辑器打开）；目标真
+    // 是目录（权限拒绝等）或 stat 也失败 → 维持原错误横幅不动。
+    if (loaded !== false || !openPathBarFile) return;    void window.dbxPlugin
+      .invoke<{ kind?: string }>(sudoMode.value ? "sudo/stat" : "sftp/stat", { sessionId: session.value?.sessionId, path: target })
+      .then((stat) => {
+        if (!stat || stat.kind === "directory") return;
+        sftpError.value = "";
+        sftpErrorOpen.value = false;
+        openPathBarFile(target);
+      })
+      .catch(() => undefined);
+  });
 }
 
   return {
