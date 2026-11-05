@@ -298,7 +298,7 @@ export const messages = {
       attempt: "retry #{attempt}",
     },
     reconnectRestored: {
-      cwd: "Reconnected, current directory {path}",
+      cwd: "Reconnected, restored working directory {path}",
       plain: "Connection restored",
     },
     home: "Home",
@@ -882,7 +882,7 @@ export const messages = {
       attempt: "reintento n.º {attempt}",
     },
     reconnectRestored: {
-      cwd: "Reconectado, directorio actual {path}",
+      cwd: "Reconectado, directorio de trabajo restaurado {path}",
       plain: "Conexión restaurada",
     },
     home: "Inicio",
@@ -1459,7 +1459,7 @@ export const messages = {
       attempt: "tentativo n. {attempt}",
     },
     reconnectRestored: {
-      cwd: "Riconnesso, directory corrente {path}",
+      cwd: "Riconnesso, directory di lavoro ripristinata {path}",
       plain: "Connessione ripristinata",
     },
     home: "Home",
@@ -2036,7 +2036,7 @@ export const messages = {
       attempt: "再試行 {attempt} 回目",
     },
     reconnectRestored: {
-      cwd: "再接続しました。現在のディレクトリ {path}",
+      cwd: "再接続しました。元のディレクトリ {path} に戻りました",
       plain: "接続を復元しました",
     },
     home: "ホーム",
@@ -2613,7 +2613,7 @@ export const messages = {
       attempt: "tentativa nº {attempt}",
     },
     reconnectRestored: {
-      cwd: "Reconectado, diretório atual {path}",
+      cwd: "Reconectado, diretório de trabalho restaurado {path}",
       plain: "Conexão restaurada",
     },
     home: "Início",
@@ -3190,7 +3190,7 @@ export const messages = {
       attempt: "第 {attempt} 次重试",
     },
     reconnectRestored: {
-      cwd: "已重新连接，当前目录 {path}",
+      cwd: "已重连，已回到原目录 {path}",
       plain: "连接已恢复",
     },
     home: "主目录",
@@ -3774,7 +3774,7 @@ export const messages = {
       attempt: "第 {attempt} 次重試",
     },
     reconnectRestored: {
-      cwd: "已重新連線，目前目錄 {path}",
+      cwd: "已重新連線，已回到原始目錄 {path}",
       plain: "連線已恢復",
     },
     home: "主目錄",
