@@ -6,6 +6,17 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.13-beta.4] — 2026-11-05
+
+- **VNC 支持发送 Ctrl+Alt+Del（#264）**。Windows Server 登录界面需要 CAD 解锁，但本机系统/宿主把该组合键拦截，到不了插件。VNC 会话运行时画布右上角新增常驻「发送 Ctrl+Alt+Del」按钮，按 SAS 语义显式发送按键序列（三键按下后逆序释放），与实体键盘等效。
+  **Send Ctrl+Alt+Del in VNC sessions (#264).** Windows Server lock screens need CAD, but the local OS/host webview swallows the chord before it reaches the plugin. A persistent "Send Ctrl+Alt+Del" button now sits at the top-right of the canvas while a VNC session runs, emitting the SAS key sequence (three keys down, released in reverse order) — equivalent to a physical keyboard.
+- **上传即时占位卡（#272）**。大文件拖入后，传输面板在重名预检与 upload/start 多次往返期间是一段空白，让人误以为拖拽没成功。现在拖入即显示「排队中」卡片（文件名 + 大小），start 返回后无缝切换为真实进度。
+  **Instant upload placeholder cards (#272).** After dropping a large file, the transfer panel showed nothing until the duplicate check and upload/start RPC round-trips completed, which looked like a failed drop. A "queued" card (name + size) now appears immediately and swaps seamlessly into the real progress card once the task starts.
+- **传输历史卡片显示时间（#269）**。历史条目按「状态 · 大小 · 时间」三段展示传输开始时间（本地时区），悬停显示耗时。
+  **Timestamps in transfer history (#269).** History entries now show the transfer start time (local timezone) as status · size · time, with the duration on hover.
+- **SFTP 路径栏提交文件路径转预览（#268）**。路径栏输入文件路径回车时不再抛 `SFTP operation failed` 原始错误串：补一次 stat，文件直接以双击同款入口打开预览（预览内可「在外部编辑器中打开」，保存自动回传）；目标确为目录（如权限拒绝）或 stat 失败时维持原错误横幅。
+  **Path bar opens files in preview (#268).** Pressing Enter on a file path in the SFTP location bar no longer surfaces a raw `SFTP operation failed` banner: a follow-up stat opens the file in the preview pane (same entry as double-click, with the external-editor menu inside); if the target really is a directory (e.g. permission denied) or the stat fails, the original banner is kept.
+
 ## [0.7.13-beta.3] — 2026-11-05
 
 - **sz/ZMODEM（含 trzsz）下载后自动定位落盘目录修复（#245）**。0.7.11 起宣传的「收完自动在系统文件管理器定位下载目录」在桌面版实际不会触发：下载走了宿主 fileTransfer 保存通道，而自动定位与完成通知里的「在文件夹中显示」依赖 sidecar 本机落盘通道返回的本机路径——桌面版上这条路径不会被走到。现在三条下载链路（SFTP / sz / trzsz）统一落盘通道优先级：本机可落盘优先走 sidecar（下载目录设置、「每次询问」、「在文件夹中显示」全部生效），仅 web/docker 无本机文件系统时走宿主 fileTransfer 流式保存，最后浏览器/宿主 saveFile 兜底。**行为变化**：桌面端 sz/trzsz 保存从「逐文件弹原生保存框」变为「直接落下载目录（与 SFTP 一致）」。
