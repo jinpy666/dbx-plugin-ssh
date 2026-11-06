@@ -6,10 +6,12 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
-## [0.7.13-beta.5] — 2026-11-06
+## [0.7.13-beta.6] — 2026-11-06
 
-- **SFTP 双击文件行为设置（文件浏览）**。设置 → 传输/下载新增「文件浏览」小节：双击 SFTP 文件可选「编辑」直接进入文本编辑态（默认仍为「预览」）。选「编辑」时，可写的文本文件双击即落编辑光标；只读连接、超大截断文件与多格式（图片/Office/PDF 等）静默回落预览，不弹提示。偏好为本机全局（pluginStore），不入连接同步。
-  **Double-click behavior setting for SFTP.** A new "File browsing" section in Settings → Transfer/Download lets double-click open SFTP files in "Edit" mode directly (default stays "Preview"). With "Edit", writable text files land in the editing caret on double-click; read-only connections, head-truncated large files and multi-format entries (images/Office/PDF) silently fall back to preview. The preference is local-global (pluginStore) and not synced per connection.
+- **路径栏提交文件后不再报 ENOTDIR（#268 跟进）**。beta.5 实测反馈：路径栏提交文件路径打开预览后，路径栏仍停留在文件路径；编辑保存触发的列表刷新拿它继续 list → `Failure: …: not a directory`。现在 stat 确认是文件后，路径栏回退父目录并立即重载列表——路径栏/列表/预览三者状态一致，保存后的刷新落在父目录、能看到刚改的文件。注：该修复原计划随 beta.5 发布，但漏合入 main，beta.5 不含；本次随 beta.6 补上。
+  **No more ENOTDIR after committing a file path (#268 follow-up).** beta.5 field feedback: after the path bar opened a file in preview, it kept showing the file path, and the save-triggered list refresh listed the file again → `Failure: …: not a directory`. Once stat confirms a file, the path bar now falls back to the parent directory and reloads immediately — path bar, listing and preview stay consistent, and the post-save refresh lands in the parent directory showing the just-edited file. Note: this fix was intended for beta.5 but was accidentally left out of main; it ships in beta.6.
+
+## [0.7.13-beta.5] — 2026-11-06
 
 ## [0.7.13-beta.4] — 2026-11-05
 
