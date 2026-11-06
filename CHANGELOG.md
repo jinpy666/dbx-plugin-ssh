@@ -6,6 +6,11 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.13] — 2026-11-06
+
+- **0.7.13 正式版**。汇总 beta.1～beta.7：sudo 密码不再误注入 `docker login`/`mysql -p` 等同形密码提示（安全修复）；SFTP 双击文件行为可设为直接编辑（设置·传输·文件浏览，默认预览）；路径栏提交文件路径转预览并修复后续 ENOTDIR；VNC 会话可发送 Ctrl+Alt+Del；上传即时占位卡；传输历史显示时间与耗时；sz/ZMODEM 下载后自动定位落盘目录（桌面端改为直接落下载目录）；自动重连后回到原工作目录；终端「半屏」自愈看门狗；vi 普通模式粘贴经 bracketed paste 完整落盘；预览滚动条常驻、sz 大文件不再误判会话失效、Windows stdio 按平台定位 app-data、补齐 MCP 工具 manifest 权限；终端点击焦点加固与 Docker 面板本地目标。
+  **0.7.13 stable.** Includes beta.1–beta.7: sudo credentials are no longer injected into look-alike prompts from `docker login` / `mysql -p` and friends (security fix); SFTP double-click can open files directly in edit mode (Settings → Transfer → File browsing, default stays preview); the path bar opens file paths in preview with the follow-up ENOTDIR fixed; VNC sessions can send Ctrl+Alt+Del; instant upload placeholder cards; transfer-history timestamps; sz/ZMODEM downloads land in the download folder automatically (desktop behavior change); automatic return to the previous working directory after reconnect; a self-healing watchdog for half-screen terminals; bracketed paste for vi normal mode; persistent preview scrollbars, a sz large-transfer false-failure fix, per-platform Windows app-data and MCP manifest permissions; terminal focus hardening and a local-target Docker panel.
+
 ## [0.7.13-beta.7] — 2026-11-06
 
 - **sudo 密码不再误注入其他交互式程序（安全修复）**。`docker login`、`podman login`、`gh auth login`、`mysql -p`、`ssh-add` 等程序的裸 `Password: ` 提示与 sudo 提示逐字符相同，旧的终端自动应答逻辑会把它当作 sudo 提示，无条件注入 sudo 密码：既让这些程序登录必然失败，也把 sudo 口令泄漏给了它们。现在改为只有当操作者刚提交的命令行确实是 sudo 调用时才自动应答；sudo 之外的一切密码提示一律透传给用户手动输入。
