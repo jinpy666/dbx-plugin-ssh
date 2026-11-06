@@ -2656,6 +2656,15 @@ impl SshRuntime {
                     }
                     command = terminal_rx.recv() => match command {
                         Some(TerminalCommand::Input(data)) => {
+                            // Feed the keystrokes to the auto-sudo watcher before
+                            // writing: it needs the submitted command line to tell
+                            // sudo's bare `Password:` prompt from `docker login`'s
+                            // identical one. Lock released before the await.
+                            if let Ok(mut slot) = entry.auto_sudo.lock() {
+                                if let Some(auto) = slot.as_mut() {
+                                    auto.note_input(&data);
+                                }
+                            }
                             if channel.data(&data[..]).await.is_err() { break; }
                         }
                         Some(TerminalCommand::Resize { cols, rows }) => {
@@ -6248,7 +6257,14 @@ impl SshRuntime {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if attach && watcher.is_none() {
-            *watcher = Some(exec::TerminalAutoSudo::new(entry.orchestration.clone()));
+            let mut auto = exec::TerminalAutoSudo::new(entry.orchestration.clone());
+            // A connection whose `remote_command` runs sudo replaces the shell,
+            // so no typed line ever reaches the watcher: seed the context from
+            // the configuration or the bare `Password:` prompt goes unanswered.
+            auto.seed_sudo_context(exec::remote_command_invokes_sudo(
+                &connection.remote_command,
+            ));
+            *watcher = Some(auto);
         } else if !attach && watcher.is_some() {
             // Disarm transitions are logged so "why didn't the terminal
             // auto-answer" is diagnosable from the sidecar log alone.

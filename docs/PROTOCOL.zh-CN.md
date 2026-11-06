@@ -336,7 +336,7 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 **凭据来源与密码半边（2026-09-16）**：登录期 KI 用的流程模式 / TOTP 密钥 / 提示词与 Quick Sudo 同源——`global` 模式下连接表单隐藏 2FA 四件套（凭据整体由全局配置接管），登录提问因此也读该配置的 `authFlowMode` / `totpSecret` / hints；`custom` 模式下连接自身配置优先，绑定（0.4.x 遗留）只补齐连接留空的项；`off` 不提升全局配置。**密码半边始终是登录口令**（含 `password_command` 解析结果）：登录提问若回一个单独的 sudo 口令只会认证失败，还会把特权口令平白送给对端。
 
-**选型指引**：有稳定的 `otpauth://` URI / base32 密钥时可配置自动回码；手机、硬件令牌或短信里不断变化的六位码不要保存到 `TOTP 密钥`，把该字段留空，连接时在密文弹窗输入当前码。主机先问 MFA、再问密码且需要自动应答时用「密码 + OTP 合并」模式——该模式不设"先密码"门槛，裸 MFA 提问也会被应答；「先密码，再 OTP」对裸 MFA 提问保持留空（保护），随后由宿主弹窗询问。**合并提问**（一条提问里同时要密码与验证码，如 `Password: OTP Code: `）两种 OTP 模式都拼接应答（只回密码半边必然失败）；`password_only` / `off` 仍只自动回密码半边，未回答部分可由连接期弹窗补充。终端内的合并提问同样处理，但需命中密码类内置模式（`[sudo] password for` / `password:`）或配置了自定义提示词，避免误答其他交互程序。
+**选型指引**：有稳定的 `otpauth://` URI / base32 密钥时可配置自动回码；手机、硬件令牌或短信里不断变化的六位码不要保存到 `TOTP 密钥`，把该字段留空，连接时在密文弹窗输入当前码。主机先问 MFA、再问密码且需要自动应答时用「密码 + OTP 合并」模式——该模式不设"先密码"门槛，裸 MFA 提问也会被应答；「先密码，再 OTP」对裸 MFA 提问保持留空（保护），随后由宿主弹窗询问。**合并提问**（一条提问里同时要密码与验证码，如 `Password: OTP Code: `）两种 OTP 模式都拼接应答（只回密码半边必然失败）；`password_only` / `off` 仍只自动回密码半边，未回答部分可由连接期弹窗补充。终端内的合并提问同样处理，但需命中密码类内置模式（`[sudo] password for` / `password:`）或配置了自定义提示词，避免误答其他交互程序（`password:` 这一裸形态另需 sudo 上下文，见「终端自动应答」）。
 
 **诊断**：认证失败时错误信息带上服务器实际提问（`name` / `instructions` / 提问文本，去控制字符并截断，绝不包含凭据）。支持 Host API 1.1 的 DBX 会先弹出密文输入框；旧宿主则指路配置 TOTP 密钥或 OTP 提示词。`auth_flow_mode=off` 只关闭自动回码，不关闭连接期人工输入。端到端回归见 `scripts/smoke_login_mfa_test.py`（本机 mock 堡垒机 + 真 sidecar，paramiko 缺失时 SKIP）。
 
@@ -344,7 +344,8 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 工作台终端输出流经统一的 sudo 检测与自动应答状态机：
 
-- 出现 sudo 密码提示（`[sudo] password for …` / `Password:`）时自动注入密码并回车；sudo 需要的 2FA 验证码在配置了 `totp_prompt_hint`（或处于 `password_plus_otp` 模式）时自动应答，每个认证序列只应答一次。
+- 出现 sudo 密码提示时自动注入密码并回车；sudo 需要的 2FA 验证码在配置了 `totp_prompt_hint`（或处于 `password_plus_otp` 模式）时自动应答，每个认证序列只应答一次。
+- **裸 `Password:` 提示只在 sudo 上下文内应答**：`[sudo] password for …` 自报家门，见到即可应答。裸 `Password: ` / `Passphrase: ` / `密码：` 与 `docker login`、`podman login`、`gh auth login`、`mysql -p`、`psql`、`ssh-add`、`gpg`、`passwd` 等**所有交互式密码程序**逐字符相同，单看文本无法区分，因此判据是**「操作者刚提交的那条命令行是不是 sudo 调用」**——这是通用规则，不是工具名单：任何新增或不常见的密码程序都自动落在「不自动应答」一侧，无需登记。判定先按 shell 语义切分 `;`/`&`/`|`/`&&`/`||`/换行/子 shell，再跳过 `NAME=value` 赋值与 `command`/`nohup`/`env`/`nice`/`timeout`/`setsid`/`stdbuf` 等包装器（含其自身参数）取其命令词，并递归展开 `sh -c '…'`（含 `-lc` 合并短选项）、`$(…)` 与反引号；`/usr/bin/sudo` 全路径与 `"sudo"` 引号形式同样识别。上下文在应答该提示或回到 shell 提示符后立即失效（一次性），避免 `sudo -v && docker login` 残留武装。`remote_command` 连接的会话没有键入行，改由该配置本身是否含 sudo 决定。若某个真正的 sudo 提示未被识别（例如命令经方向键改写过），sidecar 日志会记一条 `bare password prompt left to the running program`，此时为该连接配置 `password_prompt_hint` 即可。
 - 通用提示仅在配置自定义提示词时应答，避免误答其他交互程序（保守策略）。
 - **并发同靶排队**：批量发送把 sudo 命令写入同一 host:port 的多个会话时，各会话的 OTP 提示几乎同时出现，而当前窗口唯一的码已被先到的会话提交、重放保护拒绝重复注入——后到的提示不再永远搁置，而是推迟到下一个 TOTP 窗口边界（+1s）由终端读循环（250ms tick）自动补答新窗口的码（静态恢复码不变，不推迟）；期间检测到 shell 提示符即照常复位。
 - 检测到 shell 提示符（行尾 `$` / `#`）即重置状态机。`sudo_source=off`（旧 `quick_sudo=false` 同义）或只读连接时整体停用；每次自动应答（含推迟补答）发出 `ssh/auto-sudo` 事件（`kind` 为 `password` / `otp`）供宿主审计。
