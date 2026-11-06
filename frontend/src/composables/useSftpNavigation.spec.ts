@@ -206,6 +206,7 @@ describe("路径栏提交文件路径 (#268)", () => {
     h.currentPath.value = "/etc/docker/daemon.json";
     h.invoke.mockRejectedValueOnce(new Error("SFTP operation failed: Failure"));
     h.invoke.mockResolvedValueOnce({ kind: "file" });
+    h.invoke.mockResolvedValueOnce({ entries: [] }); // 回退父目录后的重载
     h.nav.submitPathInput();
     await flush();
     await flush();
@@ -236,5 +237,21 @@ describe("路径栏提交文件路径 (#268)", () => {
     await flush();
     expect(h.openPathBarFile).not.toHaveBeenCalled();
     expect(h.sftpError.value).toBe("SFTP operation failed: No such file");
+  });
+
+  // 用户实测反馈（beta.4）：文件提交把 currentPath 置成了文件路径，预览里
+  // 编辑保存后的列表刷新拿它继续 list → ENOTDIR "not a directory"。
+  // 修复契约：确认是文件后路径栏回退父目录、立即重载父目录列表。
+  it("文件提交后回退路径栏到父目录并重载父目录列表", async () => {
+    const h = setupHarness();
+    h.currentPath.value = "/home/jinpy/test.json";
+    h.invoke.mockRejectedValueOnce(new Error("SFTP operation failed: Failure"));
+    h.invoke.mockResolvedValueOnce({ kind: "file" });
+    h.invoke.mockResolvedValueOnce({ entries: [{ uri: "/home/jinpy/test.json", name: "test.json", kind: "file" }] });
+    h.nav.submitPathInput();
+    await vi.waitFor(() => expect(h.openPathBarFile).toHaveBeenCalledWith("/home/jinpy/test.json"));
+    expect(h.currentPath.value).toBe("/home/jinpy");
+    expect(h.sftpError.value).toBe("");
+    expect(h.entries.value).toEqual([{ uri: "/home/jinpy/test.json", name: "test.json", kind: "file" }]);
   });
 });

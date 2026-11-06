@@ -249,9 +249,15 @@ function submitPathInput() {
       .invoke<{ kind?: string }>(sudoMode.value ? "sudo/stat" : "sftp/stat", { sessionId: session.value?.sessionId, path: target })
       .then((stat) => {
         if (!stat || stat.kind === "directory") return;
+        // 编辑保存后的列表刷新以路径栏为准：文件提交已把 currentPath 置成文
+        // 件路径，不纠正的话刷新继续对文件 list 报 ENOTDIR（beta.4 用户实测
+        // 反馈）。回退父目录并立即重载——列表与路径栏一致，保存后的刷新正
+        // 好落在父目录、能看到刚改的文件。
+        currentPath.value = parentPath(target);
         sftpError.value = "";
         sftpErrorOpen.value = false;
         openPathBarFile(target);
+        void loadDirectory(currentPath.value);
       })
       .catch(() => undefined);
   });
