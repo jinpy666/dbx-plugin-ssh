@@ -6,6 +6,11 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.13-beta.7] — 2026-11-06
+
+- **sudo 密码不再误注入其他交互式程序（安全修复）**。`docker login`、`podman login`、`gh auth login`、`mysql -p`、`ssh-add` 等程序的裸 `Password: ` 提示与 sudo 提示逐字符相同，旧的终端自动应答逻辑会把它当作 sudo 提示，无条件注入 sudo 密码：既让这些程序登录必然失败，也把 sudo 口令泄漏给了它们。现在改为只有当操作者刚提交的命令行确实是 sudo 调用时才自动应答；sudo 之外的一切密码提示一律透传给用户手动输入。
+  **Sudo credential no longer leaks to other interactive programs (security fix).** Bare `Password: ` prompts from `docker login`, `podman login`, `gh auth login`, `mysql -p`, `ssh-add` and friends are byte-identical to sudo's prompt, and the terminal auto-responder used to inject the configured sudo credential into any of them — breaking those logins and leaking the secret. The auto-answer now fires only when the operator's just-submitted command line is actually a sudo invocation; every non-sudo prompt passes through for manual entry.
+
 ## [0.7.13-beta.6] — 2026-11-06
 
 - **路径栏提交文件后不再报 ENOTDIR（#268 跟进）**。beta.5 实测反馈：路径栏提交文件路径打开预览后，路径栏仍停留在文件路径；编辑保存触发的列表刷新拿它继续 list → `Failure: …: not a directory`。现在 stat 确认是文件后，路径栏回退父目录并立即重载列表——路径栏/列表/预览三者状态一致，保存后的刷新落在父目录、能看到刚改的文件。注：该修复原计划随 beta.5 发布，但漏合入 main，beta.5 不含；本次随 beta.6 补上。
