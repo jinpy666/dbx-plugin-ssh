@@ -153,7 +153,9 @@ import {
   extractMcpSettingsMirror,
   loadMcpSettingsMirror,
   mcpSettingsMirrorEquals,
+  parseSftpDoubleClickAction,
   persistMcpSettingsMirror,
+  type SftpDoubleClickAction,
 } from "./lib/settingsModel";
 import {
   clampSuggestionMaxChars,
@@ -792,6 +794,11 @@ const terminalCwd = ref("");
 const directoryTrackingSupported = ref<boolean | undefined>();
 const SFTP_SHOW_PERMISSIONS_KEY = "ssh-sftp-show-permissions";
 const showSftpPermissions = ref(parseSftpPermissionVisibility(pluginStore.getItem(SFTP_SHOW_PERMISSIONS_KEY)));
+// 文件浏览（双击文件行为）：preview=预览（默认）/ edit=直接进编辑态。纯前端
+// 偏好（不入 sidecar preferences 白名单），默认不落键；权威态在此，设置弹窗
+// 经 transferPrefs 适配器读写，双击链路经 useFilePreview 消费。
+const SFTP_DOUBLE_CLICK_ACTION_KEY = "ssh-sftp-double-click-action";
+const sftpDoubleClickAction = ref<SftpDoubleClickAction>(parseSftpDoubleClickAction(pluginStore.getItem(SFTP_DOUBLE_CLICK_ACTION_KEY)));
 const visibleColumns = ref<SftpColumn[]>([...DEFAULT_VISIBLE_COLUMNS]);
 /** 每列当前宽度（px）。 */
 const sftpColumnWidths = reactive<Record<SftpColumn, number>>({ ...DEFAULT_COLUMN_WIDTHS });
@@ -1206,6 +1213,8 @@ const transferPrefsAdapter = {
   persistCompressMode: persistTransferCompressMode,
   loadCompressThreshold: loadTransferCompressThreshold,
   persistCompressThreshold: persistTransferCompressThreshold,
+  loadDoubleClickAction: loadSftpDoubleClickAction,
+  persistDoubleClickAction: persistSftpDoubleClickAction,
 };
 const suggestionPrefsAdapter = {
   loadEnabled: loadSuggestionsEnabled,
@@ -6406,6 +6415,18 @@ function persistSftpCompatMode(value: boolean) {
   void syncPrefs();
 }
 
+// 文件浏览（双击文件行为）：纯前端 pluginStore 单键（同 showSftpPermissions 家族），
+// 不进 syncPrefs 的 sidecar preferences 白名单。
+function loadSftpDoubleClickAction(): SftpDoubleClickAction {
+  return sftpDoubleClickAction.value;
+}
+
+function persistSftpDoubleClickAction(value: SftpDoubleClickAction) {
+  sftpDoubleClickAction.value = value;
+  if (value === "edit") pluginStore.setItem(SFTP_DOUBLE_CLICK_ACTION_KEY, "edit");
+  else pluginStore.removeItem(SFTP_DOUBLE_CLICK_ACTION_KEY);
+}
+
 function loadSftpNameEncoding(): SftpNameEncoding {
   return sftpNameEncodingState.value;
 }
@@ -6900,6 +6921,7 @@ const {
   MAX_INLINE_PREVIEW_BYTES,
 } = useFilePreview({
   t, showNotice, showError, session, sudoMode, canWrite,
+  doubleClickAction: sftpDoubleClickAction,
   loadDirectory: (path?: string) => loadDirectory(path),
   downloadEntry: (entry, forceSudo?: boolean) => downloadEntry(entry, forceSudo),
   pathFromUri,

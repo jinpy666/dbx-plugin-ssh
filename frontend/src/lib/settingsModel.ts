@@ -39,6 +39,16 @@ export function settingsErrorOf(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/** 文件浏览：双击 SFTP 文件的行为（preview=预览，默认 / edit=直接进编辑态）。 */
+export type SftpDoubleClickAction = "preview" | "edit";
+
+export const SFTP_DOUBLE_CLICK_ACTIONS: SftpDoubleClickAction[] = ["preview", "edit"];
+
+/** pluginStore 容错解析：仅 "edit" 视为编辑，其余（含缺键）回落预览。 */
+export function parseSftpDoubleClickAction(value: string | null | undefined): SftpDoubleClickAction {
+  return value === "edit" ? "edit" : "preview";
+}
+
 export interface SshSettings {
   quickSudo: boolean;
   sudoUsePty: boolean;

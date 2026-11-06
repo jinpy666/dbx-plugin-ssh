@@ -72,7 +72,7 @@ function installInvoke(meta: Record<string, unknown> | null) {
 
 const hotkeyBindings = Object.fromEntries(ACTION_IDS.map((id) => [id, []])) as unknown as TerminalHotkeyBindings;
 
-function mountSettings(sessionId?: string) {
+function mountSettings(sessionId?: string, transferPrefsOverrides: Record<string, unknown> = {}) {
   return mount(SettingsDialog, {
     attachTo: document.body,
     props: {
@@ -142,6 +142,9 @@ function mountSettings(sessionId?: string) {
         loadCompressThreshold: () => 100,
         persistCompressMode: () => {},
         persistCompressThreshold: () => {},
+        loadDoubleClickAction: () => "preview",
+        persistDoubleClickAction: () => {},
+        ...transferPrefsOverrides,
       },
       editorPrefs: {
         loadConfig: () => ({ associations: [], customEditors: [], uploadPolicy: "auto" as const }),
@@ -332,6 +335,60 @@ describe("SettingsDialog MCP 尺寸保存（#241）", () => {
 
     expect(invoke.mock.calls.some(([method]) => method === "mcp/settings/set")).toBe(false);
     expect(wrapper.emitted("error")?.[0]).toEqual([t("mcpLimits.skipped")]);
+    wrapper.unmount();
+  });
+});
+
+// 「文件浏览」小节（传输/下载分类）：双击文件行为偏好（预览/编辑，默认预览）。
+// 草稿从 transferPrefs 适配器读入，主保存写穿 persistDoubleClickAction；
+// 面板为 v-show 渲染，无需切换分类即可断言（与 MCP 用例同法查 body DOM）。
+describe("SettingsDialog 文件浏览（双击行为）", () => {
+  interface RadioOverride { value: string; checked: boolean }
+
+  const doubleClickRadios = (): RadioOverride[] =>
+    [...document.body.querySelectorAll<HTMLLabelElement>(".settings-field.settings-radio-row")]
+      .filter((el) => el.querySelector<HTMLInputElement>('input[type="radio"]')?.name === "sftp-double-click-action")
+      .map((el) => ({
+        value: el.querySelector<HTMLInputElement>('input[type="radio"]')!.value,
+        checked: el.querySelector<HTMLInputElement>('input[type="radio"]')!.checked,
+      }));
+
+  const radioByLabel = (label: string) =>
+    [...document.body.querySelectorAll<HTMLLabelElement>(".settings-field.settings-radio-row")]
+      .find((el) => (el.querySelector("span")?.textContent ?? "").trim() === label)
+      ?.querySelector<HTMLInputElement>('input[type="radio"]');
+
+  const clickMainSave = async (wrapper: ReturnType<typeof mountSettings>) => {
+    const button = [...document.body.querySelectorAll<HTMLButtonElement>("footer button.primary-button")]
+      .find((el) => (el.textContent ?? "").trim() === t("settingsSave"));
+    expect(button, "底部主保存按钮").toBeTruthy();
+    button!.click();
+    await flushPromises();
+  };
+
+  it("默认勾选「预览」，渲染预览/编辑两个选项", async () => {
+    const wrapper = mountSettings("sess-1", { loadDoubleClickAction: () => "preview", persistDoubleClickAction: () => {} });
+    await openDialog(wrapper);
+    const radios = doubleClickRadios();
+    expect(radios.map((r) => r.value)).toEqual(["preview", "edit"]);
+    expect(radios.find((r) => r.value === "preview")?.checked).toBe(true);
+    expect(radios.find((r) => r.value === "edit")?.checked).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("草稿从适配器读入（edit 勾选编辑），主保存写穿 persistDoubleClickAction", async () => {
+    const persistDoubleClickAction = vi.fn();
+    const wrapper = mountSettings("sess-1", { loadDoubleClickAction: () => "edit", persistDoubleClickAction });
+    await openDialog(wrapper);
+    expect(doubleClickRadios().find((r) => r.value === "edit")?.checked).toBe(true);
+
+    const previewRadio = radioByLabel(t("fileBrowse.doubleClick.preview"))!;
+    previewRadio.checked = true;
+    previewRadio.dispatchEvent(new Event("change"));
+    await flushPromises();
+    await clickMainSave(wrapper);
+
+    expect(persistDoubleClickAction).toHaveBeenCalledWith("preview");
     wrapper.unmount();
   });
 });

@@ -19,11 +19,14 @@ export function useFilePreview(options: {
   session: Ref<{ sessionId?: string } | undefined>;
   sudoMode: Ref<boolean>;
   canWrite: Ref<boolean>;
+  // 双击文件行为偏好（设置·传输「文件浏览」）：preview=预览（默认），
+  // edit=可编辑文本直接进编辑态；不可编辑时静默回落预览。
+  doubleClickAction: Ref<"preview" | "edit">;
   loadDirectory: (path?: string) => Promise<void>;
   downloadEntry: (entry: PreviewEntry, forceSudo?: boolean) => Promise<void>;
   pathFromUri: (uri: string) => string;
 }) {
-  const { t, showNotice, showError, session, sudoMode, canWrite, loadDirectory, downloadEntry, pathFromUri } = options;
+  const { t, showNotice, showError, session, sudoMode, canWrite, doubleClickAction, loadDirectory, downloadEntry, pathFromUri } = options;
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = { png: "png", jpg: "jpeg", jpeg: "jpeg", gif: "gif", webp: "webp", svg: "svg+xml", bmp: "bmp", ico: "x-icon" };
 // 已知二进制扩展名在双击时直接提示不打开；无后缀/改名文件由打开前的内容嗅探兜底。
@@ -130,6 +133,9 @@ async function openEntry(entry: PreviewEntry) {
     previewTruncated.value = result.truncated;
     previewText.value = new TextDecoder("utf-8", { fatal: false }).decode(window.dbxPlugin.decodeBase64(result.dataBase64));
     previewBaseline.value = previewText.value;
+    // 双击直接编辑（设置·传输「文件浏览」）：加载成功且满足可编辑条件时进入
+    // 编辑态；不可编辑（只读/截断）静默回落预览，不弹提示。
+    if (doubleClickAction.value === "edit" && previewEditableAllowed.value) beginPreviewEdit();
   } catch (cause) {
     previewText.value = cause instanceof Error ? cause.message : String(cause);
     previewBaseline.value = previewText.value;

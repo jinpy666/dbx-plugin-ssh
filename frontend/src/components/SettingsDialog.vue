@@ -25,7 +25,7 @@ import { connectionEntryEquals, loadConnectionEntry, saveConnectionEntry } from 
 import { clampFontSize, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
 import { confirmDialog } from "../lib/confirmDialog";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
-import { MCP_LIMIT_CEILING_MIB, mibField, parseMibInput, persistMcpSettingsMirror, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
+import { MCP_LIMIT_CEILING_MIB, SFTP_DOUBLE_CLICK_ACTIONS, mibField, parseMibInput, persistMcpSettingsMirror, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SftpDoubleClickAction, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
 import { DOWNLOAD_CONFLICT_POLICIES, type DownloadConflictPolicy } from "../lib/downloadPrefs";
 import { type EditorAssociation, type EditorConfig, type KnownEditor } from "../lib/editorRules";
 import { TRANSFER_DUPLICATE_POLICIES, type TransferDuplicatePolicy } from "../lib/transferQueue";
@@ -559,6 +559,9 @@ const props = defineProps<{
     loadCompressThreshold(): number;
     persistCompressMode(value: string): void;
     persistCompressThreshold(value: number): void;
+    /** 文件浏览：双击 SFTP 文件行为（preview=预览默认 / edit=直接编辑），pluginStore 单键。 */
+    loadDoubleClickAction(): SftpDoubleClickAction;
+    persistDoubleClickAction(value: SftpDoubleClickAction): void;
   };
   /** 命令输入建议（开关 + 查询长度上下限）的读写适配器，权威态同在 App。 */
   suggestionPrefs: {
@@ -728,6 +731,8 @@ const transferMaxActiveDraft = ref(String(props.transferPrefs.loadMaxActive()));
 const transferDownloadLimitDraft = ref(String(props.transferPrefs.loadDownloadLimit()));
 const sftpCompatModeDraft = ref(props.transferPrefs.loadCompatMode());
 const sftpNameEncodingDraft = ref<SftpNameEncoding>(props.transferPrefs.loadNameEncoding());
+// 文件浏览（双击文件行为）：preview=预览（默认）/ edit=直接编辑；主保存写穿。
+const sftpDoubleClickDraft = ref<SftpDoubleClickAction>(props.transferPrefs.loadDoubleClickAction());
 // 外部编辑器草稿（transfer 面板）：配置整体草稿化、随主「保存」落库；
 // known 目录（local/editors/list 探测）每次打开设置时重探。
 const editorConfigDraft = ref<EditorConfig>({ associations: [], customEditors: [], uploadPolicy: "auto" });
@@ -1231,6 +1236,7 @@ async function reloadSettings() {
   transferDownloadLimitDraft.value = String(props.transferPrefs.loadDownloadLimit());
   sftpCompatModeDraft.value = props.transferPrefs.loadCompatMode();
   sftpNameEncodingDraft.value = props.transferPrefs.loadNameEncoding();
+  sftpDoubleClickDraft.value = props.transferPrefs.loadDoubleClickAction();
   transferCompressModeDraft.value = props.transferPrefs.loadCompressMode();
   transferCompressThresholdDraft.value = String(props.transferPrefs.loadCompressThreshold());
   suggestionsEnabledDraft.value = props.suggestionPrefs.loadEnabled();
@@ -1586,6 +1592,7 @@ async function saveSettings() {
     props.transferPrefs.persistDownloadLimit(Math.max(0, Number.parseInt(transferDownloadLimitDraft.value, 10) || 0));
     props.transferPrefs.persistCompatMode(sftpCompatModeDraft.value);
     props.transferPrefs.persistNameEncoding(sftpNameEncodingDraft.value);
+    props.transferPrefs.persistDoubleClickAction(sftpDoubleClickDraft.value);
     props.transferPrefs.persistCompressMode(transferCompressModeDraft.value);
     props.transferPrefs.persistCompressThreshold(Math.min(65536, Math.max(0, Number.parseInt(transferCompressThresholdDraft.value, 10) || 0)));
     props.suggestionPrefs.persistEnabled(suggestionsEnabledDraft.value);
@@ -2140,6 +2147,12 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("downloadSettings.conflictHint") }}</p>
             <p class="muted settings-note">{{ t("downloadSettings.hint") }}</p>
+            <h3 class="settings-section-title">{{ t("fileBrowse.title") }}</h3>
+            <label v-for="action in SFTP_DOUBLE_CLICK_ACTIONS" :key="action" class="settings-field settings-radio-row">
+              <input v-model="sftpDoubleClickDraft" type="radio" name="sftp-double-click-action" :value="action" />
+              <span>{{ t(`fileBrowse.doubleClick.${action}`) }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("fileBrowse.doubleClickHint") }}</p>
             <h3 class="settings-section-title">{{ t("sftpEdit.settingsSection") }}</h3>
             <label class="settings-field">
               <span>{{ t("sftpEdit.defaultEditorTitle") }}</span>

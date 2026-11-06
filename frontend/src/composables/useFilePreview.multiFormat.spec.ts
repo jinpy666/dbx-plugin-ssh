@@ -42,6 +42,7 @@ function setup(options: { canWrite?: boolean; sudoMode?: boolean } = {}) {
   const session: Ref<{ sessionId?: string } | undefined> = ref({ sessionId: "session-1" });
   const sudoMode = ref(options.sudoMode ?? false);
   const canWrite = ref(options.canWrite ?? true);
+  const doubleClickAction: Ref<"preview" | "edit"> = ref("preview");
   const notices: string[] = [];
   const errors: unknown[] = [];
   const loadedDirs: string[] = [];
@@ -53,6 +54,7 @@ function setup(options: { canWrite?: boolean; sudoMode?: boolean } = {}) {
     session,
     sudoMode,
     canWrite,
+    doubleClickAction,
     loadDirectory: async (path?: string) => {
       loadedDirs.push(path ?? "");
     },

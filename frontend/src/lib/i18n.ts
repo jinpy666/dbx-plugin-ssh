@@ -426,6 +426,14 @@ export const messages = {
       noCustomEditors: "No custom editors — add one via a file’s “Open with → Custom command…”.",
       watchingAuto: "“{name}” opened in your external editor — saves upload back to the server automatically.",
     },
+    fileBrowse: {
+      title: "File browsing",
+      doubleClick: {
+        preview: "Preview",
+        edit: "Edit",
+      },
+      doubleClickHint: "How double-clicking an SFTP file opens it: “Edit” jumps straight into text editing (files that cannot be edited still fall back to preview); “Preview” opens a read-only preview and you can edit from there.",
+    },
     symlink: {
       createAction: "New symlink…",
       editAction: "Edit link target…",
@@ -1010,6 +1018,14 @@ export const messages = {
       noCustomEditors: "Sin editores personalizados: añade uno con «Abrir con → Comando personalizado…».",
       watchingAuto: "«{name}» abierto en tu editor externo; al guardar se sube automáticamente al servidor.",
     },
+    fileBrowse: {
+      title: "Exploración de archivos",
+      doubleClick: {
+        preview: "Vista previa",
+        edit: "Editar",
+      },
+      doubleClickHint: "Cómo se abre un archivo SFTP con doble clic: «Editar» entra directamente en la edición de texto (los archivos no editables vuelven a la vista previa); «Vista previa» abre una vista de solo lectura desde la que se puede editar después.",
+    },
     symlink: {
       createAction: "Nuevo enlace simbólico…",
       editAction: "Editar destino del enlace…",
@@ -1586,6 +1602,14 @@ export const messages = {
       customEditorsTitle: "Editor personalizzati",
       noCustomEditors: "Nessun editor personalizzato: aggiungine uno da «Apri con → Comando personalizzato…».",
       watchingAuto: "«{name}» aperto nel tuo editor esterno; al salvataggio viene caricato automaticamente sul server.",
+    },
+    fileBrowse: {
+      title: "Esplorazione file",
+      doubleClick: {
+        preview: "Anteprima",
+        edit: "Modifica",
+      },
+      doubleClickHint: "Come si apre un file SFTP con doppio clic: \"Modifica\" passa direttamente alla modifica del testo (i file non modificabili restano in anteprima); \"Anteprima\" apre una vista in sola lettura da cui è possibile modificare in seguito.",
     },
     symlink: {
       createAction: "Nuovo collegamento simbolico…",
@@ -2164,6 +2188,14 @@ export const messages = {
       noCustomEditors: "カスタムエディターなし — ファイル右クリックの「アプリを指定して開く → カスタムコマンド…」から追加できます。",
       watchingAuto: "「{name}」を外部エディターで開きました — 保存すると自動でサーバーへ反映されます。",
     },
+    fileBrowse: {
+      title: "ファイルブラウズ",
+      doubleClick: {
+        preview: "プレビュー",
+        edit: "編集",
+      },
+      doubleClickHint: "SFTP ファイルをダブルクリックしたときの開き方：「編集」はテキスト編集に直接入ります（編集できないファイルはプレビューに戻ります）；「プレビュー」は読み取り専用で開き、後から手動で編集できます。",
+    },
     symlink: {
       createAction: "新規シンボリックリンク…",
       editAction: "リンク先を編集…",
@@ -2741,6 +2773,14 @@ export const messages = {
       noCustomEditors: "Sem editores personalizados — adicione um via «Abrir com → Comando personalizado…».",
       watchingAuto: "«{name}» aberto no seu editor externo; ao salvar, é enviado automaticamente ao servidor.",
     },
+    fileBrowse: {
+      title: "Navegação de arquivos",
+      doubleClick: {
+        preview: "Visualizar",
+        edit: "Editar",
+      },
+      doubleClickHint: "Como os arquivos SFTP são abertos com duplo clique: \"Editar\" entra diretamente na edição de texto (arquivos não editáveis voltam à visualização); \"Visualizar\" abre somente leitura e permite editar manualmente depois.",
+    },
     symlink: {
       createAction: "Novo link simbólico…",
       editAction: "Editar destino do link…",
@@ -3317,6 +3357,14 @@ export const messages = {
       customEditorsTitle: "自定义编辑器",
       noCustomEditors: "暂无自定义编辑器——可在文件右键「打开方式 → 自定义命令…」添加。",
       watchingAuto: "「{name}」已在外部编辑器中打开——保存后自动回传服务器。",
+    },
+    fileBrowse: {
+      title: "文件浏览",
+      doubleClick: {
+        preview: "预览",
+        edit: "编辑",
+      },
+      doubleClickHint: "双击 SFTP 文件时的打开方式：「编辑」直接进入文本编辑（不可编辑的文件自动回落预览）；「预览」打开只读预览，需要时再手动编辑。",
     },
     symlink: {
       createAction: "新建符号链接…",
@@ -3901,6 +3949,14 @@ export const messages = {
       customEditorsTitle: "自訂編輯器",
       noCustomEditors: "尚無自訂編輯器——可在檔案右鍵「開啟方式 → 自訂命令…」新增。",
       watchingAuto: "「{name}」已在外部編輯器中開啟——儲存後自動回傳伺服器。",
+    },
+    fileBrowse: {
+      title: "檔案瀏覽",
+      doubleClick: {
+        preview: "預覽",
+        edit: "編輯",
+      },
+      doubleClickHint: "雙擊 SFTP 檔案時的開啟方式：「編輯」直接進入文字編輯（不可編輯的檔案自動回落預覽）；「預覽」開啟唯讀預覽，需要時再手動編輯。",
     },
     symlink: {
       createAction: "新增符號連結…",
