@@ -5,17 +5,17 @@
 //! can never live on the SSH `SessionEntry`), structured input arrives on the
 //! `vnc/input` (alias `vnc/write`) JSON method with the keysym already mapped
 //! by the frontend, and framebuffer updates answer as 44-byte-header RGBA
-//! patch frames on the binary channel `vnc/frame/{sessionId}` — the same
+//! patch frames on the binary channel `vnc/frame/{sessionId}` 鈥?the same
 //! patch protocol NyaTerm uses (`sequence u64 LE`, desktop W/H, x/y/w/h,
 //! stride, pixel format, payload length, all `u32 LE`). The wire contract
 //! (field order, little-endian byte order, stride semantics, validation
-//! invariants) is documented in `docs/PROTOCOL.zh-CN.md` § VNC 帧补丁.
+//! invariants) is documented in `docs/PROTOCOL.zh-CN.md` 搂 VNC 甯цˉ涓?
 //! Lifecycle changes
 //! surface as `vnc/session/state` events (`connecting`/`connected`/
 //! `closed`/`error`).
 //!
 //! Engine: upstream `vnc-rs 0.6` (HsuJv/vnc-rs, MIT OR Apache-2.0) with
-//! `PixelFormat::rgba()`, encodings ZRLE + Raw (+ DesktopSizePseudo) only —
+//! `PixelFormat::rgba()`, encodings ZRLE + Raw (+ DesktopSizePseudo) only 鈥?
 //! Tight is deliberately not advertised, and a server that still sends a
 //! Tight/JPEG rectangle fails the session with a readable error. Due
 //! diligence (why route A, what the upstream limits cover) lives in
@@ -24,11 +24,11 @@
 //! Bounds (tighter than upstream's per-message decoder limits):
 //! - framebuffer at most 3840x2160 (a `SetResolution` outside the range, or
 //!   a rect outside the framebuffer, fails the session);
-//! - a patch payload is inherently ≤ 3840*2160*4 < 64 MiB and the encoder
+//! - a patch payload is inherently 鈮?3840*2160*4 < 64 MiB and the encoder
 //!   still re-validates stride/rect/payload on every frame;
 //! - classic VNC-Auth passwords are rejected above 8 bytes at `vnc/start`
 //!   (the protocol truncates silently otherwise);
-//! - clipboard text is Latin-1 and ≤ 1 MiB in both directions.
+//! - clipboard text is Latin-1 and 鈮?1 MiB in both directions.
 //!
 //! Reconnect: every worker run captures a `generation` counter; `vnc/
 //! reconnect` (or the automatic retry loop) bumps it, the superseded worker
@@ -38,7 +38,7 @@
 //! (default 3); authentication and protocol failures never retry.
 //!
 //! Safety note: classic VNC authentication is a 8-byte DES challenge and
-//! None is cleartext — the plugin surfaces the "trusted networks only"
+//! None is cleartext 鈥?the plugin surfaces the "trusted networks only"
 //! warning in the UI, keeps the password in `Zeroizing`, and never logs
 //! passwords, challenge responses or clipboard text.
 
@@ -74,12 +74,12 @@ const REFRESH_ARM_DELAY: Duration = Duration::from_secs(86_400);
 /// Classic VNC-Auth passwords are exactly the first 8 bytes (bit-reversed
 /// into the DES key); longer secrets truncate silently, so reject up front.
 const MAX_PASSWORD_BYTES: usize = 8;
-/// Framebuffer guard — deliberately tighter than upstream's 8192px/8.3MP
+/// Framebuffer guard 鈥?deliberately tighter than upstream's 8192px/8.3MP
 /// decoder limits (patch payloads stay < 64 MiB by construction).
 pub(crate) const MAX_FRAMEBUFFER_WIDTH: u16 = 3840;
 pub(crate) const MAX_FRAMEBUFFER_HEIGHT: u16 = 2160;
 const BYTES_PER_PIXEL: usize = 4;
-/// Clipboard bounds (RFC 6143 7.6.4 is Latin-1 only).
+/// Clipboard bounds (1 MiB payload; bytes are forwarded as received).
 const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 /// Bounded backpressure for input/clipboard commands.
 const COMMAND_CHANNEL_CAPACITY: usize = 256;
@@ -87,11 +87,11 @@ const COMMAND_CHANNEL_CAPACITY: usize = 256;
 const DEFAULT_RECONNECT_ATTEMPTS: u32 = 3;
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
-// —— 44-byte patch frame protocol (aligned with NyaTerm encode_frame_patch;
-// documented in docs/PROTOCOL.zh-CN.md § VNC 帧补丁) ——
+// 鈥斺€?44-byte patch frame protocol (aligned with NyaTerm encode_frame_patch;
+// documented in docs/PROTOCOL.zh-CN.md 搂 VNC 甯цˉ涓? 鈥斺€?
 
 /// Wire format: `44-byte header | payload`, every field little-endian.
-/// Documented in docs/PROTOCOL.zh-CN.md § VNC 帧补丁; the cross-side golden
+/// Documented in docs/PROTOCOL.zh-CN.md 搂 VNC 甯цˉ涓? the cross-side golden
 /// vector is pinned in `tests::patch_frame_golden_vector_matches_frontend`
 /// and mirrored in frontend/src/lib/vncFrame.spec.ts (same hex).
 pub(crate) const FRAME_HEADER_BYTES: usize = 44;
@@ -114,7 +114,7 @@ pub(crate) struct FramePatch<'a> {
 
 /// Encodes `44-byte header | payload` with every network-supplied field
 /// re-validated (the framebuffer itself is bounded, but each rect arrives
-/// from the wire and must be checked again). Pure — unit-tested.
+/// from the wire and must be checked again). Pure 鈥?unit-tested.
 pub(crate) fn encode_frame_patch(patch: &FramePatch<'_>) -> Result<Vec<u8>, String> {
     if patch.desktop_width == 0 || patch.desktop_height == 0 {
         return Err("VNC framebuffer dimensions must be non-zero".to_string());
@@ -257,9 +257,9 @@ impl VncFramebuffer {
     }
 }
 
-// —— request/response shapes ——
+// 鈥斺€?request/response shapes 鈥斺€?
 
-/// Front-end scaling hint only — the backend never resizes the remote
+/// Front-end scaling hint only 鈥?the backend never resizes the remote
 /// desktop (`vnc/resize` is accepted and validated, nothing is sent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScaleMode {
@@ -301,8 +301,8 @@ pub struct VncStartRequest {
     /// dialed by the TCP pump. Missing fields fall back to the logical endpoint.
     pub runtime_host: Option<String>,
     pub runtime_port: Option<u16>,
-    /// Absent/empty → RFB None security. Present → classic VNC-Auth
-    /// (≤ 8 bytes). Held in `Zeroizing`, never logged.
+    /// Absent/empty 鈫?RFB None security. Present 鈫?classic VNC-Auth
+    /// (鈮?8 bytes). Held in `Zeroizing`, never logged.
     pub password: Option<String>,
     /// Frontend scaling hint: fit (default) / stretch / actual.
     pub scale_mode: Option<String>,
@@ -338,7 +338,7 @@ pub struct VncInputRequest {
     pub event: VncInputEvent,
 }
 
-/// Classic VNC-Auth secret → DES key: the first ≤8 password bytes, each
+/// Classic VNC-Auth secret 鈫?DES key: the first 鈮? password bytes, each
 /// bit-reversed (RFC 6143 7.2.2). Spec-reference helper: upstream applies the
 /// same transform inside `AuthHelper` (not part of its public API), so this
 /// lives under `#[cfg(test)]` next to the known-vector pin.
@@ -355,7 +355,7 @@ pub fn vnc_auth_key(password: &str) -> [u8; 8] {
 /// VNC authentication cannot carry more than 8 bytes.
 pub fn validate_password(password: Option<&str>) -> Result<(), String> {
     if let Some(password) = password {
-        // `str::len` is byte length — exactly the classic-auth bound.
+        // `str::len` is byte length 鈥?exactly the classic-auth bound.
         if password.len() > MAX_PASSWORD_BYTES {
             return Err(format!(
                 "vnc/start: password must be at most {MAX_PASSWORD_BYTES} bytes (classic VNC authentication limit)"
@@ -365,19 +365,18 @@ pub fn validate_password(password: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Clipboard text guard: RFB cut-text is Latin-1 and bounded.
+/// Clipboard text guard: bound the payload; RFB cut-text carries raw bytes and
+/// modern servers (TightVNC/RealVNC on Windows, TigerVNC) negotiate UTF-8, so
+/// non-Latin-1 text is forwarded as UTF-8 instead of being dropped outright.
 pub fn validate_clipboard_text(text: &str) -> Result<(), String> {
     if text.len() > MAX_CLIPBOARD_BYTES {
         return Err("vnc/set-clipboard: text exceeds the 1 MiB clipboard limit".to_string());
-    }
-    if !text.chars().all(|ch| u32::from(ch) <= 0xff) {
-        return Err("vnc/set-clipboard: the VNC clipboard only carries Latin-1 text".to_string());
     }
     Ok(())
 }
 
 /// Backoff between reconnect attempts: 1s, 2s, then a flat 4s cap so a dead
-/// server cannot pin a worker on long sleeps. Pure — unit-tested.
+/// server cannot pin a worker on long sleeps. Pure 鈥?unit-tested.
 pub(crate) fn reconnect_delay(attempt: u32) -> Duration {
     Duration::from_secs(match attempt {
         0 | 1 => 1,
@@ -386,7 +385,7 @@ pub(crate) fn reconnect_delay(attempt: u32) -> Duration {
     })
 }
 
-// —— runtime ——
+// 鈥斺€?runtime 鈥斺€?
 
 enum VncCommand {
     Input(VncInputEvent),
@@ -425,7 +424,7 @@ pub struct VncSessionRuntime {
 }
 
 /// Why one protocol generation ended. `Superseded` means a newer generation
-/// took over (reconnect/close) — the worker must exit silently.
+/// took over (reconnect/close) 鈥?the worker must exit silently.
 enum GenerationEnd {
     Closed,
     Superseded,
@@ -456,7 +455,7 @@ impl VncSessionRuntime {
     }
 
     /// Registers the session row immediately (so the UI can bind its pane)
-    /// and spawns the pump, which publishes `connecting` → `connected` /
+    /// and spawns the pump, which publishes `connecting` 鈫?`connected` /
     /// `error` state events and framebuffer patches.
     pub async fn start(
         &self,
@@ -552,14 +551,14 @@ impl VncSessionRuntime {
             .map_err(|_| "VNC session is closed".to_string())
     }
 
-    /// Frontend scaling hint only — validated against the live session,
+    /// Frontend scaling hint only 鈥?validated against the live session,
     /// never forwarded to the remote desktop.
     pub async fn resize(&self, session_id: &str) -> Result<(), String> {
         // Touches the table so an unknown/dead session still errors.
         self.session(session_id).await.map(|_| ())
     }
 
-    /// Local clipboard → remote (`vnc/set-clipboard`).
+    /// Local clipboard 鈫?remote (`vnc/set-clipboard`).
     pub async fn set_clipboard(&self, session_id: &str, text: String) -> Result<(), String> {
         validate_clipboard_text(&text)?;
         let entry = self.session(session_id).await?;
@@ -713,14 +712,11 @@ fn classify_vnc_error(error: VncError) -> (String, bool) {
         VncError::IoError(error) => (format!("VNC connection failed: {error}"), true),
         VncError::ClientNotRunning => ("VNC client stopped".to_string(), false),
         // NoEncoding / WrongPixelFormat / WrongServerMessage / InvalidImageData
-        // / General — protocol violations never retry (the enum is
+        // / General 鈥?protocol violations never retry (the enum is
         // #[non_exhaustive], so future variants land here too).
         other => (other.to_string(), false),
     }
 }
-
-const TIGHT_UNSUPPORTED: &str = "The VNC server sent a Tight/JPEG update; this client supports \
-     Raw and ZRLE encodings only. Configure the server to allow Raw or ZRLE.";
 
 fn spawn_worker(
     session_id: String,
@@ -775,12 +771,12 @@ fn spawn_worker(
                         sessions.write().await.remove(&session_id);
                         return;
                     }
-                    // 活跃代际（完成过握手、进入过泵循环）的失败是"服务过一
-                    // 段时间再断"：退避梯子复位重新计步——attempt 贯穿 worker
-                    // 生命周期不复位的话，长会话经历几次偶发断线后就会因
-                    // 梯子耗尽被永久关闭。总预算由 reconnect_attempts 每次
-                    // 重新给满（与 rdp ReconnectBudget.on_active_generation
-                    // 的语义一致：attempt 复位、预算另计）。
+                    // 娲昏穬浠ｉ檯锛堝畬鎴愯繃鎻℃墜銆佽繘鍏ヨ繃娉靛惊鐜級鐨勫け璐ユ槸"鏈嶅姟杩囦竴
+                    // 娈垫椂闂村啀鏂?锛氶€€閬挎瀛愬浣嶉噸鏂拌姝モ€斺€攁ttempt 璐┛ worker
+                    // 鐢熷懡鍛ㄦ湡涓嶅浣嶇殑璇濓紝闀夸細璇濈粡鍘嗗嚑娆″伓鍙戞柇绾垮悗灏变細鍥?
+                    // 姊瓙鑰楀敖琚案涔呭叧闂€傛€婚绠楃敱 reconnect_attempts 姣忔
+                    // 閲嶆柊缁欐弧锛堜笌 rdp ReconnectBudget.on_active_generation
+                    // 鐨勮涔変竴鑷达細attempt 澶嶄綅銆侀绠楀彟璁★級銆?
                     if was_active {
                         attempt = 0;
                     }
@@ -792,7 +788,7 @@ fn spawn_worker(
     });
 }
 
-/// One dial → handshake → pump cycle. Returns why it ended; all teardown of
+/// One dial 鈫?handshake 鈫?pump cycle. Returns why it ended; all teardown of
 /// shared state happens in [`spawn_worker`].
 async fn run_generation(
     session_id: &str,
@@ -856,6 +852,7 @@ async fn run_generation(
         })
         .set_pixel_format(PixelFormat::rgba())
         .add_encoding(VncEncoding::DesktopSizePseudo)
+        .add_encoding(VncEncoding::Tight)
         .add_encoding(VncEncoding::Zrle)
         .add_encoding(VncEncoding::Raw)
         .allow_shared(true)
@@ -921,6 +918,8 @@ async fn run_generation(
     let mut refresh_due = false;
     let refresh_delay = tokio::time::sleep(REFRESH_ARM_DELAY);
     tokio::pin!(refresh_delay);
+    // 本轮尚未下发的补丁（跨 poll 周期累积，由 refresh_delay 统一 flush）。
+    let mut pending: Vec<(Rect, Vec<u8>)> = Vec::new();
     let end = loop {
         if entry.generation.load(Ordering::Acquire) != generation {
             break GenerationEnd::Superseded;
@@ -931,9 +930,15 @@ async fn run_generation(
                 loop {
                     match client.poll_event().await {
                         Ok(Some(event)) => {
-                            if let Some(end) =
-                                handle_vnc_event(session_id, entry, generation, event, emitter)
-                                    .await
+                            if let Some(end) = handle_vnc_event(
+                                session_id,
+                                entry,
+                                generation,
+                                event,
+                                &mut pending,
+                                emitter,
+                            )
+                            .await
                             {
                                 fatal = Some(end);
                                 break;
@@ -953,6 +958,12 @@ async fn run_generation(
                 if let Some(end) = fatal {
                     break end;
                 }
+                if let Some(end) =
+                    flush_tiles(session_id, entry, generation, &mut pending, emitter).await
+                {
+                    break end;
+                }
+                // 攒批：本轮收到的补丁在 refresh_delay 到点前先发送。
             }
             _ = &mut refresh_delay, if refresh_due => {
                 if let Err(error) = client.input(X11Event::Refresh).await {
@@ -1033,12 +1044,13 @@ async fn apply_input(
 }
 
 /// Applies one server event. `Some(end)` aborts the pump (readable protocol
-/// violations — the server sent something this client never advertised).
+/// violations 鈥?the server sent something this client never advertised).
 async fn handle_vnc_event(
     session_id: &str,
     entry: &Arc<VncSessionEntry>,
     generation: u64,
     event: VncEvent,
+    pending: &mut Vec<(Rect, Vec<u8>)>,
     emitter: &PluginEmitter,
 ) -> Option<GenerationEnd> {
     if entry.generation.load(Ordering::Acquire) != generation {
@@ -1060,59 +1072,13 @@ async fn handle_vnc_event(
             None
         }
         VncEvent::RawImage(rect, pixels) => {
-            let mut framebuffer = entry.framebuffer.lock().await;
-            if framebuffer.is_none() {
-                // Some servers stream rects before the DesktopSize pseudo
-                // encoding; derive the desktop from the rect like NyaTerm.
-                let width = u32::from(rect.x)
-                    .checked_add(u32::from(rect.width))
-                    .and_then(NonZeroU32::new)
-                    .and_then(|size| u16::try_from(size.get()).ok());
-                let height = u32::from(rect.y)
-                    .checked_add(u32::from(rect.height))
-                    .and_then(NonZeroU32::new)
-                    .and_then(|size| u16::try_from(size.get()).ok());
-                let (Some(width), Some(height)) = (width, height) else {
-                    return Some(GenerationEnd::Failed {
-                        error: "VNC rectangle bounds overflow".to_string(),
-                        retryable: false,
-                        was_active: true,
-                    });
-                };
-                match VncFramebuffer::new(width, height) {
-                    Ok(created) => *framebuffer = Some(created),
-                    Err(error) => {
-                        return Some(GenerationEnd::Failed {
-                            error,
-                            retryable: false,
-                            was_active: true,
-                        });
-                    }
-                }
-            }
-            let desktop = framebuffer.as_mut().expect("framebuffer initialized");
-            if let Err(error) = desktop.apply_rgba(rect, &pixels) {
-                return Some(GenerationEnd::Failed {
-                    error,
-                    retryable: false,
-                    was_active: true,
-                });
-            }
-            let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
-            match desktop.patch_bytes(sequence, rect, &pixels) {
-                Ok(frame) => publish_frame(session_id, &frame, emitter),
-                Err(error) => {
-                    return Some(GenerationEnd::Failed {
-                        error,
-                        retryable: false,
-                        was_active: true,
-                    });
-                }
-            }
+            // 瀹為獙 F锛氬厛鏀掔潃锛岀瓑杩欎竴鎵逛簨浠惰骞插噣鍐嶄竴娆℃€т笅鍙戯紝閬垮厤涓€甯ц鎷嗘垚
+            // 濂藉嚑娆＄粯鍒躲€佺湅璧锋潵浠庝笂寰€涓嬫帹杩涖€?
+            pending.push((rect, pixels));
             None
         }
         VncEvent::Text(text) => {
-            // Inbound clipboard; the same Latin-1/1MiB guard as outbound.
+            // Inbound clipboard; the same 1 MiB guard as outbound.
             if validate_clipboard_text(&text).is_ok() {
                 let _ = emitter.event(
                     "vnc/clipboard",
@@ -1121,11 +1087,24 @@ async fn handle_vnc_event(
             }
             None
         }
-        VncEvent::JpegImage(_, _) => Some(GenerationEnd::Failed {
-            error: TIGHT_UNSUPPORTED.to_string(),
-            retryable: false,
-            was_active: true,
-        }),
+        VncEvent::JpegImage(rect, data) => match decode_jpeg_tile(rect, &data) {
+            Ok(pixels) => {
+                Box::pin(handle_vnc_event(
+                    session_id,
+                    entry,
+                    generation,
+                    VncEvent::RawImage(rect, pixels),
+                    pending,
+                    emitter,
+                ))
+                .await
+            }
+            Err(error) => Some(GenerationEnd::Failed {
+                error,
+                retryable: false,
+                was_active: true,
+            }),
+        },
         VncEvent::Copy(_, _) | VncEvent::SetCursor(_, _) => Some(GenerationEnd::Failed {
             error: "The VNC server sent an encoding this client never requested".to_string(),
             retryable: false,
@@ -1140,6 +1119,91 @@ async fn handle_vnc_event(
         // bookkeeping) and future variants carry no pixels.
         _ => None,
     }
+}
+
+fn decode_jpeg_tile(rect: Rect, data: &[u8]) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
+        .map_err(|error| format!("VNC JPEG tile decode failed: {error}"))?;
+    if image.width() != u32::from(rect.width) || image.height() != u32::from(rect.height) {
+        return Err(format!(
+            "VNC JPEG tile size mismatch: got {}x{}, expected {}x{}",
+            image.width(),
+            image.height(),
+            rect.width,
+            rect.height
+        ));
+    }
+    Ok(image.to_rgba8().into_raw())
+}
+
+/// 瀹為獙 F锛氭妸杩欎竴鎵规敀涓嬫潵鐨?tile 涓€娆℃€у啓杩涘抚缂撳啿骞惰繛缁笅鍙戙€?
+/// 鍓嶇鎸?rAF 鍚堝抚缁樺埗锛屽悓涓€鎵规秷鎭細鍦ㄥ悓涓€甯ч噷鐢诲畬锛岃瑙変笂涓嶅啀浠庝笂寰€涓嬫帹杩涖€?
+async fn flush_tiles(
+    session_id: &str,
+    entry: &Arc<VncSessionEntry>,
+    generation: u64,
+    pending: &mut Vec<(Rect, Vec<u8>)>,
+    emitter: &PluginEmitter,
+) -> Option<GenerationEnd> {
+    if pending.is_empty() {
+        return None;
+    }
+    if entry.generation.load(Ordering::Acquire) != generation {
+        pending.clear();
+        return Some(GenerationEnd::Superseded);
+    }
+    let mut framebuffer = entry.framebuffer.lock().await;
+    for (rect, pixels) in pending.drain(..) {
+        if framebuffer.is_none() {
+            // Some servers stream rects before the DesktopSize pseudo encoding;
+            // derive the desktop from the rect like NyaTerm.
+            let width = u32::from(rect.x)
+                .checked_add(u32::from(rect.width))
+                .and_then(NonZeroU32::new)
+                .and_then(|size| u16::try_from(size.get()).ok());
+            let height = u32::from(rect.y)
+                .checked_add(u32::from(rect.height))
+                .and_then(NonZeroU32::new)
+                .and_then(|size| u16::try_from(size.get()).ok());
+            let (Some(width), Some(height)) = (width, height) else {
+                return Some(GenerationEnd::Failed {
+                    error: "VNC rectangle bounds overflow".to_string(),
+                    retryable: false,
+                    was_active: true,
+                });
+            };
+            match VncFramebuffer::new(width, height) {
+                Ok(created) => *framebuffer = Some(created),
+                Err(error) => {
+                    return Some(GenerationEnd::Failed {
+                        error,
+                        retryable: false,
+                        was_active: true,
+                    });
+                }
+            }
+        }
+        let desktop = framebuffer.as_mut().expect("framebuffer initialized");
+        if let Err(error) = desktop.apply_rgba(rect, &pixels) {
+            return Some(GenerationEnd::Failed {
+                error,
+                retryable: false,
+                was_active: true,
+            });
+        }
+        let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
+        match desktop.patch_bytes(sequence, rect, &pixels) {
+            Ok(frame) => publish_frame(session_id, &frame, emitter),
+            Err(error) => {
+                return Some(GenerationEnd::Failed {
+                    error,
+                    retryable: false,
+                    was_active: true,
+                });
+            }
+        }
+    }
+    None
 }
 
 fn publish_frame(session_id: &str, frame: &[u8], emitter: &PluginEmitter) {
@@ -1175,7 +1239,7 @@ mod tests {
         )
     }
 
-    // —— patch 头编码/解码往返 ————————————————————————————————————
+    // 鈥斺€?patch 澶寸紪鐮?瑙ｇ爜寰€杩?鈥斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€?
 
     #[test]
     fn patch_header_roundtrips() {
@@ -1203,14 +1267,14 @@ mod tests {
         assert_eq!(&frame[FRAME_HEADER_BYTES..], &payload);
     }
 
-    // —— 跨端 golden 向量 ————————————————————————————————————————
-    // 与 frontend/src/lib/vncFrame.spec.ts 的 "cross-side golden vector"
-    // 断言硬编码同一 hex 字符串（互指）；字段序/字节序/stride 语义的权威
-    // 契约见 docs/PROTOCOL.zh-CN.md「VNC 帧补丁」小节。
+    // 鈥斺€?璺ㄧ golden 鍚戦噺 鈥斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€?
+    // 涓?frontend/src/lib/vncFrame.spec.ts 鐨?"cross-side golden vector"
+    // 鏂█纭紪鐮佸悓涓€ hex 瀛楃涓诧紙浜掓寚锛夛紱瀛楁搴?瀛楄妭搴?stride 璇箟鐨勬潈濞?
+    // 濂戠害瑙?docs/PROTOCOL.zh-CN.md銆孷NC 甯цˉ涓併€嶅皬鑺傘€?
     //
-    // 向量定义：desktop 8x8，patch 位于 (2,1) 尺寸 4x4，sequence=42，
-    // stride=16（紧排 width*4），payload = 0x00..=0x3F（64 字节 RGBA）。
-    // 改协议字段序/字节序时两侧同步更新，任何一侧单独变化即测试失败。
+    // 鍚戦噺瀹氫箟锛歞esktop 8x8锛宲atch 浣嶄簬 (2,1) 灏哄 4x4锛宻equence=42锛?
+    // stride=16锛堢揣鎺?width*4锛夛紝payload = 0x00..=0x3F锛?4 瀛楄妭 RGBA锛夈€?
+    // 鏀瑰崗璁瓧娈靛簭/瀛楄妭搴忔椂涓や晶鍚屾鏇存柊锛屼换浣曚竴渚у崟鐙彉鍖栧嵆娴嬭瘯澶辫触銆?
 
     const GOLDEN_FRAME_HEX: &str = "2a00000000000000080000000800000002000000010000000400000004000000100000000200000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
 
@@ -1238,9 +1302,9 @@ mod tests {
         })
         .expect("golden frame should encode");
         assert_eq!(frame.len(), FRAME_HEADER_BYTES + 64);
-        // 逐字节等于跨端 hex：字段序或字节序任一侧漂移立即失败。
+        // 閫愬瓧鑺傜瓑浜庤法绔?hex锛氬瓧娈靛簭鎴栧瓧鑺傚簭浠讳竴渚ф紓绉荤珛鍗冲け璐ャ€?
         assert_eq!(frame, hex_decode(GOLDEN_FRAME_HEX));
-        // 字段级复读，把契约钉在断言上（sequence u64 LE + 9 个 u32 LE）。
+        // 瀛楁绾у璇伙紝鎶婂绾﹂拤鍦ㄦ柇瑷€涓婏紙sequence u64 LE + 9 涓?u32 LE锛夈€?
         let (sequence, dw, dh, x, y, w, h, stride, format, payload_len) =
             decode_patch_header(&frame);
         assert_eq!(sequence, 42);
@@ -1264,20 +1328,20 @@ mod tests {
             stride,
             payload: &payload,
         };
-        // 矩形出界
+        // 鐭╁舰鍑虹晫
         let error = encode_frame_patch(&base(10, 0, 1, 1, 4)).unwrap_err();
         assert!(error.contains("exceeds framebuffer bounds"), "{error}");
-        // 零尺寸
+        // 闆跺昂瀵?
         assert!(encode_frame_patch(&base(0, 0, 0, 1, 4)).is_err());
-        // stride 过小
+        // stride 杩囧皬
         let error = encode_frame_patch(&base(0, 0, 2, 1, 4)).unwrap_err();
         assert!(error.contains("stride is too small"), "{error}");
-        // payload 不足
+        // payload 涓嶈冻
         let error = encode_frame_patch(&base(0, 0, 1, 2, 4)).unwrap_err();
         assert!(error.contains("payload is too small"), "{error}");
-        // 坐标回绕
+        // 鍧愭爣鍥炵粫
         assert!(encode_frame_patch(&base(u32::MAX, 0, 1, 1, 4)).is_err());
-        // 空桌面
+        // 绌烘闈?
         let error = encode_frame_patch(&FramePatch {
             sequence: 1,
             desktop_width: 0,
@@ -1293,15 +1357,15 @@ mod tests {
         assert!(error.contains("non-zero"), "{error}");
     }
 
-    // —— 有界保护 ————————————————————————————————————————————————
+    // 鈥斺€?鏈夌晫淇濇姢 鈥斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€?
 
     #[test]
     fn framebuffer_is_bounded() {
-        // 超宽/超高被拒（契约上限 3840x2160）。
+        // 瓒呭/瓒呴珮琚嫆锛堝绾︿笂闄?3840x2160锛夈€?
         assert!(VncFramebuffer::new(3841, 1).is_err());
         assert!(VncFramebuffer::new(1, 2161).is_err());
         assert!(VncFramebuffer::new(0, 10).is_err());
-        // 恰好在上限内可建（33MB 上界 < 64MB patch 线制上限）。
+        // 鎭板ソ鍦ㄤ笂闄愬唴鍙缓锛?3MB 涓婄晫 < 64MB patch 绾垮埗涓婇檺锛夈€?
         assert!(VncFramebuffer::new(MAX_FRAMEBUFFER_WIDTH, MAX_FRAMEBUFFER_HEIGHT).is_ok());
     }
 
@@ -1319,7 +1383,7 @@ mod tests {
                 &[1, 2, 3, 255],
             )
             .expect("patch");
-        // 出界与长度不符都被拒。
+        // 鍑虹晫涓庨暱搴︿笉绗﹂兘琚嫆銆?
         assert!(framebuffer
             .apply_rgba(
                 Rect {
@@ -1349,14 +1413,14 @@ mod tests {
             (dw, dh, x, y, w, h, stride, payload_len),
             (2, 2, 0, 0, 2, 2, 8, 16)
         );
-        // 全帧 payload 即整幅 RGBA，补丁后的像素在 (1,1)。
+        // 鍏ㄥ抚 payload 鍗虫暣骞?RGBA锛岃ˉ涓佸悗鐨勫儚绱犲湪 (1,1)銆?
         assert_eq!(
             &frame[FRAME_HEADER_BYTES + 12..FRAME_HEADER_BYTES + 16],
             &[1, 2, 3, 255]
         );
     }
 
-    // —— 认证参数校验（classic VNC-Auth ≤8 字节）——————————————————
+    // 鈥斺€?璁よ瘉鍙傛暟鏍￠獙锛坈lassic VNC-Auth 鈮? 瀛楄妭锛夆€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€?
 
     #[test]
     fn password_validation_enforces_eight_bytes() {
@@ -1365,13 +1429,13 @@ mod tests {
         assert!(validate_password(Some("12345678")).is_ok());
         let error = validate_password(Some("123456789")).unwrap_err();
         assert!(error.contains("at most 8 bytes"), "{error}");
-        // 按字节计：4 个多字节字符 = 12 字节 > 8。
-        assert!(validate_password(Some("密码密码")).is_err());
+        // 鎸夊瓧鑺傝锛? 涓瀛楄妭瀛楃 = 12 瀛楄妭 > 8銆?
+        assert!(validate_password(Some("瀵嗙爜瀵嗙爜")).is_err());
     }
 
     #[test]
     fn vnc_auth_key_bit_reverses_the_first_eight_bytes() {
-        // RFC 6143 7.2.2：每个字节位反转，空位补 0。独立参照 u8::reverse_bits。
+        // RFC 6143 7.2.2锛氭瘡涓瓧鑺備綅鍙嶈浆锛岀┖浣嶈ˉ 0銆傜嫭绔嬪弬鐓?u8::reverse_bits銆?
         let key = vnc_auth_key("password");
         let expected: [u8; 8] = "password"
             .as_bytes()
@@ -1381,7 +1445,7 @@ mod tests {
             .try_into()
             .unwrap();
         assert_eq!(key, expected);
-        // 已知向量：'p' = 0x70 → 0x0E；短密码尾部补零；超长截断到 8。
+        // 宸茬煡鍚戦噺锛?p' = 0x70 鈫?0x0E锛涚煭瀵嗙爜灏鹃儴琛ラ浂锛涜秴闀挎埅鏂埌 8銆?
         assert_eq!(key[0], 0x0e);
         assert_eq!(vnc_auth_key("a")[0], 0x86);
         assert_eq!(vnc_auth_key("a"), [0x86, 0, 0, 0, 0, 0, 0, 0]);
@@ -1391,7 +1455,7 @@ mod tests {
         );
     }
 
-    // —— 输入/剪贴板/缩放参数 ————————————————————————————————————
+    // 鈥斺€?杈撳叆/鍓创鏉?缂╂斁鍙傛暟 鈥斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€斺€?
 
     #[test]
     fn input_events_decode_from_the_documented_shapes() {
@@ -1420,10 +1484,10 @@ mod tests {
         let release: VncInputEvent =
             serde_json::from_value(json!({ "kind": "release-all" })).expect("release-all");
         assert!(matches!(release, VncInputEvent::ReleaseAll));
-        // 未知 kind / 缺 keysym 必须拒绝（不静默降级）。
+        // 鏈煡 kind / 缂?keysym 蹇呴』鎷掔粷锛堜笉闈欓粯闄嶇骇锛夈€?
         assert!(serde_json::from_value::<VncInputEvent>(json!({ "kind": "drag" })).is_err());
         assert!(serde_json::from_value::<VncInputEvent>(json!({ "kind": "key" })).is_err());
-        // 完整请求（camelCase sessionId + flatten event）。
+        // 瀹屾暣璇锋眰锛坈amelCase sessionId + flatten event锛夈€?
         let request: VncInputRequest = serde_json::from_value(json!({
             "sessionId": "s1", "kind": "pointer", "x": 1, "y": 2, "buttonMask": 4
         }))
@@ -1432,11 +1496,11 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_guard_rejects_oversized_and_non_latin1() {
+    fn clipboard_guard_rejects_oversized_text() {
         assert!(validate_clipboard_text("hello").is_ok());
         assert!(validate_clipboard_text("").is_ok());
-        let error = validate_clipboard_text("中文").unwrap_err();
-        assert!(error.contains("Latin-1"), "{error}");
+        // Non-Latin-1 text is forwarded as UTF-8 bytes instead of being dropped.
+        assert!(validate_clipboard_text("涓枃").is_ok());
         let error = validate_clipboard_text(&"x".repeat(1024 * 1024 + 1)).unwrap_err();
         assert!(error.contains("1 MiB"), "{error}");
     }

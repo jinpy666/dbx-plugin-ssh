@@ -355,6 +355,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
    z-index 高于 VncSurface 画布（terminal-overlay 同层）。 */
 .vnc-sas-button { position: absolute; top: 10px; right: 10px; z-index: 2; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--border); background: color-mix(in srgb, var(--background) 88%, transparent); color: var(--foreground); font-size: 12px; cursor: pointer; opacity: 0.85; }
 .vnc-sas-button:hover { opacity: 1; border-color: var(--primary); }
+.vnc-scale-switch { position: absolute; top: 10px; right: 150px; z-index: 2; display: flex; gap: 2px; padding: 2px; border-radius: 8px; border: 1px solid var(--border); background: color-mix(in srgb, var(--background) 88%, transparent); }
+.vnc-scale-switch button { padding: 3px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--foreground); font-size: 12px; cursor: pointer; opacity: 0.75; }
+.vnc-scale-switch button:hover { opacity: 1; }
+.vnc-scale-switch button.active { background: color-mix(in srgb, var(--primary) 22%, transparent); opacity: 1; }
 .terminal-pane .drop-overlay strong { max-width: 92%; font-size: 13px; word-break: break-all; }
 /* 内边距必须挂在 .xterm（terminal.element）而非宿主 div 上：FitAddon 只读
    element 自身的 padding 做行数扣减，挂在宿主上会多算一行、底行溢出可视区
@@ -822,8 +826,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   .panes:not(.panes--horizontal) .divider { width: 100%; height: 1px; flex-basis: 1px; cursor: row-resize; }
   /* 纵向布局把手命中区向下/上扩展。 */
   .divider::after { top: -3px; bottom: -3px; left: 0; right: 0; }
-  /* SFTP 面板收起时终端占满整个工作台（含窄屏纵向布局）。 */
-  .panes--solo .terminal-pane { height: 100%; }
+  /* SFTP 面板收起时终端占满整个工作台（含窄屏纵向布局）。
+     窄屏列规则 `.panes:not(.panes--horizontal) .terminal-pane` 特异性 (0,3,1)，
+     裸 .panes--solo (0,2,1) 输给它，solo 终端仍被钉在 var(--pane-split, 52%)
+     回落值上，下半整片空白（issue #262）。叠加 .panes--solo 提到 (0,4,1)。 */
+  .panes:not(.panes--horizontal).panes--solo .terminal-pane { height: 100%; }
 }
 
 @media (max-width: 640px) {
@@ -1364,3 +1371,28 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .wb-md-code code { font-family: var(--terminal-font-family); font-size: 12px; }
 .wb-md-code-inline { background: var(--muted); border-radius: 4px; padding: 1px 5px; font-family: var(--terminal-font-family); font-size: 12px; }
 .wb-md-render-failed { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* VNC/RDP 画布独占工作台：强制 solo 时终端占满，避免分栏比例（含窄屏 52%
+   回落值）把画布压在上半部分或半屏宽。 */
+.panes--solo .terminal-pane {
+  width: 100% !important;
+  height: 100% !important;
+  flex-basis: auto !important;
+}
+
+/* VNC/RDP 独占：媒体画布必须铺满整个工作台，分栏面板与分隔条一律让位。
+   媒体会话自己带 panes--media，不再等 panes--solo 被加上（SFTP 面板开合
+   会改变 solo 的取值），规则直接命中，避免画布被 --pane-split 压到上半屏。 */
+.panes--media {
+  flex-direction: row !important;
+}
+.panes--media .terminal-pane {
+  width: 100% !important;
+  height: 100% !important;
+  flex: 1 1 auto !important;
+  flex-basis: auto !important;
+}
+.panes--media .sftp-pane,
+.panes--media .divider {
+  display: none !important;
+}
