@@ -822,8 +822,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   .panes:not(.panes--horizontal) .divider { width: 100%; height: 1px; flex-basis: 1px; cursor: row-resize; }
   /* 纵向布局把手命中区向下/上扩展。 */
   .divider::after { top: -3px; bottom: -3px; left: 0; right: 0; }
-  /* SFTP 面板收起时终端占满整个工作台（含窄屏纵向布局）。 */
-  .panes--solo .terminal-pane { height: 100%; }
+  /* SFTP 面板收起时终端占满整个工作台（含窄屏纵向布局）。
+     特异性必须压过上面 (0,3,1) 的断点列规则——:not() 的类计入特异性，
+     裸 .panes--solo (0,2,1) 输给它，solo 终端仍被钉在 var(--pane-split, 52%)
+     回落值上，下半整片空白（issue #262）。叠加 .panes--solo 提到 (0,4,1)。 */
+  .panes:not(.panes--horizontal).panes--solo .terminal-pane { height: 100%; }
 }
 
 @media (max-width: 640px) {
