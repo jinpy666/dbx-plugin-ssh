@@ -133,6 +133,7 @@ import { createConnectLog, latestConnectProgress } from "./lib/connectLog";
 import { pickModalFocusTarget } from "./lib/modalFocus";
 import { buildPasteConfirmation, type PasteConfirmation } from "./lib/dangerousCommands";
 import { readClipboardText, writeClipboardText, type ClipboardDeps } from "./lib/clipboardBridge";
+import { rememberOutboundVncClipboard } from "./lib/vncClipboardEcho";
 import { friendlySftpError } from "./lib/sftpErrors";
 import { paneDirectionClass, paneSplitCssVar, resolvePaneDirection, sanitizePaneDirection, terminalFlexBasis, type PaneDirectionPref } from "./lib/paneLayout";
 import { isCountdownActive } from "./lib/recordingCountdown";
@@ -4988,6 +4989,7 @@ async function sendVncCtrlAltDel() {
 function sendVncClipboard(text: string) {
   const sessionId = vncSession.value?.sessionId;
   if (!sessionId || !text) return;
+  rememberOutboundVncClipboard(text);
   void window.dbxPlugin.invoke("vnc/set-clipboard", { sessionId, text }).catch(() => undefined);
   showNotice(t("vnc.clipboardSent"));
 }
@@ -9115,6 +9117,14 @@ function flagHintsSource(command: string): string {
           <button v-if="!localUiMode" class="icon-button icon-cyan" :class="{ 'is-active': sftpPaneOpen }" :title="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-label="sftpPaneOpen ? t('sftpPane.close') : t('sftpPane.open')" :aria-pressed="sftpPaneOpen" :disabled="panelSurface" @click="toggleSftpPane"><FolderOpen v-if="!sftpPaneOpen" /><PanelRightClose v-else /></button>
           <button class="icon-button" :title="t('terminalFontDecrease')" :aria-label="t('terminalFontDecrease')" @click="adjustTerminalZoom(-1)"><span class="font-step-label" aria-hidden="true">A−</span></button>
           <button class="icon-button" :title="t('terminalFontIncrease')" :aria-label="t('terminalFontIncrease')" @click="adjustTerminalZoom(1)"><span class="font-step-label" aria-hidden="true">A+</span></button>
+        </template>
+        <!-- —— VNC 工具组：缩放三档，与 RDP 组同款图标按钮，避免出现第二套样式。 -->
+        <template v-if="isVncMode">
+          <div class="rdp-scale-group" role="group" :aria-label="t('vnc.scaleMode')">
+            <button class="icon-button rdp-scale-button" :class="{ 'is-active': vncScaleMode === 'fit' }" :title="t('vnc.scaleMode.fit')" :aria-label="t('vnc.scaleMode.fit')" :aria-pressed="vncScaleMode === 'fit'" @click="vncScaleMode = 'fit'"><span class="font-step-label" aria-hidden="true">{{ t("vnc.scaleMode.fit") }}</span></button>
+            <button class="icon-button rdp-scale-button" :class="{ 'is-active': vncScaleMode === 'actual' }" :title="t('vnc.scaleMode.actual')" :aria-label="t('vnc.scaleMode.actual')" :aria-pressed="vncScaleMode === 'actual'" @click="vncScaleMode = 'actual'"><span class="font-step-label" aria-hidden="true">1:1</span></button>
+            <button class="icon-button rdp-scale-button" :class="{ 'is-active': vncScaleMode === 'stretch' }" :title="t('vnc.scaleMode.stretch')" :aria-label="t('vnc.scaleMode.stretch')" :aria-pressed="vncScaleMode === 'stretch'" @click="vncScaleMode = 'stretch'"><span class="font-step-label" aria-hidden="true">{{ t("vnc.scaleMode.stretch") }}</span></button>
+          </div>
         </template>
         <!-- —— RDP 独立工具组（isRdpMode 会话激活期）：缩放三档 + 桌面分辨率 +
              大文本粘贴 + 断开。与 SSH 组互斥、各判一次门控；SSH 工具整类隐藏后，
