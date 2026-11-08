@@ -13,6 +13,8 @@ import {
   type RdpSessionStateView,
 } from "../rdp/rdpFrame";
 import type { ConnectLog } from "../lib/connectLog";
+import { copyTextToClipboard } from "../lib/clipboardWrite";
+import { isInboundVncClipboardEcho } from "../lib/vncClipboardEcho";
 
 /** RDP 证书确认弹窗数据（App.vue 局部接口 RdpCertPrompt 按消费字段收敛）。 */
 interface RdpCertPromptView {
@@ -120,6 +122,8 @@ export function usePluginEvents(options: {
 
   // 远端 → 本地剪贴板回写的节流戳（8s 内只提示一次）。
   let vncClipboardNoticeAt = 0;
+/** 最近一次从远端同步过来的剪贴板内容，用于去重（选中文字会反复触发）。 */
+let vncClipboardLastReceived = "";
   let rdpClipboardNoticeAt = 0;
 
   // 完整文本（含分片拼接结果）回写本地剪贴板 + 节流提示（与 VNC 同款）。
@@ -253,17 +257,12 @@ export function usePluginEvents(options: {
     }
     if (event.method === "vnc/clipboard" && event.params.sessionId === vncSession.value?.sessionId) {
       const text = typeof event.params.text === "string" ? event.params.text : "";
-      if (text) {
-        void navigator.clipboard
-          ?.writeText(text)
-          .then(() => {
-            // 远端复制频繁时节流提示（8s 内只提示一次）。
-            if (Date.now() - vncClipboardNoticeAt > 8000) {
-              vncClipboardNoticeAt = Date.now();
-              showNotice(t("vnc.clipboardReceived"));
-            }
-          })
-          .catch(() => undefined);
+      // 服务端把刚发过去的剪贴板回送一次时跳过，否则会把用户随后复制的
+      // 新内容盖掉（表现为「第一次粘贴之后，再复制就不生效」）。
+      // 远端选中文字就会触发 ServerCutText，这里只静默同步，不弹提示。
+      if (text && text !== vncClipboardLastReceived && !isInboundVncClipboardEcho(text)) {
+        vncClipboardLastReceived = text;
+        void copyTextToClipboard(text);
       }
       return;
     }
