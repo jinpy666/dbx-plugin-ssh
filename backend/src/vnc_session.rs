@@ -28,7 +28,7 @@
 //!   still re-validates stride/rect/payload on every frame;
 //! - classic VNC-Auth passwords are rejected above 8 bytes at `vnc/start`
 //!   (the protocol truncates silently otherwise);
-//! - clipboard text is bounded to 1 MiB in either direction (raw bytes).
+//! - clipboard text is UTF-8 and ≤ 1 MiB in both directions.
 //!
 //! Reconnect: every worker run captures a `generation` counter; `vnc/
 //! reconnect` (or the automatic retry loop) bumps it, the superseded worker
@@ -43,7 +43,6 @@
 //! passwords, challenge responses or clipboard text.
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,11 +65,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Output-event poll cadence: the engine queues at most a couple of decoded
 /// events, so the pump must drain frequently (NyaTerm uses the same 8ms).
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(8);
-/// Incremental framebuffer-update request cadence after observed traffic.
-const UPDATE_REQUEST_INTERVAL: Duration = Duration::from_millis(16);
-/// Placeholder delay that keeps the pinned `Refresh` timer dormant until the
-/// first decoded event re-arms it.
-const REFRESH_ARM_DELAY: Duration = Duration::from_secs(86_400);
 /// Classic VNC-Auth passwords are exactly the first 8 bytes (bit-reversed
 /// into the DES key); longer secrets truncate silently, so reject up front.
 const MAX_PASSWORD_BYTES: usize = 8;
@@ -79,7 +73,7 @@ const MAX_PASSWORD_BYTES: usize = 8;
 pub(crate) const MAX_FRAMEBUFFER_WIDTH: u16 = 3840;
 pub(crate) const MAX_FRAMEBUFFER_HEIGHT: u16 = 2160;
 const BYTES_PER_PIXEL: usize = 4;
-/// Clipboard bounds (1 MiB payload; bytes are forwarded as received).
+/// Clipboard bounds (servers may speak `ExtendedClipboard` UTF-8).
 const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 /// Bounded backpressure for input/clipboard commands.
 const COMMAND_CHANNEL_CAPACITY: usize = 256;
@@ -91,7 +85,7 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 // documented in docs/PROTOCOL.zh-CN.md § VNC 帧补丁) ——
 
 /// Wire format: `44-byte header | payload`, every field little-endian.
-// documented in docs/PROTOCOL.zh-CN.md § VNC 帧补丁) ——
+/// Documented in docs/PROTOCOL.zh-CN.md § VNC 帧补丁; the cross-side golden
 /// vector is pinned in `tests::patch_frame_golden_vector_matches_frontend`
 /// and mirrored in frontend/src/lib/vncFrame.spec.ts (same hex).
 pub(crate) const FRAME_HEADER_BYTES: usize = 44;
@@ -365,9 +359,7 @@ pub fn validate_password(password: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Clipboard text guard: bound the payload; RFB cut-text carries raw bytes and
-/// modern servers (TightVNC/RealVNC on Windows, TigerVNC) negotiate UTF-8, so
-/// non-Latin-1 text is forwarded as UTF-8 instead of being dropped outright.
+/// Clipboard text guard: bounded size; the text itself is UTF-8.
 pub fn validate_clipboard_text(text: &str) -> Result<(), String> {
     if text.len() > MAX_CLIPBOARD_BYTES {
         return Err("vnc/set-clipboard: text exceeds the 1 MiB clipboard limit".to_string());
@@ -771,10 +763,10 @@ fn spawn_worker(
                         sessions.write().await.remove(&session_id);
                         return;
                     }
-                    // A failure after the handshake (an "active" generation) means the
-                    // link worked for a while and then dropped: the backoff ladder
-                    // restarts from attempt 1, while the overall budget is refreshed
-                    // on every attempt. Otherwise a long session would exhaust the
+                    // 活跃代际（完成过握手、进入过泵循环）的失败是"服务过一
+                    // 段时间再断"：退避梯子复位重新计步——attempt 贯穿 worker
+                    // 生命周期不复位的话，长会话经历几次偶发断线后就会因
+                    // 梯子耗尽被永久关闭。总预算由 reconnect_attempts 每次
                     // 重新给满（与 rdp ReconnectBudget.on_active_generation
                     // 的语义一致：attempt 复位、预算另计）。
                     if was_active {
@@ -916,9 +908,6 @@ async fn run_generation(
     let mut poll = tokio::time::interval(EVENT_POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut refresh_due = false;
-    let refresh_delay = tokio::time::sleep(REFRESH_ARM_DELAY);
-    tokio::pin!(refresh_delay);
-    // Patches produced during this poll round, flushed by the refresh timer.
     let mut pending: Vec<(Rect, Vec<u8>)> = Vec::new();
     let end = loop {
         if entry.generation.load(Ordering::Acquire) != generation {
@@ -944,9 +933,6 @@ async fn run_generation(
                                 break;
                             }
                             refresh_due = true;
-                            refresh_delay
-                                .as_mut()
-                                .reset(tokio::time::Instant::now() + UPDATE_REQUEST_INTERVAL);
                         }
                         Ok(None) => break,
                         Err(error) => {
@@ -958,18 +944,21 @@ async fn run_generation(
                 if let Some(end) = fatal {
                     break end;
                 }
-                if let Some(end) =
-                    flush_tiles(session_id, entry, generation, &mut pending, emitter).await
-                {
-                    break end;
+                // #276 实验 A1：事件拉干后立即请求下一轮增量，不再等 16ms
+                // 防抖——单在途请求下每轮固定 +16ms 是画面「一条条推进」
+                // 节奏的主导项之一（TigerVNC 同为流式连续请求）。Refresh
+                // 是增量语义（vnc-rs event.rs），无全量重刷风暴风险。
+                if refresh_due {
+                    if let Some(end) =
+                        flush_tiles(session_id, entry, generation, &mut pending, emitter).await
+                    {
+                        break end;
+                    }
+                    if let Err(error) = client.input(X11Event::Refresh).await {
+                        break GenerationEnd::failed(error);
+                    }
+                    refresh_due = false;
                 }
-                // Batch: send what this round collected when the refresh timer fires.
-            }
-            _ = &mut refresh_delay, if refresh_due => {
-                if let Err(error) = client.input(X11Event::Refresh).await {
-                    break GenerationEnd::failed(error);
-                }
-                refresh_due = false;
             }
             command = cmd_rx.recv() => match command {
                 Some(VncCommand::Input(input)) => {
@@ -1043,6 +1032,72 @@ async fn apply_input(
     }
 }
 
+/// Publishes the tiles collected during one drain and keeps their order.
+async fn flush_tiles(
+    session_id: &str,
+    entry: &Arc<VncSessionEntry>,
+    generation: u64,
+    pending: &mut Vec<(Rect, Vec<u8>)>,
+    emitter: &PluginEmitter,
+) -> Option<GenerationEnd> {
+    if pending.is_empty() {
+        return None;
+    }
+    if entry.generation.load(Ordering::Acquire) != generation {
+        return Some(GenerationEnd::Superseded);
+    }
+    let tiles = std::mem::take(pending);
+    let mut framebuffer = entry.framebuffer.lock().await;
+    let Some(desktop) = framebuffer.as_mut() else {
+        return Some(GenerationEnd::Failed {
+            error: "vnc: framebuffer is not initialized".to_string(),
+            retryable: false,
+            was_active: true,
+        });
+    };
+    for (rect, pixels) in tiles {
+        if let Err(error) = desktop.apply_rgba(rect, &pixels) {
+            return Some(GenerationEnd::Failed {
+                error,
+                retryable: false,
+                was_active: true,
+            });
+        }
+        let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
+        match desktop.patch_bytes(sequence, rect, &pixels) {
+            Ok(frame) => publish_frame(session_id, &frame, emitter),
+            Err(error) => {
+                return Some(GenerationEnd::Failed {
+                    error,
+                    retryable: false,
+                    was_active: true,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Decodes one Tight/JPEG rectangle into tightly packed RGBA pixels.
+fn decode_jpeg_tile(rect: Rect, data: &[u8]) -> Result<Vec<u8>, String> {
+    let width = usize::from(rect.width);
+    let height = usize::from(rect.height);
+    if width == 0 || height == 0 {
+        return Err("vnc: JPEG tile has an empty rect".to_string());
+    }
+    let image = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
+        .map_err(|error| format!("vnc: JPEG tile decode failed: {error}"))?;
+    let rgba = image.to_rgba8();
+    if rgba.width() as usize != width || rgba.height() as usize != height {
+        return Err(format!(
+            "vnc: JPEG tile is {}x{}, expected {width}x{height}",
+            rgba.width(),
+            rgba.height()
+        ));
+    }
+    Ok(rgba.into_raw())
+}
+
 /// Applies one server event. `Some(end)` aborts the pump (readable protocol
 /// violations — the server sent something this client never advertised).
 async fn handle_vnc_event(
@@ -1072,13 +1127,11 @@ async fn handle_vnc_event(
             None
         }
         VncEvent::RawImage(rect, pixels) => {
-            // Buffer the tile instead of publishing it immediately: a full redraw
-            // arrives as many small rects, and sending each one separately makes the
             pending.push((rect, pixels));
             None
         }
         VncEvent::Text(text) => {
-            // Inbound clipboard; the same 1 MiB guard as outbound.
+            // Inbound clipboard; the same size guard as outbound.
             if validate_clipboard_text(&text).is_ok() {
                 let _ = emitter.event(
                     "vnc/clipboard",
@@ -1119,91 +1172,6 @@ async fn handle_vnc_event(
         // bookkeeping) and future variants carry no pixels.
         _ => None,
     }
-}
-
-fn decode_jpeg_tile(rect: Rect, data: &[u8]) -> Result<Vec<u8>, String> {
-    let image = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
-        .map_err(|error| format!("VNC JPEG tile decode failed: {error}"))?;
-    if image.width() != u32::from(rect.width) || image.height() != u32::from(rect.height) {
-        return Err(format!(
-            "VNC JPEG tile size mismatch: got {}x{}, expected {}x{}",
-            image.width(),
-            image.height(),
-            rect.width,
-            rect.height
-        ));
-    }
-    Ok(image.to_rgba8().into_raw())
-}
-
-/// Flush buffered tiles: apply them to the framebuffer and publish one patch per
-/// tile, so a redraw that arrived in pieces reaches the canvas in one rAF frame.
-async fn flush_tiles(
-    session_id: &str,
-    entry: &Arc<VncSessionEntry>,
-    generation: u64,
-    pending: &mut Vec<(Rect, Vec<u8>)>,
-    emitter: &PluginEmitter,
-) -> Option<GenerationEnd> {
-    if pending.is_empty() {
-        return None;
-    }
-    if entry.generation.load(Ordering::Acquire) != generation {
-        pending.clear();
-        return Some(GenerationEnd::Superseded);
-    }
-    let mut framebuffer = entry.framebuffer.lock().await;
-    for (rect, pixels) in pending.drain(..) {
-        if framebuffer.is_none() {
-            // Some servers stream rects before the DesktopSize pseudo encoding;
-            // derive the desktop from the rect like NyaTerm.
-            let width = u32::from(rect.x)
-                .checked_add(u32::from(rect.width))
-                .and_then(NonZeroU32::new)
-                .and_then(|size| u16::try_from(size.get()).ok());
-            let height = u32::from(rect.y)
-                .checked_add(u32::from(rect.height))
-                .and_then(NonZeroU32::new)
-                .and_then(|size| u16::try_from(size.get()).ok());
-            let (Some(width), Some(height)) = (width, height) else {
-                return Some(GenerationEnd::Failed {
-                    error: "VNC rectangle bounds overflow".to_string(),
-                    retryable: false,
-                    was_active: true,
-                });
-            };
-            match VncFramebuffer::new(width, height) {
-                Ok(created) => *framebuffer = Some(created),
-                Err(error) => {
-                    return Some(GenerationEnd::Failed {
-                        error,
-                        retryable: false,
-                        was_active: true,
-                    });
-                }
-            }
-        }
-        let desktop = framebuffer.as_mut().expect("framebuffer initialized");
-        if let Err(error) = desktop.apply_rgba(rect, &pixels) {
-            return Some(GenerationEnd::Failed {
-                error,
-                retryable: false,
-                was_active: true,
-            });
-        }
-        let sequence = entry.frame_sequence.fetch_add(1, Ordering::AcqRel);
-        match desktop.patch_bytes(sequence, rect, &pixels) {
-            Ok(frame) => publish_frame(session_id, &frame, emitter),
-            Err(error) => {
-                return Some(GenerationEnd::Failed {
-                    error,
-                    retryable: false,
-                    was_active: true,
-                });
-            }
-        }
-    }
-    None
 }
 
 fn publish_frame(session_id: &str, frame: &[u8], emitter: &PluginEmitter) {
@@ -1357,7 +1325,7 @@ mod tests {
         assert!(error.contains("non-zero"), "{error}");
     }
 
-    // —— 有界保护 ——
+    // —— 有界保护 ————————————————————————————————————————————————
 
     #[test]
     fn framebuffer_is_bounded() {
@@ -1420,7 +1388,7 @@ mod tests {
         );
     }
 
-    // —— 认证参数校验（classic VNC-Auth ≤8 字节）——
+    // —— 认证参数校验（classic VNC-Auth ≤8 字节）——————————————————
 
     #[test]
     fn password_validation_enforces_eight_bytes() {
@@ -1455,7 +1423,7 @@ mod tests {
         );
     }
 
-    // —— 输入/剪贴板/缩放参数 ——
+    // —— 输入/剪贴板/缩放参数 ————————————————————————————————————
 
     #[test]
     fn input_events_decode_from_the_documented_shapes() {
@@ -1496,10 +1464,9 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_guard_rejects_oversized_text() {
+    fn clipboard_guard_accepts_utf8_and_rejects_oversized() {
         assert!(validate_clipboard_text("hello").is_ok());
         assert!(validate_clipboard_text("").is_ok());
-        // Non-Latin-1 text is forwarded as UTF-8 bytes instead of being dropped.
         assert!(validate_clipboard_text("中文").is_ok());
         let error = validate_clipboard_text(&"x".repeat(1024 * 1024 + 1)).unwrap_err();
         assert!(error.contains("1 MiB"), "{error}");
