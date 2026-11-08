@@ -6,6 +6,14 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.14-beta.2] — 2026-11-09
+
+- **VNC/RDP 独立连接类型与快速图标入口（对标 local shell 双层结构）**。DBX 连接列表可直接创建 VNC 连接（主机/端口 5900/可选密码）与 RDP 连接（主机/端口 3389/用户名/密码/域/分辨率/证书策略/剪贴板，仍受「实验性 RDP」开关约束）；应用工具栏与命令面板新增 VNC、RDP 两个快速图标入口，无连接直开对应连接弹窗，取消或断开后落回可重连的空态卡片。RDP 首次连接被实验门拦截时覆盖层提供「启用并重试」一键出口（与设置页同一偏好键，持久化生效）。文案覆盖全部七种语言。
+  **Dedicated VNC/RDP connection types and quick-connect toolbar icons, mirroring the local-shell two-layer entry structure.** VNC (host/port 5900/optional password) and RDP (host/port 3389/username/password/domain/resolution/certificate policy/clipboard, still gated by the experimental-RDP preference) can now be created directly in the DBX connection list. The app toolbar and command palette gain VNC and RDP quick-connect icons that open the matching connect dialog connectionless, landing on a reconnect card after cancel or disconnect. When the experimental gate blocks a first RDP session, the overlay offers one-click "Enable & retry" (same persisted preference key as Settings). All seven locales are covered.
+
+- **VNC Tight/JPEG 编码与整帧下发落地**。随 0.7.14 线首发进发布物：服务端协商 Tight/JPEG 编码与整帧下发节拍，缩放三档（适应/拉伸/实际大小）与剪贴板 UTF-8 通道、剪贴板回声过滤一并交付。
+  **VNC Tight/JPEG encoding and full-frame delivery shipped.** Lands in the 0.7.14 line: server-negotiated Tight/JPEG encoding with full-frame delivery cadence, three scaling modes (fit/stretch/actual), the UTF-8 clipboard channel and clipboard echo filtering.
+
 ## [0.7.14-beta.1] — 2026-11-08
 
 - **窄屏 solo 布局下半空白修复**（#262, PR #278）。DBX 侧栏挤压使插件视口落入 <900px 断点时，SFTP 收起（solo）后窄屏列规则特异性 `(0,3,1)` 压过 solo 豁免 `(0,2,1)`，终端高度被钉死在 `var(--pane-split, 52%)` 回落值，下半整片空白；「始终上下」同样受影响。窄屏 solo 豁免叠加 `.panes--solo` 提升到 `(0,4,1)`，终端恢复全高；非 solo 两栏让位布局不变。
