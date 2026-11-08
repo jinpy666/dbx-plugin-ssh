@@ -54,6 +54,7 @@ import {
   Lock,
   Maximize2,
   Minimize2,
+  Monitor,
   Network,
   PackageOpen,
   Palette,
@@ -1461,6 +1462,19 @@ const vncTarget = computed(() => (vncSession.value ? `${vncSession.value.host}:$
 // + errorKind），断线重连展示手动 rdp/reconnect 出口。
 const rdpSession = ref<{ sessionId: string; host: string; port: number } | null>(null);
 const rdpDialogOpen = ref(false);
+// 快速入口直通（对标 local-terminal passthrough）：host 以 command context
+// plugin.mode="vnc"/"rdp" 打开本工作台（工具栏/命令面板 open-*-session）时，
+// 无 connectionId，弹各自连接弹窗建立临时会话；取消/断开后落回可重连的
+// 空态卡片，不显示 SSH 连接卡。
+const quickConnectProtocol = ref<"" | "vnc" | "rdp">("");
+const quickConnectMode = computed(() => quickConnectProtocol.value !== "");
+// RDP 实验门拦截态（sidecar rdp/start 前置检查拒绝时置位）：展示一键
+// 「启用实验性 RDP 并重试」覆盖层；启用成功即清位（偏好持久化，永久生效）。
+const rdpGateBlocked = ref(false);
+const rdpGateEnabling = ref(false);
+// RDP 实验开关的只读快照（hydratePrefs 拉取；设置弹窗改动后由
+// enableRdpExperimental 同步回写）。
+const rdpExperimentalPref = ref(false);
 // RDP 实验门控的权威在后端（rdp/start 前置检查 local/preferences 的
 // rdp_experimental_enabled，直接 RPC 也无法绕过）；M32-A 移除工具条入口后
 // 前端不再持有内存门副本。
@@ -1725,6 +1739,9 @@ const {
   connectionId,
   isDisposed: () => disposed,
   getTerminal: () => terminal,
+  onGateBlocked: () => {
+    rdpGateBlocked.value = true;
+  },
 });
 // —— RDP 工作台专属逻辑（大文本粘贴 + 分辨率入口）：收口在 rdp/useRdpWorkbench，
 // App.vue 只保留薄挂载点（模板绑定经解构同名透出）。 ——
@@ -4285,6 +4302,41 @@ async function connectViaRdpDialog(options: RdpConnectOptions): Promise<boolean>
   return startRdpSession(options);
 }
 
+// RDP 实验门一键出口：持久化启用（与设置弹窗同一 local/preferences/set 键，
+// 后端 rdp/start 前置检查随即放行）后立即重试——上次连接参数有 host 就用
+// 记忆参数直连（凭据缺省走 NLA 提示流），没有就回落连接弹窗。
+async function enableRdpExperimentalAndRetry() {
+  if (rdpGateEnabling.value) return;
+  rdpGateEnabling.value = true;
+  try {
+    await window.dbxPlugin.invoke("local/preferences/set", { rdp_experimental_enabled: true });
+    rdpExperimentalPref.value = true;
+    rdpGateBlocked.value = false;
+    const last = loadLastConnectParams<RdpConnectOptions>("rdp-connect-last");
+    // rdp-connect-last 的 port 是表单原始字符串（persistLastRdpForm 不转型）。
+    const lastPort = Number.parseInt(String(last?.port ?? ""), 10);
+    if (typeof last?.host === "string" && last.host) {
+      storedConnectionProtocol.value = "rdp";
+      await startRdpSession({
+        host: last.host,
+        port: Number.isInteger(lastPort) && lastPort > 0 && lastPort <= 65535 ? lastPort : 3389,
+        username: "",
+        width: 1280,
+        height: 800,
+        certificatePolicy: "prompt",
+        clipboard: true,
+        scaleMode: "fit",
+      });
+    } else {
+      rdpDialogOpen.value = true;
+    }
+  } catch (cause) {
+    showError(cause, "terminal");
+  } finally {
+    rdpGateEnabling.value = false;
+  }
+}
+
 async function openSession(forceNew = false, bootRestore = false, isRetry = false, hostReopenAttempted = false) {
   if (!connectionId.value || !workbenchId.value) return;
   // 协议路由（对标 Tabby profile）：Telnet/VNC 连接不建 SSH 会话，直接驱动
@@ -6661,6 +6713,9 @@ async function hydratePrefsOnce() {
     // 背景图偏好：键缺省保持内存默认（关 / 45%）。
     if (typeof prefs.wallpaper_enabled === "boolean") wallpaperEnabled.value = prefs.wallpaper_enabled;
     if (prefs.wallpaper_opacity !== undefined) wallpaperOpacity.value = Math.min(90, Math.max(10, Math.round(Number(prefs.wallpaper_opacity) || 45)));
+    // RDP 实验开关镜像（设置弹窗自持读写，这里只读快照供门控出口判断：
+    // rdp/start 被拦时跳过已启用态的重复启用动作）。
+    if (typeof prefs.rdp_experimental_enabled === "boolean") rdpExperimentalPref.value = prefs.rdp_experimental_enabled;
     // 存储迁移批 3（IMPL_PLAN_STORAGE_SYNC）：14 个传输/下载偏好键的镜像——
     // store 缺失从 sidecar 播种；漂移（云同步恢复后）则 store 赢：采纳镜像到
     // 状态并推回 sidecar（syncPrefs）。
@@ -8651,6 +8706,25 @@ async function initialize() {
     await startLocalTerminal(readPluginShell(hostContext.value) || undefined);
     return;
   }
+  // 快速入口直通（open-vnc-session / open-rdp-session command）：无连接的
+  // VNC/RDP 临时会话。webview 重建先按 workbenchId 接回活会话；恢复态不自动
+  // 弹窗（与 A4 restored 语义一致），常态直接弹连接弹窗，取消落空态卡片。
+  const bootPluginMode = readPluginMode(hostContext.value);
+  if (bootPluginMode === "vnc" || bootPluginMode === "rdp") {
+    if (!workbenchId.value) throw new Error(t("errors.hostBridgeMissing"));
+    await hydratePrefs();
+    if (await reattachProtocolSession()) return;
+    if (restored.value) return;
+    quickConnectProtocol.value = bootPluginMode;
+    if (bootPluginMode === "vnc") {
+      storedConnectionProtocol.value = "vnc";
+      vncDialogOpen.value = true;
+    } else {
+      storedConnectionProtocol.value = "rdp";
+      rdpDialogOpen.value = true;
+    }
+    return;
+  }
   if (!connectionId.value || !workbenchId.value) throw new Error(t("errors.hostBridgeMissing"));
   const state = initialState();
   if (restored.value) {
@@ -9825,7 +9899,7 @@ function flagHintsSource(command: string): string {
              预拨号、面板直出终端区域），但 FAILED/disconnected 是死路态——
              连接卡（错误文案 + 重连出口）在面板内同样要呈现，否则面板读作空白。 -->
         <div
-          v-if="(!panelSurface || terminalState === 'error' || terminalState === 'disconnected') && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && !isRdpConnection && !isRdpMode && terminalState !== 'connected' && !reconnectPending"
+          v-if="(!panelSurface || terminalState === 'error' || terminalState === 'disconnected') && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && !isRdpConnection && !isRdpMode && !quickConnectMode && !rdpGateBlocked && terminalState !== 'connected' && !reconnectPending"
           class="terminal-overlay"
         >
           <ConnectingCard
@@ -9848,7 +9922,7 @@ function flagHintsSource(command: string): string {
              预拨号，不叠整卡遮罩），但连接期间面板完全无反馈会读作空白——给
              一颗轻量状态丸（最新连接日志行），不拦截面板交互，connected 即隐。 -->
         <div
-          v-if="panelSurface && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && !isRdpConnection && !isRdpMode && terminalState === 'connecting' && !reconnectPending"
+          v-if="panelSurface && !isLocalMode && !localShellRestored && !isSerialMode && !isTelnetMode && !isVncMode && !isRdpConnection && !isRdpMode && !quickConnectMode && terminalState === 'connecting' && !reconnectPending"
           class="panel-connect-pill"
           role="status"
         >
@@ -9875,6 +9949,31 @@ function flagHintsSource(command: string): string {
             <div class="local-exit-actions">
               <button class="primary-button" @click="restartLocalTerminal()">{{ t("localTerminal.restart") }}</button>
               <button @click="localShellRestored ? dismissRestoredLocalShell() : closeLocalTerminal()">{{ t("localTerminal.close") }}</button>
+            </div>
+          </div>
+        </div>
+        <!-- VNC/RDP 快速入口空态（quickConnectMode）：弹窗取消/会话关闭后落回
+             的可重连卡片——不显示 SSH 连接卡（无连接语义），也不留白屏。 -->
+        <div v-if="quickConnectMode && !isVncMode && !isRdpMode && !rdpGateBlocked && !vncDialogOpen && !rdpDialogOpen" class="terminal-overlay">
+          <div class="local-exit-card" role="status">
+            <Monitor class="local-exit-icon" />
+            <strong>{{ quickConnectProtocol === "vnc" ? t("vnc.quickCard.title") : t("rdp.quickCard.title") }}</strong>
+            <div class="local-exit-actions">
+              <button class="primary-button" @click="quickConnectProtocol === 'vnc' ? (vncDialogOpen = true) : (rdpDialogOpen = true)">{{ quickConnectProtocol === "vnc" ? t("vnc.connect") : t("rdp.connect") }}</button>
+            </div>
+          </div>
+        </div>
+        <!-- RDP 实验门覆盖层（rdp/start 被偏好拦截）：一键启用（持久化）并重试，
+             与设置页同一 local/preferences/set 键；后端门保持权威，这里只是
+             更近的出口。 -->
+        <div v-if="rdpGateBlocked && !isRdpMode" class="terminal-overlay">
+          <div class="local-exit-card" role="status">
+            <TriangleAlert class="local-exit-icon" />
+            <strong>{{ t("rdp.experimentalGate.title") }}</strong>
+            <span class="mono local-exit-code">{{ t("rdp.experimentalGate.hint") }}</span>
+            <div class="local-exit-actions">
+              <button class="primary-button" :disabled="rdpGateEnabling" @click="enableRdpExperimentalAndRetry">{{ t("rdp.experimentalGate.enable") }}</button>
+              <button @click="rdpGateBlocked = false">{{ t("close") }}</button>
             </div>
           </div>
         </div>

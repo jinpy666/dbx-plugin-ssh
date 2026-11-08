@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.dbx.ssh",
   "name": "SSH",
-  "version": "0.7.14-beta.1",
+  "version": "0.7.14-beta.2",
   "publisher": "jinpy",
   "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
   "source": "https://github.com/jinpy666/dbx-plugin-ssh",
@@ -39,7 +39,7 @@
       "label": "SSH server",
       "icon": "assets/plugin.svg",
       "database_type": "ssh",
-      "description": "SSH, Telnet, or VNC connection with protocol-appropriate authentication. Experimental RDP stays disabled by default and is not available as a connection profile.",
+      "description": "SSH, Telnet, or VNC connection with protocol-appropriate authentication. Use the dedicated VNC and RDP connection types for per-protocol profiles; experimental RDP still requires enabling in Settings.",
       "fields": [
         {
           "key": "display_name",
@@ -1250,6 +1250,209 @@
       ]
     },
     {
+      "type": "connection-provider",
+      "id": "io.dbx.ssh.vnc",
+      "label": "VNC",
+      "icon": "assets/vnc-session.svg",
+      "database_type": "vnc",
+      "description": "VNC remote desktop connection. Connect to a VNC server by host and port; the password is optional.",
+      "fields": [
+        {
+          "key": "display_name",
+          "label": "Connection name",
+          "type": "text",
+          "binding": "name",
+          "required": true,
+          "default": "VNC"
+        },
+        {
+          "key": "protocol",
+          "label": "Protocol",
+          "type": "select",
+          "binding": "config",
+          "default": "vnc",
+          "options": [
+            {
+              "label": "VNC",
+              "value": "vnc"
+            }
+          ],
+          "description": "Session protocol for saved connections; fixed to VNC for this connection type."
+        },
+        {
+          "key": "host",
+          "label": "Host",
+          "type": "text",
+          "binding": "host",
+          "required": true,
+          "default": "127.0.0.1"
+        },
+        {
+          "key": "port",
+          "label": "Port",
+          "type": "number",
+          "binding": "port",
+          "required": true,
+          "default": 5900
+        },
+        {
+          "key": "password",
+          "label": "Password",
+          "type": "password",
+          "binding": "password",
+          "description": "Optional VNC password (classic VNC authentication allows at most 8 characters). Leave empty to type it in the workbench connect dialog."
+        }
+      ],
+      "workbench": "io.dbx.ssh.workbench",
+      "capabilities": [
+        "test",
+        "connect",
+        "disconnect"
+      ]
+    },
+    {
+      "type": "connection-provider",
+      "id": "io.dbx.ssh.rdp",
+      "label": "RDP",
+      "icon": "assets/rdp-session.svg",
+      "database_type": "rdp",
+      "description": "RDP remote desktop connection (experimental). RDP stays disabled until it is enabled in Settings.",
+      "fields": [
+        {
+          "key": "display_name",
+          "label": "Connection name",
+          "type": "text",
+          "binding": "name",
+          "required": true,
+          "default": "RDP"
+        },
+        {
+          "key": "protocol",
+          "label": "Protocol",
+          "type": "select",
+          "binding": "config",
+          "default": "rdp",
+          "options": [
+            {
+              "label": "RDP (experimental)",
+              "value": "rdp"
+            }
+          ],
+          "description": "Session protocol for saved connections; fixed to RDP for this connection type."
+        },
+        {
+          "key": "host",
+          "label": "Host",
+          "type": "text",
+          "binding": "host",
+          "required": true,
+          "default": "127.0.0.1"
+        },
+        {
+          "key": "port",
+          "label": "Port",
+          "type": "number",
+          "binding": "port",
+          "required": true,
+          "default": 3389
+        },
+        {
+          "key": "username",
+          "label": "Username",
+          "type": "text",
+          "binding": "username",
+          "required": true,
+          "default": ""
+        },
+        {
+          "key": "password",
+          "label": "Password",
+          "type": "password",
+          "binding": "password",
+          "description": "Optional Windows password for NLA (CredSSP). Leave empty to answer the workbench credential prompt instead."
+        },
+        {
+          "key": "rdp_domain",
+          "label": "Domain",
+          "type": "text",
+          "binding": "config",
+          "default": "",
+          "description": "Windows domain for NLA (optional)."
+        },
+        {
+          "key": "rdp_resolution",
+          "label": "Resolution",
+          "type": "select",
+          "binding": "config",
+          "default": "1280x800",
+          "options": [
+            {
+              "label": "1024×768",
+              "value": "1024x768"
+            },
+            {
+              "label": "1280×720",
+              "value": "1280x720"
+            },
+            {
+              "label": "1280×800",
+              "value": "1280x800"
+            },
+            {
+              "label": "1366×768",
+              "value": "1366x768"
+            },
+            {
+              "label": "1600×900",
+              "value": "1600x900"
+            },
+            {
+              "label": "1920×1080",
+              "value": "1920x1080"
+            },
+            {
+              "label": "2560×1440",
+              "value": "2560x1440"
+            }
+          ]
+        },
+        {
+          "key": "rdp_certificate_policy",
+          "label": "Certificate policy",
+          "type": "select",
+          "binding": "config",
+          "default": "prompt",
+          "options": [
+            {
+              "label": "Ask on mismatch",
+              "value": "prompt"
+            },
+            {
+              "label": "Strict (reject mismatch)",
+              "value": "strict"
+            },
+            {
+              "label": "Accept temporarily",
+              "value": "accept-temporarily"
+            }
+          ]
+        },
+        {
+          "key": "rdp_clipboard",
+          "label": "Share clipboard",
+          "type": "boolean",
+          "binding": "config",
+          "default": true
+        }
+      ],
+      "workbench": "io.dbx.ssh.workbench",
+      "capabilities": [
+        "test",
+        "connect",
+        "disconnect"
+      ]
+    },
+    {
       "type": "workbench",
       "id": "io.dbx.ssh.workbench",
       "label": "Terminal",
@@ -1336,6 +1539,84 @@
       ]
     },
     {
+      "type": "command",
+      "id": "open-vnc-session",
+      "label": "VNC",
+      "description": "Open a VNC remote desktop session.",
+      "icon": "assets/vnc-session.svg",
+      "action": {
+        "type": "open-workbench",
+        "workbench": "io.dbx.ssh.workbench",
+        "presentation": "panel",
+        "reuse": "singleton",
+        "instance_key": "vnc-session",
+        "restore": "none",
+        "context": {
+          "plugin": {
+            "mode": "vnc"
+          }
+        }
+      }
+    },
+    {
+      "type": "menus",
+      "id": "vnc-session-entrypoints",
+      "items": [
+        {
+          "location": "commandPalette",
+          "command": "open-vnc-session",
+          "group": "primary",
+          "order": 110
+        },
+        {
+          "location": "appToolbar",
+          "command": "open-vnc-session",
+          "group": "navigation",
+          "order": 110,
+          "default_visible": true
+        }
+      ]
+    },
+    {
+      "type": "command",
+      "id": "open-rdp-session",
+      "label": "RDP",
+      "description": "Open an RDP remote desktop session.",
+      "icon": "assets/rdp-session.svg",
+      "action": {
+        "type": "open-workbench",
+        "workbench": "io.dbx.ssh.workbench",
+        "presentation": "panel",
+        "reuse": "singleton",
+        "instance_key": "rdp-session",
+        "restore": "none",
+        "context": {
+          "plugin": {
+            "mode": "rdp"
+          }
+        }
+      }
+    },
+    {
+      "type": "menus",
+      "id": "rdp-session-entrypoints",
+      "items": [
+        {
+          "location": "commandPalette",
+          "command": "open-rdp-session",
+          "group": "primary",
+          "order": 120
+        },
+        {
+          "location": "appToolbar",
+          "command": "open-rdp-session",
+          "group": "navigation",
+          "order": 120,
+          "default_visible": true
+        }
+      ]
+    },
+    {
       "type": "mcp",
       "id": "io.dbx.ssh.mcp",
       "description": "SSH exec and SFTP tools for saved connections",
@@ -1381,6 +1662,24 @@
           "label": "Terminal",
           "description": "Open a terminal on this machine."
         },
+"io.dbx.ssh.vnc": {
+          "label": "VNC",
+          "description": "VNC remote desktop connection. Connect to a VNC server by host and port; the password is optional."
+        },
+        "io.dbx.ssh.rdp": {
+          "label": "RDP",
+          "description": "RDP remote desktop connection (experimental). RDP stays disabled until it is enabled in Settings."
+        },
+        "io.dbx.ssh.open-vnc-session": {
+          "label": "VNC",
+          "description": "Open a VNC remote desktop session."
+        },
+        "io.dbx.ssh.vnc-session-entrypoints": {},
+        "io.dbx.ssh.open-rdp-session": {
+          "label": "RDP",
+          "description": "Open an RDP remote desktop session."
+        },
+        "io.dbx.ssh.rdp-session-entrypoints": {},
         "io.dbx.ssh.local-terminal-entrypoints": {},
         "io.dbx.ssh.tunnels": {
           "label": "Port forwards",
@@ -1690,6 +1989,43 @@
           "label": "Terminal",
           "description": "Abrir una terminal en esta máquina."
         },
+"io.dbx.ssh.vnc": {
+          "label": "VNC",
+          "description": "Conexión de escritorio remoto VNC. Conecta a un servidor VNC por host y puerto; la contraseña es opcional.",
+          "fields": {
+        "display_name": { "label": "Nombre de conexión" },
+        "protocol": { "label": "Protocolo", "options": { "vnc": "VNC" }, "description": "Protocolo de sesión de las conexiones guardadas; fijo en VNC/RDP para este tipo de conexión." },
+        "host": { "label": "Host" },
+        "port": { "label": "Puerto" },
+        "password": { "label": "Contraseña", "description": "Contraseña VNC opcional (la autenticación VNC clásica admite 8 caracteres como máximo). Déjala vacía para escribirla en el diálogo de conexión del espacio de trabajo." }
+      }
+        },
+        "io.dbx.ssh.rdp": {
+          "label": "RDP",
+          "description": "Conexión de escritorio remoto RDP (experimental). RDP permanece deshabilitado hasta que se habilite en Ajustes.",
+          "fields": {
+        "display_name": { "label": "Nombre de conexión" },
+        "protocol": { "label": "Protocolo", "options": { "rdp": "RDP (experimental)" }, "description": "Protocolo de sesión de las conexiones guardadas; fijo en VNC/RDP para este tipo de conexión." },
+        "host": { "label": "Host" },
+        "port": { "label": "Puerto" },
+        "username": { "label": "Usuario" },
+        "password": { "label": "Contraseña", "description": "Contraseña de Windows opcional para NLA (CredSSP). Déjala vacía para responder a la solicitud de credenciales del espacio de trabajo." },
+        "rdp_domain": { "label": "Dominio", "description": "Dominio de Windows para NLA (opcional)." },
+        "rdp_resolution": { "label": "Resolución", "options": { "1024×768": "1024×768", "1280×720": "1280×720", "1280×800": "1280×800", "1366×768": "1366×768", "1600×900": "1600×900", "1920×1080": "1920×1080", "2560×1440": "2560×1440" } },
+        "rdp_certificate_policy": { "label": "Política de certificados", "options": { "prompt": "Preguntar si no coincide", "strict": "Estricto (rechazar sin coincidencia)", "accept-temporarily": "Aceptar temporalmente" } },
+        "rdp_clipboard": { "label": "Compartir portapapeles" }
+      }
+        },
+        "io.dbx.ssh.open-vnc-session": {
+          "label": "VNC",
+          "description": "Abrir una sesión de escritorio remoto VNC."
+        },
+        "io.dbx.ssh.vnc-session-entrypoints": {},
+        "io.dbx.ssh.open-rdp-session": {
+          "label": "RDP",
+          "description": "Abrir una sesión de escritorio remoto RDP."
+        },
+        "io.dbx.ssh.rdp-session-entrypoints": {},
         "io.dbx.ssh.local-terminal-entrypoints": {},
         "io.dbx.ssh.tunnels": {
           "label": "Redirecciones de puertos",
@@ -1999,6 +2335,43 @@
           "label": "Terminale",
           "description": "Apri un terminale su questa macchina."
         },
+"io.dbx.ssh.vnc": {
+          "label": "VNC",
+          "description": "Connessione desktop remoto VNC. Si connette a un server VNC tramite host e porta; la password è facoltativa.",
+          "fields": {
+        "display_name": { "label": "Nome connessione" },
+        "protocol": { "label": "Protocollo", "options": { "vnc": "VNC" }, "description": "Protocollo di sessione delle connessioni salvate; fisso su VNC/RDP per questo tipo di connessione." },
+        "host": { "label": "Host" },
+        "port": { "label": "Porta" },
+        "password": { "label": "Password", "description": "Password VNC facoltativa (l'autenticazione VNC classica ammette al massimo 8 caratteri). Lasciala vuota per digitarla nella finestra di connessione del workbench." }
+      }
+        },
+        "io.dbx.ssh.rdp": {
+          "label": "RDP",
+          "description": "Connessione desktop remoto RDP (sperimentale). RDP resta disabilitato finché non viene abilitato nelle impostazioni.",
+          "fields": {
+        "display_name": { "label": "Nome connessione" },
+        "protocol": { "label": "Protocollo", "options": { "rdp": "RDP (sperimentale)" }, "description": "Protocollo di sessione delle connessioni salvate; fisso su VNC/RDP per questo tipo di connessione." },
+        "host": { "label": "Host" },
+        "port": { "label": "Porta" },
+        "username": { "label": "Nome utente" },
+        "password": { "label": "Password", "description": "Password Windows facoltativa per NLA (CredSSP). Lasciala vuota per rispondere alla richiesta di credenziali del workbench." },
+        "rdp_domain": { "label": "Dominio", "description": "Dominio Windows per NLA (facoltativo)." },
+        "rdp_resolution": { "label": "Risoluzione", "options": { "1024×768": "1024×768", "1280×720": "1280×720", "1280×800": "1280×800", "1366×768": "1366×768", "1600×900": "1600×900", "1920×1080": "1920×1080", "2560×1440": "2560×1440" } },
+        "rdp_certificate_policy": { "label": "Politica dei certificati", "options": { "prompt": "Chiedi se non corrisponde", "strict": "Rigoroso (rifiuta se non corrisponde)", "accept-temporarily": "Accetta temporaneamente" } },
+        "rdp_clipboard": { "label": "Condividi appunti" }
+      }
+        },
+        "io.dbx.ssh.open-vnc-session": {
+          "label": "VNC",
+          "description": "Apri una sessione desktop remoto VNC."
+        },
+        "io.dbx.ssh.vnc-session-entrypoints": {},
+        "io.dbx.ssh.open-rdp-session": {
+          "label": "RDP",
+          "description": "Apri una sessione desktop remoto RDP."
+        },
+        "io.dbx.ssh.rdp-session-entrypoints": {},
         "io.dbx.ssh.local-terminal-entrypoints": {},
         "io.dbx.ssh.tunnels": {
           "label": "Inoltri porta",
@@ -2308,6 +2681,43 @@
           "label": "ターミナル",
           "description": "このマシンでターミナルを開きます。"
         },
+"io.dbx.ssh.vnc": {
+          "label": "VNC",
+          "description": "VNC リモートデスクトップ接続。ホストとポートで VNC サーバーに接続します。パスワードは任意です。",
+          "fields": {
+        "display_name": { "label": "接続名" },
+        "protocol": { "label": "プロトコル", "options": { "vnc": "VNC" }, "description": "保存済み接続のセッションプロトコル。この接続タイプでは VNC/RDP に固定されています。" },
+        "host": { "label": "ホスト" },
+        "port": { "label": "ポート" },
+        "password": { "label": "パスワード", "description": "VNC パスワード（任意）。クラシック VNC 認証は最大 8 文字です。空欄の場合はワークベンチの接続ダイアログで入力します。" }
+      }
+        },
+        "io.dbx.ssh.rdp": {
+          "label": "RDP",
+          "description": "RDP リモートデスクトップ接続（実験的）。設定で有効化するまで RDP は無効のままです。",
+          "fields": {
+        "display_name": { "label": "接続名" },
+        "protocol": { "label": "プロトコル", "options": { "rdp": "RDP（実験的）" }, "description": "保存済み接続のセッションプロトコル。この接続タイプでは VNC/RDP に固定されています。" },
+        "host": { "label": "ホスト" },
+        "port": { "label": "ポート" },
+        "username": { "label": "ユーザー名" },
+        "password": { "label": "パスワード", "description": "NLA（CredSSP）用の Windows パスワード（任意）。空欄の場合はワークベンチの資格情報プロンプトで入力します。" },
+        "rdp_domain": { "label": "ドメイン", "description": "NLA 用の Windows ドメイン（任意）。" },
+        "rdp_resolution": { "label": "解像度", "options": { "1024×768": "1024×768", "1280×720": "1280×720", "1280×800": "1280×800", "1366×768": "1366×768", "1600×900": "1600×900", "1920×1080": "1920×1080", "2560×1440": "2560×1440" } },
+        "rdp_certificate_policy": { "label": "証明書ポリシー", "options": { "prompt": "不一致なら確認", "strict": "厳格（不一致は拒否）", "accept-temporarily": "一時的に受け入れる" } },
+        "rdp_clipboard": { "label": "クリップボード共有" }
+      }
+        },
+        "io.dbx.ssh.open-vnc-session": {
+          "label": "VNC",
+          "description": "VNC リモートデスクトップセッションを開きます。"
+        },
+        "io.dbx.ssh.vnc-session-entrypoints": {},
+        "io.dbx.ssh.open-rdp-session": {
+          "label": "RDP",
+          "description": "RDP リモートデスクトップセッションを開きます。"
+        },
+        "io.dbx.ssh.rdp-session-entrypoints": {},
         "io.dbx.ssh.local-terminal-entrypoints": {},
         "io.dbx.ssh.tunnels": {
           "label": "ポート転送",
@@ -2617,6 +3027,43 @@
           "label": "Terminal",
           "description": "Abrir um terminal nesta máquina."
         },
+"io.dbx.ssh.vnc": {
+          "label": "VNC",
+          "description": "Conexão de área de trabalho remota VNC. Conecta a um servidor VNC por host e porta; a senha é opcional.",
+          "fields": {
+        "display_name": { "label": "Nome da conexão" },
+        "protocol": { "label": "Protocolo", "options": { "vnc": "VNC" }, "description": "Protocolo de sessão das conexões salvas; fixado em VNC/RDP para este tipo de conexão." },
+        "host": { "label": "Host" },
+        "port": { "label": "Porta" },
+        "password": { "label": "Senha", "description": "Senha VNC opcional (a autenticação VNC clássica permite no máximo 8 caracteres). Deixe em branco para digitá-la no diálogo de conexão do workbench." }
+      }
+        },
+        "io.dbx.ssh.rdp": {
+          "label": "RDP",
+          "description": "Conexão de área de trabalho remota RDP (experimental). O RDP permanece desabilitado até ser habilitado nas configurações.",
+          "fields": {
+        "display_name": { "label": "Nome da conexão" },
+        "protocol": { "label": "Protocolo", "options": { "rdp": "RDP (experimental)" }, "description": "Protocolo de sessão das conexões salvas; fixado em VNC/RDP para este tipo de conexão." },
+        "host": { "label": "Host" },
+        "port": { "label": "Porta" },
+        "username": { "label": "Usuário" },
+        "password": { "label": "Senha", "description": "Senha do Windows opcional para NLA (CredSSP). Deixe em branco para responder ao pedido de credenciais do workbench." },
+        "rdp_domain": { "label": "Domínio", "description": "Domínio do Windows para NLA (opcional)." },
+        "rdp_resolution": { "label": "Resolução", "options": { "1024×768": "1024×768", "1280×720": "1280×720", "1280×800": "1280×800", "1366×768": "1366×768", "1600×900": "1600×900", "1920×1080": "1920×1080", "2560×1440": "2560×1440" } },
+        "rdp_certificate_policy": { "label": "Política de certificado", "options": { "prompt": "Perguntar em caso de divergência", "strict": "Rígido (rejeitar divergência)", "accept-temporarily": "Aceitar temporariamente" } },
+        "rdp_clipboard": { "label": "Compartilhar área de transferência" }
+      }
+        },
+        "io.dbx.ssh.open-vnc-session": {
+          "label": "VNC",
+          "description": "Abrir uma sessão de área de trabalho remota VNC."
+        },
+        "io.dbx.ssh.vnc-session-entrypoints": {},
+        "io.dbx.ssh.open-rdp-session": {
+          "label": "RDP",
+          "description": "Abrir uma sessão de área de trabalho remota RDP."
+        },
+        "io.dbx.ssh.rdp-session-entrypoints": {},
         "io.dbx.ssh.local-terminal-entrypoints": {},
         "io.dbx.ssh.tunnels": {
           "label": "Encaminhamentos de porta",
@@ -2926,6 +3373,43 @@
           "label": "终端",
           "description": "在本机打开一个终端。"
         },
+"io.dbx.ssh.vnc": {
+          "label": "VNC",
+          "description": "VNC 远程桌面连接。按主机和端口连接 VNC 服务器；密码可选。",
+          "fields": {
+        "display_name": { "label": "连接名称" },
+        "protocol": { "label": "协议", "options": { "vnc": "VNC" }, "description": "保存连接的会话协议；此连接类型固定为 VNC/RDP。" },
+        "host": { "label": "主机" },
+        "port": { "label": "端口" },
+        "password": { "label": "密码", "description": "VNC 密码（可选）。经典 VNC 认证最多 8 个字符；留空则在工作台连接弹窗中输入。" }
+      }
+        },
+        "io.dbx.ssh.rdp": {
+          "label": "RDP",
+          "description": "RDP 远程桌面连接（实验性）。在设置中启用前，RDP 保持关闭。",
+          "fields": {
+        "display_name": { "label": "连接名称" },
+        "protocol": { "label": "协议", "options": { "rdp": "RDP（实验性）" }, "description": "保存连接的会话协议；此连接类型固定为 VNC/RDP。" },
+        "host": { "label": "主机" },
+        "port": { "label": "端口" },
+        "username": { "label": "用户名" },
+        "password": { "label": "密码", "description": "NLA（CredSSP）用的 Windows 密码（可选）。留空则在工作台凭据提示中输入。" },
+        "rdp_domain": { "label": "域", "description": "Windows NLA 域（可选）。" },
+        "rdp_resolution": { "label": "分辨率", "options": { "1024×768": "1024×768", "1280×720": "1280×720", "1280×800": "1280×800", "1366×768": "1366×768", "1600×900": "1600×900", "1920×1080": "1920×1080", "2560×1440": "2560×1440" } },
+        "rdp_certificate_policy": { "label": "证书策略", "options": { "prompt": "不匹配时询问", "strict": "严格（不匹配即拒绝）", "accept-temporarily": "临时接受" } },
+        "rdp_clipboard": { "label": "共享剪贴板" }
+      }
+        },
+        "io.dbx.ssh.open-vnc-session": {
+          "label": "VNC",
+          "description": "打开 VNC 远程桌面会话。"
+        },
+        "io.dbx.ssh.vnc-session-entrypoints": {},
+        "io.dbx.ssh.open-rdp-session": {
+          "label": "RDP",
+          "description": "打开 RDP 远程桌面会话。"
+        },
+        "io.dbx.ssh.rdp-session-entrypoints": {},
         "io.dbx.ssh.local-terminal-entrypoints": {},
         "io.dbx.ssh.tunnels": {
           "label": "端口映射",
@@ -3235,6 +3719,43 @@
           "label": "終端",
           "description": "在本機開啟一個終端。"
         },
+"io.dbx.ssh.vnc": {
+          "label": "VNC",
+          "description": "VNC 遠端桌面連線。依主機與連接埠連接 VNC 伺服器；密碼可選。",
+          "fields": {
+        "display_name": { "label": "連線名稱" },
+        "protocol": { "label": "協議", "options": { "vnc": "VNC" }, "description": "已儲存連線的會話協議；此連線類型固定為 VNC/RDP。" },
+        "host": { "label": "主機" },
+        "port": { "label": "連接埠" },
+        "password": { "label": "密碼", "description": "VNC 密碼（可選）。經典 VNC 認證最多 8 個字元；留空則在工作台連線對話框中輸入。" }
+      }
+        },
+        "io.dbx.ssh.rdp": {
+          "label": "RDP",
+          "description": "RDP 遠端桌面連線（實驗性）。在設定中啟用前，RDP 保持關閉。",
+          "fields": {
+        "display_name": { "label": "連線名稱" },
+        "protocol": { "label": "協議", "options": { "rdp": "RDP（實驗性）" }, "description": "已儲存連線的會話協議；此連線類型固定為 VNC/RDP。" },
+        "host": { "label": "主機" },
+        "port": { "label": "連接埠" },
+        "username": { "label": "使用者名稱" },
+        "password": { "label": "密碼", "description": "NLA（CredSSP）用的 Windows 密碼（可選）。留空則在工作台憑證提示中輸入。" },
+        "rdp_domain": { "label": "網域", "description": "Windows NLA 網域（可選）。" },
+        "rdp_resolution": { "label": "解析度", "options": { "1024×768": "1024×768", "1280×720": "1280×720", "1280×800": "1280×800", "1366×768": "1366×768", "1600×900": "1600×900", "1920×1080": "1920×1080", "2560×1440": "2560×1440" } },
+        "rdp_certificate_policy": { "label": "憑證策略", "options": { "prompt": "不符時詢問", "strict": "嚴格（不符即拒絕）", "accept-temporarily": "暫時接受" } },
+        "rdp_clipboard": { "label": "共用剪貼簿" }
+      }
+        },
+        "io.dbx.ssh.open-vnc-session": {
+          "label": "VNC",
+          "description": "開啟 VNC 遠端桌面會話。"
+        },
+        "io.dbx.ssh.vnc-session-entrypoints": {},
+        "io.dbx.ssh.open-rdp-session": {
+          "label": "RDP",
+          "description": "開啟 RDP 遠端桌面會話。"
+        },
+        "io.dbx.ssh.rdp-session-entrypoints": {},
         "io.dbx.ssh.local-terminal-entrypoints": {},
         "io.dbx.ssh.tunnels": {
           "label": "連接埠映射",

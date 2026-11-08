@@ -39,6 +39,9 @@ export function useRdpSession(options: {
   connectionId: Ref<string>;
   isDisposed: () => boolean;
   getTerminal: () => Terminal | undefined;
+  /** 实验门拦截回调（rdp/start 前置检查 rdp_experimental_enabled）：命中时
+   * 不走 showError toast，由 App.vue 展示「启用实验性 RDP 并重试」覆盖层。 */
+  onGateBlocked?: () => void;
 }) {
   const {
     t,
@@ -53,6 +56,7 @@ export function useRdpSession(options: {
     connectionId,
     isDisposed,
     getTerminal,
+    onGateBlocked,
   } = options;
 
   // RDP 证书确认（connection/challenge kind=rdp-certificate，RDP-3 前端）：
@@ -96,6 +100,13 @@ export function useRdpSession(options: {
       rdpSurface.value?.$el?.querySelector("canvas")?.focus();
       return true;
     } catch (cause) {
+      // 实验门拦截（sidecar 文案 "rdp/start is disabled until experimental
+      // RDP is explicitly enabled"）：转交覆盖层出口而非 toast——用户需要的是
+      // 一键启用动作，不是一闪而过的错误条。
+      if (String((cause as Error)?.message ?? cause).includes("disabled until experimental")) {
+        onGateBlocked?.();
+        return false;
+      }
       showError(cause, "terminal");
       return false;
     }
