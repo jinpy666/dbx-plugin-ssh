@@ -6,6 +6,14 @@ This file records user-facing changes for Terminal. Unless noted otherwise, vers
 
 ## [Unreleased]
 
+## [0.7.14-beta.1] — 2026-11-08
+
+- **窄屏 solo 布局下半空白修复**（#262, PR #278）。DBX 侧栏挤压使插件视口落入 <900px 断点时，SFTP 收起（solo）后窄屏列规则特异性 `(0,3,1)` 压过 solo 豁免 `(0,2,1)`，终端高度被钉死在 `var(--pane-split, 52%)` 回落值，下半整片空白；「始终上下」同样受影响。窄屏 solo 豁免叠加 `.panes--solo` 提升到 `(0,4,1)`，终端恢复全高；非 solo 两栏让位布局不变。
+  **Fix half-screen blank area in narrow solo layout** (#262, PR #278). When the DBX side panel shrank the viewport below the 900px breakpoint, the narrow column rule `(0,3,1)` overrode the solo exemption `(0,2,1)`, pinning the terminal to the `--pane-split` fallback (52%) with the lower half blank (also affected "Always stacked"). The solo exemption now adds `.panes--solo` for `(0,4,1)` specificity; non-solo split layouts are unchanged.
+
+- **VNC 画面逐条推进优化实验 A1**（#276, PR #279）。链路分析确认单在途 FramebufferUpdateRequest + 16ms 防抖 + 8ms poll 粒度导致扫描台阶数由轮次决定（解释了 JPEG/CopyRect/合并瓦片/调节拍均无效）。实验 A1：事件拉干后立即重发增量 `Refresh`（增量语义，无全量重刷风险），供 reporter 复现视频对比；若收益有限将继续 A2（并发多区域请求）与 B（同轮矩形合并，验证宿主桥 per-message 固耗）。
+  **VNC refresh pipeline experiment A1** (#276, PR #279). Analysis showed single in-flight FramebufferUpdateRequest + 16ms debounce + 8ms poll made scan steps round-count bound (explaining why JPEG/CopyRect/tile-merge/cadence tuning had no effect). A1 sends the next incremental Refresh immediately after draining events (incremental semantics, no full-refresh storm) for reporter validation; A2 (concurrent region requests) and B (merge rects per round to probe host-bridge per-message overhead) follow if needed.
+
 ## [0.7.13] — 2026-11-06
 
 - **0.7.13 正式版**。汇总 beta.1～beta.7：sudo 密码不再误注入 `docker login`/`mysql -p` 等同形密码提示（安全修复）；SFTP 双击文件行为可设为直接编辑（设置·传输·文件浏览，默认预览）；路径栏提交文件路径转预览并修复后续 ENOTDIR；VNC 会话可发送 Ctrl+Alt+Del；上传即时占位卡；传输历史显示时间与耗时；sz/ZMODEM 下载后自动定位落盘目录（桌面端改为直接落下载目录）；自动重连后回到原工作目录；终端「半屏」自愈看门狗；vi 普通模式粘贴经 bracketed paste 完整落盘；预览滚动条常驻、sz 大文件不再误判会话失效、Windows stdio 按平台定位 app-data、补齐 MCP 工具 manifest 权限；终端点击焦点加固与 Docker 面板本地目标。
