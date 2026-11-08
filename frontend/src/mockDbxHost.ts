@@ -60,6 +60,13 @@ if (fixtureParams.get("noanim") === "1") {
 // Connectionless local-terminal tab (HOST_PLUGIN_UI_SPEC §4/§7.1 passthrough): no
 // connectionId/connection. workbenchId/restored/surface are injected by the host (mock).
 const localOnlyContext = fixtureParams.get("local") === "1";
+// ?quick=vnc|rdp simulates a host opening the quick-connect command context
+// (open-vnc-session / open-rdp-session): connectionless workbench with
+// plugin.mode=vnc|rdp — App.vue skips the SSH flow and opens the matching
+// connect dialog directly (cancelling lands on the quick-connect card).
+const quickFixture = fixtureParams.get("quick") === "vnc" || fixtureParams.get("quick") === "rdp"
+  ? (fixtureParams.get("quick") as "vnc" | "rdp")
+  : null;
 // ?proto=rdp 模拟宿主连接表单 protocol=rdp：RDP 连接级门控走查（工具条 SSH-only
 // 控件整类隐藏）。mock 的 rdp/start 夹具（:1574 起）会推桌面帧，可直连完成。
 const protoFixture = fixtureParams.get("proto");
@@ -133,7 +140,14 @@ function emitAutoAuthProgress(includeAgentFailure: boolean): void {
   }
 }
 
-const context = localOnlyContext
+const context = quickFixture
+  ? {
+      plugin: { mode: quickFixture },
+      workbenchId: "visual-workbench",
+      restored: restoredFixture,
+      surface: surfaceFixture,
+    }
+  : localOnlyContext
   ? {
       plugin: { mode: "local-terminal" },
       workbenchId: "visual-workbench",
@@ -820,7 +834,7 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string, par
   // connection-switching walkthrough; on legacy host semantics unknown methods still resolve to null (caller degrades).
   if (method === "host.listConnections") {
     return {
-      connections: localOnlyContext
+      connections: localOnlyContext || quickFixture
         ? []
         : [{ id: "visual-connection", name: "Production SSH", providerId: "io.dbx.ssh.connection", connectionType: "ssh", readOnly: !writable }],
     } as T;

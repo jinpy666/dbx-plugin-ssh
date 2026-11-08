@@ -1,0 +1,7 @@
+<!-- VNC quick-connect command icon (open-vnc-session / io.dbx.ssh.vnc). Licensed under the repository Apache-2.0 license. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="VNC">
+  <rect x="6" y="10" width="52" height="36" rx="8" fill="none" stroke="#0ea5e9" stroke-width="6"/>
+  <path d="M32 46v8" fill="none" stroke="#0ea5e9" stroke-width="6" stroke-linecap="round"/>
+  <path d="M20 56h24" fill="none" stroke="#0ea5e9" stroke-width="6" stroke-linecap="round"/>
+  <path d="M25 19l15 9-6.5 1.5L30 36z" fill="#0ea5e9" stroke="#0ea5e9" stroke-width="2.5" stroke-linejoin="round"/>
+</svg>

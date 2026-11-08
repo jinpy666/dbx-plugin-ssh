@@ -829,6 +829,24 @@ try {
     await localPage.close();
   }
 
+  console.log("==> VNC/RDP quick-connect command passthrough (open-*-session)");
+  // ?quick=vnc|rdp：宿主以 command context（plugin.mode=vnc|rdp）无连接打开
+  // 工作台——直开对应连接弹窗、无 SSH 连接卡；关闭弹窗落回可重连空态卡。
+  for (const kind of ["vnc", "rdp"]) {
+    const quickPage = await newPage(`${baseUrl}?render=dom&quick=${kind}&noanim=1`);
+    await expect(quickPage, '[data-slot="dialog-content"]', `${kind} quick-connect dialog opens`);
+    const quickContract = await quickPage.evaluate(() => window.dbxPlugin?.context?.plugin?.mode);
+    check(`quick=${kind} context carries plugin.mode`, quickContract === kind, `mode=${quickContract}`);
+    const sshCardHits = await quickPage.locator("text=Production SSH").count();
+    check(`quick=${kind} shows no SSH connection card`, sshCardHits === 0, `${sshCardHits} hit(s)`);
+    // 关闭弹窗（取消）→ 空态卡片（复用 local-exit-card 样式的 quick 卡）。
+    await quickPage.locator('[data-slot="dialog-content"] button[aria-label], [data-slot="dialog-content"] header button').first().click();
+    await quickPage.waitForTimeout(300);
+    const quickCard = await quickPage.locator(".terminal-overlay .local-exit-card").count();
+    check(`quick=${kind} lands on the reconnect card after cancel`, quickCard === 1, `cards=${quickCard}`);
+    await quickPage.close();
+  }
+
   console.log("==> independent tunnel manager and saved quick start");
   const tunnelPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   tunnelPage.on("pageerror", (err) => pageError.push(String(err)));

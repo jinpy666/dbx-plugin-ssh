@@ -11,8 +11,9 @@ import { readFileSync } from "node:fs";
 
 const root = new URL("../../", import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL("manifest.json", root), "utf8"));
-const provider = manifest.contributions.find((item) => item.type === "connection-provider");
-assert(provider, "SSH manifest must define a connection provider");
+const providers = manifest.contributions.filter((item) => item.type === "connection-provider");
+const provider = providers.find((item) => item.id === "io.dbx.ssh.connection");
+assert(provider, "SSH manifest must define the multi-protocol connection provider (io.dbx.ssh.connection)");
 const fields = provider.fields;
 const byKey = Object.fromEntries(fields.map((field) => [field.key, field]));
 const defaults = Object.fromEntries(fields.map((field) => [field.key, field.default]));
@@ -745,5 +746,53 @@ for (const protocol of options("protocol")) {
   current.visible("rdp_clipboard", protocol === "rdp");
 }
 
+// —— VNC / RDP dedicated connection providers（对标 io.dbx.ssh.local 的独立
+// 连接类型）：字段契约 + 锁定协议 + 七语本地化。多协议表单（上方断言）不受
+// 影响；这两个 provider 保存的连接经 sidecar connection/protocol 路由到
+// vnc/start / rdp/start，protocol 字段必须锁定，否则 sidecar 按 ssh 处理。 ——
+for (const [providerId, expectedProtocol] of [["io.dbx.ssh.vnc", "vnc"], ["io.dbx.ssh.rdp", "rdp"]]) {
+  const dedicated = providers.find((item) => item.id === providerId);
+  assert(dedicated, `${providerId} provider must be declared`);
+  assert.equal(dedicated.workbench, "io.dbx.ssh.workbench", `${providerId} must open the shared workbench`);
+  const protocolField = dedicated.fields.find((field) => field.key === "protocol");
+  assert(protocolField, `${providerId} must pin a protocol select`);
+  assert.equal(protocolField.default, expectedProtocol, `${providerId} protocol default must be ${expectedProtocol}`);
+  assert.deepStrictEqual(
+    protocolField.options.map((option) => option.value),
+    [expectedProtocol],
+    `${providerId} protocol must be locked to ${expectedProtocol}`,
+  );
+  const keys = dedicated.fields.map((field) => field.key);
+  assert.equal(new Set(keys).size, keys.length, `${providerId} duplicate field keys`);
+  assert(keys.includes("host") && keys.includes("port") && keys.includes("display_name"), `${providerId} requires host/port/display_name`);
+  for (const locale of locales) {
+    const entry = manifest.localizations[locale]?.contributions?.[providerId];
+    assert(entry, `${providerId} localization missing for ${locale}`);
+    for (const field of dedicated.fields) {
+      if (locale === "en") continue; // English falls back to the manifest body
+      assert(entry.fields?.[field.key]?.label, `${providerId}.${field.key} label missing for ${locale}`);
+    }
+  }
+}
+
+// Quick-connect commands：工具栏/命令面板图标入口（无连接临时会话）。
+for (const [commandId, mode, icon] of [
+  ["open-vnc-session", "vnc", "assets/vnc-session.svg"],
+  ["open-rdp-session", "rdp", "assets/rdp-session.svg"],
+]) {
+  const command = manifest.contributions.find((item) => item.type === "command" && item.id === commandId);
+  assert(command, `${commandId} command must be declared`);
+  assert.equal(command.action?.type, "open-workbench");
+  assert.equal(command.action?.context?.plugin?.mode, mode, `${commandId} must pass plugin.mode=${mode}`);
+  assert.equal(command.icon, icon);
+  const menus = manifest.contributions.find((item) => item.type === "menus" && item.items?.some((item2) => item2.command === commandId));
+  assert(menus, `${commandId} must be wired into a menus contribution`);
+  for (const locale of locales) {
+    // Localization contribution keys are namespaced: io.dbx.ssh.<command id>.
+    assert(manifest.localizations[locale]?.contributions?.[`io.dbx.ssh.${commandId}`]?.label, `${commandId} label missing for ${locale}`);
+  }
+}
+
 console.log(`PASS SSH connection form: ${scenarios} combinations; field ordering and seven-language labels/options`);
+console.log(`PASS VNC/RDP dedicated providers: locked protocol + seven-language labels; quick-connect commands wired`);
 console.log(`PASS SSH timeout scope contract: ${timeoutScenarios} cases; global/per-connection sentinels survive save+reopen (issue #20, host-side fix tracked separately)`);
