@@ -66,11 +66,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Output-event poll cadence: the engine queues at most a couple of decoded
 /// events, so the pump must drain frequently (NyaTerm uses the same 8ms).
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(8);
-/// Incremental framebuffer-update request cadence after observed traffic.
-const UPDATE_REQUEST_INTERVAL: Duration = Duration::from_millis(16);
-/// Placeholder delay that keeps the pinned `Refresh` timer dormant until the
-/// first decoded event re-arms it.
-const REFRESH_ARM_DELAY: Duration = Duration::from_secs(86_400);
 /// Classic VNC-Auth passwords are exactly the first 8 bytes (bit-reversed
 /// into the DES key); longer secrets truncate silently, so reject up front.
 const MAX_PASSWORD_BYTES: usize = 8;
@@ -919,8 +914,6 @@ async fn run_generation(
     let mut poll = tokio::time::interval(EVENT_POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut refresh_due = false;
-    let refresh_delay = tokio::time::sleep(REFRESH_ARM_DELAY);
-    tokio::pin!(refresh_delay);
     let end = loop {
         if entry.generation.load(Ordering::Acquire) != generation {
             break GenerationEnd::Superseded;
@@ -939,9 +932,6 @@ async fn run_generation(
                                 break;
                             }
                             refresh_due = true;
-                            refresh_delay
-                                .as_mut()
-                                .reset(tokio::time::Instant::now() + UPDATE_REQUEST_INTERVAL);
                         }
                         Ok(None) => break,
                         Err(error) => {
@@ -953,12 +943,16 @@ async fn run_generation(
                 if let Some(end) = fatal {
                     break end;
                 }
-            }
-            _ = &mut refresh_delay, if refresh_due => {
-                if let Err(error) = client.input(X11Event::Refresh).await {
-                    break GenerationEnd::failed(error);
+                // #276 实验 A1：事件拉干后立即请求下一轮增量，不再等 16ms
+                // 防抖——单在途请求下每轮固定 +16ms 是画面「一条条推进」
+                // 节奏的主导项之一（TigerVNC 同为流式连续请求）。Refresh
+                // 是增量语义（vnc-rs event.rs），无全量重刷风暴风险。
+                if refresh_due {
+                    if let Err(error) = client.input(X11Event::Refresh).await {
+                        break GenerationEnd::failed(error);
+                    }
+                    refresh_due = false;
                 }
-                refresh_due = false;
             }
             command = cmd_rx.recv() => match command {
                 Some(VncCommand::Input(input)) => {
