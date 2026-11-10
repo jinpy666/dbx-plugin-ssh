@@ -403,16 +403,23 @@ impl SudoAuth {
         Ok(selection.code)
     }
 
-    /// Picks the OTP code to use right now across all configured secrets,
-    /// sorted like tiny-rdm's resolveRotatingOTP: unused codes first, then
-    /// longest remaining validity, configured order as the stable tie-break;
-    /// when every candidate is used the best code is still returned as a
-    /// fallback (the replay guard in [`Self::take_totp_answer`] decides
-    /// whether it may actually go out). Selections are marked in the
-    /// process-global usage ledger until their window expires, so
-    /// back-to-back MCP exec calls — each resolving a fresh `SudoAuth` —
-    /// keep rotating to an unused secret instead of resubmitting the first
-    /// secret's code.
+    /// Picks the OTP code to use right now across all configured secrets.
+    /// Ordering: unused codes first (a code this target already submitted
+    /// inside its replay window counts as used), then codes with enough of
+    /// their window left, then the least recently selected secret — this is
+    /// what makes rotation continue **across** TOTP windows, where the
+    /// per-window usage marks are gone and every secret has a fresh code —
+    /// then longest remaining validity, configured order as the stable
+    /// tie-break. When every candidate is used the best code is still
+    /// returned as a fallback (the replay guard in [`Self::take_totp_answer`]
+    /// decides whether it may actually go out).
+    ///
+    /// Usage marks live in the process-global usage ledger until their window
+    /// expires, so back-to-back MCP exec calls — each resolving a fresh
+    /// `SudoAuth` — keep rotating to an unused secret instead of resubmitting
+    /// the first secret's code. The last-selected ledger deliberately
+    /// outlives a window: with three secrets and one prompt per window the
+    /// first secret would otherwise be picked forever.
     fn current_totp_selection(&self) -> Option<TotpSelection> {
         let now = unix_now();
         // Scope marks to this auth's credential consumer so the rotation
@@ -424,6 +431,18 @@ impl SudoAuth {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         usage.retain(|_, valid_until| *valid_until > now);
+        // A code another session already injected stays unavailable for its
+        // replay window even after this window's usage mark expired (static
+        // codes are the case that outlives a single usage window). Treating
+        // it as used lets the selector fall through to another secret instead
+        // of selecting a code the guard below would refuse.
+        let mut committed = committed_otp_ledger()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        committed.retain(|_, until| is_totp_in_replay_window(now, *until));
+        let mut rotation = otp_rotation_ledger()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
 
         struct Candidate {
             fingerprint: String,
@@ -433,6 +452,7 @@ impl SudoAuth {
             remaining: u64,
             usage_key: String,
             used: bool,
+            last_selected: u64,
         }
         let mut candidates: Vec<Candidate> = self
             .totp_secrets
@@ -453,6 +473,7 @@ impl SudoAuth {
                             period: OTP_STATIC_WINDOW,
                             remaining: OTP_STATIC_WINDOW,
                             used: false,
+                            last_selected: 0,
                         }
                     }
                     TotpSecret::Key {
@@ -472,6 +493,7 @@ impl SudoAuth {
                             period: *period,
                             remaining: valid_until.saturating_sub(now),
                             used: false,
+                            last_selected: 0,
                         }
                     }
                 }
@@ -479,13 +501,34 @@ impl SudoAuth {
             .filter(|candidate| candidate.valid_until > now)
             .collect();
         for candidate in &mut candidates {
-            candidate.used = usage.contains_key(&candidate.usage_key);
+            candidate.used = usage.contains_key(&candidate.usage_key)
+                || committed.contains_key(&format!(
+                    "{scope}|{}|{}",
+                    candidate.fingerprint, candidate.code
+                ));
+            candidate.last_selected = rotation
+                .get(&format!("{scope}|{}", candidate.fingerprint))
+                .copied()
+                .unwrap_or(0);
         }
         // `sort_by` is stable, so the configured secret order stays the
-        // tie-break, exactly like tiny-rdm's ref comparison.
-        candidates.sort_by(|a, b| a.used.cmp(&b.used).then(b.remaining.cmp(&a.remaining)));
+        // tie-break. Least-recently-selected before the remaining-validity
+        // comparison is what rotates across windows; the enough-remaining
+        // tier only steers away from a code that is about to expire.
+        candidates.sort_by(|a, b| {
+            a.used
+                .cmp(&b.used)
+                .then(
+                    (b.remaining >= OTP_MIN_REMAINING_SECS)
+                        .cmp(&(a.remaining >= OTP_MIN_REMAINING_SECS)),
+                )
+                .then(a.last_selected.cmp(&b.last_selected))
+                .then(b.remaining.cmp(&a.remaining))
+        });
         let chosen = candidates.first()?;
         usage.insert(chosen.usage_key.clone(), chosen.valid_until);
+        rotation.insert(format!("{scope}|{}", chosen.fingerprint), now);
+        rotation.retain(|_, last| now.saturating_sub(*last) <= OTP_ROTATION_MEMORY_SECS);
         Some(TotpSelection {
             fingerprint: chosen.fingerprint.clone(),
             code: chosen.code.clone(),
@@ -502,6 +545,16 @@ impl SudoAuth {
 /// mirrors tiny-rdm's service-level `markOTPUsage`; in-memory only, cleared
 /// on sidecar restart.
 fn otp_usage_ledger() -> &'static Mutex<HashMap<String, u64>> {
+    static LEDGER: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Process-global rotation history: `scope|secret-fingerprint -> unix seconds
+/// of the last selection`. The usage ledger above only lasts one TOTP window,
+/// so it cannot carry rotation across windows; this ledger can, making one
+/// prompt per window cycle A→B→C instead of always restarting at A. Entries
+/// older than [`OTP_ROTATION_MEMORY_SECS`] are pruned on every selection.
+fn otp_rotation_ledger() -> &'static Mutex<HashMap<String, u64>> {
     static LEDGER: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     LEDGER.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -528,6 +581,10 @@ fn otp_ledger_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poison| poison.into_inner())
         .clear();
     committed_otp_ledger()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clear();
+    otp_rotation_ledger()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .clear();
@@ -564,6 +621,14 @@ pub fn otp_ledger_scope_for(username: &str, host: &str, port: u16) -> String {
 /// Nominal replay window for static OTP codes, which carry no period of
 /// their own (mirrors tiny-rdm's `otpReuseWindowFallback`).
 const OTP_STATIC_WINDOW: u64 = 30;
+/// A rotating code with less than this much of its window left is used only
+/// when no other candidate has more: submitting it risks the code rolling
+/// over while it travels to the server (the original `>= 5s` rule).
+const OTP_MIN_REMAINING_SECS: u64 = 5;
+/// How long a secret stays "recently selected" for rotation. Long enough to
+/// span any TOTP period the parser accepts (<= 120s) and everyday sudo
+/// gaps, short enough that removed/re-added secrets do not stay stale.
+const OTP_ROTATION_MEMORY_SECS: u64 = 24 * 60 * 60;
 
 /// One OTP selection with the data the replay guard needs.
 struct TotpSelection {
@@ -4329,6 +4394,21 @@ mod rotation_tests {
     // test). Each test holds the ledger guard so parallel tests neither
     // share marks nor wipe each other mid-run.
 
+    /// Three distinct rotating secrets for the cross-window tests. Built from
+    /// obvious fixture bytes rather than base32 literals so the test carries
+    /// no secret-looking material.
+    fn three_distinct_secrets() -> Vec<TotpSecret> {
+        [b"alpha-seed".as_slice(), b"bravo-seed", b"charlie-seed"]
+            .into_iter()
+            .map(|key| TotpSecret::Key {
+                key: key.to_vec(),
+                digits: 6,
+                period: 30,
+                algorithm: TotpAlgorithm::Sha1,
+            })
+            .collect()
+    }
+
     #[test]
     fn parses_multiple_totp_secrets_across_separators() {
         let secrets = parse_totp_secrets("JBSWY3DPEHPK3PXP\nGEZDGNBVGY3TQOJQ; 123456\r\n");
@@ -4353,6 +4433,67 @@ mod rotation_tests {
         // Once every candidate is used we fall back instead of failing.
         let third = auth.current_totp_selection().expect("code").code;
         assert!(third == first || third == second);
+    }
+
+    /// Rotation must continue across TOTP windows. The usage ledger expires
+    /// with its window, so without the cross-window rotation history a
+    /// three-secret profile would answer with the first secret forever when
+    /// consecutive sudo prompts are more than one window apart.
+    #[test]
+    fn otp_selection_cycles_secrets_across_windows() {
+        let _otp_ledger = otp_ledger_test_guard();
+        let auth = SudoAuth {
+            totp_secrets: three_distinct_secrets(),
+            ..Default::default()
+        };
+        assert_eq!(auth.totp_secrets.len(), 3, "fixture carries three secrets");
+        let mut picks = Vec::new();
+        for _ in 0..4 {
+            picks.push(auth.current_totp_selection().expect("code").fingerprint);
+            // Simulate a window roll: per-window usage marks are pruned, the
+            // rotation history survives (that is the point of the change).
+            otp_usage_ledger()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clear();
+        }
+        assert_ne!(picks[0], picks[1], "second window uses the second secret");
+        assert_ne!(picks[1], picks[2], "third window uses the third secret");
+        assert_ne!(picks[0], picks[2]);
+        assert_eq!(
+            picks[0], picks[3],
+            "rotation wraps back to the first secret"
+        );
+    }
+
+    /// A code still inside its replay window is not "available", even when
+    /// the per-window usage mark is gone (static codes outlive one usage
+    /// window). The selector must fall through to another secret instead of
+    /// handing the replay guard a code it will refuse.
+    #[test]
+    fn otp_selection_skips_a_replay_blocked_code() {
+        let _otp_ledger = otp_ledger_test_guard();
+        let auth = SudoAuth {
+            totp_secrets: three_distinct_secrets(),
+            ..Default::default()
+        };
+        let first = auth.current_totp_selection().expect("code");
+        committed_otp_ledger()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(
+                format!("|{}|{}", first.fingerprint, first.code),
+                first.valid_until + first.period,
+            );
+        otp_usage_ledger()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
+        let next = auth.current_totp_selection().expect("code");
+        assert_ne!(
+            next.fingerprint, first.fingerprint,
+            "a replay-blocked code must not be selected again"
+        );
     }
 
     /// Two `ssh_exec_sudo` calls never share a `SudoAuth` instance (each
