@@ -4611,3 +4611,28 @@ client_build 断言 700（beta 家族按 0 计），CHANGELOG 收录 #246/#243�
   校验归属；web/docker 无能力静默跳过），手动按钮保留。
 - 验证：前端 vitest 2173 全绿、vue-tsc 0 错；后端 1300 全绿、clippy -D
   warnings 清零、fmt 通过；`scripts/test.sh` 端到端 all green。
+
+## Quick Sudo 多密钥 profile 轮换：跨窗口 LRU + 重放窗口内码不可选（2026-11-09）
+
+**问题**：`quick-sudo-profiles.json` 的 KN profile 配了 3 条 otpauth TOTP
+（本地只做了结构校验，未输出密钥）。原选择算法把"未用"标记记在窗内 usage
+台账里，窗口一滚（默认 30s）标记即清空，排序又回到配置顺序；因此两次 sudo
+间隔超过一个窗口时永远用第一条密钥，表现为"不轮换"。
+
+**修复**（exec.rs）：
+- 新增进程全局 `otp_rotation_ledger`（`作用域|密钥指纹 -> 最后选中时刻`，
+  24h 清理）；排序在 used 之后按最近最少使用（LRU）选择，跨窗口继续
+  A→B→C 轮换，不会每到新窗口就回到第一条；
+- 选择阶段把已进入重放窗口（committed 且未过期）的码视为不可用，直接落到
+  下一条密钥，而不是选中后再被防重放守卫拒绝；
+- 保留剩余有效期 ≥5s 优先档，避免选中即将滚动的码；
+- 测试 guard 同步清理轮换台账，新增用例见下。
+
+**测试**：`otp_selection_cycles_secrets_across_windows`（三密钥、模拟窗口
+滚动，断言 A→B→C→A）与 `otp_selection_skips_a_replay_blocked_code`
+（usage 台账丢失但码仍在重放窗口时换下一条）；cargo test 1331 全绿，
+clippy -D warnings、fmt 通过。
+
+**边界**：服务端明确拒绝（非重放）某个码时仍不会自动换下一条密钥重试；
+终端 watcher 的 `otp_sent` 一次性门保持原语义（避免连续烧码/刷认证）。
+如需"被拒后换密钥重试"需单独评估重试上限、失败告警与锁号风险。
