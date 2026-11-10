@@ -80,6 +80,8 @@ interface DbxPluginApi {
   notify(method: string, params?: unknown): Promise<void>;
   /** `target: "tab"`：面板 webview 显式请求主工作台 tab 落点（宿主桥扩展；旧宿主/不支持的面板忽略该选项，保持原落点）。 */
   openWorkbench?(contributionId: string, context?: Record<string, unknown>, options?: { forceNew?: boolean; target?: "tab" }): Promise<void>;
+  /** 关闭当前 tab/dock/浮动工作台；旧宿主无此方法。 */
+  closeWorkbench?(): void;
   /** 请宿主按当前最新配置重开连接（含 vault 最新凭据回推）。Host API 1.2+；旧宿主无此方法。 */
   reopenConnection?(connectionId: string): Promise<unknown>;
   setTitle?(title: string | null): Promise<void>;

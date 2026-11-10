@@ -31,6 +31,7 @@ function buildHarness(overrides: HarnessOptions = {}) {
     connectLog: { entries: ref([]), push: vi.fn(), clear: vi.fn() },
     scheduleSessionReconnect,
     cancelSessionReconnect: vi.fn(),
+    closeWorkbenchAfterRemoteExit: vi.fn(),
     reconnectPending: ref(false),
     localSession: ref<{ sessionId: string; shell: string } | null>(null),
     markLocalExited: vi.fn(),
@@ -88,6 +89,21 @@ describe("usePluginEvents session lifecycle isolation (issue #193a)", () => {
 
     handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-A", state: "disconnected" }));
     expect(scheduleSessionReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes only the owning workbench after a remote shell exit without reconnecting", () => {
+    const cancelSessionReconnect = vi.fn();
+    const closeWorkbenchAfterRemoteExit = vi.fn();
+    const { handlePluginEvent, scheduleSessionReconnect } = buildHarness({ cancelSessionReconnect, closeWorkbenchAfterRemoteExit });
+
+    handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-B", state: "disconnected", reason: "remote-exit" }));
+    expect(cancelSessionReconnect).not.toHaveBeenCalled();
+    expect(closeWorkbenchAfterRemoteExit).not.toHaveBeenCalled();
+
+    handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-A", state: "disconnected", reason: "remote-exit" }));
+    expect(cancelSessionReconnect).toHaveBeenCalledTimes(1);
+    expect(closeWorkbenchAfterRemoteExit).toHaveBeenCalledTimes(1);
+    expect(scheduleSessionReconnect).not.toHaveBeenCalled();
   });
 
   it("does not reconnect when the workbench has no session bound", () => {
