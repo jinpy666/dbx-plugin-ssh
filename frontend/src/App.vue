@@ -4097,7 +4097,7 @@ function drainTerminalFrames() {
         showNotice(t("directoryTrackingUnavailable"));
       } else {
         terminalState.value = "disconnected";
-        terminalError.value = state === "ssh-transport-disconnected" ? t("transportDisconnected") : state || t("disconnected");
+        terminalError.value = state === "ssh-transport-disconnected" ? t("transportDisconnected") : state === "ssh-session-exited" ? t("disconnected") : state || t("disconnected");
         if (state === "ssh-transport-disconnected" && session.value?.sessionId) {
           terminalTransportWatch.reportUnavailable(session.value.sessionId);
         }
@@ -7995,7 +7995,9 @@ const { handlePluginEvent } = usePluginEvents({
   t, session, terminalState, showError, showNotice,
   terminalDiag, batchBarSourceId, applyRemoteBatchBarState,
   hostKeyPrompt, rdpCertPrompt, rdpCertRemember, connectLog,
-  scheduleSessionReconnect, cancelSessionReconnect, reconnectPending,
+  scheduleSessionReconnect, cancelSessionReconnect,
+  closeWorkbenchAfterRemoteExit: () => window.dbxPlugin.closeWorkbench?.(),
+  reconnectPending,
   localSession, markLocalExited,
   telnetSession, telnetState, telnetError, markTelnetClosed,
   vncSession, vncState, vncError, markVncClosed,

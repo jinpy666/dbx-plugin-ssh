@@ -48,6 +48,7 @@ export function usePluginEvents(options: {
   connectLog: ConnectLog;
   scheduleSessionReconnect: () => void;
   cancelSessionReconnect: () => void;
+  closeWorkbenchAfterRemoteExit: () => void;
   reconnectPending: Ref<boolean>;
   // 本地/telnet/vnc/serial 会话域
   localSession: Ref<{ sessionId: string; shell: string } | null>;
@@ -93,6 +94,7 @@ export function usePluginEvents(options: {
     connectLog,
     scheduleSessionReconnect,
     cancelSessionReconnect,
+    closeWorkbenchAfterRemoteExit,
     reconnectPending,
     localSession,
     markLocalExited,
@@ -190,7 +192,10 @@ let vncClipboardLastReceived = "";
     }
     if (event.method === "ssh/session/state" && event.params.sessionId === session.value?.sessionId) {
       if (event.params.state === "disconnected") {
-        if (event.params.reason === "connection-disconnect") {
+        if (event.params.reason === "remote-exit") {
+          cancelSessionReconnect();
+          closeWorkbenchAfterRemoteExit();
+        } else if (event.params.reason === "connection-disconnect") {
           // 用户主动删除连接：停在本状态，不把刚删除的连接重新打开。
           cancelSessionReconnect();
         } else {

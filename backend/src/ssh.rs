@@ -2755,6 +2755,7 @@ impl SshRuntime {
                                 if let Some(data) = initial_output.take().filter(|data| !data.is_empty()) {
                                     publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
                                 }
+                                disconnect_reason = remote_channel_closed_reason(disconnect_reason);
                                 eprintln!("[ssh] terminal session {task_id}: channel ended by remote ({msg:?})");
                                 break;
                             }
@@ -2942,7 +2943,7 @@ impl SshRuntime {
             publish_terminal(
                 &task_id,
                 TerminalStream::State,
-                b"ssh-transport-disconnected".to_vec(),
+                terminal_disconnect_state(disconnect_reason).to_vec(),
                 &replay,
                 &emitter,
             )
@@ -13334,6 +13335,20 @@ fn decode_stream_text(carry: &mut Vec<u8>, data: &[u8]) -> String {
     text
 }
 
+const REMOTE_EXIT_REASON: &str = "remote-exit";
+
+fn remote_channel_closed_reason(reason: Option<&'static str>) -> Option<&'static str> {
+    reason.or(Some(REMOTE_EXIT_REASON))
+}
+
+fn terminal_disconnect_state(reason: Option<&'static str>) -> &'static [u8] {
+    if reason == Some(REMOTE_EXIT_REASON) {
+        b"ssh-session-exited"
+    } else {
+        b"ssh-transport-disconnected"
+    }
+}
+
 fn session_disconnected_event(
     session_id: &str,
     connection_id: &str,
@@ -15237,13 +15252,28 @@ matrix-ed25519";
     }
 
     #[test]
-    fn disconnect_reason_is_only_present_for_intentional_lifecycle_disconnects() {
+    fn disconnect_reason_distinguishes_remote_exit_from_transport_loss() {
         let network = session_disconnected_event("s1", "c1", None);
         assert_eq!(network["state"], "disconnected");
         assert!(network.get("reason").is_none());
+        assert_eq!(
+            terminal_disconnect_state(None),
+            b"ssh-transport-disconnected"
+        );
 
         let deleted = session_disconnected_event("s1", "c1", Some("connection-disconnect"));
         assert_eq!(deleted["reason"], "connection-disconnect");
+        assert_eq!(
+            remote_channel_closed_reason(Some("connection-disconnect")),
+            Some("connection-disconnect")
+        );
+
+        let exited = session_disconnected_event("s1", "c1", remote_channel_closed_reason(None));
+        assert_eq!(exited["reason"], "remote-exit");
+        assert_eq!(
+            terminal_disconnect_state(remote_channel_closed_reason(None)),
+            b"ssh-session-exited"
+        );
     }
 
     #[test]
