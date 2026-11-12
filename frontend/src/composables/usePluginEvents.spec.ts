@@ -32,6 +32,7 @@ function buildHarness(overrides: HarnessOptions = {}) {
     scheduleSessionReconnect,
     cancelSessionReconnect: vi.fn(),
     closeWorkbenchAfterRemoteExit: vi.fn(),
+    markRemoteKilled: vi.fn(),
     reconnectPending: ref(false),
     localSession: ref<{ sessionId: string; shell: string } | null>(null),
     markLocalExited: vi.fn(),
@@ -103,6 +104,26 @@ describe("usePluginEvents session lifecycle isolation (issue #193a)", () => {
     handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-A", state: "disconnected", reason: "remote-exit" }));
     expect(cancelSessionReconnect).toHaveBeenCalledTimes(1);
     expect(closeWorkbenchAfterRemoteExit).toHaveBeenCalledTimes(1);
+    expect(scheduleSessionReconnect).not.toHaveBeenCalled();
+  });
+
+  it("keeps the workbench and surfaces a kill notice after a forced remote kill", () => {
+    // 被强杀（pkill/sshd 收线，exit-signal）：tab 必须留在原地让用户看到
+    // 「会话被远端终止」的提示——既不自动重连，也绝不静默关闭工作台。
+    const cancelSessionReconnect = vi.fn();
+    const closeWorkbenchAfterRemoteExit = vi.fn();
+    const markRemoteKilled = vi.fn();
+    const { handlePluginEvent, scheduleSessionReconnect } = buildHarness({ cancelSessionReconnect, closeWorkbenchAfterRemoteExit, markRemoteKilled });
+
+    handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-B", state: "disconnected", reason: "remote-killed" }));
+    expect(cancelSessionReconnect).not.toHaveBeenCalled();
+    expect(closeWorkbenchAfterRemoteExit).not.toHaveBeenCalled();
+    expect(markRemoteKilled).not.toHaveBeenCalled();
+
+    handlePluginEvent(backendEvent("ssh/session/state", { sessionId: "session-A", state: "disconnected", reason: "remote-killed" }));
+    expect(cancelSessionReconnect).toHaveBeenCalledTimes(1);
+    expect(closeWorkbenchAfterRemoteExit).not.toHaveBeenCalled();
+    expect(markRemoteKilled).toHaveBeenCalledTimes(1);
     expect(scheduleSessionReconnect).not.toHaveBeenCalled();
   });
 
