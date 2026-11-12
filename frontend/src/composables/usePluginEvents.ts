@@ -49,6 +49,8 @@ export function usePluginEvents(options: {
   scheduleSessionReconnect: () => void;
   cancelSessionReconnect: () => void;
   closeWorkbenchAfterRemoteExit: () => void;
+  /** 远端强杀（exit-signal）：保留 tab、置错误态提示，不重连不关面板。 */
+  markRemoteKilled: () => void;
   reconnectPending: Ref<boolean>;
   // 本地/telnet/vnc/serial 会话域
   localSession: Ref<{ sessionId: string; shell: string } | null>;
@@ -95,6 +97,7 @@ export function usePluginEvents(options: {
     scheduleSessionReconnect,
     cancelSessionReconnect,
     closeWorkbenchAfterRemoteExit,
+    markRemoteKilled,
     reconnectPending,
     localSession,
     markLocalExited,
@@ -195,6 +198,11 @@ let vncClipboardLastReceived = "";
         if (event.params.reason === "remote-exit") {
           cancelSessionReconnect();
           closeWorkbenchAfterRemoteExit();
+        } else if (event.params.reason === "remote-killed") {
+          // 被强杀（管理员 pkill / sshd 收线）：tab 留在原地展示
+          // 「会话被远端终止」，既不自动重连也不静默关闭工作台。
+          cancelSessionReconnect();
+          markRemoteKilled();
         } else if (event.params.reason === "connection-disconnect") {
           // 用户主动删除连接：停在本状态，不把刚删除的连接重新打开。
           cancelSessionReconnect();

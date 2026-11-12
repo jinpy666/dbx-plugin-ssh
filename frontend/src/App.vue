@@ -4097,7 +4097,14 @@ function drainTerminalFrames() {
         showNotice(t("directoryTrackingUnavailable"));
       } else {
         terminalState.value = "disconnected";
-        terminalError.value = state === "ssh-transport-disconnected" ? t("transportDisconnected") : state === "ssh-session-exited" ? t("disconnected") : state || t("disconnected");
+        terminalError.value =
+          state === "ssh-transport-disconnected"
+            ? t("transportDisconnected")
+            : state === "ssh-session-exited"
+              ? t("disconnected")
+              : state === "ssh-session-killed"
+                ? t("remoteSessionKilled")
+                : state || t("disconnected");
         if (state === "ssh-transport-disconnected" && session.value?.sessionId) {
           terminalTransportWatch.reportUnavailable(session.value.sessionId);
         }
@@ -7997,6 +8004,12 @@ const { handlePluginEvent } = usePluginEvents({
   hostKeyPrompt, rdpCertPrompt, rdpCertRemember, connectLog,
   scheduleSessionReconnect, cancelSessionReconnect,
   closeWorkbenchAfterRemoteExit: () => window.dbxPlugin.closeWorkbench?.(),
+  // 远端强杀：保留 tab 并把提示落到终端错误区（状态帧通常已先行置位，
+  // 这里兜底幂等重写，确保即使帧重排也一定看到原因）。
+  markRemoteKilled: () => {
+    terminalState.value = "disconnected";
+    terminalError.value = t("remoteSessionKilled");
+  },
   reconnectPending,
   localSession, markLocalExited,
   telnetSession, telnetState, telnetError, markTelnetClosed,

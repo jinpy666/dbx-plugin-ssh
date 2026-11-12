@@ -2755,9 +2755,28 @@ impl SshRuntime {
                                 if let Some(data) = initial_output.take().filter(|data| !data.is_empty()) {
                                     publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
                                 }
+                                // exit-signal（强杀）先于 Eof/Close 到达时已写入
+                                // disconnect_reason，这里不覆盖；否则按干净退出归档。
                                 disconnect_reason = remote_channel_closed_reason(disconnect_reason);
                                 eprintln!("[ssh] terminal session {task_id}: channel ended by remote ({msg:?})");
                                 break;
+                            }
+                            // SSH RFC 4254：shell 被信号终止时服务端先发
+                            // exit-signal 再关 channel。记下强杀档位，随后的
+                            // Eof/Close 不得降级为 remote-exit，前端据此保留
+                            // tab 并提示「会话被远端终止」而不是静默关闭。
+                            Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
+                                disconnect_reason = Some(REMOTE_KILLED_REASON);
+                                eprintln!("[ssh] terminal session {task_id}: remote process killed by {signal_name:?}");
+                                continue;
+                            }
+                            Some(ChannelMsg::ExitStatus { exit_status }) => {
+                                // 干净退出先到：同样预置 reason，供后续
+                                // Eof/Close 归档（exit_status 由终端输出自身呈现）。
+                                if disconnect_reason.is_none() {
+                                    disconnect_reason = remote_channel_exit_reason(Some(ChannelMsg::ExitStatus { exit_status }));
+                                }
+                                continue;
                             }
                             None => {
                                 if let Some(data) = initial_output.take().filter(|data| !data.is_empty()) {
@@ -13336,14 +13355,31 @@ fn decode_stream_text(carry: &mut Vec<u8>, data: &[u8]) -> String {
 }
 
 const REMOTE_EXIT_REASON: &str = "remote-exit";
+const REMOTE_KILLED_REASON: &str = "remote-killed";
 
 fn remote_channel_closed_reason(reason: Option<&'static str>) -> Option<&'static str> {
     reason.or(Some(REMOTE_EXIT_REASON))
 }
 
+/// channel 读循环结束时按 SSH 协议语义分档：shell 被信号杀死（sshd 先发
+/// exit-signal，russh 映射为 `ChannelMsg::ExitSignal`）记为 `remote-killed`，
+/// 干净退出（exit-status，或裸 Eof/Close 无先行状态）记为 `remote-exit`，
+/// transport 自行死亡（`channel.wait()` 返回 `None`）不在此列、保持原值。
+fn remote_channel_exit_reason(message: Option<ChannelMsg>) -> Option<&'static str> {
+    match message {
+        Some(ChannelMsg::ExitSignal { .. }) => Some(REMOTE_KILLED_REASON),
+        Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => {
+            Some(REMOTE_EXIT_REASON)
+        }
+        _ => None,
+    }
+}
+
 fn terminal_disconnect_state(reason: Option<&'static str>) -> &'static [u8] {
     if reason == Some(REMOTE_EXIT_REASON) {
         b"ssh-session-exited"
+    } else if reason == Some(REMOTE_KILLED_REASON) {
+        b"ssh-session-killed"
     } else {
         b"ssh-transport-disconnected"
     }
@@ -15274,6 +15310,42 @@ matrix-ed25519";
             terminal_disconnect_state(remote_channel_closed_reason(None)),
             b"ssh-session-exited"
         );
+    }
+
+    #[test]
+    fn disconnect_reason_distinguishes_remote_kill_from_clean_exit() {
+        // 被强杀（管理员 pkill / sshd 主动关会话）必须与「干净退出」分道：
+        // SSH 协议在 shell 被信号终止时先发 exit-signal，russh 映射为
+        // ChannelMsg::ExitSignal；干净退出是 exit-status。读循环据此分别
+        // 记录 remote-killed / remote-exit，前端才能保留 tab 提示而不是
+        // 静默关闭工作台。
+        assert_eq!(
+            remote_channel_exit_reason(Some(ChannelMsg::ExitSignal {
+                signal_name: russh::Sig::KILL,
+                core_dumped: false,
+                error_message: String::new(),
+                lang_tag: String::new(),
+            })),
+            Some("remote-killed")
+        );
+        assert_eq!(
+            remote_channel_exit_reason(Some(ChannelMsg::ExitStatus { exit_status: 0 })),
+            Some("remote-exit")
+        );
+        // 裸 Eof/Close（无 exit-status/exit-signal 先行）仍按干净退出对待，
+        // 维持 #285 既有行为。
+        assert_eq!(
+            remote_channel_exit_reason(Some(ChannelMsg::Eof)),
+            Some("remote-exit")
+        );
+        assert_eq!(remote_channel_exit_reason(None), None);
+
+        assert_eq!(
+            terminal_disconnect_state(Some("remote-killed")),
+            b"ssh-session-killed"
+        );
+        let killed = session_disconnected_event("s1", "c1", Some("remote-killed"));
+        assert_eq!(killed["reason"], "remote-killed");
     }
 
     #[test]
