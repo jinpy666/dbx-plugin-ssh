@@ -188,10 +188,24 @@ jobs:
         run: node scripts/connection-forms/verify.mjs
       - name: Check Rust formatting
         run: cargo fmt --manifest-path backend/Cargo.toml --check
+      # sccache 代理在本 runner 上会在 spawn rustc 时直接失败：
+      #   sccache: error: failed to spawn Command { std: "…\\rustc.exe" … }
+      #   caused by: The filename or extension is too long. (os error 206)
+      # 实测该 crate 的 rustc 命令行只有 ~3.4 KB（vendored ironrdp-client 的
+      # [lints] 表展开成 111 个 --warn），远低于 Windows 的 32 KB 上限，因此
+      # 不是命令行长度问题，而是 sccache 自身的 spawn/临时路径在 2026-11-13
+      # 的 runner 上开始报错——main 在 11-12 跑过同类 job 是绿的，之后没能再
+      # 跑过一次 Windows job，所有 PR（含只改前端的）都卡在同一个 crate 上。
+      # 这里让 cargo 直接 spawn rustc（Swatinem/rust-cache 仍然缓存 target，
+      # 冷构建只影响首次）。上游 runner 恢复后可回退这两处 RUSTC_WRAPPER。
       - name: Run native Windows backend regression tests
+        env:
+          RUSTC_WRAPPER: ""
         run: cargo test --locked --manifest-path backend/Cargo.toml
       - name: Build and smoke the Windows sidecar
         shell: pwsh
+        env:
+          RUSTC_WRAPPER: ""
         run: |
           cargo build --locked --release --manifest-path backend/Cargo.toml
           # windows-2022 runner 的 docker daemon 偶发 15s 探测超时（main 近
