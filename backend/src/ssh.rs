@@ -7841,7 +7841,6 @@ impl SshRuntime {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// 显式解压下载（ST10）：远端源 `.dbxz` → 本地暂存拉流 → 自研解压 →
     /// staged 分块供给原始字节。注册表里 compression=None + expand_lzpack=
     /// true：分块供给走 staged 车道（download_staged_chunk），status/事件
