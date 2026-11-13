@@ -13153,41 +13153,112 @@ pub(crate) async fn apply_preserved_permissions(
     Ok(())
 }
 
+/// Round-trip decisions of the commit sequence, derived from the target's
+/// attributes alone (pure; unit-tested without a session).
+struct CommitPlan {
+    /// The target exists, so it has to be renamed aside before the staged file
+    /// can take its place.
+    backup_rename: bool,
+    /// SETSTAT payload for the staged file. `None` means the server declared no
+    /// permission bits, so no SETSTAT is sent at all (issue #37 only asks for
+    /// the mode to survive; there is nothing to preserve without one).
+    permissions: Option<russh_sftp::protocol::FileAttributes>,
+}
+
+fn commit_plan(target: Option<&russh_sftp::protocol::FileAttributes>) -> CommitPlan {
+    CommitPlan {
+        backup_rename: target.is_some(),
+        permissions: target.and_then(preserved_target_permissions),
+    }
+}
+
+/// Renames a finished staging file onto its target, moving an existing target
+/// aside first and restoring it when the commit fails.
+///
+/// Every call here is one SFTP round trip and the count is multiplied by the
+/// file count, so the sequence is kept to the minimum that still preserves the
+/// rollback contract: an overwrite used to cost five round trips per file
+/// (STAT + SETSTAT + RENAME + RENAME + REMOVE) against two for a fresh upload
+/// — hundreds of small files on a 100–200 ms public-cloud link is exactly the
+/// "first upload under a minute, overwrite ten-plus minutes" gap of issue
+/// #284. It now costs three (STAT + pipelined SETSTAT/RENAME + RENAME, with
+/// the backup REMOVE no longer awaited).
 async fn commit_remote_file(
     sftp: &Arc<AsyncMutex<SftpSession>>,
     temporary: &str,
     target: &str,
     backup: &str,
 ) -> Result<(), String> {
-    let target_attributes = sftp.lock().await.metadata(target.to_string()).await.ok();
-    apply_preserved_permissions(sftp, temporary, target_attributes.as_ref()).await?;
-    let target_exists = target_attributes.is_some();
-    if target_exists {
-        sftp.lock()
-            .await
-            .rename(target.to_string(), backup.to_string())
-            .await
-            .map_err(sftp_error)?;
+    // One guard covers the whole sequence: re-locking per call would not save a
+    // round trip, and holding it for the sequence keeps the commit ordered
+    // against other operations sharing the session.
+    let session = sftp.lock().await;
+    let target_attributes = session.metadata(target.to_string()).await.ok();
+    let CommitPlan {
+        backup_rename,
+        permissions,
+    } = commit_plan(target_attributes.as_ref());
+    if backup_rename {
+        // SETSTAT hits the staging file while the RENAME moves the current
+        // target aside: different paths, no ordering dependency, so both go out
+        // as one pipelined batch (russh-sftp multiplexes requests by id)
+        // instead of paying a round trip each. Compensations match the serial
+        // version: a SETSTAT failure keeps the original in place (restore the
+        // backup, drop the staging file), a RENAME failure is reported as-is
+        // and leaves the staging file to the caller's cleanup.
+        let (preset, moved) = tokio::join!(
+            async {
+                match permissions {
+                    Some(attributes) => {
+                        let mode = attributes.permissions.unwrap_or_default();
+                        session
+                            .set_metadata(temporary.to_string(), attributes)
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "SFTP save failed while preserving permissions {}: {error}; original file left unchanged",
+                                    format_permissions(mode),
+                                )
+                            })
+                    }
+                    None => Ok(()),
+                }
+            },
+            session.rename(target.to_string(), backup.to_string()),
+        );
+        if let Err(error) = preset {
+            if moved.is_ok() {
+                let _ = session.rename(backup.to_string(), target.to_string()).await;
+            }
+            let _ = session.remove_file(temporary.to_string()).await;
+            return Err(error);
+        }
+        moved.map_err(sftp_error)?;
     }
-    if let Err(error) = sftp
-        .lock()
-        .await
+    if let Err(error) = session
         .rename(temporary.to_string(), target.to_string())
         .await
     {
-        if target_exists {
-            let _ = sftp
-                .lock()
-                .await
-                .rename(backup.to_string(), target.to_string())
-                .await;
+        if backup_rename {
+            let _ = session.rename(backup.to_string(), target.to_string()).await;
         }
-        let _ = sftp.lock().await.remove_file(temporary.to_string()).await;
+        let _ = session.remove_file(temporary.to_string()).await;
         return Err(sftp_error(error));
     }
-    if target_exists {
-        let _ = sftp.lock().await.remove_file(backup.to_string()).await;
+    if !backup_rename {
+        return Ok(());
     }
+    drop(session);
+    // The backup is dead weight once the target is in place, and awaiting its
+    // REMOVE made every overwritten file pay one more round trip. A failed
+    // cleanup only leaves an orphan `.dbx-upload-<task>.backup` beside the
+    // target; each upload names its own task id, so a later upload never trips
+    // over it.
+    let cleanup = Arc::clone(sftp);
+    let backup = backup.to_string();
+    tokio::spawn(async move {
+        let _ = cleanup.lock().await.remove_file(backup).await;
+    });
     Ok(())
 }
 
@@ -17754,6 +17825,45 @@ matrix-ed25519";
                 ..Default::default()
             };
             assert!(preserved_target_permissions(&target).is_none());
+        }
+
+        #[test]
+        fn commit_plan_skips_setstat_only_when_the_server_declares_no_mode() {
+            // Issue #284: the overwrite commit must not spend a SETSTAT when
+            // there is no mode to carry over, and must always book the backup
+            // rename exactly when the target exists.
+            let with_mode = russh_sftp::protocol::FileAttributes {
+                permissions: Some(0o100644),
+                ..Default::default()
+            };
+            let plan = commit_plan(Some(&with_mode));
+            assert!(plan.backup_rename);
+            assert_eq!(
+                plan.permissions
+                    .and_then(|attributes| attributes.permissions),
+                Some(0o644)
+            );
+
+            let without_mode = russh_sftp::protocol::FileAttributes {
+                size: Some(3),
+                ..Default::default()
+            };
+            let plan = commit_plan(Some(&without_mode));
+            assert!(
+                plan.backup_rename,
+                "existing target still needs the backup rename"
+            );
+            assert!(
+                plan.permissions.is_none(),
+                "no mode information, no SETSTAT round trip"
+            );
+
+            let plan = commit_plan(None);
+            assert!(
+                !plan.backup_rename,
+                "fresh upload commits with a single rename"
+            );
+            assert!(plan.permissions.is_none());
         }
     }
 

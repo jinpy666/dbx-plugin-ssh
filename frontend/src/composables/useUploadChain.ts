@@ -342,6 +342,13 @@ function askUploadDuplicate(fileName: string, path: string): Promise<"overwrite"
 async function resolveUploadDuplicateName(name: string, targetDir: string): Promise<{ name: string; proceed: boolean }> {
   const sessionId = session.value?.sessionId;
   if (!sessionId) return { name, proceed: true };
+  const policy = transferDuplicateState.value;
+  // issue #284：覆盖策略下 exists 探测不影响结果——目标存不存在都按原名下发，
+  // 却让每个文件白付一次 stat 往返。小文件批量覆盖上传时这笔开销按文件数
+  // 放大，公网 RTT 下就是「首传 1 分钟、覆盖十几分钟」的一部分。ask 模式
+  // 已批量选了覆盖时同理（探测结果同样不可能改变本次解析结果）。
+  if (policy === "overwrite") return { name, proceed: true };
+  if (policy === "ask" && uploadDuplicateBatchDecision === "overwrite") return { name, proceed: true };
   const targetPath = joinRemote(targetDir, name);
   let exists = false;
   try {
@@ -354,8 +361,6 @@ async function resolveUploadDuplicateName(name: string, targetDir: string): Prom
     return { name, proceed: true };
   }
   if (!exists) return { name, proceed: true };
-  const policy = transferDuplicateState.value;
-  if (policy === "overwrite") return { name, proceed: true };
   if (policy === "ask" && uploadDuplicateBatchDecision === undefined) {
     const choice = await askUploadDuplicate(name, targetPath);
     if (!choice) return { name, proceed: false };
