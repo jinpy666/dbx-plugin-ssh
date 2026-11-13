@@ -4,7 +4,124 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.14-beta.2.9] — 2026-11-13
+
+### 修复
+- **分屏窗格底部黑条**：每个副屏窗格底部出现一条全宽黑边。原因是 xterm 6.1-beta
+  给 `.xterm-viewport` 的库默认背景为 `#000`，其矩形覆盖整个窗格，而 fit 按行高
+  取整后的画面高度与窗格底边存在富余（最多一个行高），富余处露出黑底。主终端
+  已有同款压底规则（beta.2.x 之前的 padding 环带修复），分屏窗格漏配——补上
+  `.split-pane-host .xterm .xterm-viewport { background: var(--ssh-terminal-background) }`，
+  与主终端观感一致（滚动条同步隐藏）。
+
+## [0.7.14-beta.2.8] — 2026-11-13
+
+### 调整
+- **分屏工具条默认隐藏**：右下角三按钮悬浮条由「35% 半透明常驻」改为「默认
+  完全隐藏（opacity: 0），悬停分屏区域或键盘聚焦时显形」。半透明常驻在深色
+  终端上会被误认为是一条黑边；隐藏后分屏画面无任何附加痕迹，功能不变。
+
+## [0.7.14-beta.2.7] — 2026-11-13
+
+### 新增
+- **批量上传（多目标会话）**：批量命令条新增「命令 / 上传」双模式切换（分段控件，
+  目标勾选与结果浮条两模式共用）。上传模式与批量发送命令同一套交互：勾选多个
+  目标会话 → 填写上传服务器路径（`~`/相对路径自动归一为绝对路径，上次目录记忆
+  落 pluginStore）→ `<input type="file" multiple>` 选择本地文件（同名同大小去重，
+  「文件（N）」弹窗可查看/移除/清空）→ 同名文件策略（覆盖 / 保留两者 / 跳过）→
+  点击上传，逐目标逐文件投递到 `sftp/upload/*` 分块通道。
+- **跨连接可用**：sidecar 的 `sftp/upload/*` 只按 sessionId 寻址（ensure_writable
+  仅查只读门禁），批量上传把目标 sessionId 显式传进传输队列的 `uploadSource`——
+  其他连接/标签页的存活会话同样能传（与 `ssh/terminal/batchInput` 同一寻址方式）。
+  传输面板进度/暂停/取消、spool 暂存、压缩决策与普通上传完全同一条管线。
+- **重名策略逐台判定**：多台服务器目录内容天然不同，`sftp/exists` /
+  `sftp/rename-unique` 在每个目标上各判一次（跳过/保留两者），不拿一台的结果套
+  全部；探测失败回落覆盖语义不阻断。
+- **结果浮条**：上传中显示「正在上传 N/M · 文件 N/M · 目标 · 文件名」；结束后
+  「N 成功 / M 失败 / K 跳过」逐行（目标 · 文件 · 原因），全部成功 3.5s 自动收起，
+  与批量发送同语义。七语文案齐备（supplemental 追加块）。
+
+### 验证
+- vitest：新增 `lib/batchUpload.spec.ts` 13 项（目录归一/去重/目标筛选/汇总）；
+  七语键集对齐、i18n 引用、popover 收口结构守卫、pluginStore 白名单同步后全绿
+  （2256+ 项）。
+- playwright + mock 宿主（`?rw=1` 可写夹具）端到端：切上传模式 → 路径预填
+  `/home/demo` → 选 2 个文件（弹窗列出名称/大小/移除）→ 点上传 → 浮条
+  「2 upload(s) completed」，传输面板出现任务卡。
+
+## [0.7.14-beta.2.6] — 2026-11-13
+
+### 优化（分屏工具条布局）
+- **副屏工具条悬浮化**：分屏区底部的「切换排列 / 新增副屏 / 镜像其他会话」
+  三个带文字按钮此前作为 flex 项参与布局——row（上下排列）模式下会挤占
+  窗格横向空间，窗格多时按钮还会换行成一条高列（实测占掉 ~220px 宽）。
+  现改为绝对定位悬浮在分屏区右下角的**纯图标**工具条（文案进 tooltip 与
+  aria-label，无障碍不回退），仅 ~70×24px，不再占用任何窗格空间；平时
+  35% 透明度常驻，悬停分屏区或键盘聚焦时完全显形。column / row 两模式
+  行为一致，会话选择浮层（z=8）打开时工具条自动被覆盖。
+
+## [0.7.14-beta.2.3] — 2026-11-13
+
+### 修复
+- **工作台白屏（宿主握手不落定）**：`main.ts` 的 boot 在 `await api.ready` /
+  `host.getContext` 上无限等待，宿主与 sidecar 握手未走完时永久白屏且无任何报错。
+  现两处均加 3s 超时兜底，超时用宿主同步注入的 `api.context` + 空对象挂载工作台
+  （连接表单/工具条照常可用，后续 context/appearance 推送仍会补齐）。
+- **补全 worker 起不来**：vendored `autocomplete-engine/parser.js` 在模块顶层给
+  `window.resetCaches` / `window.listCache` 赋值，而该文件经 `?worker&inline` 在
+  Worker 作用域求值（无 `window`）→ `ReferenceError: window is not defined`，
+  worker 整个死掉。现加 `typeof window !== "undefined"` 护栏。
+- **桥缺失兜底**：`window.dbxPlugin.workbench?.onClose` → 全链可选链，避免桥未注入时
+  setup 抛 TypeError 直接白屏。
+
+## [0.7.14-beta.2.4] — 2026-11-13
+
+### 修复（白屏真因）
+- **工作台白屏（setup 期 SecurityError）**：工作台 iframe 为
+  `sandbox="allow-scripts"`（opaque origin），访问 `localStorage` 直接抛
+  `SecurityError`。分屏 composable 在 setup 顶层裸读
+  `localStorage.getItem("ssh-split-pane-width")`，异常中断整个 App 挂载 →
+  永久白屏，且只留一条 `console.error`（外壳 webview 无 devtools 时不可见）。
+  本地 dev/mock（localhost 有正常 origin）完全复现不到，故前两轮未命中。
+  现改为 `readStoredSplitWidth()`：捕获异常回落默认 360px，列宽偏好不落盘也
+  不影响分屏功能。
+- **启动失败可视化**：`main.ts` 挂载改为 try/catch + `app.config.errorHandler`，
+  首个 setup/render 异常直接绘制在 #app 内（含 message + stack），不再出现
+  「白屏无提示」。仅在容器从未渲染成功时接管，运行期偶发错误不抢屏。
+
+### 验证
+- 模拟 opaque origin（`localStorage` getter 抛 SecurityError）+ mock 宿主：
+  新构建 `#app` 完整挂载并显示工作台；同场景旧构建（2.2/2.3）`#app` 子节点为 0
+  且控制台为 `SecurityError: Access is denied for this document.` —— 白屏原因
+  闭环确认。
+
+## [0.7.14-beta.2.5] — 2026-11-13
+
+### 新增
+- **分屏「上下排列」模式**：副屏区可贴底横排（主终端在上、副屏全宽在下，
+  对标 CRT 上下 tiled），与既有「右列纵排」一键互切。副屏 footer 新增
+  「切换排列」按钮，方向与两个轴向尺寸（列宽/区高）分别记忆落盘（沙箱
+  安全读写）；分隔条按方向自动切换横/纵拖拽（区高 140–900px）。
+- batch-bar / marker 底栏与副屏区共存：底部让位（两种模式都修，右列模式
+  此前 footer 会被底栏盖住属潜在缺陷）。
+
+### 验证
+- opaque origin 模拟（localStorage 抛 SecurityError）+ mock 宿主下：
+  column（width 360 / --dbx-split-width）↔ row（height 320 /
+  --dbx-split-height）双向切换正常；batch-bar+marker 同开时副屏区底距
+  66px、主终端 bottom 386px，几何一致无遮挡。
+
 ## [Unreleased]
+
+## [0.7.14-beta.2.2] — 2026-11-13
+
+- **分屏副终端（对标 SecureCRT tiled sessions）**。工具条新增「分屏终端」按钮：点击在当前工作台右侧展开分屏栏并自动打开第一个副屏终端——副屏经复制会话同款链路在**当前已认证 transport** 上另开 channel（独立 PTY、免二次认证/免堡垒机口令），最多 3 个副屏（主 + 3 = 4 路同屏）；分隔条可拖拽调整副屏列宽（偏好落 `ssh-split-pane-width`）。副屏底部提供「新增副屏」与「镜像其他会话」入口：后者从 `ssh/sessions/list` 挑选任意存活会话（含其他连接、其他标签页的会话）挂载为镜像窗格——输出按 sidecar 二进制帧的 sessionId 路由（replay 回填历史），输入经 `ssh/terminal/in/{id}` 直接驱动远端 PTY；镜像会话所有权仍在原工作台，原 tab 关闭后镜像窗格落断开态、不代替关闭。主会话断开时非镜像副屏联动落断开态；工作台拆除时本工作台打开的副屏会话随 `ssh/session/close` 清理。外观（字体/主题/回滚）与主终端同一套设置合成；七语文案齐备。已知边界：副屏为精简终端（无搜索/建议/ZMODEM/OSC 扩展、外观变更需重开窗格生效）；镜像窗格依赖宿主把插件二进制帧广播到全部 webview（与 boot-restore attach 同一通道假设），若宿主按 webview 收敛事件则镜像模式无效、同连接副屏不受影响。
+  **Split terminal panes (SecureCRT tiled-sessions parity).** A new "Split terminal" toolbar button expands a pane column on the right of the workbench and opens the first split terminal over the **already-authenticated transport** (same chain as Duplicate session: independent PTY, no second login or jump-host OTP), up to 3 panes (main + 3 = 4-way); the divider is draggable (width persisted to `ssh-split-pane-width`). The footer offers "Add split pane" and "Mirror session": the latter mounts any live session from `ssh/sessions/list` (including other connections/tabs) as a mirrored pane — output is routed per sessionId from the sidecar's broadcast binary frames (replay backfills history), input drives the remote PTY via `ssh/terminal/in/{id}`; mirrored sessions stay owned by their original workbench, so closing the source tab lands the pane in a disconnected state instead of closing the session. When the main session disconnects, non-mirrored panes follow; workbench teardown closes panes opened by this workbench. Pane appearance (font/theme/scrollback) is synthesized from the same settings as the main terminal; all seven locales covered. Known edges: split panes are lean terminals (no search/suggestions/ZMODEM/OSC extensions; appearance changes apply to newly opened panes); mirrored panes rely on the host broadcasting plugin binary frames to all webviews (the same channel assumption as boot-restore attach) — if the host scopes events per webview, mirror mode is inert while same-connection panes keep working.
+
+## [0.7.14-beta.2.1] — 2026-11-13
+
+- **工具条直出「复制会话」（同连接多开终端 tab，对标 SecureCRT Clone Session）**。此前同一连接的多开入口只藏在「+」会话下拉里（新建会话 / 复制会话 / 命令会话），容易被误判为「一个连接只能开一个会话 tab」。现在工具条会话分组前新增一级「复制会话（免再次验证）」按钮：点击即在当前已认证 SSH transport 上另开 channel 打开独立工作台 tab（独立 PTY、独立回放缓冲、免二次认证与堡垒机动态口令），与下拉菜单里的同名项共用 `openCopiedSessionTab()`。未连接时按钮置灰，RDP/本地终端形态不显示。
+  **First-class "Duplicate session" toolbar button for multiple terminal tabs per connection (SecureCRT Clone Session parity).** The multi-tab entries used to live only inside the "+" session dropdown, which read as "one connection = one session tab". A dedicated "Duplicate session (reuse login)" button now sits next to the session group: one click opens another workbench tab on the already-authenticated SSH transport (independent PTY and replay buffer, no second login or jump-host OTP). It reuses `openCopiedSessionTab()` — the same handler as the dropdown item. Disabled while disconnected; hidden for RDP/local terminal surfaces.
 
 ## [0.7.14-beta.2] — 2026-11-09
 

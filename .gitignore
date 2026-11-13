@@ -24,3 +24,6 @@ gui-test-screenshots/
 .video_agent/
 
 .planning/
+
+# playwright-cli 本地验证工件不入库
+.playwright-cli/

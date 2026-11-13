@@ -871,6 +871,25 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .batch-quick-popover { display: flex; width: min(300px, calc(100vw - 32px)); max-height: min(320px, 60vh); flex-direction: column; gap: 2px; overflow: auto; padding: 8px; }
 .batch-quick-popover .quick-card { cursor: pointer; text-align: left; width: 100%; }
 .batch-quick-popover .quick-card:hover { background: color-mix(in srgb, var(--muted) 45%, transparent); }
+/* 批量条模式切换（命令 / 上传）：分段控件，选中态用主色底；两个模式共用
+   同一份目标勾选与结果浮条。 */
+.batch-mode-switch { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.batch-mode-switch button { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 4px 8px; background: transparent; color: var(--muted-foreground); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.batch-mode-switch button svg { width: 12px; height: 12px; }
+.batch-mode-switch button:hover:not(.active) { color: var(--foreground); background: color-mix(in srgb, var(--muted) 55%, transparent); }
+.batch-mode-switch button.active { background: color-mix(in srgb, var(--primary) 16%, var(--background)); color: var(--foreground); }
+.batch-mode-switch button + button { border-left: 1px solid var(--border); }
+/* 同名策略：原生 select 的紧凑变体（批量上传条上只占 ~86px）。 */
+.batch-upload-policy { flex: 0 0 auto; height: 26px; max-width: 96px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; background: var(--background); color: var(--foreground); font-size: 11px; cursor: pointer; }
+.batch-upload-policy:disabled { opacity: 0.6; cursor: default; }
+/* 已选文件列表（popover）：名称占满、大小右对齐、单行省略。 */
+.batch-upload-files-popover { display: flex; width: min(360px, calc(100vw - 32px)); max-height: min(320px, 60vh); flex-direction: column; gap: 6px; overflow: auto; padding: 8px; }
+.batch-upload-file-list { display: flex; flex-direction: column; gap: 2px; overflow: auto; }
+.batch-upload-file-row { display: flex; align-items: center; gap: 6px; border-radius: 6px; padding: 3px 6px; font-size: 12px; }
+.batch-upload-file-row:hover { background: color-mix(in srgb, var(--muted) 45%, transparent); }
+.batch-upload-file-row svg { width: 13px; height: 13px; flex: 0 0 auto; color: var(--muted-foreground); }
+.batch-upload-file-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-upload-file-size { flex: 0 0 auto; font-size: 11px; font-variant-numeric: tabular-nums; }
 .batch-bar-status { position: absolute; z-index: 5; right: 8px; bottom: 48px; left: 8px; display: flex; align-items: flex-start; gap: 7px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; background: color-mix(in srgb, var(--background) 94%, transparent); box-shadow: 0 4px 14px color-mix(in srgb, #000 18%, transparent); font-size: 11px; }
 .batch-bar-status p { margin: 0; }
 .batch-bar-status .icon-button { flex: 0 0 auto; margin-left: auto; }
@@ -1396,3 +1415,193 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .panes--media .divider {
   display: none !important;
 }
+
+/* —— 分屏副终端（SecureCRT tiled sessions 对标）：右侧副屏列 + 可拖分隔条。
+   主 terminal-host 经 :has(.split-column) 以 --dbx-split-width 收窄右缘；
+   该规则特异性 (0,3,0) 高于既有 inset 简写（batch-bar/marker 变体 0,2,0），
+   右缘让位在所有底栏组合下都生效。 —— */
+.terminal-pane:has(.split-column) .terminal-host { right: var(--dbx-split-width, 0px); }
+.split-divider {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  bottom: 0;
+  right: calc(var(--dbx-split-width, 0px) - 3px);
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+}
+.split-divider:hover { background: color-mix(in srgb, var(--foreground) 18%, transparent); }
+.split-column {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px;
+  background: var(--background);
+  border-left: 1px solid var(--border);
+}
+.split-pane {
+  flex: 1 1 0;
+  min-height: 90px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.split-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  flex: 0 0 26px;
+  padding: 0 6px;
+  background: color-mix(in srgb, var(--background) 92%, var(--foreground) 8%);
+  border-bottom: 1px solid var(--border);
+}
+.split-pane-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.split-pane-dot { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; flex: 0 0 auto; }
+.split-pane[data-state="connecting"] .split-pane-dot { background: #eab308; }
+.split-pane[data-state="closed"] .split-pane-dot { background: var(--destructive); }
+.split-pane-sub { color: var(--muted-foreground); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.split-pane-badge {
+  font-size: 11px;
+  color: var(--destructive);
+  background: color-mix(in srgb, var(--destructive) 12%, transparent);
+  border-radius: 4px;
+  padding: 1px 6px;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.split-pane-close {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  padding: 2px;
+}
+.split-pane-close:hover { color: var(--foreground); }
+.split-pane-host {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-left: 6px;
+  background: var(--ssh-terminal-background);
+}
+.split-pane-host .xterm { position: absolute; inset: 2px 0 0 0; }
+/* 分屏窗格同样要压掉 xterm 6.1-beta 的 viewport 库默认 #000（同 397 行注释）：
+   fit 按行高取整后 canvas 底部与窗格底边的富余（可达一个行高）露出 viewport
+   的黑底，就是用户看到的窗格底部"小黑条"。跟随终端背景色，与主终端 402 行
+   的修复保持一致；滚动条一并隐藏与主终端观感统一。 */
+.split-pane-host .xterm .xterm-viewport {
+  scrollbar-width: none !important;
+  background: var(--ssh-terminal-background);
+}
+/* 工具条悬浮化：三按钮仅图标（文案进 tooltip/aria-label），绝对定位钉在
+   分屏区右下角，不再作为 flex 项参与布局——row 模式下此前的带文字按钮会
+   吃掉一整列宽度并换行成高条。默认完全隐藏（opacity:0），悬停分屏区或
+   键盘聚焦时才显形——半透明常驻在深色终端上会被人当成一条"黑边"。
+   z=7 位于分隔条(6)之上、会话选择浮层(8)之下。 */
+.split-footer {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  z-index: 7;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: color-mix(in srgb, var(--background) 85%, transparent);
+  backdrop-filter: blur(4px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.split-column:hover .split-footer,
+.split-footer:focus-within { opacity: 1; }
+.split-footer-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  border-radius: calc(var(--radius) - 2px);
+  padding: 3px;
+  cursor: pointer;
+}
+.split-footer-button svg { width: 14px; height: 14px; }
+.split-footer-button:hover:not(:disabled) { color: var(--foreground); background: color-mix(in srgb, var(--foreground) 10%, transparent); }
+.split-footer-button:disabled { opacity: 0.5; cursor: default; }
+.split-picker {
+  position: absolute;
+  inset: 2px;
+  z-index: 8;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 2px;
+  overflow: auto;
+}
+.split-picker-head { display: flex; align-items: center; justify-content: space-between; }
+.split-picker-head h3 { font-size: 12px; margin: 0; }
+.split-picker-empty { font-size: 12px; }
+.split-picker-row { width: 100%; }
+.workbench.panel-surface .split-pane-head { height: 22px; flex-basis: 22px; }
+
+/* —— 分屏 row 模式（上下排列，对标 CRT 上下 tiled）：副屏区贴底横排，
+   主 terminal-host 收窄底缘（--dbx-split-height）。既有 batch-bar/marker
+   变体是 inset 简写 (0,2,0)，这里逐组合覆写 bottom，保证底栏与副屏区共存。 —— */
+.terminal-pane:has(.split-column.split-row) .terminal-host { right: 0; bottom: var(--dbx-split-height, 0px); }
+.terminal-pane.batch-bar-open:has(.split-column.split-row) .terminal-host { bottom: calc(var(--dbx-split-height, 0px) + 42px); }
+.terminal-pane.marker-visible:has(.split-column.split-row) .terminal-host { bottom: calc(var(--dbx-split-height, 0px) + 24px); }
+.terminal-pane.batch-bar-open.marker-visible:has(.split-column.split-row) .terminal-host { bottom: calc(var(--dbx-split-height, 0px) + 66px); }
+.split-divider.split-divider-row {
+  top: auto;
+  bottom: calc(var(--dbx-split-height, 0px) - 3px);
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 6px;
+  cursor: row-resize;
+}
+.split-column.split-row {
+  top: auto;
+  left: 0;
+  flex-direction: row;
+  border-left: 0;
+  border-top: 1px solid var(--border);
+}
+.split-column.split-row .split-pane { min-height: 0; min-width: 220px; }
+.split-column.split-row .split-picker { inset: 2px; }
+/* 底栏共存：batch-bar（42px）/ marker（24px）横贯 terminal-pane 底部（z=5），
+   副屏区贴底会被盖住 footer —— 两种模式都让位；row 模式的分隔条同步上移。 —— */
+.terminal-pane.batch-bar-open .split-column { bottom: 42px; }
+.terminal-pane.marker-visible .split-column { bottom: 24px; }
+.terminal-pane.batch-bar-open.marker-visible .split-column { bottom: 66px; }
+.terminal-pane.batch-bar-open .split-divider.split-divider-row { bottom: calc(var(--dbx-split-height, 0px) + 42px - 3px); }
+.terminal-pane.marker-visible .split-divider.split-divider-row { bottom: calc(var(--dbx-split-height, 0px) + 24px - 3px); }
+.terminal-pane.batch-bar-open.marker-visible .split-divider.split-divider-row { bottom: calc(var(--dbx-split-height, 0px) + 66px - 3px); }

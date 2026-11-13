@@ -30,6 +30,7 @@ import {
   StretchHorizontal,
   Proportions,
   Columns3,
+  Rows3,
   Copy,
   Crosshair,
   Download,
@@ -78,6 +79,7 @@ import {
   TextSelect,
   Trash2,
   TriangleAlert,
+  Upload,
   X,
   Zap,
 } from "@lucide/vue";
@@ -292,6 +294,7 @@ import { useZmodem } from "./composables/useZmodem";
 import { useExternalEdits } from "./composables/useExternalEdits";
 import { useSftpSidebar } from "./composables/useSftpSidebar";
 import { useBatchSend } from "./composables/useBatchSend";
+import { useBatchUpload } from "./composables/useBatchUpload";
 import { useMetricsPanel, type ServerMetrics } from "./composables/useMetricsPanel";
 import { useTrzsz } from "./composables/useTrzsz";
 import { useRecording } from "./composables/useRecording";
@@ -386,6 +389,8 @@ import {
   type HistoryPanelEntry,
 } from "./lib/historyPanel";
 import TerminalGutter from "./components/TerminalGutter.vue";
+import SplitTerminalPane from "./components/SplitTerminalPane.vue";
+import { useSplitPanes } from "./composables/useSplitPanes";
 import CommandSuggestions from "./components/CommandSuggestions.vue";
 import CompletionMenu from "./components/CompletionMenu.vue";
 import ConnectingCard from "./components/ConnectingCard.vue";
@@ -1727,6 +1732,35 @@ onBeforeUnmount(() => window.clearInterval(connectionNameTimer));
 // hosts that omit the injection — see lib/pluginContext.spec.ts).
 const fallbackWorkbenchId = randomUUID();
 const workbenchId = computed(() => resolveWorkbenchId(hostContext.value, fallbackWorkbenchId));
+// —— 分屏副终端（对标 SecureCRT tiled sessions）：状态收口在
+// composables/useSplitPanes；副屏会话经复制会话同款链路打开（复用已认证
+// transport），镜像副屏可挂载其他连接/其他 tab 的存活会话（sidecar 二进制
+// 帧广播到全部 webview，按 sessionId 路由）。App 只保留接线：外观工厂、
+// 输入队列复用、事件路由、工具条入口与布局。 ——
+const splitPane = useSplitPanes({
+  t,
+  notify: (message) => showNotice(message),
+  showError: (cause) => showError(cause, "terminal"),
+  connectionId: () => connectionId.value,
+  workbenchId: () => workbenchId.value,
+  mainSessionId: () => session.value?.sessionId,
+  connected: () => connected.value,
+  isSshMode: () => !localUiMode.value && !isTelnetMode.value && !isVncMode.value && !isRdpMode.value && !isSerialMode.value && !localSession.value,
+  createPaneTerminal: () => createSplitPaneTerminal(),
+  spawnDimensions: () => fitTerminalDimensions(),
+  enqueueInput: (sessionId, data) => terminalInputQueue.enqueue(sessionId, data),
+  invoke: <T,>(method: string, params?: unknown, options?: { timeoutMs?: number }) => window.dbxPlugin.invoke<T>(method, params, options),
+});
+const {
+  panes: splitPaneRecords,
+  splitOpen: splitPaneOpen,
+  splitWidth: splitPaneWidth,
+  splitHeight: splitPaneHeight,
+  splitDirection: splitPaneDirection,
+  pickOpen: splitPanePickOpen,
+  pickLoading: splitPanePickLoading,
+  pickRows: splitPanePickRows,
+} = splitPane;
 // RDP 会话生命周期与证书确认：收口在 composables/useRdpSession（rdpSession/
 // rdpState/rdpSurface 等模板共享态留守 App.vue，经 options 注入）。
 const {
@@ -3609,6 +3643,91 @@ function sendTerminalBytes(data: Uint8Array) {
   terminalInputQueue.enqueue(sessionId, normalizeTerminalInputBytes(data));
 }
 
+/** 分屏副终端外观工厂：与主终端同一套字体/主题/行为项合成（createTerminal
+ * 的精简版——副屏不挂搜索/建议/ZMODEM/OSC 扩展，保证行为面最小）。 */
+function createSplitPaneTerminal() {
+  const font = resolveTerminalFont(terminalFontOverride.value, {
+    fontFamily: hostTerminalFontFamily(appearance.value),
+    fontSize: appearance.value.terminal.fontSize,
+  });
+  const optionPatch = terminalOptionPatch(terminalAppearance.value.settings);
+  const behaviorPatch = terminalBehaviorOptionPatch(terminalBehavior.value);
+  const paneTerminal = new Terminal({
+    convertEol: false,
+    cursorBlink: optionPatch.cursorBlink,
+    cursorStyle: optionPatch.cursorStyle,
+    cursorInactiveStyle: optionPatch.cursorInactiveStyle,
+    fontFamily: font.fontFamily,
+    fontSize: font.fontSize,
+    fontWeight: optionPatch.fontWeight,
+    fontWeightBold: optionPatch.fontWeightBold,
+    lineHeight: optionPatch.lineHeight,
+    letterSpacing: optionPatch.letterSpacing,
+    drawBoldTextInBrightColors: optionPatch.drawBoldTextInBrightColors,
+    minimumContrastRatio: optionPatch.minimumContrastRatio,
+    scrollback: behaviorPatch.scrollback,
+    scrollOnUserInput: behaviorPatch.scrollOnUserInput,
+    wordSeparator: behaviorPatch.wordSeparator,
+    ignoreBracketedPasteMode: behaviorPatch.ignoreBracketedPasteMode,
+    macOptionIsMeta: behaviorPatch.macOptionIsMeta,
+    allowProposedApi: true,
+    theme: terminalTheme(),
+  });
+  const paneFit = new FitAddon();
+  paneTerminal.loadAddon(paneFit);
+  paneTerminal.loadAddon(new Unicode11Addon());
+  paneTerminal.unicode.activeVersion = "11";
+  return { terminal: paneTerminal, fit: paneFit };
+}
+
+/** 分屏分隔条拖拽：column 模式横向拖调列宽（220px 下限）；row 模式（上下
+ * 排列）纵向拖调副屏区高度（140px 下限）。拖拽方向与分隔条位置反向：
+ * 右列往左拖变宽，底部区往上拖变高。偏好即时落盘。 */
+function onSplitDividerPointerDown(event: PointerEvent) {
+  const row = splitPaneDirection.value === "row";
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const startWidth = splitPaneWidth.value;
+  const startHeight = splitPaneHeight.value;
+  const onMove = (moveEvent: PointerEvent) => {
+    if (row) splitPane.setHeight(startHeight + (startY - moveEvent.clientY));
+    else splitPane.setWidth(startWidth - (moveEvent.clientX - startX));
+    scheduleFit();
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    scheduleFit();
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+/** 切换 column（右列纵排）↔ row（底部横排）：方向由 composable 落盘，
+ * 主终端与副屏 xterm 均由 resize/fit 链路自适应新几何。 */
+function onSplitDirectionToggle() {
+  splitPane.toggleDirection();
+  scheduleFit();
+}
+
+/** 镜像会话选择行的展示文本：user@host:port，缺字段时逐级回落。 */
+function splitPaneRowLabel(row: { username?: string; host?: string; port?: number }): string {
+  const user = typeof row.username === "string" && row.username ? row.username : "";
+  const host = typeof row.host === "string" && row.host ? row.host : "";
+  const endpoint = user && host ? `${user}@${host}` : host || "?";
+  return typeof row.port === "number" && row.port > 0 ? `${endpoint}:${row.port}` : endpoint;
+}
+
+/** 主终端容器让位样式：column 模式供 --dbx-split-width 收窄右缘；row 模式
+ * （上下排列）供 --dbx-split-height 收窄底缘。 */
+const splitHostStyle = computed<Record<string, string>>(() => {
+  const style: Record<string, string> = {};
+  if (!splitPaneOpen.value || !splitPaneRecords.value.length) return style;
+  if (splitPaneDirection.value === "row") style["--dbx-split-height"] = `${splitPaneHeight.value}px`;
+  else style["--dbx-split-width"] = `${splitPaneWidth.value}px`;
+  return style;
+});
+
 function scheduleFit() {
   window.clearTimeout(resizeTimer);
   resizeTimer = window.setTimeout(() => {
@@ -4075,6 +4194,16 @@ function handleBinary(event: DbxPluginBinaryEvent) {
     drainTerminalFrames();
     return;
   }
+  // 分屏副终端：主会话之外的 ssh/terminal/out/{id} 帧按 sessionId 路由到
+  // 对应副屏窗格（sidecar 二进制帧广播到插件的全部 webview，本 webview 只
+  // 认领自己挂载的副屏会话）。
+  if (event.channel.startsWith("ssh/terminal/out/")) {
+    splitPane.acceptFrame(
+      event.channel.slice("ssh/terminal/out/".length),
+      bridgeBinaryBytes(event, window.dbxPlugin.decodeBase64),
+    );
+    return;
+  }
   const taskId = event.channel.startsWith("sftp/download/") ? event.channel.slice("sftp/download/".length) : "";
   const waiter = downloadChunkWaiters.get(taskId);
   if (!waiter) return;
@@ -4109,6 +4238,8 @@ function drainTerminalFrames() {
         if (state === "ssh-transport-disconnected" && session.value?.sessionId) {
           terminalTransportWatch.reportUnavailable(session.value.sessionId);
         }
+        // 主会话随 transport 断开：非镜像副屏共用同一 transport，一并落断开态。
+        splitPane.notifyMainDisconnected();
       }
     } else {
       consumeFrameViaZmodem(frame.data);
@@ -5179,7 +5310,9 @@ function cancelSerialUpload() {
 // 前先通知本 workbench 释放自己的 sidecar scope（PTY 会话），避免孤儿 PTY 活到 sidecar
 // 退出。特 性探测：旧宿主不发 workbench/close，也无此 API。置 disposed 拦住在途的
 // 异步启动流程（startLocalTerminal 会据此回收刚开的会话）。
-if (window.dbxPlugin.workbench?.onClose) {
+// 桥未注入（宿主激活/握手失败）时 dbxPlugin 可能整个缺失：可选链全链兜底，
+// 否则 setup 直接抛 TypeError 变成永久白屏（现场见 beta.2.1/2.2）。
+if (window.dbxPlugin?.workbench?.onClose) {
   window.dbxPlugin.workbench.onClose(async () => {
     disposed = true;
     // 只枚举本工作台自有会话（workbenchCloseTargets 契约）：同连接其他 tab、
@@ -7835,6 +7968,43 @@ const {
   terminalInputQueue,
 });
 
+// 批量上传：与批量发送共用同一条批量条（「命令 / 上传」双模式）与同一份
+// 目标勾选；每个目标按自己的 sessionId 走 sftp/upload/* 分块通道（与 SFTP
+// 面板单文件上传同一管线），逐台解析同名策略。
+const batchUploadInput = ref<HTMLInputElement>();
+const {
+  batchMode,
+  uploadDir,
+  uploadPolicy,
+  uploadFiles,
+  uploading,
+  uploadProgress,
+  uploadSummary,
+  uploadError,
+  uploadFilesOpen,
+  uploadTotalBytes,
+  uploadTargetCount,
+  uploadReady,
+  setBatchMode,
+  pickUploadFiles,
+  onUploadFilesInput,
+  removeUploadFile,
+  clearUploadFiles,
+  runBatchUpload,
+  dismissUploadResult,
+} = useBatchUpload({
+  t: (key, values) => t(key, values),
+  showError,
+  uploadSource,
+  batchTargets,
+  batchSelected,
+  homeDir: computed(() => sftpHomePath.value || currentPath.value || "/"),
+  fileInput: batchUploadInput,
+});
+
+/** 已选文件字节数展示（与传输面板同口径的 KiB/MiB 进位）。 */
+const batchUploadBytesLabel = computed(() => formatBytes(uploadTotalBytes.value));
+
 // 连接建立后刷新 AI 模式；断开时收起模式弹出层。
 watch(connected, (value) => {
   if (value) {
@@ -8307,6 +8477,7 @@ function closeToolbarPopovers() {
   agentModeOpen.value = false;
   bookmarkSaveOpen.value = false;
   batchTargetsOpen.value = false;
+  uploadFilesOpen.value = false;
   sessionMenuOpen.value = false;
   sessionMenuShellOpen.value = false;
   sessionMenuShellPickOpen.value = false;
@@ -8951,6 +9122,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   disposed = true;
+  splitPane.disposeAll();
   window.removeEventListener("dbx:docker-open-in-terminal", handleDockerOpenInTerminal);
   window.removeEventListener("dragleave", resetDragHighlightOnWindowLeave);
   document.removeEventListener("mouseover", onTooltipOver);
@@ -9286,6 +9458,32 @@ function flagHintsSource(command: string): string {
         <!-- 工具条语义分组分隔线：两侧（视图段/会话菜单）在 SSH 与 RDP 两种形态
              下都各有一侧可见，永远不会成为孤儿分隔符；其余分隔线全部收进 SSH 组。 -->
         <span class="toolbar-separator" aria-hidden="true" />
+        <!-- 复制会话一级入口（对标 SecureCRT「Clone Session」）：此前多开能力只
+             藏在「+」会话下拉里，用户容易误判成「一个连接只能开一个会话 tab」。
+             这里提为工具条直按钮，行为完全复用 openCopiedSessionTab——forceNew
+             新开工作台 tab，并在当前已认证 transport 上另开 channel（不重复 MFA/
+             不重复输密码），与「+」菜单里的同名项是同一个函数。 -->
+        <button
+          v-if="!localUiMode && !isRdpConnection"
+          class="icon-button icon-emerald"
+          :disabled="!connectionId || !connected"
+          :title="t('copySessionTab')"
+          :aria-label="t('copySessionTab')"
+          @click="openCopiedSessionTab()"
+        ><Copy /></button>
+        <!-- 分屏副终端（SecureCRT tiled sessions 对标）：点击开启右侧分屏栏
+             并自动开第一个副屏（复用已认证 transport）；再点继续加窗格至上限。
+             开启后可用「镜像会话」挂载其他连接/其他 tab 的存活会话。 -->
+        <button
+          v-if="!localUiMode && !isRdpConnection"
+          class="icon-button icon-emerald"
+          :class="{ 'is-active': splitPaneOpen }"
+          :disabled="!connectionId || !connected"
+          :title="t('splitPaneToggle')"
+          :aria-label="t('splitPaneToggle')"
+          :aria-expanded="splitPaneOpen"
+          @click="splitPane.togglePane()"
+        ><Columns3 /></button>
         <!-- 会话下拉：新建 / 复制 / 命令会话 / 本地终端 / Shell 选项收敛为单入口，
              工具条不再平铺五个会话类按钮（视觉走查）。Shell 选项为同弹层视图切换
              （数据与 local/shells/list 懒加载逻辑不变）。 -->
@@ -9719,7 +9917,7 @@ function flagHintsSource(command: string): string {
     <section ref="paneContainer" :class="orderedPaneClass" :style="paneSplitStyle">
       <ContextMenu :open="terminalMenuOpen" @update:open="(open) => { if (!open) terminalMenuOpen = false; }">
         <ContextMenuTrigger as-child>
-      <section class="terminal-pane" :class="{ 'drag-active': terminalDragActive, 'batch-bar-open': connected && batchBarOpen, 'marker-visible': commandMarker.installed, 'gutter-visible': gutterPaneVisible, 'wallpaper-active': wallpaperActive, ...transferBusyPaneClass(terminalTransferBusy) }" :style="[terminalBasis, gutterPaneStyle]" @contextmenu="showTerminalMenu" @dragenter.prevent="onTerminalDragEnter" @dragover.prevent @dragleave="onTerminalDragLeave" @drop.prevent="onTerminalDrop($event)">
+      <section class="terminal-pane" :class="{ 'drag-active': terminalDragActive, 'batch-bar-open': connected && batchBarOpen, 'marker-visible': commandMarker.installed, 'gutter-visible': gutterPaneVisible, 'wallpaper-active': wallpaperActive, ...transferBusyPaneClass(terminalTransferBusy) }" :style="[terminalBasis, gutterPaneStyle, splitHostStyle]" @contextmenu="showTerminalMenu" @dragenter.prevent="onTerminalDragEnter" @dragover.prevent @dragleave="onTerminalDragLeave" @drop.prevent="onTerminalDrop($event)">
         <!-- P2-9 背景图层：pointer-events:none 垫底（DOM 序先于 terminal-host），
              透明度 0.1-0.9 由设置页滑杆控制；开启期间强制 DOM 渲染器透出本层。 -->
         <div v-if="wallpaperActive" class="terminal-wallpaper" :style="{ backgroundImage: `url(${wallpaperDataUrl})`, opacity: wallpaperOpacity / 100 }" aria-hidden="true" />
@@ -9728,6 +9926,44 @@ function flagHintsSource(command: string): string {
              不遮文本；drop-overlay/搜索面板/诊断浮层定位不受影响。 -->
         <TerminalGutter v-if="gutterVisible" :rows="gutterRows" :width="gutterWidth" />
         <div ref="terminalHost" class="terminal-host" :class="{ 'bell-flash': terminalBellFlash }" @mousedown.middle="handleTerminalMiddleClick" />
+        <!-- 分屏副终端列（对标 CRT tiled sessions）：绝对定位贴右缘，宽度可拖
+             分隔条调整（偏好落 ssh-split-pane-width）；主 terminal-host 经
+             .split-active 收窄右缘让位。窗格纵向堆叠，副屏各自独立 xterm。 -->
+        <template v-if="splitPaneOpen && splitPaneRecords.length">
+          <div class="split-divider" :class="{ 'split-divider-row': splitPaneDirection === 'row' }" :aria-orientation="splitPaneDirection === 'row' ? 'horizontal' : 'vertical'" role="separator" @pointerdown.prevent="onSplitDividerPointerDown" />
+          <div class="split-column" :class="{ 'split-row': splitPaneDirection === 'row' }" :style="splitPaneDirection === 'row' ? { height: `${splitPaneHeight}px` } : { width: `${splitPaneWidth}px` }">
+            <SplitTerminalPane v-for="entry in splitPaneRecords" :key="entry.id" :pane="entry" :split="splitPane" :t="t" />
+            <div v-if="splitPanePickOpen" class="split-picker">
+              <header class="split-picker-head">
+                <h3>{{ t("splitPaneMirrorPick") }}</h3>
+                <button type="button" class="icon-button compact" :title="t('cancel')" :aria-label="t('cancel')" @click="splitPane.closePicker()"><X /></button>
+              </header>
+              <div v-if="splitPanePickLoading" class="empty compact"><Loader2 class="spinning" />{{ t("loading") }}</div>
+              <p v-else-if="!splitPanePickRows.length" class="muted split-picker-empty">{{ t("splitPaneNoOtherSessions") }}</p>
+              <template v-else>
+                <button
+                  v-for="row in splitPanePickRows"
+                  :key="row.sessionId"
+                  type="button"
+                  class="session-menu-item split-picker-row"
+                  @click="splitPane.attachPane(row)"
+                >
+                  <TerminalIcon /><span class="mono">{{ splitPaneRowLabel(row) }}</span>
+                </button>
+              </template>
+            </div>
+            <!-- 工具条悬浮化（图标按钮 + tooltip 承担文案）：绝对定位钉在分屏区
+                 右下角，不再作为 flex 项挤占窗格空间（此前 row 模式下带文字按钮
+                 会吃掉一整列宽度并换行成高条）。平时半透明，悬停/聚焦显形。 -->
+            <div class="split-footer">
+              <button type="button" class="split-footer-button" :title="t('splitPaneLayout')" :aria-label="t('splitPaneLayout')" @click="onSplitDirectionToggle">
+                <Rows3 v-if="splitPaneDirection === 'column'" /><Columns3 v-else />
+              </button>
+              <button type="button" class="split-footer-button" :disabled="splitPaneRecords.length >= 3" :title="t('splitPaneAdd')" :aria-label="t('splitPaneAdd')" @click="splitPane.addPane()"><Plus /></button>
+              <button type="button" class="split-footer-button" :title="t('splitPaneMirror')" :aria-label="t('splitPaneMirror')" @click="splitPane.openPicker()"><TerminalIcon /></button>
+            </div>
+          </div>
+        </template>
         <!-- VNC 画布（nyaterm-parity P2 2d）：盖在 xterm 之上（z-index 2），
              帧从 vnc/frame/{id} 二进制通道进入；键盘/鼠标由画布采集后经
              keysym 映射发 vnc/input。连接态/退出覆盖层沿用 terminal-overlay。 -->
@@ -10220,8 +10456,8 @@ function flagHintsSource(command: string): string {
             </div>
           </section>
         </div>
-        <!-- 批量发送结果浮条：显示在命令条上方，可手动关闭。 -->
-        <div v-if="connected && batchBarOpen && !isRdpConnection && (batchSummary || batchError)" class="batch-bar-status" role="status">
+        <!-- 批量发送结果浮条：显示在命令条上方，可手动关闭（命令模式）。 -->
+        <div v-if="connected && batchBarOpen && !isRdpConnection && batchMode === 'command' && (batchSummary || batchError)" class="batch-bar-status" role="status">
           <template v-if="batchSummary">
             <p :class="batchSummary.failed ? 'task-error' : 'muted'">
               {{ batchSummary.failed ? t("batchSendPartial", { sent: batchSummary.sent, failed: batchSummary.failed }) : t("batchSendSent", { count: batchSummary.sent }) }}
@@ -10235,9 +10471,39 @@ function flagHintsSource(command: string): string {
           <p v-else class="task-error">{{ batchError }}</p>
           <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="dismissBatchResult"><X /></button>
         </div>
+        <!-- 批量上传结果浮条（上传模式）：进度行 → 汇总行；失败/跳过行常驻可查。 -->
+        <div v-if="connected && batchBarOpen && !isRdpConnection && batchMode === 'upload' && (uploadProgress || uploadSummary || uploadError)" class="batch-bar-status" role="status">
+          <template v-if="uploadProgress">
+            <p class="muted">
+              <Loader2 class="spinning" />
+              {{ t("batchUploadRunning", { target: uploadProgress.targetIndex, targets: uploadProgress.targetCount, file: uploadProgress.fileIndex, files: uploadProgress.fileCount }) }}
+              · {{ uploadProgress.label }} · <span class="mono">{{ uploadProgress.fileName }}</span>
+            </p>
+          </template>
+          <template v-else-if="uploadSummary">
+            <p :class="uploadSummary.failed ? 'task-error' : 'muted'">
+              {{ uploadSummary.failed || uploadSummary.skipped ? t("batchUploadPartial", { uploaded: uploadSummary.uploaded, failed: uploadSummary.failed, skipped: uploadSummary.skipped }) : t("batchUploadDone", { count: uploadSummary.uploaded }) }}
+            </p>
+            <div v-if="uploadSummary.failed || uploadSummary.skipped" class="batch-result-list">
+              <span v-for="row in uploadSummary.rows.filter((item) => item.status !== 'uploaded')" :key="`${row.sessionId}-${row.fileName}`" class="batch-result-row mono" :class="{ 'task-error': row.status === 'failed' }">
+                {{ batchSessionLabel(row.sessionId) }} · {{ row.fileName }} · {{ row.status === "skipped" ? t("batchUploadSkipped") : row.error || t("batchUploadFailed") }}
+              </span>
+            </div>
+          </template>
+          <p v-else class="task-error">{{ uploadError }}</p>
+          <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="dismissUploadResult"><X /></button>
+        </div>
         <!-- 批量发送命令条（Electerm quick-command bar）：贴终端底部，回车即发送；
              目标选择/快速命令切换/保存为快速命令均在条上完成。 -->
         <section v-if="connected && batchBarOpen && !isRdpConnection" class="batch-bar" @contextmenu.stop @mousedown.stop @click.stop>
+          <!-- 模式切换（命令 / 上传）：两个模式共用下面的目标勾选与结果浮条，
+               区别只在中间那一行控件——避免为批量上传再造一条独立工具条。 -->
+          <div class="batch-mode-switch" role="tablist" :aria-label="t('batchUploadSummary')">
+            <button type="button" role="tab" :aria-selected="batchMode === 'command'" :class="{ active: batchMode === 'command' }" :title="t('batchModeCommand')" @click="setBatchMode('command')"><TerminalIcon /><span>{{ t("batchModeCommand") }}</span></button>
+            <button type="button" role="tab" :aria-selected="batchMode === 'upload'" :class="{ active: batchMode === 'upload' }" :title="t('batchModeUpload')" @click="setBatchMode('upload')"><Upload /><span>{{ t("batchModeUpload") }}</span></button>
+          </div>
+          <!-- 本地文件选择器：沙箱内唯一可用的"选择文件"通道（File 对象直读字节）。 -->
+          <input ref="batchUploadInput" class="hidden" type="file" multiple @change="onUploadFilesInput" />
           <div>
             <!-- 底部条上的 popover 向上展开（reka side="top"，旧绝对定位会被裁切）。 -->
             <Popover :open="batchTargetsOpen" @update:open="(open) => { if (!open) batchTargetsOpen = false; }">
@@ -10271,7 +10537,7 @@ function flagHintsSource(command: string): string {
           <!-- 快速命令弹层：与右上角面板同形态（搜索 + 可折叠分组 + 命令卡片，
                复用面板样式类与折叠态），点击卡片即回填批量输入框（发送仍由
                回车/发送按钮触发）。无真实分组时保持平铺，避免单条未分组的噪声组头。 -->
-          <Popover v-if="!batchSaveMode && quickCommands.length" :open="batchQuickOpen" @update:open="(open) => { if (!open) batchQuickOpen = false; }">
+          <Popover v-if="batchMode === 'command' && !batchSaveMode && quickCommands.length" :open="batchQuickOpen" @update:open="(open) => { if (!open) batchQuickOpen = false; }">
             <PopoverAnchor as-child>
               <button class="batch-bar-quick batch-bar-targets" :title="t('batchSendQuickPick')" :aria-label="t('batchSendQuickPick')" @click.stop="batchQuickOpen = !batchQuickOpen">
                 <Braces />
@@ -10315,6 +10581,8 @@ function flagHintsSource(command: string): string {
               </footer>
             </PopoverContent>
           </Popover>
+          <!-- 命令模式：输入 / 快速命令保存 / 发送 -->
+          <template v-if="batchMode === 'command'">
           <input
             v-if="batchSaveMode"
             v-model="batchSaveName"
@@ -10352,6 +10620,52 @@ function flagHintsSource(command: string): string {
             <Loader2 v-if="batchSending" class="spinning" />
             <Send v-else />
           </button>
+          </template>
+          <!-- 上传模式：目标目录 + 本地文件 + 同名策略 + 上传；目标勾选沿用上面
+               的「目标会话」按钮（同一份 batchSelected）。 -->
+          <template v-else>
+            <input
+              v-model="uploadDir"
+              class="batch-bar-input mono"
+              spellcheck="false"
+              :title="t('batchUploadPath')"
+              :placeholder="t('batchUploadPathPlaceholder')"
+              :disabled="uploading"
+              @keydown.enter="runBatchUpload"
+            />
+            <button class="batch-bar-targets" :title="t('batchUploadPick')" :aria-label="t('batchUploadPick')" :disabled="uploading" @click="pickUploadFiles"><FileUp /><span>{{ t("batchUploadPick") }}</span></button>
+            <Popover :open="uploadFilesOpen" @update:open="(open) => { if (!open) uploadFilesOpen = false; }">
+              <PopoverAnchor as-child>
+                <button class="batch-bar-targets" :title="t('batchUploadFiles', { count: uploadFiles.length })" :aria-label="t('batchUploadFiles', { count: uploadFiles.length })" @click.stop="uploadFilesOpen = !uploadFilesOpen">
+                  <FileText /><span>{{ t("batchUploadFiles", { count: uploadFiles.length }) }}</span>
+                </button>
+              </PopoverAnchor>
+              <PopoverContent class="popover batch-upload-files-popover" side="top" align="end" :side-offset="6">
+                <div class="command-history-header">
+                  <span>{{ t("batchUploadFiles", { count: uploadFiles.length }) }} · {{ batchUploadBytesLabel }}</span>
+                  <button v-if="uploadFiles.length" class="link-button" @click="clearUploadFiles">{{ t("batchUploadClear") }}</button>
+                </div>
+                <p v-if="!uploadFiles.length" class="muted batch-send-hint">{{ t("batchUploadFilesEmpty") }}</p>
+                <div v-else class="batch-upload-file-list">
+                  <div v-for="entry in uploadFiles" :key="entry.id" class="batch-upload-file-row">
+                    <FileText />
+                    <span class="mono batch-upload-file-name">{{ entry.name }}</span>
+                    <span class="muted batch-upload-file-size">{{ formatBytes(entry.size) }}</span>
+                    <button class="icon-button" :title="t('batchUploadRemove')" :aria-label="t('batchUploadRemove')" @click="removeUploadFile(entry.id)"><X /></button>
+                  </div>
+                </div>
+              </PopoverContent>
+            </Popover>
+            <select v-model="uploadPolicy" class="batch-upload-policy" :title="t('batchUploadPolicy')" :aria-label="t('batchUploadPolicy')" :disabled="uploading">
+              <option value="overwrite">{{ t("batchUploadPolicyOverwrite") }}</option>
+              <option value="rename">{{ t("batchUploadPolicyRename") }}</option>
+              <option value="skip">{{ t("batchUploadPolicySkip") }}</option>
+            </select>
+            <button class="icon-button icon-emerald batch-bar-send" :title="t('batchUploadStart')" :aria-label="t('batchUploadStart')" :disabled="!uploadReady" @click="runBatchUpload">
+              <Loader2 v-if="uploading" class="spinning" />
+              <Upload v-else />
+            </button>
+          </template>
         </section>
       </section>
         </ContextMenuTrigger>
