@@ -1216,13 +1216,21 @@ var resetCaches = () => {
 		cache.clear();
 	});
 };
-window.resetCaches = resetCaches;
+// 本地补丁（非上游）：调试钩子只在有 window 的线程挂载。本文件经
+// engine.worker（?worker&inline）在模块顶层求值，Worker 作用域没有 window，
+// 直接赋值会抛 ReferenceError 让整个补全 worker 起不来（宿主控制台可见
+// `blob: ... window is not defined`）。
+if (typeof window !== "undefined") {
+	window.resetCaches = resetCaches;
+}
 var specCache = createCache();
 var generateSpecCache = createCache();
-window.listCache = () => {
-	console.log(specCache);
-	console.log(generateSpecCache);
-};
+if (typeof window !== "undefined") {
+	window.listCache = () => {
+		console.log(specCache);
+		console.log(generateSpecCache);
+	};
+}
 //#endregion
 //#region vendor/amazon-q-autocomplete/packages/autocomplete-parser/src/parseArguments.ts
 var TokenType = /* @__PURE__ */ function(TokenType) {

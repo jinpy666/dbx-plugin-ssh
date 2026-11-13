@@ -371,15 +371,20 @@ function persistTransferDownloadLimit(value: number) {
 /** 单文件上传入口。返回 boolean 供批次调用方区分成功与放弃：true=已交付
  * sidecar（后台推送中也算），false=重复目标弹窗里放弃跳过（无会话同理）——
  * 抛错仍是失败。成功提示的计数只该包含 true 的那份。 */
-async function uploadSource(name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean; batchId?: string; lzpack?: boolean }): Promise<boolean> {
-  if (!session.value) return false;
+async function uploadSource(name: string, size: number, readChunk: (offset: number, length: number) => Promise<Uint8Array>, resume?: { taskId: string; remotePath: string }, targetDir?: string, options?: { duplicatePreCheckedAbsent?: boolean; batchId?: string; lzpack?: boolean; sessionId?: string; sudoLane?: boolean }): Promise<boolean> {
+  // sessionId：批量上传（useBatchUpload）按目标会话逐个投递，不能锁定当前
+  // 工作台会话——sidecar 的 sftp/upload/* 只认 sessionId，跨 tab 的存活会话
+  // 同样可传（与 ssh/terminal/batchInput 同一寻址方式）。
+  const targetSessionId = options?.sessionId ?? session.value?.sessionId;
+  if (!targetSessionId) return false;
   // resume 携带原 taskId/remotePath：后端校验 spool meta 后从已传前缀续接。
   // targetDir 仅新上传生效（终端拖入的自定义目标目录）；缺省仍是 SFTP 当前目录。
   const dir = targetDir ?? currentPath.value;
   // 重复目标预检（P1-5）：仅新上传生效；rename 可能改写最终远端文件名，
   // 后续 remotePath 与传输面板展示名都用解析后的名字。duplicatePreChecked-
   // Absent（评审 M-4）：文件夹批量 ask 模式已逐文件预检过不存在，跳过二次
-  // sftp/exists（千文件目录少一半往返）。
+  // sftp/exists（千文件目录少一半往返）；批量上传（多目标）由调用方按目标
+  // 逐台解析重名策略，同样带这个标记。
   let uploadName = name;
   // issue #272：占位卡。exists/rename-unique/upload-start 多次往返 + 大文件
   // 压缩决策落地前，面板先有一张「排队中」卡——否则 100M+ 文件拖入后是一段
@@ -398,14 +403,16 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
   }
   // UploadSudo：车道在任务启动当刻定死，start 与 finish 必须同道（sidecar
   // 按注册表里的 sudo 标记分派提交方式，finish 方法名只是前端契约一致性）。
-  const sudoLane = sudoUpload();
+  // 显式 sessionId（批量上传）不继承当前工作台的 sudo 状态：目标连接是不是
+  // sudo 车道由它自己的上下文决定，批量部署走普通车道。
+  const sudoLane = options?.sudoLane ?? (options?.sessionId ? false : sudoUpload());
   const startMethod = sudoLane ? "sudo/upload/start" : "sftp/upload/start";
   const finishMethod = sudoLane ? "sudo/upload/finish" : "sftp/upload/finish";
   let info: { taskId: string; chunkSize: number; resumeOffset?: number; compression?: string };
   try {
     info = await window.dbxPlugin.invoke<{ taskId: string; chunkSize: number; resumeOffset?: number; compression?: string }>(startMethod, resume
-      ? { sessionId: session.value.sessionId, remotePath: resume.remotePath, size, resumeTaskId: resume.taskId }
-      : { sessionId: session.value.sessionId, remotePath: joinRemote(dir, uploadName), size, mode: options?.lzpack ? "lzpack" : undefined });
+      ? { sessionId: targetSessionId, remotePath: resume.remotePath, size, resumeTaskId: resume.taskId }
+      : { sessionId: targetSessionId, remotePath: joinRemote(dir, uploadName), size, mode: options?.lzpack ? "lzpack" : undefined });
   } catch (cause) {
     // start 未落地（#272）：占位卡没有真任务可交接，移除后原样抛出，批次
     // 编排照常记失败；已落地任务的失败路径不在本段管辖（progress/finish 事件结算）。
@@ -418,7 +425,7 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
   // ST10：显式 lzpack 由调用方 options 声明（响应 compression 恒 none，
   // 交付 <目标名>.dbxz 由后端保证）。
   delete transferTasks[pendingKey];
-  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: session.value.sessionId, direction: "upload", fileName: uploadName, size, transferred: startOffset, compression: info.compression === "gzip" ? "gzip" : options?.lzpack ? "lzpack" : undefined, status: startOffset > 0 ? "running" : "queued", joinedAt: pendingJoinedAt, batchId: options?.batchId };
+  transferTasks[info.taskId] = { taskId: info.taskId, sessionId: targetSessionId, direction: "upload", fileName: uploadName, size, transferred: startOffset, compression: info.compression === "gzip" ? "gzip" : options?.lzpack ? "lzpack" : undefined, status: startOffset > 0 ? "running" : "queued", joinedAt: pendingJoinedAt, batchId: options?.batchId };
   try {
     let offset = startOffset;
     while (offset < size) {
