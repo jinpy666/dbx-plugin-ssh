@@ -2590,6 +2590,11 @@ impl SshRuntime {
             let mut disconnect_reason = None;
             let mut directory_filter = DirectoryHandshakeFilter::default();
             let mut directory_tracking_enabled = false;
+            // #287：shell 探测可能在登录 shell 读完 rc、把 tty 交给 readline
+            // 之前就返回。此时写 hook 会被行规程原样回显、随后又被 readline
+            // 重绘，屏幕上就出现两遍脚本文本。推迟到首个提示符可见（或用户
+            // 先输入）后再写。
+            let mut pending_prompt_hook: Option<RemoteShell> = None;
             // #90：ZMODEM 触发检测（远端 sz 发起的 ZRQINIT）。字节全透传，
             // 检测器只产出事件边沿；事件窗口超时后自动复位（详见
             // zmodem_detect 模块注释）。
@@ -2606,6 +2611,16 @@ impl SshRuntime {
                     _ = directory_timeout.tick() => {
                         if initial_output_started.is_some_and(|started| started.elapsed() >= REMOTE_SHELL_DETECTION_TIMEOUT + Duration::from_secs(1)) {
                             if let Some(data) = initial_output.take() {
+                                // #287 兜底：一直没有识别出提示符（例如自定
+                                // 义 shell 提示带换行），但又必须释放被扣住的
+                                // 启动输出。此刻 shell 早已就绪，补装 hook，
+                                // 避免用户不输入时目录跟踪永远不生效。
+                                if let Some(shell) = pending_prompt_hook.take() {
+                                    directory_tracking_enabled = true;
+                                    directory_filter.begin(directory_tracking_marker(&directory_marker_id));
+                                    let script = directory_tracking_script(&directory_marker_id, shell);
+                                    if channel.data(script.as_bytes()).await.is_err() { break; }
+                                }
                                 if !data.is_empty() {
                                     publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
                                 }
@@ -2656,6 +2671,31 @@ impl SshRuntime {
                     }
                     command = terminal_rx.recv() => match command {
                         Some(TerminalCommand::Input(data)) => {
+                            // #287：用户在首个提示符出现前就输入。先补装
+                            // hook，让脚本排在按键之前；否则脚本字节会在
+                            // readline 就绪后重绘，插进用户正在输入的行里。
+                            if let Some(shell) = pending_prompt_hook.take() {
+                                if let Some(held) = initial_output.take() {
+                                    if let Some(held) = Some(strip_trailing_prompt(held))
+                                        .filter(|data| !data.is_empty())
+                                    {
+                                        publish_terminal(
+                                            &task_id,
+                                            TerminalStream::Stdout,
+                                            held,
+                                            &replay,
+                                            &emitter,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                directory_tracking_enabled = true;
+                                directory_filter
+                                    .begin(directory_tracking_marker(&directory_marker_id));
+                                let script =
+                                    directory_tracking_script(&directory_marker_id, shell);
+                                if channel.data(script.as_bytes()).await.is_err() { break; }
+                            }
                             // Feed the keystrokes to the auto-sudo watcher before
                             // writing: it needs the submitted command line to tell
                             // sudo's bare `Password:` prompt from `docker login`'s
@@ -2697,6 +2737,9 @@ impl SshRuntime {
                             if directory_tracking_enabled {
                                 continue;
                             }
+                            // 显式开启目录跟踪会立刻安装 hook；取消 #287 的
+                            // 延迟安装，避免 stdout 路径稍后再写一次同一脚本。
+                            pending_prompt_hook = None;
                             let deferring_initial_prompt = initial_output.is_some();
                             if let Some(data) = initial_output.take().map(strip_trailing_prompt).filter(|data| !data.is_empty()) {
                                 publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
@@ -2720,18 +2763,31 @@ impl SshRuntime {
                             // prompt. Hold that prompt off-screen and publish only
                             // the post-install one, instead of clearing an already
                             // visible line and causing a flash.
-                            let buffered = initial_output.take();
                             if matches!(shell, RemoteShell::Bash | RemoteShell::Zsh) && !directory_tracking_enabled {
-                                if let Some(data) = buffered.map(strip_trailing_prompt).filter(|data| !data.is_empty()) {
-                                    publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                                // #287：探测可能先于登录 shell 的 rc/MOTD 完成。
+                                // 只有缓冲区已经以“提示符尾巴”（非换行结尾）
+                                // 收束时，才说明 readline 已经接管 tty、可以安全
+                                // 写入；空缓冲或整行换行结尾说明 rc/MOTD 还在
+                                // 跑，先记下 shell，等首个提示符（或用户输入）
+                                // 再装，避免行规程回显 + readline 重绘两份。
+                                let ready_now =
+                                    initial_output.as_deref().is_some_and(ends_with_prompt_tail);
+                                if initial_output.is_some() && !ready_now {
+                                    remote_shell = shell;
+                                    pending_prompt_hook = Some(shell);
+                                } else {
+                                    let buffered = initial_output.take();
+                                    if let Some(data) = buffered.map(strip_trailing_prompt).filter(|data| !data.is_empty()) {
+                                        publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                                    }
+                                    remote_shell = shell;
+                                    directory_tracking_enabled = true;
+                                    directory_filter.begin(directory_tracking_marker(&directory_marker_id));
+                                    let script = directory_tracking_script(&directory_marker_id, shell);
+                                    if channel.data(script.as_bytes()).await.is_err() { break; }
                                 }
-                                remote_shell = shell;
-                                directory_tracking_enabled = true;
-                                directory_filter.begin(directory_tracking_marker(&directory_marker_id));
-                                let script = directory_tracking_script(&directory_marker_id, shell);
-                                if channel.data(script.as_bytes()).await.is_err() { break; }
                             } else {
-                                if let Some(data) = buffered.filter(|data| !data.is_empty()) {
+                                if let Some(data) = initial_output.take().filter(|data| !data.is_empty()) {
                                     publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
                                 }
                             }
@@ -2904,6 +2960,28 @@ impl SshRuntime {
                         if stream == TerminalStream::Stdout {
                             if let Some(buffer) = initial_output.as_mut() {
                                 buffer.extend_from_slice(&data);
+                                // #287：启动输出一直被扣住到首个提示符。
+                                // 提示符不带换行，所以缓冲区以非换行收尾就说明
+                                // readline 已经接管；此时再写 hook 才不会被
+                                // 回显/重绘。
+                                if should_flush_pending_hook(pending_prompt_hook, buffer) {
+                                    // 先取走缓冲再装 hook：这样后续 stdout
+                                    // 直接走正常发布路径，脚本只写一次。
+                                    let held = initial_output.take().unwrap_or_default();
+                                    let shell =
+                                        pending_prompt_hook.take().unwrap_or(remote_shell);
+                                    remote_shell = shell;
+                                    directory_tracking_enabled = true;
+                                    directory_filter.begin(directory_tracking_marker(&directory_marker_id));
+                                    let script =
+                                        directory_tracking_script(&directory_marker_id, shell);
+                                    if channel.data(script.as_bytes()).await.is_err() { break; }
+                                    if let Some(data) = Some(strip_trailing_prompt(held))
+                                        .filter(|data| !data.is_empty())
+                                    {
+                                        publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                                    }
+                                }
                                 continue;
                             }
                         }
@@ -13400,6 +13478,22 @@ fn session_disconnected_event(
     payload
 }
 
+/// True when `output` ends on a prompt tail: non-empty and not terminated by
+/// a newline. Prompts are drawn without a trailing newline, so this is the
+/// signal that readline has taken over the tty (and that echoing the hook's
+/// bytes is no longer possible). Mirrors the boundary judgment used by
+/// [`strip_trailing_prompt`].
+fn ends_with_prompt_tail(output: &[u8]) -> bool {
+    !output.is_empty() && !output.ends_with(b"\n") && !output.ends_with(b"\r")
+}
+
+/// #287: decides whether the deferred shell-integration hook may be written
+/// now. Only pending hooks flush, and only once startup output shows a prompt
+/// tail (the shell has clearly reached its first prompt).
+fn should_flush_pending_hook(pending: Option<RemoteShell>, output: &[u8]) -> bool {
+    pending.is_some() && ends_with_prompt_tail(output)
+}
+
 /// Drops the unterminated prompt line at the end of startup output. Earlier
 /// banners keep their original bytes and trailing newline; a prompt-only
 /// buffer becomes empty. Output already ending on a line boundary has no
@@ -15267,6 +15361,44 @@ matrix-ed25519";
         // handshake window; bash's PROMPT_COMMAND fires on the next prompt.
         assert!(zsh.ends_with("\r \r"));
         assert!(bash.ends_with("\r"));
+    }
+
+    #[test]
+    fn pending_prompt_hook_flushes_only_at_a_prompt_tail() {
+        assert!(!ends_with_prompt_tail(b""));
+        assert!(!ends_with_prompt_tail(b"Welcome\r\n"));
+        assert!(!ends_with_prompt_tail(b"Welcome\n"));
+        assert!(ends_with_prompt_tail(b"Welcome\r\nnroot@host:~$ "));
+        assert!(ends_with_prompt_tail(b"nroot@host:~$ "));
+        // Nothing is pending: a prompt tail alone must not install anything.
+        assert!(!should_flush_pending_hook(None, b"nroot@host:~$ "));
+        // Still in rc files / MOTD: the buffer has no prompt tail yet.
+        assert!(!should_flush_pending_hook(Some(RemoteShell::Bash), b""));
+        assert!(!should_flush_pending_hook(
+            Some(RemoteShell::Bash),
+            b"Welcome\r\n"
+        ));
+        assert!(should_flush_pending_hook(
+            Some(RemoteShell::Zsh),
+            b"Welcome\r\nnroot@host:~$ "
+        ));
+    }
+
+    #[test]
+    fn pending_prompt_hook_is_written_exactly_once_across_ready_then_type() {
+        let mut pending = Some(RemoteShell::Bash);
+        let mut script_writes = 0;
+        // First prompt arrives: the stdout path flushes the deferred hook.
+        if should_flush_pending_hook(pending, b"Welcome!\r\nnroot@host:~$ ") {
+            let _ = pending.take();
+            script_writes += 1;
+        }
+        // The user then types before another prompt: the input path only
+        // installs while the slot is still occupied, so no second write.
+        if pending.take().is_some() {
+            script_writes += 1;
+        }
+        assert_eq!(script_writes, 1);
     }
 
     #[test]
