@@ -40,6 +40,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-sftp-pane-open",
   "ssh-follow-directory",
   "ssh-sftp-show-permissions",
+  // 文件浏览双击行为（preview/edit，issue #288）：此前只在运行时写入、漏登记
+  // 水合白名单，关闭连接重开工作台后 getItem 命中不到 → 静默回落 preview。
+  "ssh-sftp-double-click-action",
   "ssh-sftp-side-tab",
   "ssh-sftp-side-collapsed",
   "ssh-terminal-select-copy",

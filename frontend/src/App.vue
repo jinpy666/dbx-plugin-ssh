@@ -159,6 +159,7 @@ import {
   persistMcpSettingsMirror,
   type SftpDoubleClickAction,
 } from "./lib/settingsModel";
+import { previewEditKeyAction } from "./lib/previewEditKeys";
 import {
   clampSuggestionMaxChars,
   clampSuggestionMinChars,
@@ -8462,10 +8463,25 @@ watch(modalOpenCount, (count, previous) => {
 });
 
 /**
- * Esc 关闭链（一次按键关一层）：预览 > 对话框 > 右键菜单 > 工具栏弹出层。
+ * Esc 关闭链（一次按键关一层）：预览编辑态 > 预览 > 对话框 > 右键菜单 > 工具栏弹出层。
  * 逐层 if-return：无内容打开时按键穿透，不影响终端内 vim 等自身 Esc 语义。
  */
 function onDocumentKeydown(event: KeyboardEvent) {
+  // 预览编辑态快捷键（issue #288）：Ctrl/Cmd+S 保存，Esc 退出编辑文本框（回到
+  // 只读预览而非直接关窗）。保存后仍保持编辑态，可连续 Ctrl+S 再次保存。
+  if (previewOpen.value && previewEditable.value && !pendingConfirmDialog.value) {
+    const action = previewEditKeyAction(event);
+    if (action === "save") {
+      event.preventDefault();
+      void savePreview();
+      return;
+    }
+    if (action === "exit") {
+      event.preventDefault();
+      void cancelPreviewEdit();
+      return;
+    }
+  }
   // Tab 焦点陷阱已移交 reka Dialog 的 FocusScope（每个弹层独立圈定，嵌套时顶层
   // 生效）；此处不再拦截 Tab。注意 FocusScope 的 keydown 挂在内容元素上，冒泡先于
   // 本 document 处理器，若恢复自制陷阱会与 reka 双步进，勿回退。

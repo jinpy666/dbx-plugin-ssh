@@ -300,8 +300,8 @@ async function savePreview() {
     previewText.value = previewDraft.value;
     previewSize.value = bytes.byteLength;
     previewBaseline.value = previewText.value;
-    previewEditable.value = false;
-    previewDraft.value = "";
+    // 保存后保持编辑态（issue #288）：按钮不回落「编辑」，用户可继续改并再次
+    // 保存；baseline 已更新，dirty 自然归零。成功提示仍走 showNotice。
     showNotice(t("editSave.saved", { name: previewTitle.value }));
     await loadDirectory();
   } catch (cause) {
