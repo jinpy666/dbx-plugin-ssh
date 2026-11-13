@@ -38,6 +38,8 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 必须在册：宿主 storage 水合只拉白名单键，漏注册 = 每次启动面板列全丢。
   "ssh-command-history-meta",
   "ssh-sftp-pane-open",
+  // 批量上传（多目标会话）上次使用的目标目录：跨会话复用同一落点。
+  "ssh-batch-upload-dir",
   "ssh-follow-directory",
   "ssh-sftp-show-permissions",
   "ssh-sftp-side-tab",

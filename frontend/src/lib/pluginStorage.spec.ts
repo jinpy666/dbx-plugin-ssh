@@ -31,6 +31,8 @@ describe("ssh pluginStore wiring", () => {
         // 关键词显示方式（#180）：与 pluginStore 白名单镜像同步。
         "ssh-keyword-display-mode",
         "ssh-batch-bar-open",
+        // 批量上传上次使用的目标目录（批量条上传模式）。
+        "ssh-batch-upload-dir",
         "ssh-terminal-search-options",
         "ssh-terminal-webgl",
         "ssh-terminal-font-size",
