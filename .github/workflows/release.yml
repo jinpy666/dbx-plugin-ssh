@@ -20,9 +20,13 @@ env:
   # Windows runners default python stdout to cp1252; UTF-8 mode is a no-op
   # on the other platforms.
   PYTHONUTF8: "1"
-  # sccache caches rustc invocations — `dbx-plugin package`'s staging build
-  # has its own target dir that rust-cache cannot help (see ci.yml).
-  RUSTC_WRAPPER: sccache
+  # sccache caches rustc invocations, but on Windows runners its replay of
+  # vendor crate rustc command lines (ironrdp_client etc., long -L native=…
+  # out dirs) exceeds the CreateProcess 32K limit (os error 206) — cargo
+  # invokes rustc directly, which handles over-long lines via response
+  # files. Cold builds cost a few extra minutes (same root cause as the
+  # ci.yml windows-regression fix in #296).
+  # RUSTC_WRAPPER: sccache
   SCCACHE_DIR: ${{ github.workspace }}/.sccache-cache
   CARGO_INCREMENTAL: "0"
 
