@@ -5,8 +5,8 @@
 // 被吞掉，面板永久停留在上传页。这里用模拟 DragEvent 走真实 DOM 子树验证
 // onSftpDragEnter/onSftpDragLeave/onTerminalDragEnter/onTerminalDragLeave 的
 // 完整生命周期，不需要真实文件。
-import { ref } from "vue";
-import { describe, expect, it, vi } from "vitest";
+import { ref, type Ref } from "vue";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useUploadChain } from "./useUploadChain";
 
 /** 最小 DragEvent 替身：处理器只读 dataTransfer.types / relatedTarget / currentTarget。 */
@@ -30,14 +30,16 @@ function buildPaneTree() {
 }
 
 /** 挂载上传链，drag 高亮 ref 随返回值透出便于断言；overrides 覆盖门禁输入。 */
-function mountUploadChain(overrides?: { sftpPaneOpen?: boolean }) {
+function mountUploadChain(overrides?: { sftpPaneOpen?: boolean; duplicatePolicy?: "rename" | "ask" | "overwrite"; sessionId?: string }) {
   const dragActive = ref(false);
   const terminalDragActive = ref(false);
+  const duplicatePolicy: Ref<"rename" | "ask" | "overwrite"> = ref(overrides?.duplicatePolicy ?? "rename");
+  const session = ref<{ sessionId?: string } | undefined>(overrides?.sessionId ? { sessionId: overrides.sessionId } : undefined);
   const chain = useUploadChain({
     t: (key) => key,
     showNotice: vi.fn(),
     showError: vi.fn(),
-    session: ref(undefined),
+    session,
     connected: ref(true),
     canWrite: ref(true),
     currentPath: ref("/root"),
@@ -51,8 +53,8 @@ function mountUploadChain(overrides?: { sftpPaneOpen?: boolean }) {
     uploadSource: vi.fn(async () => true),
     loadTransferConcurrency: () => 3,
     loadTransferMaxActive: () => 3,
-    loadTransferDuplicatePolicy: () => "rename",
-    transferDuplicateState: ref("rename"),
+    loadTransferDuplicatePolicy: () => duplicatePolicy.value,
+    transferDuplicateState: duplicatePolicy,
     transferTasks: {},
     terminal: () => undefined,
     loadDirectory: vi.fn(async () => undefined),
@@ -60,7 +62,7 @@ function mountUploadChain(overrides?: { sftpPaneOpen?: boolean }) {
     joinRemote: (parent: string, name: string) => `${parent}/${name}`,
     sudoUpload: () => false,
   });
-  return { chain, dragActive, terminalDragActive };
+  return { chain, dragActive, terminalDragActive, duplicatePolicy };
 }
 
 describe("useUploadChain drag highlight lifecycle (issue #197)", () => {
@@ -122,5 +124,61 @@ describe("useUploadChain drag highlight lifecycle (issue #197)", () => {
     const paneOpen = mountUploadChain({ sftpPaneOpen: true });
     paneOpen.chain.onTerminalDragEnter(fakeDragEvent({ types: ["Files"], currentTarget: pane }));
     expect(paneOpen.terminalDragActive.value).toBe(false);
+  });
+});
+
+// issue #284：覆盖策略下的重复目标预检完全无法改变解析结果，却让每个文件
+// 白付一次 stat 往返；小文件批量覆盖上传按文件数放大这笔开销。
+describe("resolveUploadDuplicateName duplicate-target probe (issue #284)", () => {
+  afterEach(() => {
+    delete (window as { dbxPlugin?: unknown }).dbxPlugin;
+  });
+
+  /** 替换宿主桥：记录调用方法名，按 method 返回桩结果。 */
+  function stubInvoke(result: (method: string) => unknown) {
+    const invoke = vi.fn(async (method: string) => result(method));
+    window.dbxPlugin = { invoke } as unknown as DbxPluginApi;
+    return invoke;
+  }
+
+  it("overwrite policy: no exists probe, the original name is used as-is", async () => {
+    const invoke = stubInvoke(() => ({ exists: true }));
+    const { chain } = mountUploadChain({ duplicatePolicy: "overwrite", sessionId: "s1" });
+
+    await expect(chain.resolveUploadDuplicateName("a.bin", "/root")).resolves.toEqual({ name: "a.bin", proceed: true });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("rename policy still probes and asks the sidecar for a free name", async () => {
+    const invoke = stubInvoke((method) => (method === "sftp/exists" ? { exists: true } : { name: "a(1).bin" }));
+    const { chain } = mountUploadChain({ duplicatePolicy: "rename", sessionId: "s1" });
+
+    await expect(chain.resolveUploadDuplicateName("a.bin", "/root")).resolves.toEqual({ name: "a(1).bin", proceed: true });
+    expect(invoke.mock.calls.map(([method]) => method)).toEqual(["sftp/exists", "sftp/rename-unique"]);
+  });
+
+  it("rename policy: an absent target costs exactly one probe", async () => {
+    const invoke = stubInvoke(() => ({ exists: false }));
+    const { chain } = mountUploadChain({ duplicatePolicy: "rename", sessionId: "s1" });
+
+    await expect(chain.resolveUploadDuplicateName("a.bin", "/root")).resolves.toEqual({ name: "a.bin", proceed: true });
+    expect(invoke.mock.calls.map(([method]) => method)).toEqual(["sftp/exists"]);
+  });
+
+  it("ask policy: once the batch decided overwrite, later files skip the probe", async () => {
+    const invoke = stubInvoke(() => ({ exists: true }));
+    const { chain } = mountUploadChain({ duplicatePolicy: "ask", sessionId: "s1" });
+
+    // 首个撞名文件仍要探测并提问；「应用到全部」选覆盖后决策落到批次。
+    const first = chain.resolveUploadDuplicateName("a.bin", "/root");
+    await vi.waitFor(() => expect(chain.uploadDuplicatePrompt.value).not.toBeNull());
+    chain.uploadDuplicateApplyAll.value = true;
+    chain.resolveUploadDuplicate("overwrite");
+    await expect(first).resolves.toEqual({ name: "a.bin", proceed: true });
+    expect(invoke.mock.calls.map(([method]) => method)).toEqual(["sftp/exists"]);
+
+    invoke.mockClear();
+    await expect(chain.resolveUploadDuplicateName("b.bin", "/root")).resolves.toEqual({ name: "b.bin", proceed: true });
+    expect(invoke).not.toHaveBeenCalled();
   });
 });
