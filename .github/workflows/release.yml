@@ -22,7 +22,11 @@ env:
   PYTHONUTF8: "1"
   # sccache caches rustc invocations — `dbx-plugin package`'s staging build
   # has its own target dir that rust-cache cannot help (see ci.yml).
-  RUSTC_WRAPPER: sccache
+  # fork 补丁：禁用 sccache。windows runner 上 vendor\ironrdp_client 等 crate 的
+  # rustc 命令行（大量 -L native=… out dir）经 sccache 重放时超过 CreateProcess
+  # 32K 上限（os error 206），sccache 无法 spawn rustc → job 失败。cargo 直调
+  # rustc 时自身用 response file 处理超长命令行，不受此限。冷编译多几分钟可接受。
+  # RUSTC_WRAPPER: sccache
   SCCACHE_DIR: ${{ github.workspace }}/.sccache-cache
   CARGO_INCREMENTAL: "0"
 
