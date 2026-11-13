@@ -304,6 +304,13 @@ impl DialTarget {
 const DIRECTORY_HANDSHAKE_LIMIT: usize = 64 * 1024;
 const DIRECTORY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const REMOTE_SHELL_DETECTION_TIMEOUT: Duration = Duration::from_secs(5);
+/// #287：提示符尾巴必须静默这么久才当作就绪。ticker 250ms 一跳，取 150ms
+/// 让「横幅分片之间的毫秒级间隔、流式输出」都不被误判，而真提示符在下一跳
+/// 就会命中（用户感知上仍是即时安装）。
+const PROMPT_TAIL_SETTLE: Duration = Duration::from_millis(150);
+/// #287：未换行尾巴的长度上限。提示符远短于此；只有横幅长行被 SSH 拆包时
+/// 才会出现更长的尾巴，那不算就绪。
+const PROMPT_TAIL_LIMIT: usize = 512;
 
 /// Error shown when a terminal-routed agent command finds no live workbench
 /// PTY for its connection; the wording doubles as user guidance.
@@ -2595,6 +2602,10 @@ impl SshRuntime {
             // 重绘，屏幕上就出现两遍脚本文本。推迟到首个提示符可见（或用户
             // 先输入）后再写。
             let mut pending_prompt_hook: Option<RemoteShell> = None;
+            // 提示符尾巴第一次出现的时刻。SSH 分片会让缓冲末尾「暂时」不带
+            // 换行，只有静默一拍（见 ticker 的 PROMPT_TAIL_SETTLE）才说明那是
+            // 真提示符而不是横幅被拆包。
+            let mut prompt_tail_since: Option<Instant> = None;
             // #90：ZMODEM 触发检测（远端 sz 发起的 ZRQINIT）。字节全透传，
             // 检测器只产出事件边沿；事件窗口超时后自动复位（详见
             // zmodem_detect 模块注释）。
@@ -2609,6 +2620,32 @@ impl SshRuntime {
             loop {
                 tokio::select! {
                     _ = directory_timeout.tick() => {
+                        // #287 主路径：尾巴静默一拍即视为提示符。ticker 250ms
+                        // 一跳、数据到达会刷新 prompt_tail_since，所以这里只
+                        // 会在「shell 停在提示符等输入」时命中；持续输出的横幅
+                        // 永远刷得到新时刻，不会被误判成就绪。
+                        let tail_settled = prompt_tail_since
+                            .is_some_and(|at| at.elapsed() >= PROMPT_TAIL_SETTLE);
+                        let flush_hook = initial_output.as_deref().is_some_and(|buffer| {
+                            should_flush_pending_hook(pending_prompt_hook, buffer, tail_settled)
+                        });
+                        if flush_hook {
+                            // 先取走缓冲再装 hook：后续 stdout 直接走正常发布
+                            // 路径，脚本只写一次。
+                            let held = initial_output.take().unwrap_or_default();
+                            let shell = pending_prompt_hook.take().unwrap_or(remote_shell);
+                            remote_shell = shell;
+                            directory_tracking_enabled = true;
+                            directory_filter.begin(directory_tracking_marker(&directory_marker_id));
+                            let script = directory_tracking_script(&directory_marker_id, shell);
+                            if channel.data(script.as_bytes()).await.is_err() { break; }
+                            if let Some(data) = Some(strip_trailing_prompt(held))
+                                .filter(|data| !data.is_empty())
+                            {
+                                publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
+                            }
+                            prompt_tail_since = None;
+                        }
                         if initial_output_started.is_some_and(|started| started.elapsed() >= REMOTE_SHELL_DETECTION_TIMEOUT + Duration::from_secs(1)) {
                             if let Some(data) = initial_output.take() {
                                 // #287 兜底：一直没有识别出提示符（例如自定
@@ -2961,27 +2998,20 @@ impl SshRuntime {
                             if let Some(buffer) = initial_output.as_mut() {
                                 buffer.extend_from_slice(&data);
                                 // #287：启动输出一直被扣住到首个提示符。
-                                // 提示符不带换行，所以缓冲区以非换行收尾就说明
-                                // readline 已经接管；此时再写 hook 才不会被
-                                // 回显/重绘。
-                                if should_flush_pending_hook(pending_prompt_hook, buffer) {
-                                    // 先取走缓冲再装 hook：这样后续 stdout
-                                    // 直接走正常发布路径，脚本只写一次。
-                                    let held = initial_output.take().unwrap_or_default();
-                                    let shell =
-                                        pending_prompt_hook.take().unwrap_or(remote_shell);
-                                    remote_shell = shell;
-                                    directory_tracking_enabled = true;
-                                    directory_filter.begin(directory_tracking_marker(&directory_marker_id));
-                                    let script =
-                                        directory_tracking_script(&directory_marker_id, shell);
-                                    if channel.data(script.as_bytes()).await.is_err() { break; }
-                                    if let Some(data) = Some(strip_trailing_prompt(held))
-                                        .filter(|data| !data.is_empty())
-                                    {
-                                        publish_terminal(&task_id, TerminalStream::Stdout, data, &replay, &emitter).await;
-                                    }
-                                }
+                                // 提示符不带换行，但「缓冲区此刻不以换行收尾」
+                                // 本身不足以证明 readline 已接管——SSH 会按包
+                                // 拆分横幅的长行，任何一次分片都让缓冲末尾暂时
+                                // 没有换行。据此立刻写 hook 会在 rc/MOTD 仍在
+                                // 输出时把脚本回显出来，正是要修的症状。这里只
+                                // 记「尾巴出现时刻」，真正的 flush 交给 250ms
+                                // ticker：尾巴静默一拍（150ms 无新数据）才说明
+                                // shell 停在提示符上等输入；持续输出的横幅每次
+                                // 都会刷新该时刻，不会误判。
+                                prompt_tail_since = if ends_with_prompt_tail(buffer) {
+                                    Some(Instant::now())
+                                } else {
+                                    None
+                                };
                                 continue;
                             }
                         }
@@ -13488,10 +13518,28 @@ fn ends_with_prompt_tail(output: &[u8]) -> bool {
 }
 
 /// #287: decides whether the deferred shell-integration hook may be written
-/// now. Only pending hooks flush, and only once startup output shows a prompt
-/// tail (the shell has clearly reached its first prompt).
-fn should_flush_pending_hook(pending: Option<RemoteShell>, output: &[u8]) -> bool {
-    pending.is_some() && ends_with_prompt_tail(output)
+/// now. Only pending hooks flush, only once startup output shows a prompt
+/// tail, only after that tail has been quiet for [`PROMPT_TAIL_SETTLE`], and
+/// only when the tail is short enough to be a prompt rather than a banner line
+/// that SSH happened to split across packets.
+fn should_flush_pending_hook(pending: Option<RemoteShell>, output: &[u8], settled: bool) -> bool {
+    pending.is_some()
+        && settled
+        && ends_with_prompt_tail(output)
+        && prompt_tail_len(output) <= PROMPT_TAIL_LIMIT
+}
+
+/// Length of the unterminated trailing line in `output` (0 when it ends on a
+/// line boundary). A prompt sits right after the last newline; a banner line
+/// cut by packet framing is typically much longer.
+fn prompt_tail_len(output: &[u8]) -> usize {
+    if !ends_with_prompt_tail(output) {
+        return 0;
+    }
+    output
+        .iter()
+        .rposition(|byte| matches!(byte, b'\n' | b'\r'))
+        .map_or(output.len(), |index| output.len() - index - 1)
 }
 
 /// Drops the unterminated prompt line at the end of startup output. Earlier
@@ -15371,25 +15419,52 @@ matrix-ed25519";
         assert!(ends_with_prompt_tail(b"Welcome\r\nnroot@host:~$ "));
         assert!(ends_with_prompt_tail(b"nroot@host:~$ "));
         // Nothing is pending: a prompt tail alone must not install anything.
-        assert!(!should_flush_pending_hook(None, b"nroot@host:~$ "));
+        assert!(!should_flush_pending_hook(None, b"nroot@host:~$ ", true));
         // Still in rc files / MOTD: the buffer has no prompt tail yet.
-        assert!(!should_flush_pending_hook(Some(RemoteShell::Bash), b""));
         assert!(!should_flush_pending_hook(
             Some(RemoteShell::Bash),
-            b"Welcome\r\n"
+            b"",
+            true
+        ));
+        assert!(!should_flush_pending_hook(
+            Some(RemoteShell::Bash),
+            b"Welcome\r\n",
+            true
+        ));
+        // A mid-line tail that has not been quiet yet is a packet boundary in
+        // the banner, not a prompt: #287 is exactly that echo bug.
+        assert!(!should_flush_pending_hook(
+            Some(RemoteShell::Zsh),
+            b"Welcome\r\nnroot@host:~$ ",
+            false
         ));
         assert!(should_flush_pending_hook(
             Some(RemoteShell::Zsh),
-            b"Welcome\r\nnroot@host:~$ "
+            b"Welcome\r\nnroot@host:~$ ",
+            true
         ));
+        // A banner line split by SSH framing leaves a long unterminated tail;
+        // even after a quiet tick it is not a prompt.
+        let mut split_banner = b"Last login: Tue Nov 10\r\n".to_vec();
+        split_banner.extend(std::iter::repeat_n(b'x', PROMPT_TAIL_LIMIT + 1));
+        assert!(!should_flush_pending_hook(
+            Some(RemoteShell::Bash),
+            &split_banner,
+            true
+        ));
+        assert_eq!(prompt_tail_len(&split_banner), PROMPT_TAIL_LIMIT + 1);
+        assert_eq!(prompt_tail_len(b"Welcome\r\n"), 0);
+        assert_eq!(prompt_tail_len(b"user@host:~$ "), "user@host:~$ ".len());
     }
 
     #[test]
     fn pending_prompt_hook_is_written_exactly_once_across_ready_then_type() {
         let mut pending = Some(RemoteShell::Bash);
         let mut script_writes = 0;
-        // First prompt arrives: the stdout path flushes the deferred hook.
-        if should_flush_pending_hook(pending, b"Welcome!\r\nnroot@host:~$ ") {
+        // First prompt arrives and the buffer goes quiet: the ticker path
+        // flushes the deferred hook (settled tail required since #287's
+        // packet-framing hardening).
+        if should_flush_pending_hook(pending, b"Welcome!\r\nnroot@host:~$ ", true) {
             let _ = pending.take();
             script_writes += 1;
         }
