@@ -370,6 +370,10 @@ jobs:
         env:
           RUST_TARGET: ${{ matrix.rust_target }}
         run: |
+          # windows-x64：sccache 代理 spawn rustc 时报 os error 206（与
+          # windows-regression 同一原因，见该 job 的注释），生产构建也必须绕开
+          # wrapper，否则 candidate 永远红。其余平台保持 sccache 提速。
+          if [ "${{ matrix.os }}" = "windows" ]; then unset RUSTC_WRAPPER; fi
           if [ -n "$RUST_TARGET" ]; then export CARGO_BUILD_TARGET="$RUST_TARGET"; fi
           cargo build --locked --release --manifest-path backend/Cargo.toml
       # cargo 带 target 时输出在 target/<triple>/release/，而 Offline MCP smoke 的
@@ -392,6 +396,9 @@ jobs:
           RUST_TARGET: ${{ matrix.rust_target }}
           NO_COLOR: "1"
         run: |
+          # windows-x64：plugin-cli 内部的 cargo 同样过 sccache，同样会报
+          # os error 206；这里一并在 step 内摘掉 wrapper（其余平台不动）。
+          if [ "${{ matrix.os }}" = "windows" ]; then unset RUSTC_WRAPPER; fi
           if [ -n "$RUST_TARGET" ]; then
             export CARGO_BUILD_TARGET="$RUST_TARGET"
             shim_dir="$(mktemp -d)"
