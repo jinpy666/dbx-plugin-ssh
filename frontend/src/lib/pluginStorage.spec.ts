@@ -24,6 +24,8 @@ describe("ssh pluginStore wiring", () => {
         "ssh-follow-directory",
         "ssh-sftp-pane-open",
         "ssh-sftp-show-permissions",
+        // 文件浏览双击行为（#288：漏登记 = 重开连接后静默回落 preview）。
+        "ssh-sftp-double-click-action",
         "ssh-sftp-side-tab",
         "ssh-sftp-side-collapsed",
         "ssh-terminal-select-copy",
