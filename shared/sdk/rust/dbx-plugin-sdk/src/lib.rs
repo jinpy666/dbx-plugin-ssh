@@ -112,7 +112,7 @@ impl PluginEmitter {
             return Err(PluginError::new(-32600, "Binary channel is too long"));
         }
         let payload_len = 2 + channel.len() + data.len();
-        let mut output = self.output.lock().map_err(|_| PluginError::new(-32000, "Plugin output lock is poisoned"))?;
+        let mut output = lock_output(&self.output);
         output.write_all(&[FRAME_KIND_BINARY]).map_err(io_error)?;
         output.write_all(&(payload_len as u32).to_be_bytes()).map_err(io_error)?;
         output.write_all(&(channel.len() as u16).to_be_bytes()).map_err(io_error)?;
@@ -144,12 +144,25 @@ impl PluginEmitter {
     }
 }
 
+/// Locks the plugin's output writer, recovering from a poisoned guard.
+///
+/// A handler that panics while the writer is locked (the sink panicking
+/// mid-write is the realistic case) poisons the mutex. Refusing every later
+/// write would leave a sidecar that answers nothing — the exact silent-death
+/// shape the worker-pool panic isolation removes (dbx-plugin-ssh#286) — while
+/// the writer itself holds no invariant a panic can break: it is either usable
+/// or it returns an IO error per call. Recover the inner writer and keep the
+/// session diagnosable.
+fn lock_output(output: &Mutex<Box<dyn Write + Send>>) -> std::sync::MutexGuard<'_, Box<dyn Write + Send>> {
+    output.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn write_json_frame(
     output: &Arc<Mutex<Box<dyn Write + Send>>>,
     transport: PluginTransport,
     payload: &[u8],
 ) -> Result<(), PluginError> {
-    let mut output = output.lock().map_err(|_| PluginError::new(-32000, "Plugin output lock is poisoned"))?;
+    let mut output = lock_output(output);
     match transport {
         PluginTransport::JsonLines => {
             output.write_all(payload).map_err(io_error)?;
@@ -1023,6 +1036,30 @@ mod tests {
             output: Arc::new(Mutex::new(Box::new(Cursor::new(Vec::new())) as Box<dyn Write + Send>)),
             transport: PluginTransport::Framed,
         }
+    }
+
+    /// A handler panic while the writer lock is held poisons it; the emitter
+    /// must keep writing instead of turning the sidecar mute
+    /// (dbx-plugin-ssh#286: the poisoned worker pool reached the host as a
+    /// silent timeout, so a poisoned writer would look exactly the same).
+    #[test]
+    fn emitter_keeps_writing_after_a_poisoned_output_lock() {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let output: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(RecordingOutput(sink.clone()))));
+        let emitter = PluginEmitter::for_tests(output, PluginTransport::JsonLines);
+
+        let poison_target = emitter.output.clone();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poison_target.lock().expect("fresh lock");
+            panic!("sink panicked mid-write");
+        }));
+        assert!(poisoned.is_err(), "the guard must unwind through the panic");
+        assert!(poison_target.is_poisoned());
+
+        emitter.event("ssh/probe", serde_json::json!({ "ok": true })).expect("event after poison");
+
+        let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+        assert!(written.contains("ssh/probe"), "event must still reach the host: {written}");
     }
 
     #[test]
