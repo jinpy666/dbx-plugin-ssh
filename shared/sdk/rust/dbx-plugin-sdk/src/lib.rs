@@ -583,7 +583,19 @@ impl<H: PluginHandler> PluginServer<H> {
         let handler = self.handler.clone();
         workers.submit(move || {
             let context = RequestContext { request_id: request.id, driver: request.driver };
-            let result = handler.handle(context, &request.method, request.params, &emitter);
+            // A panicking handler must still produce an error response: without
+            // this the host would only ever see a silent timeout, while the
+            // repeated unanswered requests degraded user-visible errors
+            // (dbx-plugin-ssh#286).
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handler.handle(context, &request.method, request.params, &emitter)
+            })) {
+                Ok(result) => result,
+                Err(panic) => Err(PluginError::new(
+                    -32000,
+                    format!("plugin handler panicked: {}", panic_message(panic.as_ref())),
+                )),
+            };
             if let Some(id) = request.id {
                 if let Err(error) = emitter.respond(id, result) {
                     eprintln!("[dbx-plugin-sdk] failed to write response: {}", error.message);
@@ -664,7 +676,17 @@ impl ChannelExecutor {
         let executor = self.clone();
         let finish_channel = channel.clone();
         let chained: PluginJob = Box::new(move || {
-            job();
+            // A panicking job must never skip finish(): the lane would stay
+            // `running` forever and every later binary frame (terminal
+            // keystrokes, upload chunks) would queue behind a job that already
+            // died (dbx-plugin-ssh#286).
+            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+                eprintln!(
+                    "[dbx-plugin-sdk] channel '{}' job panicked: {}; lane continues",
+                    finish_channel,
+                    panic_message(panic.as_ref())
+                );
+            }
             executor.finish(finish_channel);
         });
         if let Err(error) = self.pool.submit(chained) {
@@ -735,7 +757,19 @@ impl WorkerPool {
                     Err(_) => return,
                 };
                 match job {
-                    Ok(job) => job(),
+                    Ok(job) => {
+                        // Last-resort isolation: one panicking job must not
+                        // take its worker thread down with it, or the pool
+                        // shrinks a thread per panic until submits fail with
+                        // "plugin worker pool is unavailable"
+                        // (dbx-plugin-ssh#286).
+                        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+                            eprintln!(
+                                "[dbx-plugin-sdk] plugin job panicked: {}; worker continues",
+                                panic_message(panic.as_ref())
+                            );
+                        }
+                    }
                     Err(_) => return,
                 }
             })?;
@@ -782,6 +816,20 @@ fn io_error(error: io::Error) -> PluginError {
     PluginError::new(-32000, error.to_string())
 }
 
+/// Best-effort extraction of the printable message from a panic payload for
+/// the panic-isolation layers: `panic!` with a literal yields `&str`,
+/// dynamically built messages yield `String`, any other payload type has no
+/// printable form.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Write};
@@ -824,6 +872,113 @@ mod tests {
         let mut values = (0..4).map(|_| receiver.recv_timeout(Duration::from_secs(1)).unwrap()).collect::<Vec<_>>();
         values.sort_unstable();
         assert_eq!(values, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn worker_pool_survives_panicking_jobs() {
+        // One worker, so the value job runs on the very thread the panic
+        // would have killed before the isolation in WorkerPool::new
+        // (dbx-plugin-ssh#286).
+        let pool = WorkerPool::new(1, 4).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        pool.submit(|| panic!("job exploded")).unwrap();
+        pool.submit(move || sender.send("still alive").unwrap()).unwrap();
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(2)).unwrap(), "still alive");
+    }
+
+    struct PanicHandler;
+
+    impl PluginHandler for PanicHandler {
+        fn handle(
+            &self,
+            _context: RequestContext,
+            method: &str,
+            _params: Value,
+            _emitter: &PluginEmitter,
+        ) -> Result<Value, PluginError> {
+            panic!("handler exploded on {method}");
+        }
+    }
+
+    #[test]
+    fn dispatch_json_answers_panicking_handler_with_error() {
+        // Without the catch_unwind in dispatch_json the host only sees a
+        // silent timeout for a panicking handler (dbx-plugin-ssh#286).
+        let output = RecordingOutput::default();
+        let sink: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(output.clone())));
+        let emitter = PluginEmitter::for_tests(sink, PluginTransport::JsonLines);
+        let server = PluginServer::new(PluginMetadata::new("sample", "1.0.0"), PanicHandler);
+        let workers = WorkerPool::new(1, 4).unwrap();
+
+        server
+            .dispatch_json(
+                br#"{"jsonrpc":"2.0","id":7,"method":"sample/panic","params":{}}"#,
+                emitter,
+                &workers,
+            )
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(response) = output.lines().first() {
+                assert_eq!(response["id"].as_u64(), Some(7));
+                let message = response["error"]["message"].as_str().unwrap_or_default();
+                assert!(message.contains("panicked"), "unexpected error response: {response}");
+                return;
+            }
+            assert!(Instant::now() < deadline, "no response for a panicking handler");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct PanicOnFirstBinary {
+        seen: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl PluginHandler for PanicOnFirstBinary {
+        fn handle(
+            &self,
+            _context: RequestContext,
+            method: &str,
+            _params: Value,
+            _emitter: &PluginEmitter,
+        ) -> Result<Value, PluginError> {
+            Err(PluginError::method_not_found(method))
+        }
+
+        fn handle_binary(&self, _channel: &str, data: Vec<u8>, _emitter: &PluginEmitter) -> Result<(), PluginError> {
+            let sequence = u64::from_be_bytes(data[..8].try_into().unwrap());
+            if sequence == 0 {
+                panic!("binary job exploded");
+            }
+            self.seen.lock().unwrap().push(sequence);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn channel_lane_drains_after_panicking_job() {
+        // A panicking head job must still release its lane, or every later
+        // binary frame on that channel queues forever (terminal keystrokes
+        // included) (dbx-plugin-ssh#286).
+        let handler = PanicOnFirstBinary { seen: Arc::new(Mutex::new(Vec::new())) };
+        let seen = handler.seen.clone();
+        let server = PluginServer::new(PluginMetadata::new("sample", "1.0.0"), handler);
+        let emitter = test_emitter();
+        let binary = ChannelExecutor::new(WorkerPool::new(2, 8).unwrap());
+
+        for sequence in 0..2u64 {
+            server
+                .dispatch_binary(binary_frame_payload("ssh/terminal/in/s1", sequence), emitter.clone(), &binary)
+                .unwrap();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while seen.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "lane never drained after the panicking job");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(*seen.lock().unwrap(), vec![1]);
     }
 
     /// Records the order in which binary frames were applied to the handler.

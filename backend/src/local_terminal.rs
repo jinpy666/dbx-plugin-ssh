@@ -281,6 +281,35 @@ struct LocalSession {
     rows: u16,
 }
 
+/// portable-pty 0.9 resolves ConPTY through a `lazy_static` whose init
+/// `expect()`s when kernel32 lacks `CreatePseudoConsole` (pre-1809 Windows:
+/// Win7 / Server 2008 R2 / Server 2016). That panic poisons the global Once,
+/// so every later local-terminal request panicked before our handler could
+/// return an error, and the repeated worker-thread deaths took the SDK worker
+/// pool — and the whole sidecar — down with it (dbx-plugin-ssh#286). Probe
+/// the export ourselves and refuse with a regular protocol error instead of
+/// ever running that initializer.
+fn conpty_available() -> bool {
+    #[cfg(windows)]
+    {
+        // windows-sys 0.59 declares `PCSTR` as `*const u8`, so the NUL-terminated
+        // byte strings are passed directly (the `windows` crate's `s!` helper
+        // does not exist here).
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+        unsafe {
+            let kernel = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
+            if kernel.is_null() {
+                return false;
+            }
+            GetProcAddress(kernel, b"CreatePseudoConsole\0".as_ptr()).is_some()
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
 pub struct LocalTerminalRuntime {
     sessions: Arc<RwLock<HashMap<String, Arc<LocalSession>>>>,
 }
@@ -297,6 +326,14 @@ impl LocalTerminalRuntime {
         request: LocalTerminalStartRequest,
         emitter: PluginEmitter,
     ) -> Result<Value, String> {
+        // Fail fast before portable-pty's poisoned-Once initializer can ever
+        // run; see conpty_available() for the failure chain this prevents.
+        if !conpty_available() {
+            return Err(
+                "local terminal requires ConPTY (Windows 10 1809+ / Server 2019+); this system does not export CreatePseudoConsole"
+                    .to_string(),
+            );
+        }
         let cols = request.cols.clamp(2, u16::MAX as u32) as u16;
         let rows = request.rows.clamp(2, u16::MAX as u32) as u16;
         let requested = request
@@ -1675,6 +1712,12 @@ mod tests {
         let request: LocalTerminalStartRequest =
             serde_json::from_str(r#"{"workbenchId":"w","cols":80,"rows":24}"#).unwrap();
         assert!(request.env.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_available_detects_conpty_on_modern_windows() {
+        assert!(conpty_available());
     }
 
     #[test]

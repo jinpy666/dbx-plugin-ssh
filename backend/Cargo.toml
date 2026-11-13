@@ -102,8 +102,8 @@ libc = "0.2"
 pageant = "0.2"
 # 进程级 kill-on-close job（src/job_object.rs）：sidecar 死亡时由内核回收
 # ConPTY conhost/shell 全树。CreateJobObjectW 的 SECURITY_ATTRIBUTES 参数被
-# Win32_Security feature 门控（0.59 实测），故需要四组 feature。
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# Win32_Security feature 门控（0.59 实测），故需要五组 feature。
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Threading"] }
 # RDP TLS backend: Schannel via native-tls on Windows (NyaTerm's split, see
 # the ironrdp comment above and docs/RDP_VENDOR_FORK_PLAN.zh-CN.md §8-7).
 ironrdp = { version = "0.17", default-features = false, features = ["native-tls"] }
