@@ -1474,6 +1474,14 @@
       "icon": "assets/plugin.svg"
     },
     {
+      "type": "context-menu",
+      "id": "manage-monitor",
+      "label": "Monitor",
+      "description": "Open the multi-server resource monitor.",
+      "menu": "connection",
+      "action": { "type": "open-workbench", "workbench": "io.dbx.ssh.monitor" }
+    },
+    {
       "type": "workbench",
       "id": "io.dbx.ssh.tunnels.quick",
       "label": "Start saved port forwards",
@@ -1695,6 +1703,10 @@
         "io.dbx.ssh.monitor": {
           "label": "Monitor",
           "description": "Live resource monitor for multiple SSH servers, grouped and colour-coded."
+        },
+        "io.dbx.ssh.manage-monitor": {
+          "label": "Monitor",
+          "description": "Open the multi-server resource monitor."
         },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
@@ -2046,6 +2058,10 @@
           "label": "Monitor",
           "description": "Monitorización de recursos de varios servidores SSH, agrupados y con código de color."
         },
+        "io.dbx.ssh.manage-monitor": {
+          "label": "Monitor",
+          "description": "Abrir el monitor de recursos de varios servidores."
+        },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
           "description": "Herramientas SSH exec y SFTP para conexiones guardadas"
@@ -2395,6 +2411,10 @@
         "io.dbx.ssh.monitor": {
           "label": "Monitor",
           "description": "Monitoraggio delle risorse di più server SSH, raggruppato e con codici colore."
+        },
+        "io.dbx.ssh.manage-monitor": {
+          "label": "Monitor",
+          "description": "Apri il monitoraggio delle risorse di più server."
         },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
@@ -2746,6 +2766,10 @@
           "label": "モニター",
           "description": "複数の SSH サーバーのリソースをリアルタイム監視し、グループ別に色分けして表示します。"
         },
+        "io.dbx.ssh.manage-monitor": {
+          "label": "モニター",
+          "description": "複数のサーバーのリソースモニターを開きます。"
+        },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
           "description": "保存済み接続向けの SSH exec および SFTP ツール"
@@ -3095,6 +3119,10 @@
         "io.dbx.ssh.monitor": {
           "label": "Monitor",
           "description": "Monitoramento de recursos de vários servidores SSH, agrupados e com código de cores."
+        },
+        "io.dbx.ssh.manage-monitor": {
+          "label": "Monitor",
+          "description": "Abrir o monitor de recursos de vários servidores."
         },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
@@ -3446,6 +3474,10 @@
           "label": "监控",
           "description": "多台 SSH 服务器的实时资源监控，按分组配色排列。"
         },
+        "io.dbx.ssh.manage-monitor": {
+          "label": "监控",
+          "description": "打开多服务器资源监控。"
+        },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
           "description": "已保存连接的 SSH 执行与 SFTP 工具"
@@ -3795,6 +3827,10 @@
         "io.dbx.ssh.monitor": {
           "label": "監控",
           "description": "多台 SSH 伺服器的即時資源監控，依分組配色排列。"
+        },
+        "io.dbx.ssh.manage-monitor": {
+          "label": "監控",
+          "description": "開啟多伺服器資源監控。"
         },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
