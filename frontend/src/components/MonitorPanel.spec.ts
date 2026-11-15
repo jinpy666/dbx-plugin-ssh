@@ -164,7 +164,7 @@ describe("MonitorPanel", () => {
       {
         contributionId: "io.dbx.ssh.workbench",
         context: { connectionId: "c1", providerId: "io.dbx.ssh.connection", connectionType: "ssh", connection: { id: "c1", name: "C1", readOnly: false } },
-        options: { forceNew: true },
+        options: { forceNew: true, target: "tab" },
       },
     ]);
     mounted.wrapper.unmount();

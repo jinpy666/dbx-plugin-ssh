@@ -499,6 +499,13 @@ describe("mockDbxHost fixture", () => {
     expect(snap2.samples["conn-a"].live?.cpuPct).toBeGreaterThanOrEqual(0);
     expect(snap2.samples["conn-a"].details?.disks.length).toBeGreaterThan(0);
 
+    // status 行的可选字段仅在有意义时序列化（Lane A TaskStatusRow 的 Option 字段）：
+    // live 带探测到的主网卡（与 snapshot 样本的 iface 一致），且无 error。
+    const statusLive = await plugin.invoke("monitor/status", {}) as { tasks: Array<{ state: string; primaryInterface?: string; error?: string }> };
+    expect(statusLive.tasks[0].state).toBe("live");
+    expect(statusLive.tasks[0].primaryInterface).toBe("eth0");
+    expect(statusLive.tasks[0].error).toBeUndefined();
+
     await plugin.invoke("monitor/stop", { connectionId: "conn-a" });
     const status2 = await plugin.invoke("monitor/status", {}) as { tasks: unknown[] };
     expect(status2.tasks).toEqual([]);
@@ -508,13 +515,31 @@ describe("mockDbxHost fixture", () => {
     await expect(plugin.invoke("monitor/details", { connectionId: "conn-a" })).rejects.toThrow(/monitor\/details/);
   });
 
+  it("monitor/snapshot clamps points like the sidecar (default 120, floor 1, cap 720)", async () => {
+    const plugin = await loadMock("");
+    await plugin.invoke("monitor/start", { connectionId: "conn-a" });
+    const historyLength = async (points?: number) => {
+      const snap = await plugin.invoke("monitor/snapshot", points === undefined ? {} : { points }) as { samples: Record<string, { history: unknown[] }> };
+      return snap.samples["conn-a"].history.length;
+    };
+    // 语义逐条对齐 Lane A clamp_points（monitor.rs）：缺省/非自然数 → 默认
+    // SNAPSHOT_DEFAULT_POINTS(120)，否则收进 1..FAST_RING_CAP(720)。
+    expect(await historyLength()).toBe(120);
+    expect(await historyLength(0)).toBe(1);
+    expect(await historyLength(1)).toBe(1);
+    expect(await historyLength(99999)).toBe(720);
+    expect(await historyLength(-3)).toBe(120); // as_u64 → None → 缺省
+    expect(await historyLength(2.5)).toBe(120); // 非整数 → 缺省
+  });
+
   it("monitor fixture ?mon=unsupported narrative reports state/error without samples", async () => {
     const plugin = await loadMock("?mon=unsupported");
     const start = await plugin.invoke("monitor/start", { connectionId: "conn-x" }) as { state: string };
     expect(start.state).toBe("unsupported");
-    const status = await plugin.invoke("monitor/status", {}) as { tasks: Array<{ state: string; error?: string }> };
+    const status = await plugin.invoke("monitor/status", {}) as { tasks: Array<{ state: string; error?: string; primaryInterface?: string }> };
     expect(status.tasks[0].state).toBe("unsupported");
     expect(status.tasks[0].error).toBeTruthy();
+    expect(status.tasks[0].primaryInterface).toBeUndefined(); // iface 未探测 → 字段缺省省略
     const snap = await plugin.invoke("monitor/snapshot", { connectionIds: ["conn-x"] }) as { samples: Record<string, { state: string; live: unknown; history: unknown[]; details: unknown }> };
     expect(snap.samples["conn-x"]).toEqual({ state: "unsupported", live: null, history: [], details: null });
   });

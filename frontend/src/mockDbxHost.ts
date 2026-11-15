@@ -857,7 +857,8 @@ let mockForwardSeq = 1;
 // 曲线前移；数值用确定性正弦叠加（无 Math.random），快照可复现。
 const mockMonitorTasks = new Map<string, { state: string; since: number; phase: number }>();
 const monUnsupported = fixtureParams.get("mon") === "unsupported";
-const MONITOR_POINTS_DEFAULT = 120;
+const MONITOR_POINTS_DEFAULT = 120; // Lane A SNAPSHOT_DEFAULT_POINTS（monitor.rs）。
+const MONITOR_POINTS_MAX = 720; // Lane A FAST_RING_CAP：快照点数上限（12min @ 1s）。
 const MONITOR_SAMPLE_INTERVAL_MS = 2000;
 // 与 sidecar 单位约定一致（计划 §1）：内存 MB=1024²B、速率 KiB/s 一位小数、
 // cpuPct 0..100 一位小数。
@@ -1906,12 +1907,16 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     result = { state: "stopped" };
   }
   else if (method === "monitor/status") {
+    // error/primaryInterface 仅在有意义时序列化（Lane A TaskStatusRow 的 Option
+    // 字段 skip_serializing_if）：unsupported 带错误文案；live 带探测到的主网卡
+    // （与 snapshot 样本的 iface 一致）；connecting 两者皆缺省省略。
     result = {
       tasks: [...mockMonitorTasks.entries()].map(([connectionId, task]) => ({
         connectionId,
         state: task.state,
         since: task.since,
         ...(task.state === "unsupported" ? { error: "remote counters unavailable on this host" } : {}),
+        ...(task.state === "live" ? { primaryInterface: "eth0" } : {}),
       })),
     };
   }
@@ -1920,7 +1925,12 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     const wanted = Array.isArray(input.connectionIds) && input.connectionIds.length
       ? input.connectionIds.map((id) => String(id))
       : [...mockMonitorTasks.keys()];
-    const points = Math.max(2, Math.min(Number(input.points) || MONITOR_POINTS_DEFAULT, MONITOR_POINTS_DEFAULT * 4));
+    // points 语义对齐 Lane A clamp_points（monitor.rs）：缺省/非自然数 → 默认
+    // SNAPSHOT_DEFAULT_POINTS(120)，否则收进 1..FAST_RING_CAP(720)。
+    const requested = Number(input.points);
+    const points = Number.isInteger(requested) && requested >= 0
+      ? Math.min(Math.max(requested, 1), MONITOR_POINTS_MAX)
+      : MONITOR_POINTS_DEFAULT;
     const samples: Record<string, unknown> = {};
     for (const connectionId of wanted) {
       const task = mockMonitorTasks.get(connectionId);
@@ -1930,7 +1940,9 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
         samples[connectionId] = { state: "unsupported", live: null, history: [], details: null };
         continue;
       }
-      task.phase += 1; // 脚本式推进：每次快照曲线前移一相位。
+      // 相位计数器语义：phase = 自 start 起收到的快照拍数（每次 snapshot 前移一拍）；
+      // phase>=2 才转 live（首拍保持 connecting 模拟握手窗口），liveCount = min(phase-1, points)。
+      task.phase += 1;
       if (task.state === "connecting" && task.phase >= 2) task.state = "live";
       const liveCount = Math.min(task.phase - 1, points);
       const history: Array<Record<string, unknown>> = [];

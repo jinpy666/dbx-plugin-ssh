@@ -99,7 +99,6 @@ const netSeries = computed(() => historySeries(tail.value, (entry) => entry.netR
 const cpuSegments = computed(() => sparklineSegments(cpuSeries.value.values, cpuSeries.value.gaps, SPARK_WIDTH, SPARK_HEIGHT));
 const memSegments = computed(() => sparklineSegments(memSeries.value.values, memSeries.value.gaps, SPARK_WIDTH, SPARK_HEIGHT));
 const netSegments = computed(() => sparklineSegments(netSeries.value.values, netSeries.value.gaps, SPARK_WIDTH, SPARK_HEIGHT));
-const hasSparkData = computed(() => tail.value.some((entry) => !("gap" in entry && entry.gap === true)));
 
 const liveValues = computed(() => {
   const live = props.snapshot?.live ?? null;
