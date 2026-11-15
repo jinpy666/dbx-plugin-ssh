@@ -67,7 +67,11 @@ interface DbxPluginApi {
   readonly locale: string;
   /** 宿主能力位（Host API 1.2 起）；storage 缺失表示该宿主无持久化桥，clipboard* 在 Host API 1.3 起引入。
    *  ai（Warp AI 对齐批）：宿主 AI 面板桥在位（host.ai.openConversation 可调）；
-   *  旧宿主缺省即不支持，消费方经 lib/aiBridge.aiBridgeAvailable 降级。 */
+   *  旧宿主缺省即不支持，消费方经 lib/aiBridge.aiBridgeAvailable 降级。
+   *  monitorContribution（监控面板，DESIGN_MONITOR_PANEL）：刻意不设 capabilities
+   *  位——贡献点经 manifest contributions 声明、宿主经 dbx-plugin-init 的
+   *  detail.contributionId 路由（main.ts isMonitorContribution 分支），宿主无需
+   *  新能力字段，旧宿主不装该面板即零影响。 */
   readonly capabilities?: { storage?: boolean; clipboardRead?: boolean; clipboardWrite?: boolean; ai?: boolean; aiCompletion?: boolean; aiRecommendations?: boolean; connectionsApi?: boolean; workbenchTitle?: boolean };
   /** 持久化 UI 状态桥（单值 256 KiB / 总量 1 MiB）；配 capabilities.storage 使用，经 shared/frontend/pluginStorage 读写。 */
   readonly storage?: {
