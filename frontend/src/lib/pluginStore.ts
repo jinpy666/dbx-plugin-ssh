@@ -150,6 +150,15 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   // 工作台 UI 布局镜像（issue #178，workbenchUiMirror.ts 拆装）：宿主缺
   // workbenchState 桥时的持久兜底（paneOrder/表头/面板开合/列宽/排序等）。
   "ssh-workbench-ui",
+  // 多服务器监控面板（DESIGN_MONITOR_PANEL / 计划 §4-B3）三个 UI 偏好键：
+  // watched 为单键 JSON 映射（wire 形态 {"version":1,"watched":{[connectionId]:
+  // {"addedAt":number}}}，useMonitorPanel.ts 拆装；逐主机「加入监控」开关，
+  // 重开面板据此 reconcile 自动补启/自动停）；privacy "1"|"0"（隐私模式，
+  // 截图安全：卡片名打码为 #序号）；refresh-ms "2000"|"5000"|"10000"|"30000"|
+  // "60000"（面板轮询间隔，snapshot 失败停轮询后重开沿用上次选择）。
+  "ssh-monitor-watched",
+  "ssh-monitor-privacy",
+  "ssh-monitor-refresh-ms",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);

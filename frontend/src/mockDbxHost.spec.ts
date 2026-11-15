@@ -467,4 +467,80 @@ describe("mockDbxHost fixture", () => {
     const listed = await plugin.invoke("docker/list", {}) as { available: boolean };
     expect(listed.available).toBe(true);
   });
+
+  // 监控面板夹具（计划 §4-B6）：逐条镜像 Lane A 契约（计划 §1）——start 幂等、
+  // stop 后注册表条目移除（status/snapshot 不再列出）、snapshot 对无任务连接
+  // 不给条目、首帧前 live 为 null、窗口外样本为 Gap（{t, gap:true}）序列化、
+  // ?mon=unsupported 降级叙事。
+  it("monitor fixture mirrors the sidecar contract (idempotent start, stop removes, snapshot omits)", async () => {
+    const plugin = await loadMock("");
+    const start1 = await plugin.invoke("monitor/start", { connectionId: "conn-a" }) as { state: string; since: number };
+    expect(start1.state).toBe("connecting");
+    expect(typeof start1.since).toBe("number");
+    // 幂等：再次 start 返回现状态，不重建任务。
+    const start2 = await plugin.invoke("monitor/start", { connectionId: "conn-a" }) as { state: string; since: number };
+    expect(start2).toEqual(start1);
+
+    const status1 = await plugin.invoke("monitor/status", {}) as { tasks: Array<{ connectionId: string; state: string }> };
+    expect(status1.tasks.map((task) => task.connectionId)).toEqual(["conn-a"]);
+
+    const snap1 = await plugin.invoke("monitor/snapshot", { connectionIds: ["conn-a", "conn-b"], points: 8 }) as { samples: Record<string, { state: string; live: unknown; history: Array<{ gap?: boolean; t: number }>; details: unknown }> };
+    // 无任务的连接在 samples 中无条目。
+    expect(Object.keys(snap1.samples)).toEqual(["conn-a"]);
+    expect(snap1.samples["conn-a"].state).toBe("connecting");
+    // 首帧前 live 为 null；窗口外样本为 Gap 序列化。
+    expect(snap1.samples["conn-a"].live).toBeNull();
+    expect(snap1.samples["conn-a"].history.every((entry) => entry.gap === true)).toBe(true);
+
+    const snap2 = await plugin.invoke("monitor/snapshot", { connectionIds: ["conn-a"], points: 8 }) as { samples: Record<string, { state: string; live: { cpuPct: number } | null; history: Array<{ gap?: boolean; cpuPct?: number }>; details: { disks: unknown[] } | null }> };
+    expect(snap2.samples["conn-a"].state).toBe("live");
+    const sampleEntries = snap2.samples["conn-a"].history.filter((entry) => !entry.gap);
+    expect(sampleEntries).toHaveLength(1);
+    expect(snap2.samples["conn-a"].live?.cpuPct).toBeGreaterThanOrEqual(0);
+    expect(snap2.samples["conn-a"].details?.disks.length).toBeGreaterThan(0);
+
+    // status 行的可选字段仅在有意义时序列化（Lane A TaskStatusRow 的 Option 字段）：
+    // live 带探测到的主网卡（与 snapshot 样本的 iface 一致），且无 error。
+    const statusLive = await plugin.invoke("monitor/status", {}) as { tasks: Array<{ state: string; primaryInterface?: string; error?: string }> };
+    expect(statusLive.tasks[0].state).toBe("live");
+    expect(statusLive.tasks[0].primaryInterface).toBe("eth0");
+    expect(statusLive.tasks[0].error).toBeUndefined();
+
+    await plugin.invoke("monitor/stop", { connectionId: "conn-a" });
+    const status2 = await plugin.invoke("monitor/status", {}) as { tasks: unknown[] };
+    expect(status2.tasks).toEqual([]);
+    const snap3 = await plugin.invoke("monitor/snapshot", { connectionIds: ["conn-a"], points: 8 }) as { samples: Record<string, unknown> };
+    expect(snap3.samples).toEqual({});
+    // 未注册任务取 details 显式报错（严格化口径）。
+    await expect(plugin.invoke("monitor/details", { connectionId: "conn-a" })).rejects.toThrow(/monitor\/details/);
+  });
+
+  it("monitor/snapshot clamps points like the sidecar (default 120, floor 1, cap 720)", async () => {
+    const plugin = await loadMock("");
+    await plugin.invoke("monitor/start", { connectionId: "conn-a" });
+    const historyLength = async (points?: number) => {
+      const snap = await plugin.invoke("monitor/snapshot", points === undefined ? {} : { points }) as { samples: Record<string, { history: unknown[] }> };
+      return snap.samples["conn-a"].history.length;
+    };
+    // 语义逐条对齐 Lane A clamp_points（monitor.rs）：缺省/非自然数 → 默认
+    // SNAPSHOT_DEFAULT_POINTS(120)，否则收进 1..FAST_RING_CAP(720)。
+    expect(await historyLength()).toBe(120);
+    expect(await historyLength(0)).toBe(1);
+    expect(await historyLength(1)).toBe(1);
+    expect(await historyLength(99999)).toBe(720);
+    expect(await historyLength(-3)).toBe(120); // as_u64 → None → 缺省
+    expect(await historyLength(2.5)).toBe(120); // 非整数 → 缺省
+  });
+
+  it("monitor fixture ?mon=unsupported narrative reports state/error without samples", async () => {
+    const plugin = await loadMock("?mon=unsupported");
+    const start = await plugin.invoke("monitor/start", { connectionId: "conn-x" }) as { state: string };
+    expect(start.state).toBe("unsupported");
+    const status = await plugin.invoke("monitor/status", {}) as { tasks: Array<{ state: string; error?: string; primaryInterface?: string }> };
+    expect(status.tasks[0].state).toBe("unsupported");
+    expect(status.tasks[0].error).toBeTruthy();
+    expect(status.tasks[0].primaryInterface).toBeUndefined(); // iface 未探测 → 字段缺省省略
+    const snap = await plugin.invoke("monitor/snapshot", { connectionIds: ["conn-x"] }) as { samples: Record<string, { state: string; live: unknown; history: unknown[]; details: unknown }> };
+    expect(snap.samples["conn-x"]).toEqual({ state: "unsupported", live: null, history: [], details: null });
+  });
 });

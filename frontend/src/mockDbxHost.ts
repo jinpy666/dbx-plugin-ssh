@@ -831,12 +831,13 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string, par
     return null as T;
   }
   // host.listConnections（PR-A4 扩展点）：返回夹具连接（只读无密），供面板
-  // connection-switching walkthrough; on legacy host semantics unknown methods still resolve to null (caller degrades).
+  // connection-switching 与监控面板（dbType 过滤 + connected 字段探测）walkthrough;
+  // on legacy host semantics unknown methods still resolve to null (caller degrades).
   if (method === "host.listConnections") {
     return {
       connections: localOnlyContext || quickFixture
         ? []
-        : [{ id: "visual-connection", name: "Production SSH", providerId: "io.dbx.ssh.connection", connectionType: "ssh", readOnly: !writable }],
+        : [{ id: "visual-connection", name: "Production SSH", dbType: "ssh", connected: true, isConnected: true, providerId: "io.dbx.ssh.connection", connectionType: "ssh", readOnly: !writable }],
     } as T;
   }
   return null as T;
@@ -846,6 +847,44 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string, par
 // 语义一致（0 端口由 mock 随机挑一个、start 后广播 active 状态事件）。
 const mockForwards: Array<Record<string, unknown>> = [];
 let mockForwardSeq = 1;
+
+// 监控面板 fixture（计划 §4-B6）：内存注册表 + 脚本式假计数器，语义逐条对齐
+// Lane A 契约（计划 §1，serde camelCase）：start 幂等返回现状态；stop 后注册表
+// 条目移除（status/snapshot 不再列出）；snapshot 对无任务连接不给条目；live 在
+// 首帧前为 null；history 窗口外为 Gap（{t, gap:true}，iface 断档标记）；状态机
+// connecting →(第 2 次快照)→ live。?mon=unsupported 走查降级叙事。样本由
+// per-task 相位计数器推进（每次 snapshot +1），浏览器走查每轮轮询都能看到
+// 曲线前移；数值用确定性正弦叠加（无 Math.random），快照可复现。
+const mockMonitorTasks = new Map<string, { state: string; since: number; phase: number }>();
+const monUnsupported = fixtureParams.get("mon") === "unsupported";
+const MONITOR_POINTS_DEFAULT = 120; // Lane A SNAPSHOT_DEFAULT_POINTS（monitor.rs）。
+const MONITOR_POINTS_MAX = 720; // Lane A FAST_RING_CAP：快照点数上限（12min @ 1s）。
+const MONITOR_SAMPLE_INTERVAL_MS = 2000;
+// 与 sidecar 单位约定一致（计划 §1）：内存 MB=1024²B、速率 KiB/s 一位小数、
+// cpuPct 0..100 一位小数。
+function mockMonitorSample(i: number, phase: number, t: number) {
+  const w = (i + phase * 5) * 0.32;
+  return {
+    t,
+    cpuPct: Math.round((30 + 22 * Math.sin(w) + 8 * Math.sin(w * 2.7)) * 10) / 10,
+    memTotalMb: 2048,
+    memUsedMb: Math.round((1180 + 140 * Math.sin(w * 0.6 + 1.3)) * 10) / 10,
+    netRxKbps: Math.round(Math.max(0, 240 + 180 * Math.sin(w * 1.4 + 0.4)) * 10) / 10,
+    netTxKbps: Math.round(Math.max(0, 90 + 60 * Math.sin(w * 1.1 + 2.1)) * 10) / 10,
+    iface: "eth0",
+  };
+}
+const mockMonitorDetails = {
+  load1: 0.42,
+  load5: 0.31,
+  load15: 0.24,
+  uptimeSec: 90061,
+  disks: [
+    { mount: "/", totalKb: 81_715_891, usedKb: 52_339_271 },
+    { mount: "/data", totalKb: 409_600_000, usedKb: 122_880_000 },
+  ],
+  users: [{ user: "deploy", tty: "pts/0", from: "10.0.0.8" }],
+};
 
 const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, params?: unknown) => {
   let result: unknown;
@@ -1850,6 +1889,82 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     const index = bookmarksState.findIndex((bookmark) => bookmark.id === id);
     if (index >= 0) bookmarksState.splice(index, 1);
     result = { success: true, removed: index >= 0 };
+  }
+  // 监控面板方法族（计划 §4-B6，契约见 Lane A §1）：语义逐条对齐真实 sidecar。
+  else if (method === "monitor/start") {
+    const connectionId = String((params as Record<string, unknown>)?.connectionId || "");
+    const existing = mockMonitorTasks.get(connectionId);
+    if (existing) result = { state: existing.state, since: existing.since };
+    else {
+      const task = { state: monUnsupported ? "unsupported" : "connecting", since: Date.now(), phase: 0 };
+      mockMonitorTasks.set(connectionId, task);
+      result = { state: task.state, since: task.since };
+    }
+  }
+  else if (method === "monitor/stop") {
+    const connectionId = String((params as Record<string, unknown>)?.connectionId || "");
+    mockMonitorTasks.delete(connectionId);
+    result = { state: "stopped" };
+  }
+  else if (method === "monitor/status") {
+    // error/primaryInterface 仅在有意义时序列化（Lane A TaskStatusRow 的 Option
+    // 字段 skip_serializing_if）：unsupported 带错误文案；live 带探测到的主网卡
+    // （与 snapshot 样本的 iface 一致）；connecting 两者皆缺省省略。
+    result = {
+      tasks: [...mockMonitorTasks.entries()].map(([connectionId, task]) => ({
+        connectionId,
+        state: task.state,
+        since: task.since,
+        ...(task.state === "unsupported" ? { error: "remote counters unavailable on this host" } : {}),
+        ...(task.state === "live" ? { primaryInterface: "eth0" } : {}),
+      })),
+    };
+  }
+  else if (method === "monitor/snapshot") {
+    const input = (params ?? {}) as { connectionIds?: unknown; points?: unknown };
+    const wanted = Array.isArray(input.connectionIds) && input.connectionIds.length
+      ? input.connectionIds.map((id) => String(id))
+      : [...mockMonitorTasks.keys()];
+    // points 语义对齐 Lane A clamp_points（monitor.rs）：缺省/非自然数 → 默认
+    // SNAPSHOT_DEFAULT_POINTS(120)，否则收进 1..FAST_RING_CAP(720)。
+    const requested = Number(input.points);
+    const points = Number.isInteger(requested) && requested >= 0
+      ? Math.min(Math.max(requested, 1), MONITOR_POINTS_MAX)
+      : MONITOR_POINTS_DEFAULT;
+    const samples: Record<string, unknown> = {};
+    for (const connectionId of wanted) {
+      const task = mockMonitorTasks.get(connectionId);
+      // 无任务的连接在 samples 中无条目（Lane A 契约）。
+      if (!task) continue;
+      if (monUnsupported) {
+        samples[connectionId] = { state: "unsupported", live: null, history: [], details: null };
+        continue;
+      }
+      // 相位计数器语义：phase = 自 start 起收到的快照拍数（每次 snapshot 前移一拍）；
+      // phase>=2 才转 live（首拍保持 connecting 模拟握手窗口），liveCount = min(phase-1, points)。
+      task.phase += 1;
+      if (task.state === "connecting" && task.phase >= 2) task.state = "live";
+      const liveCount = Math.min(task.phase - 1, points);
+      const history: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < points; i += 1) {
+        const t = Date.now() - (points - 1 - i) * MONITOR_SAMPLE_INTERVAL_MS;
+        // 窗口外（首个样本之前）一律 Gap：iface 断档/采集缺失的 sparkline 分段标记。
+        if (i < points - liveCount) history.push({ t, gap: true });
+        else history.push(mockMonitorSample(i, task.phase, t));
+      }
+      samples[connectionId] = {
+        state: task.state,
+        live: liveCount > 0 ? history[history.length - 1] : null,
+        history,
+        details: task.state === "live" ? mockMonitorDetails : null,
+      };
+    }
+    result = { samples };
+  }
+  else if (method === "monitor/details") {
+    const connectionId = String((params as Record<string, unknown>)?.connectionId || "");
+    if (!mockMonitorTasks.has(connectionId)) throw new Error(`[mockDbxHost] monitor/details: no monitor task for ${connectionId}`);
+    result = mockMonitorDetails;
   }
   // 严格化（docs/MOCK_HOST_STRICTNESS_PLAN.zh-CN.md）：未实现的方法显式
   // 报错而非静默成功——静默成功会把调用侧的方法名/参数回归吞成「成功」，
