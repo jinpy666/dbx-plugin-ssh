@@ -278,10 +278,13 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
     reconcileInFlight = true;
     try {
       // ① provider-scoped 连接清单：过滤 ssh；宿主缺扩展点（抛错/null）→ 本轮不动。
+      // 宿主 dispatch 返回裸数组（PluginConnectionSummary[]）；兼容旧包裹形状
+      // {connections:[…]}（早期 mock 误设，真实宿主从未返回过）。
       let rows: MonitorConnectionRow[] = [];
       try {
-        const listed = (await api.request("host.listConnections")) as { connections?: MonitorConnectionRow[] } | null;
-        rows = (listed?.connections ?? []).filter((row) => row && typeof row.id === "string" && row.id && row.dbType === "ssh");
+        const listed = (await api.request("host.listConnections")) as MonitorConnectionRow[] | { connections?: MonitorConnectionRow[] } | null;
+        const rawRows: MonitorConnectionRow[] = Array.isArray(listed) ? listed : (listed?.connections ?? []);
+        rows = rawRows.filter((row) => row && typeof row.id === "string" && row.id && row.dbType === "ssh");
       } catch {
         return;
       }

@@ -834,11 +834,11 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string, par
   // connection-switching 与监控面板（dbType 过滤 + connected 字段探测）walkthrough;
   // on legacy host semantics unknown methods still resolve to null (caller degrades).
   if (method === "host.listConnections") {
-    return {
-      connections: localOnlyContext || quickFixture
-        ? []
-        : [{ id: "visual-connection", name: "Production SSH", dbType: "ssh", connected: true, isConnected: true, providerId: "io.dbx.ssh.connection", connectionType: "ssh", readOnly: !writable }],
-    } as T;
+    // 宿主 dispatch 返回裸数组（PluginConnectionSummary[]）——mock 必须与真机
+    // wire 形状一致（早期误设 {connections} 包裹对象曾让真机列表恒空）。
+    return (localOnlyContext || quickFixture
+      ? []
+      : [{ id: "visual-connection", name: "Production SSH", dbType: "ssh", connected: true, isConnected: true, providerId: "io.dbx.ssh.connection", connectionType: "ssh", readOnly: !writable }]) as T;
   }
   return null as T;
 };
