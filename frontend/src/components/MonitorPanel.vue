@@ -33,6 +33,8 @@ const {
   refreshMs,
   pollStopped,
   taskLimitReached,
+  dataSource,
+  listDiagnostics,
   start,
   dispose,
   refresh,
@@ -178,6 +180,10 @@ function groupAccent(group: MonitorGroupView): string {
     <p v-if="taskLimitReached" class="monitor-banner monitor-banner--error">{{ t("monitor.taskLimit") }}</p>
 
     <p v-if="!connections.length" class="monitor-empty">{{ t("monitor.noServers") }}</p>
+    <!-- 空态诊断行（数据行，非文案）：两源结果与行数，截图即可定位宿主版本/字段问题 -->
+    <p v-if="!connections.length" class="monitor-diag" data-testid="monitor-diag">
+      listConnections: {{ listDiagnostics.listState }} ({{ listDiagnostics.listCount }}) · sessions: {{ dataSource === "sessions" ? "fallback" : dataSource }}
+    </p>
 
     <template v-else>
       <section v-for="group in groups" :key="group.id || '__flat__'" class="monitor-group">
@@ -298,6 +304,12 @@ function groupAccent(group: MonitorGroupView): string {
   margin: 0;
   font-size: 0.8125rem;
   color: var(--muted-foreground);
+}
+.monitor-diag {
+  margin: 4px 0 0;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--muted-foreground);
+  opacity: 0.75;
 }
 .monitor-group {
   display: flex;

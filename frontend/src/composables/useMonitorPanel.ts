@@ -77,6 +77,15 @@ export interface MonitorConnectionRow {
   groupName?: string;
 }
 
+/** ssh/sessions/list 行（回退源）：sidecar 会话清单，仅取映射所需字段。 */
+interface MonitorSessionRow {
+  connectionId?: string;
+  connected?: boolean;
+  readOnly?: boolean;
+  username?: string;
+  host?: string;
+}
+
 /** window.dbxPlugin 的 MonitorApi 子集（sidecar RPC 走 invoke，宿主扩展点走 request）。 */
 export interface MonitorApi {
   invoke(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown>;
@@ -154,6 +163,10 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
   const refreshMs = ref(5000);
   const pollStopped = ref(false);
   const taskLimitReached = ref(false);
+  // 数据源与诊断：旧宿主无 host.listConnections 扩展点时回退 sidecar 会话清单；
+  // 空态下把两源结果暴露给面板诊断行（截图即可定位宿主版本/字段问题）。
+  const dataSource = ref<"connections" | "sessions" | "none">("none");
+  const listDiagnostics = ref<{ listState: "ok" | "null" | "error"; listCount: number }>({ listState: "ok", listCount: 0 });
 
   // —— 偏好持久化（pluginStore 通道；键已登记水合白名单）——
 
@@ -277,19 +290,51 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
     if (reconcileInFlight) return;
     reconcileInFlight = true;
     try {
-      // ① provider-scoped 连接清单：过滤 ssh；宿主缺扩展点（抛错/null）→ 本轮不动。
-      // 宿主 dispatch 返回裸数组（PluginConnectionSummary[]）；兼容旧包裹形状
-      // {connections:[…]}（早期 mock 误设，真实宿主从未返回过）。
+      // ① 连接清单：主源 host.listConnections（provider-scoped，宿主 ≥ 扩展点版本
+      // 才有；dispatch 返回裸数组 PluginConnectionSummary[]，兼容旧包裹形状）。
+      // 旧宿主 unknown method resolve null/抛错时**回退 sidecar ssh/sessions/list**：
+      // sidecar 永远知道已连接会话（去重 per connectionId），已连接主机的监控不依赖
+      // 宿主版本；两源皆空才是真·无服务器。
       let rows: MonitorConnectionRow[] = [];
+      let listState: "ok" | "null" | "error" = "ok";
+      let listCount = 0;
       try {
         const listed = (await api.request("host.listConnections")) as MonitorConnectionRow[] | { connections?: MonitorConnectionRow[] } | null;
         const rawRows: MonitorConnectionRow[] = Array.isArray(listed) ? listed : (listed?.connections ?? []);
+        if (listed == null) listState = "null";
+        listCount = rawRows.length;
         rows = rawRows.filter((row) => row && typeof row.id === "string" && row.id && row.dbType === "ssh");
       } catch {
-        return;
+        listState = "error";
+      }
+      let viaSessions = false;
+      if (!rows.length) {
+        try {
+          const listed = (await api.invoke("ssh/sessions/list")) as { sessions?: MonitorSessionRow[] } | null;
+          const byConnection = new Map<string, MonitorConnectionRow>();
+          for (const session of listed?.sessions ?? []) {
+            if (!session || typeof session.connectionId !== "string" || !session.connectionId) continue;
+            if (byConnection.has(session.connectionId)) continue;
+            const label = [session.username, session.host].filter(Boolean).join("@");
+            byConnection.set(session.connectionId, {
+              id: session.connectionId,
+              name: label || session.connectionId,
+              dbType: "ssh",
+              connected: session.connected === true,
+              isConnected: session.connected === true,
+              readOnly: session.readOnly === true,
+            });
+          }
+          rows = [...byConnection.values()];
+          viaSessions = rows.length > 0;
+        } catch {
+          // sidecar 也缺 → 维持空，noServers 是真实结论。
+        }
       }
       if (disposed) return;
       connections.value = rows;
+      dataSource.value = rows.length ? (viaSessions ? "sessions" : "connections") : "none";
+      listDiagnostics.value = { listState, listCount };
 
       // ② 注册表现状。
       let status: { tasks?: MonitorTaskRow[] };
@@ -416,6 +461,8 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
     refreshMs,
     pollStopped,
     taskLimitReached,
+    dataSource,
+    listDiagnostics,
     start,
     dispose,
     refresh,

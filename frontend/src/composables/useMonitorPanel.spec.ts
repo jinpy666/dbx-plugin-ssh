@@ -324,4 +324,35 @@ describe("useMonitorPanel", () => {
     expect(panel.refreshMs.value).toBe(2000);
     expect(storage.getItem("ssh-monitor-refresh-ms")).toBe("2000");
   });
+
+  it("falls back to sidecar ssh/sessions/list when host.listConnections is unavailable (legacy host)", async () => {
+    // 旧宿主 unknown method resolve null → 主源空；sidecar 会话清单去重 per
+    // connectionId，user@host 作显示名，已连接主机的监控不依赖宿主版本。
+    const { api, invokeCalls } = fakeApi({
+      request: async () => null,
+      invoke: async (method) => {
+        if (method === "monitor/status") return { tasks: [] };
+        if (method === "monitor/snapshot") return { samples: {} };
+        if (method === "ssh/sessions/list") {
+          return {
+            sessions: [
+              { sessionId: "s1", connectionId: "c-s1", connected: true, readOnly: false, username: "demo", host: "web-01" },
+              { sessionId: "s2", connectionId: "c-s1", connected: true, readOnly: false, username: "demo", host: "web-01" },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    const { timers } = manualTimers();
+    const panel = useMonitorPanel({ api, storage: memoryStorage(), timers });
+    await panel.start();
+    expect(panel.connections.value.map((row) => row.id)).toEqual(["c-s1"]);
+    expect(panel.connections.value[0]?.name).toBe("demo@web-01");
+    expect(panel.connections.value[0]?.connected).toBe(true);
+    expect(panel.dataSource.value).toBe("sessions");
+    expect(panel.listDiagnostics.value).toEqual({ listState: "null", listCount: 0 });
+    expect(invokeCalls.some((call) => call.startsWith("ssh/sessions/list"))).toBe(true);
+    panel.dispose();
+  });
 });
