@@ -81,7 +81,7 @@ export interface MonitorConnectionRow {
 export interface MonitorApi {
   invoke(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown>;
   request(method: string, params?: unknown): Promise<unknown>;
-  openWorkbench?(contributionId: string, context: Record<string, unknown>, options?: { forceNew?: boolean }): Promise<unknown>;
+  openWorkbench?(contributionId: string, context: Record<string, unknown>, options?: { forceNew?: boolean; target?: "tab" }): Promise<unknown>;
   reopenConnection?(connectionId: string): Promise<unknown>;
 }
 
@@ -117,6 +117,19 @@ function isConnectedRow(row: MonitorConnectionRow): boolean {
   return row.connected === true || row.isConnected === true;
 }
 
+/**
+ * 后端唯一超限错误串（Lane A monitor.rs：`monitor task limit reached (24)`）。
+ * 其余 start 失败（无会话/通道错误等）走通用失败路径，不亮「最多 24 台」横幅。
+ */
+function isTaskLimitError(error: unknown): boolean {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "object" && error !== null && "message" in error
+      ? String((error as { message: unknown }).message)
+      : "";
+  return message.includes("monitor task limit reached");
+}
+
 const defaultTimers: MonitorTimers = {
   set: (handler, timeoutMs) => window.setInterval(() => void handler(), timeoutMs),
   clear: (handle) => window.clearInterval(handle as number),
@@ -124,8 +137,9 @@ const defaultTimers: MonitorTimers = {
 
 /**
  * 监控面板编排。`start()` 装载偏好、立即跑一轮 reconcile+snapshot 并挂上双
- * timer；`dispose()` 摘除 timer（面板卸载调用）。所有 ref 与动作原样返回，
- * MonitorPanel.vue 直接绑定。
+ * timer（重入安全：timer 未摘除前二次调用直接返回）；`dispose()` 摘除 timer
+ * 并置 disposed（面板卸载调用；卸载后悬挂的异步回调不再写状态）。
+ * 所有 ref 与动作原样返回，MonitorPanel.vue 直接绑定。
  */
 export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; timers?: MonitorTimers }) {
   const { api, storage } = deps;
@@ -206,16 +220,20 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
   let snapshotInFlight = false;
   let snapshotTimer: unknown = null;
   let reconcileTimer: unknown = null;
+  // 面板生命周期标志：dispose() 后悬挂的异步回调一律不再写状态（卸载竞态防护）。
+  let disposed = false;
 
   async function pollSnapshot() {
     if (snapshotInFlight) return;
     snapshotInFlight = true;
     try {
       const result = (await api.invoke("monitor/snapshot", {})) as { samples?: Record<string, MonitorSnapshot> } | null;
+      if (disposed) return;
       snapshots.value = result?.samples ?? {};
       snapshotFailures = 0;
       pollStopped.value = false;
     } catch {
+      if (disposed) return;
       snapshotFailures += 1;
       if (snapshotFailures >= SNAPSHOT_FAILURE_LIMIT) stopSnapshotTimer(true);
     } finally {
@@ -267,6 +285,7 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
       } catch {
         return;
       }
+      if (disposed) return;
       connections.value = rows;
 
       // ② 注册表现状。
@@ -276,23 +295,25 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
       } catch {
         return;
       }
+      if (disposed) return;
       tasks.value = status.tasks ?? [];
       const activeTasks = new Set(tasks.value.map((task) => task.connectionId));
       const connected = new Set(rows.filter(isConnectedRow).map((row) => row.id));
 
-      // ③ watched∩connected 无任务 → start（含恢复补启；并发上限报错 → 顶栏提示）。
+      // ③ watched∩connected 无任务 → start（含恢复补启；仅并发上限错误 → 顶栏提示）。
       const startIds = Object.keys(watched.value).filter((id) => connected.has(id) && !activeTasks.has(id));
-      let startFailures = 0;
+      let startLimitFailures = 0;
       await Promise.all(
         startIds.map(async (id) => {
           try {
             await api.invoke("monitor/start", { connectionId: id });
-          } catch {
-            startFailures += 1;
+          } catch (error) {
+            if (isTaskLimitError(error)) startLimitFailures += 1;
           }
         }),
       );
-      taskLimitReached.value = startFailures > 0;
+      if (disposed) return;
+      taskLimitReached.value = startLimitFailures > 0;
 
       // ④ 有任务但不在 watched → stop（stop 幂等；sidecar 收到后移除注册表条目）。
       const stopIds = tasks.value.filter((task) => !watched.value[task.connectionId]).map((task) => task.connectionId);
@@ -336,14 +357,16 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
     }
     try {
       await api.invoke("monitor/start", { connectionId });
-      taskLimitReached.value = false;
-    } catch {
-      taskLimitReached.value = true;
+      if (!disposed) taskLimitReached.value = false;
+    } catch (error) {
+      // 仅超限错误亮横幅；通道类失败静默（下一轮 reconcile/手动刷新兜底）。
+      if (!disposed && isTaskLimitError(error)) taskLimitReached.value = true;
     }
     await pollSnapshot();
   }
 
-  /** 打开该连接的工作台：照抄 App.vue openConnectionSurface 的 openWorkbench 形状（含 forceNew:true）。 */
+  /** 打开该连接的工作台：照抄 App.vue openConnectionSurface 的 openWorkbench 形状
+   * （forceNew + target:"tab"；缺省 target 时同面板复用可能覆盖当前 tab）。 */
   function openTerminal(connection: MonitorConnectionRow) {
     void api.openWorkbench?.(
       "io.dbx.ssh.workbench",
@@ -353,23 +376,27 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
         connectionType: connection.connectionType,
         connection: { id: connection.id, name: connection.name, readOnly: connection.readOnly === true },
       },
-      { forceNew: true },
+      { forceNew: true, target: "tab" },
     );
   }
 
   // —— 生命周期 ——
 
   async function start() {
+    // 重入守卫：timer 未摘除前二次 start 会双开节拍（并覆盖 reconcileTimer 泄漏首柄）。
+    if (disposed || snapshotTimer !== null || reconcileTimer !== null) return;
     watched.value = loadWatched();
     privacy.value = loadPrivacy();
     refreshMs.value = loadRefreshMs();
     await Promise.all([reconcile(), pollSnapshot()]);
+    if (disposed) return; // start 悬挂期间已卸载：不挂 timer。
     startSnapshotTimer();
     // reconcile 节拍固定 5s（连接清单/注册表收敛慢于快照轮询）。
     reconcileTimer = timers.set(() => void reconcile(), RECONCILE_INTERVAL_MS);
   }
 
   function dispose() {
+    disposed = true;
     stopSnapshotTimer();
     if (reconcileTimer !== null) {
       timers.clear(reconcileTimer);

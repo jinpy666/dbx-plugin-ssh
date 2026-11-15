@@ -29,6 +29,7 @@ function manualTimers() {
     tick: async (times: number) => {
       for (let i = 0; i < times; i += 1) for (const handler of [...pending]) await handler();
     },
+    size: () => pending.size,
   };
 }
 
@@ -148,6 +149,126 @@ describe("useMonitorPanel", () => {
     const startIndex = invokeCalls.indexOf("monitor/start:{\"connectionId\":\"c-9\"}");
     expect(stopIndex).toBeGreaterThanOrEqual(0);
     expect(startIndex).toBeGreaterThan(stopIndex);
+  });
+
+  it("reconcile raises the task-limit banner only for the sidecar limit error", async () => {
+    // 后端唯一超限错误串（Lane A monitor.rs：`monitor task limit reached (24)`）→ 置位横幅。
+    const watchedSeed = { "ssh-monitor-watched": JSON.stringify({ version: 1, watched: { "c-1": { addedAt: 1 } } }) };
+    const limited = fakeApi({
+      request: listSsh(),
+      invoke: async (method) => {
+        if (method === "monitor/start") throw new Error("monitor task limit reached (24)");
+        return {};
+      },
+    });
+    const panel = useMonitorPanel({ api: limited.api, storage: memoryStorage(watchedSeed), timers: manualTimers().timers });
+    await panel.start();
+    expect(panel.taskLimitReached.value).toBe(true);
+
+    // 通道类失败（无会话/通道错误等）走通用失败路径：不误报「最多 24 台」。
+    const generic = fakeApi({
+      request: listSsh(),
+      invoke: async (method) => {
+        if (method === "monitor/start") throw new Error("no session for connection");
+        return {};
+      },
+    });
+    const other = useMonitorPanel({ api: generic.api, storage: memoryStorage(watchedSeed), timers: manualTimers().timers });
+    await other.start();
+    expect(other.taskLimitReached.value).toBe(false);
+  });
+
+  it("retry sets the task-limit banner only for the limit error and clears it on success", async () => {
+    let startError: Error | null = new Error("no session for connection");
+    const { api } = fakeApi({
+      invoke: async (method) => {
+        if (method === "monitor/start" && startError) throw startError;
+        return {};
+      },
+    });
+    const { timers } = manualTimers();
+    const panel = useMonitorPanel({ api, storage: memoryStorage(), timers });
+    await panel.start();
+
+    await panel.retry("c-9"); // 通用失败：不置位
+    expect(panel.taskLimitReached.value).toBe(false);
+
+    startError = new Error("monitor task limit reached (24)");
+    await panel.retry("c-9"); // 超限：置位
+    expect(panel.taskLimitReached.value).toBe(true);
+
+    startError = null;
+    await panel.retry("c-9"); // 成功：清除
+    expect(panel.taskLimitReached.value).toBe(false);
+  });
+
+  it("openTerminal opens the workbench in a new tab surface", async () => {
+    const workbenchArgs: Array<Parameters<NonNullable<MonitorApi["openWorkbench"]>>> = [];
+    const { api } = fakeApi({
+      openWorkbench: async (contributionId, context, options) => {
+        workbenchArgs.push([contributionId, context, options]);
+        return {};
+      },
+    });
+    const { timers } = manualTimers();
+    const panel = useMonitorPanel({ api, storage: memoryStorage(), timers });
+
+    panel.openTerminal({ id: "c-1", name: "web-01", dbType: "ssh", providerId: "io.dbx.ssh.connection" });
+    expect(workbenchArgs).toHaveLength(1);
+    expect(workbenchArgs[0][0]).toBe("io.dbx.ssh.workbench");
+    // forceNew + target:"tab"（App.vue 复制会话同款）：缺省 target 时同面板复用可能覆盖当前 tab。
+    expect(workbenchArgs[0][2]).toEqual({ forceNew: true, target: "tab" });
+  });
+
+  it("dispose() silences in-flight snapshot callbacks (unmount race)", async () => {
+    // 成功路径：悬挂的 snapshot 在 dispose 后 resolve → 不写 snapshots、不挂 timer。
+    let resolveSnapshot!: (value: unknown) => void;
+    const success = fakeApi({
+      invoke: async (method) => (method === "monitor/snapshot"
+        ? new Promise((resolve) => { resolveSnapshot = resolve; })
+        : {}),
+    });
+    const successTimers = manualTimers();
+    const panel = useMonitorPanel({ api: success.api, storage: memoryStorage(), timers: successTimers.timers });
+    const started = panel.start();
+    await Promise.resolve(); // pollSnapshot 已悬挂在 snapshot invoke 上。
+    panel.dispose();
+    resolveSnapshot({ samples: { "c-1": { state: "live", live: null, history: [], details: null } } });
+    await started;
+    expect(panel.snapshots.value).toEqual({});
+    expect(successTimers.size()).toBe(0); // start 悬挂期间已卸载：不再挂双 timer。
+
+    // 失败路径：dispose 后 rejection 不推进失败计数、不置 pollStopped。
+    let rejectSnapshot!: (reason?: unknown) => void;
+    const failing = fakeApi({
+      invoke: async (method) => (method === "monitor/snapshot"
+        ? new Promise((_resolve, reject) => { rejectSnapshot = reject; })
+        : {}),
+    });
+    const other = useMonitorPanel({ api: failing.api, storage: memoryStorage(), timers: manualTimers().timers });
+    const otherStarted = other.start();
+    await Promise.resolve();
+    other.dispose();
+    rejectSnapshot(new Error("sidecar gone"));
+    await otherStarted;
+    expect(other.pollStopped.value).toBe(false);
+    expect(other.snapshots.value).toEqual({});
+  });
+
+  it("start() is re-entry safe: a second call while running does not double the timers", async () => {
+    const { api, invokeCalls } = fakeApi({ request: listSsh() });
+    const { timers, tick, size } = manualTimers();
+    const panel = useMonitorPanel({ api, storage: memoryStorage(), timers });
+    await panel.start();
+    await panel.start(); // 重入守卫：已有 timer 直接返回。
+    expect(size()).toBe(2); // snapshot + reconcile 各一（不是 3：泄漏的旧 reconcile 柄）。
+    const statusCalls = () => invokeCalls.filter((call) => call.startsWith("monitor/status")).length;
+    const before = statusCalls();
+    await tick(1);
+    // timer handler 是 fire-and-forget（void reconcile()）：等一轮宏任务让
+    // reconcile 链路的微任务排空，再断言拍数。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(statusCalls()).toBe(before + 1); // 一拍一轮 reconcile，不是两轮。
   });
 
   it("toggleWatch persists the key, reopens disconnected servers and stop-then-removes on off", async () => {
