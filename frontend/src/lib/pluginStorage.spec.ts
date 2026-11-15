@@ -99,6 +99,12 @@ describe("ssh pluginStore wiring", () => {
         "ssh-agent-approved-commands",
         // 存储迁移批 3：传输/下载 14 键合并单镜像（wire 键名同形）。
         "ssh-preferences-mirror",
+        // 监控面板偏好三键（计划 §4-B3）：watched wire 形态
+        // {"version":1,"watched":{[cid]:{"addedAt":number}}}；privacy "1"/"0"；
+        // refresh-ms "2000"|"5000"|"10000"|"30000"|"60000"。
+        "ssh-monitor-watched",
+        "ssh-monitor-privacy",
+        "ssh-monitor-refresh-ms",
       ].sort(),
     );
     for (const banned of [
