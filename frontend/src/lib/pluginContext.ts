@@ -33,6 +33,17 @@ export function isTunnelManagerContext(context: Record<string, unknown> | undefi
 }
 
 /**
+ * Monitor workbench gate on the plugin payload: toolbar entries inject
+ * `plugin.mode = "monitor"` (same shape as the local-terminal gate) so routing
+ * still lands on MonitorPanel when the host's init message carries no usable
+ * contributionId. The connection context-menu entry relies on the
+ * contribution-id gate instead (host-minted context, no plugin payload).
+ */
+export function isMonitorContext(context: Record<string, unknown> | undefined | null): boolean {
+  return readPluginMode(context) === "monitor";
+}
+
+/**
  * Host-authoritative workbenchId: injected by Host API 1.1+; legacy hosts (1.0, which do not inject the
  * field) fall back to the caller's locally generated id, keeping sessions scoped per workbench instance.
  */

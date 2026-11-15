@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isMonitorContribution, isTunnelManagerContext, MONITOR_CONTRIBUTION_ID, readPluginMode, readPluginShell, resolveWorkbenchId, tunnelManagerConnectionId } from "./pluginContext";
+import { isMonitorContext, isMonitorContribution, isTunnelManagerContext, MONITOR_CONTRIBUTION_ID, readPluginMode, readPluginShell, resolveWorkbenchId, tunnelManagerConnectionId } from "./pluginContext";
 
 // Read helpers for the PR-A4 context.plugin namespace. The cases lock two things: type-safe reads of the A4 target shape
 // type-safe reads (including the hard-switch rejection of the legacy { localTerminal: true } passthrough shape) and
@@ -70,5 +70,20 @@ describe("pluginContext (PR-A4 context.plugin namespace)", () => {
     expect(isMonitorContribution(undefined)).toBe(false);
     expect(isMonitorContribution(null)).toBe(false);
     expect(isMonitorContribution("")).toBe(false);
+  });
+
+  it("isMonitorContext routes the toolbar entry's self-declared plugin.mode", () => {
+    // Toolbar openMonitorPanel injects plugin.mode="monitor" (local-terminal gate shape);
+    // hosts whose init message lacks a usable contributionId still land on MonitorPanel.
+    expect(isMonitorContext({ plugin: { mode: "monitor" } })).toBe(true);
+    // Malformed payloads and other modes keep the caller on the tunnel/App routes.
+    expect(isMonitorContext({ plugin: { mode: "local-terminal" } })).toBe(false);
+    expect(isMonitorContext({ plugin: "monitor" })).toBe(false);
+    expect(isMonitorContext({})).toBe(false);
+    expect(isMonitorContext(undefined)).toBe(false);
+    // The host-minted connection summary (context-menu entry) has no plugin payload —
+    // it must NOT self-route to monitor; it relies on the contribution-id gate, and
+    // must never trip the tunnels gate here.
+    expect(isMonitorContext({ id: "conn-1", dbType: "ssh", name: "Prod" })).toBe(false);
   });
 });

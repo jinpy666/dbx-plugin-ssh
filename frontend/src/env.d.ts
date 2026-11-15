@@ -73,6 +73,10 @@ interface DbxPluginApi {
    *  detail.contributionId 路由（main.ts isMonitorContribution 分支），宿主无需
    *  新能力字段，旧宿主不装该面板即零影响。 */
   readonly capabilities?: { storage?: boolean; clipboardRead?: boolean; clipboardWrite?: boolean; ai?: boolean; aiCompletion?: boolean; aiRecommendations?: boolean; connectionsApi?: boolean; workbenchTitle?: boolean };
+  /** 本贡献 id（宿主 init 消息持久化在 SDK getter 上）。dbx-plugin-init 事件是
+   *  一次性派发而插件 bundle 是异步 module script，监听注册常晚于宿主 sendInit——
+   *  事件值丢失时以 getter 兜底读（main.ts 路由合并两源）。 */
+  readonly contributionId?: string;
   /** 持久化 UI 状态桥（单值 256 KiB / 总量 1 MiB）；配 capabilities.storage 使用，经 shared/frontend/pluginStorage 读写。 */
   readonly storage?: {
     get(key: string): Promise<unknown>;

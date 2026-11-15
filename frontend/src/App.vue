@@ -5661,6 +5661,9 @@ function openMonitorPanel() {
   void api.openWorkbench(
     "io.dbx.ssh.monitor",
     {
+      // plugin.mode 自证身份：老宿主 init 不带 contributionId 时 main.ts 仍可靠
+      // isMonitorContext 路由到 MonitorPanel（照 local-terminal 先例）。
+      plugin: { mode: "monitor" },
       connectionId: connectionId.value,
       connection: { id: connectionId.value, name: connection.value.name, readOnly: connection.value.readOnly === true },
     },

@@ -2,7 +2,7 @@ import { createApp } from "vue";
 import App from "./App.vue";
 import TunnelManager from "./TunnelManager.vue";
 import MonitorPanel from "./components/MonitorPanel.vue";
-import { isMonitorContribution, isTunnelManagerContext } from "./lib/pluginContext";
+import { isMonitorContext, isMonitorContribution, isTunnelManagerContext } from "./lib/pluginContext";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import "./styles/tailwind.css";
@@ -112,10 +112,17 @@ const boot = async () => {
   const requestedContext = (api
     ? await withTimeout(api.request<Record<string, unknown>>("host.getContext"), HOST_HANDSHAKE_TIMEOUT_MS, "host.getContext")
     : undefined) ?? {};
-  const context = { ...injectedContext, ...readyContext, ...requestedContext, quickStart: readyContext.quickStart === true || injectedContext.quickStart === true || openedContributionId === "io.dbx.ssh.tunnels.quick" };
-  // Monitor 面板按 contribution id 路由（优先于 tunnels 弹层：二者 context 形状不同，
-  // monitor 面板是 provider-scoped 无连接工作台，不吃 connection context-menu 语义）。
-  const app = isMonitorContribution(openedContributionId)
+  // dbx-plugin-init 是一次性派发而插件 bundle 是异步 module script：监听注册
+  // 常晚于宿主 sendInit，事件值会丢；SDK getter（init 即使早到也持久保存在
+  // window.dbxPlugin.contributionId）兜底。两源合并后再做路由与 quickStart 判定。
+  const bridgeContributionId = typeof api?.contributionId === "string" ? api.contributionId : "";
+  const routeContributionId = openedContributionId || bridgeContributionId;
+  const context = { ...injectedContext, ...readyContext, ...requestedContext, quickStart: readyContext.quickStart === true || injectedContext.quickStart === true || routeContributionId === "io.dbx.ssh.tunnels.quick" };
+  // Monitor 面板路由（优先于 tunnels 弹层）：contribution id 两源兜底 + 插件自证
+  // mode（context.plugin.mode === "monitor"，工具栏入口注入）。右键入口的宿主
+  // context 是 manage-tunnels 同款连接摘要（有 id 无 connection 字段），必须靠
+  // contribution id 分流，否则 isTunnelManagerContext 误判、开成端口转发面板。
+  const app = isMonitorContribution(routeContributionId) || isMonitorContext(context)
     ? createApp(MonitorPanel, { context })
     : isTunnelManagerContext(context)
       ? createApp(TunnelManager, { context })
