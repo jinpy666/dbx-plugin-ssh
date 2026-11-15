@@ -25,6 +25,7 @@ mod mcp_safety;
 mod metrics;
 mod metrics_history;
 mod model;
+mod monitor;
 mod multi_exec;
 mod non_ssh_credentials;
 mod otp;
