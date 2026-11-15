@@ -1468,6 +1468,13 @@
     },
     {
       "type": "workbench",
+      "id": "io.dbx.ssh.monitor",
+      "label": "Monitor",
+      "description": "Live resource monitor for multiple SSH servers, grouped and colour-coded.",
+      "icon": "assets/plugin.svg"
+    },
+    {
+      "type": "workbench",
       "id": "io.dbx.ssh.tunnels.quick",
       "label": "Start saved port forwards",
       "description": "Start every saved SSH port forward for this connection.",
@@ -1684,6 +1691,10 @@
         "io.dbx.ssh.tunnels": {
           "label": "Port forwards",
           "description": "Manage SSH port forwards without opening a terminal."
+        },
+        "io.dbx.ssh.monitor": {
+          "label": "Monitor",
+          "description": "Live resource monitor for multiple SSH servers, grouped and colour-coded."
         },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
@@ -2031,6 +2042,10 @@
           "label": "Redirecciones de puertos",
           "description": "Administra redirecciones SSH sin abrir una terminal."
         },
+        "io.dbx.ssh.monitor": {
+          "label": "Monitor",
+          "description": "Monitorización de recursos de varios servidores SSH, agrupados y con código de color."
+        },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
           "description": "Herramientas SSH exec y SFTP para conexiones guardadas"
@@ -2376,6 +2391,10 @@
         "io.dbx.ssh.tunnels": {
           "label": "Inoltri porta",
           "description": "Gestisci gli inoltri SSH senza aprire un terminale."
+        },
+        "io.dbx.ssh.monitor": {
+          "label": "Monitor",
+          "description": "Monitoraggio delle risorse di più server SSH, raggruppato e con codici colore."
         },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
@@ -2723,6 +2742,10 @@
           "label": "ポート転送",
           "description": "ターミナルを開かずに SSH ポート転送を管理します。"
         },
+        "io.dbx.ssh.monitor": {
+          "label": "モニター",
+          "description": "複数の SSH サーバーのリソースをリアルタイム監視し、グループ別に色分けして表示します。"
+        },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
           "description": "保存済み接続向けの SSH exec および SFTP ツール"
@@ -3068,6 +3091,10 @@
         "io.dbx.ssh.tunnels": {
           "label": "Encaminhamentos de porta",
           "description": "Gerencie encaminhamentos SSH sem abrir um terminal."
+        },
+        "io.dbx.ssh.monitor": {
+          "label": "Monitor",
+          "description": "Monitoramento de recursos de vários servidores SSH, agrupados e com código de cores."
         },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
@@ -3415,6 +3442,10 @@
           "label": "端口映射",
           "description": "无需打开终端即可管理 SSH 端口转发。"
         },
+        "io.dbx.ssh.monitor": {
+          "label": "监控",
+          "description": "多台 SSH 服务器的实时资源监控，按分组配色排列。"
+        },
         "io.dbx.ssh.mcp": {
           "label": "SSH",
           "description": "已保存连接的 SSH 执行与 SFTP 工具"
@@ -3760,6 +3791,10 @@
         "io.dbx.ssh.tunnels": {
           "label": "連接埠映射",
           "description": "無需開啟終端即可管理 SSH 連接埠轉發。"
+        },
+        "io.dbx.ssh.monitor": {
+          "label": "監控",
+          "description": "多台 SSH 伺服器的即時資源監控，依分組配色排列。"
         },
         "io.dbx.ssh.mcp": {
           "label": "SSH",

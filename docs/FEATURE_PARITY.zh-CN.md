@@ -659,3 +659,11 @@ Xshell/Termius/SecureCRT 全部不存在，维持不立项；Telnet/Serial 维�
 | 能力 | 来源 | 插件状态 | 说明 |
 | --- | --- | --- | --- |
 | SFTP 自动连接开关 | issue #179（服务端未开 SFTP 时每次连接弹错误横幅） | ✅ 已有（2026-10-12） | 全局偏好 `ssh-sftp-auto-connect`（默认开，pluginStore 持久化，`lib/workbenchLayout.ts` `sanitizeSftpAutoConnectPref` 纯函数解析）。关闭后 `afterSessionConnected` 跳过 `sftp/list` 首拉、`sftp/home` 主目录探测与侧栏树根补拉（tree tab 默认，其失败同样会弹错）——连接成功不再触碰 SFTP 子系统，无 SFTP 的服务端不再弹错误横幅；传输恢复（`restoreTransfers`）不受影响。面板仍按「默认打开 SFTP 面板」偏好/per-tab 状态打开但保持未加载，首次手动打开面板时经 `shouldLazyLoadSftpListing`（面板打开 × 会话在场 × 本会话未加载过三条件）惰性补载一次，刷新按钮随时手动加载；断开重置「已加载」标记（`onListingLoaded` 回调上报）。开关入口在工具栏「自定义列」popover、「默认打开 SFTP 面板」下方（`sftpPane.autoConnect`/`autoConnectHint` 七语）。单测 `workbench.spec.ts`（偏好解析 + 惰性加载判定矩阵） |
+
+## motty 对标补充（2026-11-15，本期新增）
+
+以 motty（多机资源监控 dashboard，对标范围 `remotestats` + `monitoring` + `workbench/monitor*.go`）为参照的「多服务器监控面板」立项：设计、sidecar 协议与宿主协同见 `docs/DESIGN_MONITOR_PANEL.zh-CN.md`。工作台内既有 F2 单机指标浮卡（`ssh/metrics`）保持不动——那是单机深度视图，本面板是多机总览补位，二者互不依赖。
+
+| motty 能力 | 插件状态 | 说明 |
+| --- | --- | --- |
+| 多服务器监控面板（dashboard） | ✅ 本期新增 | 多台 SSH 服务器的实时资源监控卡片：按宿主侧栏分组区块排列并配色（分组数据依赖宿主 `listConnections` provider-scoped 分支暴露 `groupId`/`groupName`，issue 草案见 `docs/HOST_ISSUE_MONITOR_GROUP_API.zh-CN.md`；未落地时降级平铺，两阶段解耦）；长驻流式采集（快通道秒级计数器行协议 + 慢通道 load/df/who）+ 五态状态徽标 + 每卡直达终端 + 隐私模式；独立 workbench contribution（`io.dbx.ssh.monitor`，与 `io.dbx.ssh.tunnels` 同范式）。多面板制、组搜索/拖拽排序、告警/导出/阈值等做与不做逐项见 `docs/DESIGN_MONITOR_PANEL.zh-CN.md` §7 取舍表 |
