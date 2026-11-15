@@ -1363,7 +1363,9 @@ type Details = { load1: number; load5: number; load15: number; uptimeSec: number
 
 单位约定：`t` = **sidecar 到达时刻** Unix 毫秒（不采远端时间戳——busybox `date` 无 `%3N`，
 远端时钟不可信）；`cpuPct` 0..100 一位小数；内存 MB=1024² B；`netRxKbps`/`netTxKbps` =
-KiB/s（字节差分 ÷ 采样秒 ÷ 1024）一位小数；磁盘 KB=1024 B；`Details.load*` 为原始 loadavg。
+KiB/s（字节差分 ÷ 采样秒 ÷ 1024）一位小数；磁盘 KB=1024 B；`Details.load*` 为原始 loadavg；
+`users[].user`/`tty` 逐字取 `who` 前两列，`users[].from` 为登录来源主机（`who` 输出中 `(...)`
+包裹字段剥括号——GNU `who` 第三列是登录日期而非主机），本地登录无来源时为**空串**。
 
 状态机：`connecting →(首个计数行)→ live`；`→(dbx-mon-unsupported 行)→ unsupported`
 （远端缺 `/proc/stat`、`/proc/net/dev` 或 `/proc/meminfo`，如 macOS/BSD；无 error 载荷）；

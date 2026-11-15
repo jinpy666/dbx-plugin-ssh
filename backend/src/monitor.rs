@@ -48,11 +48,16 @@ const MON_FAST_SCRIPT: &str = concat!(
     "/^MemFree:/{f=$2}/^Buffers:/{b=$2}/^Cached:/{c=$2}/^SReclaimable:/{s=$2}",
     "/^Shmem:/{sh=$2}END{a=f+b+c+s-sh; if(a<0)a=0; print a}' /proc/meminfo);; esac; ",
     "iface=$(awk '$2==\"00000000\"{print $1; exit}' /proc/net/route 2>/dev/null); ",
-    "case \"$iface\" in ''|*[!A-Za-z0-9.@_-]*) iface=$(awk 'NR>2{sub(/:.*/,\"\",$1);",
-    "if($1!=\"lo\"){print $1; exit}}' /proc/net/dev);; esac; ",
+    // Both iface sources pass the same charset whitelist before the eval:
+    // a failed validation clears $iface (no fallback re-entry), so a hostile
+    // /proc/net/dev name can never reach `awk -v IF="$iface"` either.
+    "case \"$iface\" in *[!A-Za-z0-9.@_-]*) iface=;; esac; ",
+    "[ -n \"$iface\" ] || iface=$(awk 'NR>2{sub(/:.*/,\"\",$1);",
+    "if($1!=\"lo\"){print $1; exit}}' /proc/net/dev); ",
+    "case \"$iface\" in *[!A-Za-z0-9.@_-]*) iface=;; esac; ",
     "n_rx=0; n_tx=0; ",
     "case \"$iface\" in ?*) eval \"$(awk -v IF=\"$iface\" 'NR>2{sub(/:.*/,\"\",$1);",
-    "if($1==IF){print \"n_rx=\"$2\"; print \"n_tx=\"$10; exit}}' /proc/net/dev)\";; esac; ",
+    "if($1==IF){print \"n_rx=\"$2; print \"n_tx=\"$10; exit}}' /proc/net/dev)\";; esac; ",
     "l1=$(awk '{print int($1*100)}' /proc/loadavg); ",
     "printf 'dbx-mon c=%s,%s m=%s,%s n=%s,%s,%s l=%s\\n' ",
     "\"$c_total\" \"$c_idle\" \"$m_total\" \"$m_avail\" \"$n_rx\" \"$n_tx\" \"$iface\" \"$l1\"; ",
@@ -64,7 +69,9 @@ const MON_SLOW_SCRIPT: &str = concat!(
     "echo \"dbx-det load=$(cut -d' ' -f1-3 /proc/loadavg)\"; ",
     "echo \"dbx-det uptime=$(awk '{print int($1)}' /proc/uptime)\"; ",
     "df -P -k / 2>/dev/null | tail -n +2 | awk '{printf \"dbx-det disk=%s,%s,%s\\n\", $6, $2, $3}'; ",
-    "who 2>/dev/null | head -20 | awk '{printf \"dbx-det user=%s,%s,%s\\n\", $1, $2, $3}'; ",
+    // who awk is pinned verbatim by `MON_WHO_AWK` in the tests module (GNU
+    // who prints the login date in column 3; the host arrives paren-wrapped).
+    "who 2>/dev/null | head -20 | awk '{f=\"\"; for(i=3;i<=NF;i++) if($i ~ /^\\(.*\\)$/) {f=substr($i,2,length($i)-2); break}; printf \"dbx-det user=%s,%s,%s\\n\", $1, $2, f}'; ",
     "echo \"dbx-det end\"; ",
     "sleep 5; done",
 );
@@ -126,7 +133,9 @@ pub struct DiskRow {
     pub used_kb: u64,
 }
 
-/// One login row of a detail burst (`who`, first three columns verbatim).
+/// One login row of a detail burst (`who`: user/tty verbatim, `from` = the
+/// first `(...)`-wrapped field with its parens stripped — empty when the
+/// login has no remote host).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UserRow {
@@ -338,7 +347,8 @@ pub fn parse_detail_block(lines: &[&str]) -> Details {
                 }
             }
         } else if let Some(value) = rest.strip_prefix("user=") {
-            // who columns 1..3 verbatim; a missing from-column degrades to "".
+            // who user/tty verbatim; `from` is the awk-extracted host (see
+            // MON_WHO_AWK) — a missing from-column degrades to "".
             let mut parts = value.splitn(3, ',');
             let user = parts.next().unwrap_or_default().to_string();
             if user.is_empty() {
@@ -1244,6 +1254,112 @@ mod tests {
             "",
         ]);
         assert_eq!(details, Details::default());
+    }
+
+    #[test]
+    fn user_row_degrades_to_empty_from_without_the_paren_field() {
+        // The script always prints three comma-separated columns; a local
+        // login without a remote host leaves the third one empty.
+        let details = parse_detail_block(&["dbx-det user=carol,tty2,"]);
+        assert_eq!(
+            details.users[0],
+            UserRow {
+                user: "carol".into(),
+                tty: "tty2".into(),
+                from: String::new(),
+            }
+        );
+    }
+
+    /// Runs the who→user awk program against one fixture line (real awk:
+    /// the GNU-coreutils `who` shape that motivated the column-3 bug is
+    /// exactly what this test pins down).
+    /// who→user awk as embedded in `MON_SLOW_SCRIPT` (the `contains`
+    /// assertion below pins the two together). user/tty stay verbatim;
+    /// `from` is the first `(...)`-wrapped field with its parens stripped —
+    /// GNU `who` prints the login DATE in column 3 and the remote host
+    /// paren-wrapped after the time, or nothing for local logins.
+    const MON_WHO_AWK: &str = "{f=\"\"; for(i=3;i<=NF;i++) if($i ~ /^\\(.*\\)$/) {f=substr($i,2,length($i)-2); break}; printf \"dbx-det user=%s,%s,%s\\n\", $1, $2, f}";
+
+    /// Runs the who→user awk program against one fixture line (real awk:
+    /// the GNU-coreutils `who` shape that motivated the column-3 bug is
+    /// exactly what this test pins down).
+    fn run_awk(program: &str, line: &str) -> String {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("awk")
+            .arg(program)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("awk available on dev hosts");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(line.as_bytes())
+            .expect("awk reads its stdin");
+        let output = child.wait_with_output().expect("awk exits");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[test]
+    fn who_awk_reads_the_host_from_the_paren_wrapped_field_not_column_3() {
+        // GNU coreutils `who`: `alice pts/0 2026-11-15 09:12 (10.0.0.8)` —
+        // the third column is the login DATE, the remote host arrives
+        // paren-wrapped after the time. The program must take `from` from
+        // the first paren-wrapped field (parens stripped), not column 3.
+        let out = run_awk(MON_WHO_AWK, "alice pts/0 2026-11-15 09:12 (10.0.0.8)");
+        assert_eq!(out.trim_end(), "dbx-det user=alice,pts/0,10.0.0.8");
+        // Local login: no paren-wrapped host at all → empty from-column.
+        let out = run_awk(MON_WHO_AWK, "bob tty1 2026-11-15 09:12");
+        assert_eq!(out.trim_end(), "dbx-det user=bob,tty1,");
+        // Drift guard: the script must run exactly this program.
+        assert!(
+            MON_SLOW_SCRIPT.contains(MON_WHO_AWK),
+            "MON_SLOW_SCRIPT drifted from MON_WHO_AWK"
+        );
+    }
+
+    #[test]
+    fn unvalidated_fallback_iface_never_reaches_the_counter_eval() {
+        // The /proc/net/dev fallback name must re-enter the same charset
+        // whitelist before `eval "$(awk -v IF="$iface" …)"`. Two checks:
+        // the gate itself clears hostile names under POSIX sh (a cleared
+        // iface skips the `?*` eval case, so n_rx/n_tx stay 0 — "no NIC"
+        // behaviour), and the script runs BOTH sources through it — exactly
+        // two gates, the second sitting between the fallback read and the
+        // eval.
+        let gate = "case \"$iface\" in *[!A-Za-z0-9.@_-]*) iface=;; esac; ";
+        for (name, kept) in [
+            ("eth0", true),
+            ("eth0.100", true),
+            ("br-lan_1", true),
+            ("bad$(id)", false),
+            ("a b", false),
+            ("x;y", false),
+        ] {
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("iface=$1; {gate}printf '%s' \"$iface\""))
+                .arg("sh")
+                .arg(name)
+                .output()
+                .expect("/bin/sh available on dev hosts");
+            let expected = if kept { name } else { "" };
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                expected,
+                "iface {name:?}"
+            );
+        }
+        let gates: Vec<usize> = MON_FAST_SCRIPT
+            .match_indices(gate)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(gates.len(), 2, "route and fallback ifaces share one gate");
+        let fallback = MON_FAST_SCRIPT.find("/proc/net/dev").expect("fallback source");
+        let eval = MON_FAST_SCRIPT.find("eval \"$(awk -v IF=").expect("counter eval");
+        assert!(fallback < gates[1] && gates[1] < eval);
     }
 
     #[test]
