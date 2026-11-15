@@ -109,6 +109,9 @@ struct Plugin {
     /// （validate/execute/start/stop/status）与常驻会话监管，见
     /// src/task_provider.rs 与冻结契约 ADR §6。
     tasks: Arc<task_provider::TaskProvider>,
+    /// 监控面板常驻采集任务（monitor/* RPC 面）：每连接一对快慢 exec 通道
+    /// + 环形缓冲，见 src/monitor.rs。
+    monitors: monitor::MonitorRegistry,
 }
 
 impl Plugin {
@@ -140,6 +143,7 @@ impl Plugin {
             connection_import: connection_import::ImportStream::default(),
             non_ssh_creds: non_ssh_credentials::NonSshCredentials::new(),
             tasks: Arc::new(task_provider::TaskProvider::new()),
+            monitors: monitor::MonitorRegistry::new(),
         })
     }
 
@@ -1448,6 +1452,30 @@ impl Plugin {
                     as usize;
                 self.runtime
                     .block_on(self.ssh.metrics_history(session_id, limit))
+            }
+            // 监控面板（monitor/*）：每连接常驻快慢采集通道 + 环形缓冲，
+            // 见 src/monitor.rs；start 幂等、stop 幂等，failed/unsupported
+            // 终态仅 stop+start 复活。
+            "monitor/start" => {
+                let connection_id = required_string(&params, "connectionId")?;
+                self.runtime.block_on(self.monitors.start(
+                    &self.ssh,
+                    connection_id,
+                    &self.runtime,
+                ))
+            }
+            "monitor/stop" => {
+                let connection_id = required_string(&params, "connectionId")?;
+                self.runtime.block_on(self.monitors.stop(connection_id))
+            }
+            "monitor/status" => Ok(self.runtime.block_on(self.monitors.status())),
+            "monitor/snapshot" => {
+                Ok(self.runtime.block_on(self.monitors.snapshot(&params)))
+            }
+            "monitor/details" => {
+                let connection_id = required_string(&params, "connectionId")?;
+                self.runtime
+                    .block_on(self.monitors.details(connection_id))
             }
             // Docker 管理面板（IMPL_PLAN Task P2-4）。列表/日志是只读采集
             // 脚本（探针区分「未装容器 CLI」与「daemon socket 拒绝」）；动作

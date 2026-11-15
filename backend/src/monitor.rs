@@ -11,10 +11,29 @@
 //! never trusted). All parsing and diff math lives in pure functions below
 //! so script-output fixtures can be unit-tested without a server.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
+
+use russh::client::{Handle, Msg};
+use russh::ChannelMsg;
+use serde_json::{json, Value};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use crate::ssh::{SshClient, SshRuntime};
+
 pub const MONITOR_TASK_LIMIT: usize = 24;
 pub const FAST_RING_CAP: usize = 720; // 12 min @ 1s
 pub const SLOW_RING_CAP: usize = 144; // 12 min @ 5s
 pub const SNAPSHOT_DEFAULT_POINTS: usize = 120;
+
+/// Inter-line watchdog on the fast channel: 3s without a counter row means
+/// the stream stalled without an EOF — the loop reopens the channel.
+const FAST_WATCHDOG: Duration = Duration::from_secs(3);
+/// Backoff between watchdog reopen attempts (still cancellable).
+const REOPEN_BACKOFF: Duration = Duration::from_millis(500);
 
 const MON_FAST_SCRIPT: &str = concat!(
     "echo \"dbx-mon-cap $(uname -sr)\"; ",
@@ -333,6 +352,633 @@ pub fn parse_detail_block(lines: &[&str]) -> Details {
     details
 }
 
+/// Ring entry of the fast loop: either a computed sample or an axis-break
+/// marker. Untagged so entries serialize flat as the protocol's
+/// `Sample|Gap` union.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(untagged)]
+pub enum Point {
+    Sample(Sample),
+    Gap(GapPoint),
+}
+
+/// One slow-loop detail burst with its sidecar-arrival stamp.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailPoint {
+    pub t: u64,
+    pub details: Details,
+}
+
+/// `points` clamp: at least one sample, at most the fast ring cap (the
+/// protocol pins the default at 120).
+fn clamp_points(points: Option<u64>) -> usize {
+    points
+        .map(|value| value.clamp(1, FAST_RING_CAP as u64) as usize)
+        .unwrap_or(SNAPSHOT_DEFAULT_POINTS)
+}
+
+/// Tail-N view of a ring, oldest-first — the frontend charts expect
+/// chronological order while the ring holds newest-last.
+fn ring_tail(ring: &VecDeque<Point>, points: usize) -> Vec<Point> {
+    ring.iter().rev().take(points).rev().cloned().collect()
+}
+
+/// Next ring point for a fresh counter row: an iface switch records a Gap
+/// and re-baselines (the caller stores `next` as the new `last`), anything
+/// else diffs straight into a Sample — no rate is ever computed across the
+/// switch, which is what breaks the frontend chart axis.
+fn next_point(prev: &Counters, next: &Counters, t_ms: u64) -> Point {
+    if prev.iface != next.iface {
+        Point::Gap(GapPoint { t: t_ms, gap: true })
+    } else {
+        Point::Sample(diff_counters(prev, next, t_ms))
+    }
+}
+
+/// Splits newly arrived bytes into complete lines, keeping the trailing
+/// partial line in the buffer for the next chunk — SSH data chunks are not
+/// line-aligned and the printf rows can straddle two reads.
+fn drain_lines(buffer: &mut String, data: &str) -> Vec<String> {
+    buffer.push_str(data);
+    let mut lines = Vec::new();
+    while let Some(position) = buffer.find('\n') {
+        lines.push(buffer[..position].to_string());
+        buffer.drain(..=position);
+    }
+    lines
+}
+
+/// Registry of resident monitor tasks, keyed by connectionId. Same shape as
+/// the scheduler TaskProvider's registries: a sync-Mutex map of shared task
+/// handles owned by the plugin for its whole lifetime. Purely in-memory —
+/// tasks die with the sidecar and are never persisted.
+pub struct MonitorRegistry {
+    tasks: Mutex<HashMap<String, Arc<TaskHandle>>>,
+}
+
+/// Shared state of one connection's monitor: lifecycle fields, the two
+/// rings and the counters' diff baseline. Plain `std` locks — critical
+/// sections are field-sized and never span an await.
+pub(crate) struct TaskHandle {
+    state: RwLock<MonitorState>,
+    error: RwLock<Option<String>>,
+    since: RwLock<u64>,
+    iface: RwLock<Option<String>>,
+    fast: RwLock<VecDeque<Point>>,
+    slow: RwLock<VecDeque<DetailPoint>>,
+    last: RwLock<Option<Counters>>,
+    cancel: watch::Sender<bool>,
+    /// Set once the fast loop has exited (failed, unsupported or cancelled).
+    done: AtomicBool,
+    loops: Mutex<Vec<JoinHandle<()>>>,
+}
+
+/// One row of `monitor/status`. `error`/`primaryInterface` appear only when
+/// present (protocol: fields exist only when they carry a value).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskStatusRow<'a> {
+    connection_id: &'a str,
+    state: MonitorState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    since: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_interface: Option<String>,
+}
+
+impl MonitorRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            tasks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// `monitor/start`: spawns the fast+slow collector loops for a
+    /// connection's live session. Idempotent — an existing task (in any
+    /// state) is returned as-is; revive a failed task by stopping it first.
+    pub async fn start(
+        &self,
+        ssh: &SshRuntime,
+        connection_id: &str,
+        spawner: &tokio::runtime::Runtime,
+    ) -> Result<Value, String> {
+        if let Some(task) = self.task(connection_id) {
+            return Ok(task.state_and_since());
+        }
+        if self.task_count() >= MONITOR_TASK_LIMIT {
+            return Err(format!(
+                "monitor task limit reached ({MONITOR_TASK_LIMIT})"
+            ));
+        }
+        let handle = ssh
+            .live_handle_for_connection(connection_id)
+            .await
+            .ok_or_else(|| {
+                format!("no live SSH session for connection '{connection_id}'")
+            })?;
+        // Re-check under the lock: two concurrent starts for one connection
+        // must stay idempotent and the limit must hold against the race.
+        let mut tasks = self.lock_tasks();
+        if let Some(existing) = tasks.get(connection_id) {
+            return Ok(existing.state_and_since());
+        }
+        if tasks.len() >= MONITOR_TASK_LIMIT {
+            return Err(format!(
+                "monitor task limit reached ({MONITOR_TASK_LIMIT})"
+            ));
+        }
+        let (cancel, cancel_rx) = watch::channel(false);
+        let task = Arc::new(TaskHandle {
+            state: RwLock::new(MonitorState::Connecting),
+            error: RwLock::new(None),
+            since: RwLock::new(now_ms()),
+            iface: RwLock::new(None),
+            fast: RwLock::new(VecDeque::new()),
+            slow: RwLock::new(VecDeque::new()),
+            last: RwLock::new(None),
+            cancel,
+            done: AtomicBool::new(false),
+            loops: Mutex::new(Vec::new()),
+        });
+        let fast = spawner.spawn(run_fast_loop(
+            Arc::clone(&handle),
+            Arc::clone(&task),
+            cancel_rx.clone(),
+        ));
+        let slow = spawner.spawn(run_slow_loop(handle, Arc::clone(&task), cancel_rx));
+        task.lock_loops().extend([fast, slow]);
+        let payload = task.state_and_since();
+        tasks.insert(connection_id.to_string(), Arc::clone(&task));
+        Ok(payload)
+    }
+
+    /// `monitor/stop`: signals cancel, joins both loops with a shared 2s
+    /// budget, then reports stopped. Idempotent — stopping an unknown
+    /// connection still reports stopped (and removes the entry, so a later
+    /// start can revive a failed task).
+    pub async fn stop(&self, connection_id: &str) -> Result<Value, String> {
+        let task = {
+            let mut tasks = self.lock_tasks();
+            tasks.remove(connection_id)
+        };
+        if let Some(task) = task {
+            let _ = task.cancel.send(true);
+            if !task.done.load(AtomicOrdering::Relaxed) {
+                let loops = std::mem::take(&mut *task.lock_loops());
+                // Shared deadline: both joins together must fit in 2s.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                for handle in loops {
+                    let _ = tokio::time::timeout_at(deadline, handle).await;
+                }
+            }
+            *task.lock_state() = MonitorState::Stopped;
+            *task.lock_error() = None;
+            *task.lock_since() = now_ms();
+        }
+        Ok(json!({ "state": "stopped" }))
+    }
+
+    /// `monitor/status`: every resident task's lifecycle row.
+    pub async fn status(&self) -> Value {
+        let tasks = self.lock_tasks();
+        let rows: Vec<Value> = tasks
+            .iter()
+            .map(|(id, task)| task.status_row(id))
+            .collect();
+        json!({ "tasks": rows })
+    }
+
+    /// `monitor/snapshot`: per-connection state, newest sample, history
+    /// tail and the latest detail burst. Connections without a task are
+    /// omitted from the samples map.
+    pub async fn snapshot(&self, params: &Value) -> Value {
+        let requested: Option<Vec<String>> = params
+            .get("connectionIds")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            });
+        let points = clamp_points(params.get("points").and_then(Value::as_u64));
+        let tasks = self.lock_tasks();
+        let mut samples = serde_json::Map::new();
+        for (id, task) in tasks.iter() {
+            if let Some(ids) = &requested {
+                if !ids.iter().any(|wanted| wanted == id) {
+                    continue;
+                }
+            }
+            samples.insert(id.clone(), task.snapshot_entry(points));
+        }
+        json!({ "samples": Value::Object(samples) })
+    }
+
+    /// `monitor/details`: the latest slow-loop burst for one connection.
+    pub async fn details(&self, connection_id: &str) -> Result<Value, String> {
+        let task = self
+            .task(connection_id)
+            .ok_or_else(|| {
+                format!(
+                    "monitor task was not found for connection '{connection_id}'"
+                )
+            })?;
+        let latest = task.lock_slow().back().cloned();
+        match latest {
+            Some(burst) => serde_json::to_value(&burst.details).map_err(|error| {
+                format!("failed to serialize monitor details: {error}")
+            }),
+            None => Err(format!(
+                "no monitor detail burst has arrived yet for connection '{connection_id}'"
+            )),
+        }
+    }
+
+    fn lock_tasks(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<TaskHandle>>> {
+        self.tasks.lock().expect("monitor registry poisoned")
+    }
+
+    fn task(&self, connection_id: &str) -> Option<Arc<TaskHandle>> {
+        self.lock_tasks().get(connection_id).cloned()
+    }
+
+    fn task_count(&self) -> usize {
+        self.lock_tasks().len()
+    }
+}
+
+impl TaskHandle {
+    fn lock_state(&self) -> std::sync::RwLockWriteGuard<'_, MonitorState> {
+        self.state.write().expect("monitor state poisoned")
+    }
+
+    fn lock_error(&self) -> std::sync::RwLockWriteGuard<'_, Option<String>> {
+        self.error.write().expect("monitor error poisoned")
+    }
+
+    fn lock_since(&self) -> std::sync::RwLockWriteGuard<'_, u64> {
+        self.since.write().expect("monitor since poisoned")
+    }
+
+    fn lock_iface(&self) -> std::sync::RwLockWriteGuard<'_, Option<String>> {
+        self.iface.write().expect("monitor iface poisoned")
+    }
+
+    fn lock_fast(&self) -> std::sync::RwLockWriteGuard<'_, VecDeque<Point>> {
+        self.fast.write().expect("monitor fast ring poisoned")
+    }
+
+    fn lock_slow(&self) -> std::sync::RwLockWriteGuard<'_, VecDeque<DetailPoint>> {
+        self.slow.write().expect("monitor slow ring poisoned")
+    }
+
+    fn lock_last(&self) -> std::sync::RwLockWriteGuard<'_, Option<Counters>> {
+        self.last.write().expect("monitor last poisoned")
+    }
+
+    fn lock_loops(&self) -> std::sync::MutexGuard<'_, Vec<JoinHandle<()>>> {
+        self.loops.lock().expect("monitor loops poisoned")
+    }
+
+    /// `{state, since}` payload for start's idempotent reply.
+    fn state_and_since(&self) -> Value {
+        json!({
+            "state": *self.state.read().expect("monitor state poisoned"),
+            "since": *self.since.read().expect("monitor since poisoned"),
+        })
+    }
+
+    fn status_row(&self, connection_id: &str) -> Value {
+        let row = TaskStatusRow {
+            connection_id,
+            state: *self.state.read().expect("monitor state poisoned"),
+            error: self.error.read().expect("monitor error poisoned").clone(),
+            since: *self.since.read().expect("monitor since poisoned"),
+            primary_interface: self
+                .iface
+                .read()
+                .expect("monitor iface poisoned")
+                .clone(),
+        };
+        serde_json::to_value(row).expect("monitor status row serializes")
+    }
+
+    /// One connection's `samples` entry: state, newest live sample (only
+    /// in the live state), the history tail and the latest details.
+    fn snapshot_entry(&self, points: usize) -> Value {
+        let state = *self.state.read().expect("monitor state poisoned");
+        let (live, history) = {
+            let ring = self.fast.read().expect("monitor fast ring poisoned");
+            let live = if state == MonitorState::Live {
+                ring.iter()
+                    .rev()
+                    .find_map(|point| match point {
+                        Point::Sample(sample) => Some(serde_json::to_value(sample).ok()?),
+                        Point::Gap(_) => None,
+                    })
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+            let history: Vec<Value> = ring_tail(&ring, points)
+                .iter()
+                .map(|point| serde_json::to_value(point).expect("ring point serializes"))
+                .collect();
+            (live, history)
+        };
+        let details = self
+            .slow
+            .read()
+            .expect("monitor slow ring poisoned")
+            .back()
+            .map(|burst| serde_json::to_value(&burst.details).expect("details serialize"))
+            .unwrap_or(Value::Null);
+        json!({
+            "state": state,
+            "live": live,
+            "history": history,
+            "details": details,
+        })
+    }
+}
+
+/// Fast-loop ingest of one complete line: state flips, baseline and ring
+/// pushes. The cap line is only traced (its payload has no protocol slot);
+/// the unsupported line is the terminal state; counter rows keep the diff
+/// chain rolling.
+fn ingest_counter_line(task: &TaskHandle, line: &str) {
+    match parse_counter_line(line) {
+        CounterLine::Cap(uname) => {
+            eprintln!("[ssh-trace] monitor: remote reports {uname}");
+        }
+        CounterLine::Unsupported(reason) => {
+            let mut state = task.lock_state();
+            if *state != MonitorState::Unsupported {
+                eprintln!("[ssh-trace] monitor unsupported on remote: {reason}");
+                *state = MonitorState::Unsupported;
+                drop(state);
+                *task.lock_error() = None;
+                *task.lock_iface() = None;
+                *task.lock_since() = now_ms();
+            }
+        }
+        CounterLine::Counters(counters) => {
+            let t = now_ms();
+            // First counter row flips connecting → live and only sets the
+            // baseline; every later row diffs into a sample.
+            if *task.state.read().expect("monitor state poisoned")
+                == MonitorState::Connecting
+            {
+                *task.lock_state() = MonitorState::Live;
+                *task.lock_since() = t;
+            }
+            let prev = task.lock_last().replace(counters.clone());
+            if let Some(prev) = &prev {
+                let point = next_point(prev, &counters, t);
+                push_fast(task, point);
+            }
+            *task.lock_iface() = Some(counters.iface);
+        }
+        CounterLine::Ignored => {}
+    }
+}
+
+/// Pushes one point into the fast ring, trimming past [`FAST_RING_CAP`].
+fn push_fast(task: &TaskHandle, point: Point) {
+    let mut ring = task.lock_fast();
+    ring.push_back(point);
+    if ring.len() > FAST_RING_CAP {
+        ring.pop_front();
+    }
+}
+
+/// Pushes one detail burst into the slow ring, trimming past
+/// [`SLOW_RING_CAP`].
+fn push_slow(task: &TaskHandle, point: DetailPoint) {
+    let mut ring = task.lock_slow();
+    ring.push_back(point);
+    if ring.len() > SLOW_RING_CAP {
+        ring.pop_front();
+    }
+}
+
+/// Marks the task failed with an error payload — unless it is already
+/// terminal (unsupported reported earlier, or a stop won the race). The
+/// double-checked transition keeps stop-vs-EOF races from resurrecting a
+/// stopped task as failed.
+fn fail(task: &TaskHandle, error: String) {
+    if matches!(
+        *task.state.read().expect("monitor state poisoned"),
+        MonitorState::Unsupported | MonitorState::Stopped
+    ) {
+        return;
+    }
+    let mut state = task.lock_state();
+    if matches!(*state, MonitorState::Unsupported | MonitorState::Stopped) {
+        return;
+    }
+    *state = MonitorState::Failed;
+    drop(state);
+    *task.lock_error() = Some(error);
+    *task.lock_since() = now_ms();
+    task.done.store(true, AtomicOrdering::Relaxed);
+}
+
+/// Fast loop: one channel per attempt streaming `MON_FAST_SCRIPT`. 3s of
+/// line silence reopens the channel; two consecutive reopen failures mark
+/// the task failed. Every exit path closes the channel explicitly —
+/// dropping a russh Channel never sends SSH_MSG_CHANNEL_CLOSE, so the
+/// remote `while` loop would keep running forever (the invariant
+/// documented at exec.rs's abort_exec_channel).
+async fn run_fast_loop(
+    handle: Arc<Handle<SshClient>>,
+    task: Arc<TaskHandle>,
+    mut cancel: watch::Receiver<bool>,
+) {
+    let mut reopen_failures = 0_u32;
+    loop {
+        if *cancel.borrow() {
+            return;
+        }
+        let mut channel = match open_monitor_channel(&handle, MON_FAST_SCRIPT).await {
+            Ok(channel) => {
+                reopen_failures = 0;
+                channel
+            }
+            Err(error) => {
+                reopen_failures += 1;
+                if reopen_failures >= 2 {
+                    fail(&task, format!("monitor channel failed: {error}"));
+                    return;
+                }
+                if wait_cancelled_for(REOPEN_BACKOFF, &mut cancel).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        let mut remote_closed = false;
+        let mut pending = String::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = wait_cancelled_or_dropped(&mut cancel) => {
+                    close_channel(&mut channel).await;
+                    return;
+                }
+                waited = tokio::time::timeout(FAST_WATCHDOG, channel.wait()) => match waited {
+                    // Watchdog: the stream stalled without an EOF — close
+                    // and reopen (the counters keep their kernel values, so
+                    // the diff chain survives the restart).
+                    Err(_) => {
+                        close_channel(&mut channel).await;
+                        break;
+                    }
+                    // EOF: the script never exits by itself, so a closed
+                    // channel means the transport died — failed, no retry.
+                    Ok(None) => {
+                        remote_closed = true;
+                        break;
+                    }
+                    Ok(Some(ChannelMsg::Data { ref data })) => {
+                        for line in drain_lines(&mut pending, &String::from_utf8_lossy(data)) {
+                            ingest_counter_line(&task, &line);
+                        }
+                    }
+                    Ok(Some(_)) => {}
+                }
+            }
+        }
+        if remote_closed {
+            fail(&task, "monitor channel was closed by the remote host".to_string());
+            return;
+        }
+    }
+}
+
+/// Slow loop: one channel streaming `MON_SLOW_SCRIPT`, one detail burst per
+/// 5s tick into the slow ring. The fast loop owns the task state — a
+/// slow-channel failure only freezes details until the next start, so this
+/// loop exits silently on EOF (still closing its channel explicitly).
+async fn run_slow_loop(
+    handle: Arc<Handle<SshClient>>,
+    task: Arc<TaskHandle>,
+    mut cancel: watch::Receiver<bool>,
+) {
+    let mut channel = match open_monitor_channel(&handle, MON_SLOW_SCRIPT).await {
+        Ok(channel) => channel,
+        Err(error) => {
+            eprintln!("[ssh-trace] monitor slow channel unavailable: {error}");
+            return;
+        }
+    };
+    let mut pending = String::new();
+    let mut burst: Vec<String> = Vec::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = wait_cancelled_or_dropped(&mut cancel) => {
+                close_channel(&mut channel).await;
+                return;
+            }
+            message = channel.wait() => match message {
+                None => return,
+                Some(ChannelMsg::Data { ref data }) => {
+                    for line in drain_lines(&mut pending, &String::from_utf8_lossy(data)) {
+                        let trimmed = line.trim();
+                        if trimmed == "dbx-det end" {
+                            let lines: Vec<&str> =
+                                burst.iter().map(String::as_str).collect();
+                            push_slow(
+                                &task,
+                                DetailPoint {
+                                    t: now_ms(),
+                                    details: parse_detail_block(&lines),
+                                },
+                            );
+                            burst.clear();
+                        } else if trimmed.starts_with("dbx-det ") {
+                            // A truncated burst (no end marker yet) must not
+                            // grow unbounded — a real burst stays far below
+                            // this ceiling.
+                            if burst.len() >= 64 {
+                                burst.clear();
+                            }
+                            burst.push(trimmed.to_string());
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+/// Dials a fresh channel and starts one monitor script on it. No env
+/// merging and no PTY (plugin-internal plumbing, same as the metrics
+/// collector path); a failed exec still closes the dialed channel.
+async fn open_monitor_channel(
+    handle: &Handle<SshClient>,
+    script: &str,
+) -> Result<russh::Channel<Msg>, String> {
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("Failed to open monitor channel: {error}"))?;
+    if let Err(error) = channel.exec(true, script.as_bytes()).await {
+        let message = format!("Failed to start monitor script: {error}");
+        close_channel(&mut channel).await;
+        return Err(message);
+    }
+    Ok(channel)
+}
+
+/// Explicitly closes a monitor channel (EOF + CLOSE) so sshd reaps the
+/// remote script. Dropping the russh Channel is NOT enough — it never
+/// sends SSH_MSG_CHANNEL_CLOSE and the remote `while` loop would leak
+/// (same invariant as exec.rs's abort_exec_channel).
+async fn close_channel(channel: &mut russh::Channel<Msg>) {
+    let _ = channel.eof().await;
+    let _ = channel.close().await;
+}
+
+/// Resolves once cancellation is requested OR the registry drops the
+/// sender (entry removed — the task is being torn down either way). This
+/// is deliberately the opposite of `exec::wait_cancelled`'s
+/// sender-dropped-means-never-cancel: there the dropped sender belongs to a
+/// still-tracked run, here it means the task is already gone.
+async fn wait_cancelled_or_dropped(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow_and_update() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Cancellable backoff sleep; resolves true when the task should exit
+/// (cancel requested or the registry dropped the sender).
+async fn wait_cancelled_for(delay: Duration, cancel: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        biased;
+        _ = wait_cancelled_or_dropped(cancel) => true,
+        _ = tokio::time::sleep(delay) => false,
+    }
+}
+
+/// Unix milliseconds for the sidecar-arrival timestamps (`Sample.t`, the
+/// `since` lifecycle stamps). Remote clocks are never consulted.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +1244,86 @@ mod tests {
             "",
         ]);
         assert_eq!(details, Details::default());
+    }
+
+    #[test]
+    fn snapshot_points_clamp_into_1_cap() {
+        assert_eq!(clamp_points(None), SNAPSHOT_DEFAULT_POINTS);
+        assert_eq!(clamp_points(Some(0)), 1);
+        assert_eq!(clamp_points(Some(5)), 5);
+        assert_eq!(clamp_points(Some(10_000)), FAST_RING_CAP);
+    }
+
+    #[test]
+    fn ring_tail_returns_oldest_first_slice_of_the_newest_points() {
+        let mut ring = VecDeque::new();
+        for index in 0..5_u64 {
+            ring.push_back(Point::Sample(Sample {
+                t: index,
+                cpu_pct: index as f64,
+                mem_total_mb: 0.0,
+                mem_used_mb: 0.0,
+                net_rx_kbps: 0.0,
+                net_tx_kbps: 0.0,
+                iface: Some("eth0".into()),
+            }));
+        }
+        // The tail keeps the NEWEST points, oldest-first for the chart.
+        let tail = ring_tail(&ring, 2);
+        assert_eq!(tail.len(), 2);
+        match (&tail[0], &tail[1]) {
+            (Point::Sample(a), Point::Sample(b)) => {
+                assert_eq!(a.t, 3);
+                assert_eq!(b.t, 4);
+            }
+            other => panic!("expected samples, got {other:?}"),
+        }
+        // More points than the ring holds → the whole ring, oldest first.
+        let whole = ring_tail(&ring, 10);
+        assert_eq!(whole.len(), 5);
+        match &whole[0] {
+            Point::Sample(sample) => assert_eq!(sample.t, 0),
+            other => panic!("expected a sample, got {other:?}"),
+        }
+        assert!(ring_tail(&VecDeque::new(), 3).is_empty());
+    }
+
+    #[test]
+    fn iface_switch_yields_gap_then_rebaseline_sample() {
+        // The switch row itself produces only the Gap marker; the caller
+        // stores it as the new baseline and the NEXT row samples against it
+        // (no rate is ever computed across the switch).
+        let eth0 = counters(1000, 1000, 500, 1000, 500, 100, 100, "eth0");
+        let eth1 = counters(2000, 2000, 500, 1000, 500, 300, 300, "eth1");
+        assert!(matches!(
+            next_point(&eth0, &eth1, 2000),
+            Point::Gap(GapPoint { t: 2000, gap: true })
+        ));
+        let follow = counters(3000, 3000, 500, 1000, 500, 400, 400, "eth1");
+        match next_point(&eth1, &follow, 3000) {
+            Point::Sample(sample) => {
+                assert_eq!(sample.iface.as_deref(), Some("eth1"));
+                assert_eq!(sample.cpu_pct, 100.0);
+            }
+            other => panic!("expected a sample after the re-baseline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_lines_reassemble_across_chunks() {
+        // SSH data chunks are not line-aligned: a printf row can arrive in
+        // two reads; the trailing partial line stays buffered.
+        let mut pending = String::new();
+        let lines = drain_lines(&mut pending, "dbx-mon c=1,2 m=3,4");
+        assert!(lines.is_empty());
+        assert_eq!(pending, "dbx-mon c=1,2 m=3,4");
+        let lines = drain_lines(
+            &mut pending,
+            " n=5,6,eth0 l=7\ndbx-mon c=8,9 m=10,11 n=12,13,eth1 l=14\n",
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "dbx-mon c=1,2 m=3,4 n=5,6,eth0 l=7");
+        assert_eq!(lines[1], "dbx-mon c=8,9 m=10,11 n=12,13,eth1 l=14");
+        assert!(pending.is_empty());
     }
 }

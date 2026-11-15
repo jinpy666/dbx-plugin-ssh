@@ -4340,6 +4340,27 @@ impl SshRuntime {
         }
     }
 
+    /// Resolves one live transport handle for a connection — the resident
+    /// monitor collectors open their own channels on an existing session's
+    /// transport instead of dialing a second connection. Same registry scan
+    /// as `attach_session`: entries are matched by connection id and must
+    /// still be connected; any of the connection's workbench sessions
+    /// qualifies (the transport is shared, the monitor never touches a
+    /// terminal's PTY).
+    pub async fn live_handle_for_connection(
+        &self,
+        connection_id: &str,
+    ) -> Option<Arc<Handle<SshClient>>> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .find(|entry| {
+                entry.connection_id == connection_id
+                    && entry.connected.load(Ordering::Acquire)
+            })
+            .map(|entry| Arc::clone(&entry.handle))
+    }
+
     /// Completion-host read-only gate (FIG wave-1 lane B, decision D4):
     /// `completion/execute` must refuse SSH targets on read-only
     /// connections. Minimal read-only query only — no other behavior of
