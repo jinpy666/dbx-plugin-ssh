@@ -2144,7 +2144,14 @@ window.dbxPlugin = {
   })(),
 };
 queueMicrotask(() => document.dispatchEvent(new CustomEvent("dbx-plugin-init", {
-  detail: { contributionId: fixtureParams.get("tunnels") === "quick" ? "io.dbx.ssh.tunnels.quick" : fixtureParams.has("tunnels") ? "io.dbx.ssh.tunnels" : "io.dbx.ssh.workbench" },
+  // ?panel=monitor：监控面板独立 tab 走查（main.ts isMonitorContribution 路由；
+  // ?mon= 控制采样叙事，?sessions=1 走 sessions 回退源叙事）。
+  detail: {
+    contributionId: fixtureParams.get("panel") === "monitor" ? "io.dbx.ssh.monitor"
+      : fixtureParams.get("tunnels") === "quick" ? "io.dbx.ssh.tunnels.quick"
+      : fixtureParams.has("tunnels") ? "io.dbx.ssh.tunnels"
+      : "io.dbx.ssh.workbench",
+  },
 })));
 
 // mock 专有调试入口（真实桥无此字段）：切换 locale 并经 onEvent 投递

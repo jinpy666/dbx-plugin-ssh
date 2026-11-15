@@ -27,6 +27,7 @@ const unsubscribe = window.dbxPlugin.onEvent((event) => {
 
 const {
   connections,
+  tasks,
   snapshots,
   watched,
   privacy,
@@ -87,6 +88,13 @@ function stateOf(row: MonitorConnectionRow): PanelCardState | "" {
   return watched.value[row.id] ? "connecting" : "";
 }
 
+/** 卡片开关的 on 态：显式 watched，或任务在采（已连接自动采集）——
+ *  已连接卡片的开关默认就是 on（关闭即停止采集并记 dismissed）。 */
+function watchActive(row: MonitorConnectionRow): boolean {
+  if (watched.value[row.id]) return true;
+  return tasks.value.some((task: { connectionId: string }) => task.connectionId === row.id);
+}
+
 function matchesFilter(state: PanelCardState | ""): boolean {
   if (statusFilter.value === "all") return true;
   if (statusFilter.value === "live") return state === "live";
@@ -123,7 +131,7 @@ function cardEntries(group: MonitorGroupView): MonitorCardEntry[] {
     const state = stateOf(row);
     if (!matchesFilter(state)) continue;
     ordinal += 1;
-    entries.push({ row, privacyIndex: ordinal, state, watched: !!watched.value[row.id] });
+    entries.push({ row, privacyIndex: ordinal, state, watched: watchActive(row) });
   }
   return entries;
 }
@@ -179,11 +187,13 @@ function groupAccent(group: MonitorGroupView): string {
     <button v-if="pollStopped" type="button" class="monitor-banner" @click="() => refresh()">{{ t("monitor.pollStopped") }}</button>
     <p v-if="taskLimitReached" class="monitor-banner monitor-banner--error">{{ t("monitor.taskLimit") }}</p>
 
-    <p v-if="!connections.length" class="monitor-empty">{{ t("monitor.noServers") }}</p>
-    <!-- 空态诊断行（数据行，非文案）：两源结果与行数，截图即可定位宿主版本/字段问题 -->
-    <p v-if="!connections.length" class="monitor-diag" data-testid="monitor-diag">
-      listConnections: {{ listDiagnostics.listState }} ({{ listDiagnostics.listCount }}) · sessions: {{ dataSource === "sessions" ? "fallback" : dataSource }}
-    </p>
+    <template v-if="!connections.length">
+      <p class="monitor-empty">{{ t("monitor.noServers") }}</p>
+      <!-- 空态诊断行（数据行，非文案）：两源结果与行数，截图即可定位宿主版本/字段问题 -->
+      <p class="monitor-diag" data-testid="monitor-diag">
+        listConnections: {{ listDiagnostics.listState }} ({{ listDiagnostics.listCount }}) · sessions: {{ dataSource === "sessions" ? "fallback" : dataSource }}
+      </p>
+    </template>
 
     <template v-else>
       <section v-for="group in groups" :key="group.id || '__flat__'" class="monitor-group">

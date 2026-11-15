@@ -76,9 +76,10 @@ describe("useMonitorPanel", () => {
     await panel.start();
 
     expect(panel.watched.value).toEqual({ "c-1": { addedAt: 42 } });
-    // watched∩connected（c-1）无任务 → monitor/start；c-2 未 watched 不启动。
+    // 自动采集（新语义）：已连接主机一律 start——watched 的 c-1 与未 watched 的
+    // c-2 都启动（不写 watched 表、不拨连接）；未连接主机仍需开关声明才拉起。
     expect(invokeCalls).toContain("monitor/start:{\"connectionId\":\"c-1\"}");
-    expect(invokeCalls.some((call) => call.startsWith("monitor/start:{\"connectionId\":\"c-2\"}"))).toBe(false);
+    expect(invokeCalls).toContain("monitor/start:{\"connectionId\":\"c-2\"}");
     // provider-scoped 无参列连接 + 无参 status。
     expect(requestCalls).toContain("host.listConnections:{}");
     expect(invokeCalls).toContain("monitor/status:{}");

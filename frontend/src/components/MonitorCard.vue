@@ -163,9 +163,10 @@ function formatUptime(seconds: number): string {
       <p class="monitor-placeholder-text">{{ t("monitor.badgeUnsupported") }}</p>
     </div>
 
-    <!-- 已连接但未加入监控：灰色占位（加入动作在头部开关） -->
+    <!-- 已连接、采集尚未起表（自动采集在途/watched 声明待首跑）：连接中叙事占位。
+         自动采集下该状态只在 start 前一瞬；持续停留 = start 失败（状态徽标会转 failed）。 -->
     <div v-else-if="!watched && !state" class="monitor-placeholder">
-      <p class="monitor-placeholder-text">{{ t("monitor.addWatch") }}</p>
+      <p class="monitor-placeholder-text">{{ t("monitor.badgeConnecting") }}</p>
     </div>
 
     <template v-else>

@@ -167,6 +167,8 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
   // 空态下把两源结果暴露给面板诊断行（截图即可定位宿主版本/字段问题）。
   const dataSource = ref<"connections" | "sessions" | "none">("none");
   const listDiagnostics = ref<{ listState: "ok" | "null" | "error"; listCount: number }>({ listState: "ok", listCount: 0 });
+  // 用户显式停止采集的连接（内存，面板会话内有效）：自动采集不复活的闸。
+  const dismissedAuto = ref<Set<string>>(new Set());
 
   // —— 偏好持久化（pluginStore 通道；键已登记水合白名单）——
 
@@ -348,8 +350,12 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
       const activeTasks = new Set(tasks.value.map((task) => task.connectionId));
       const connected = new Set(rows.filter(isConnectedRow).map((row) => row.id));
 
-      // ③ watched∩connected 无任务 → start（含恢复补启；仅并发上限错误 → 顶栏提示）。
-      const startIds = Object.keys(watched.value).filter((id) => connected.has(id) && !activeTasks.has(id));
+      // ③ 已连接主机**自动开始采集**（打开面板即见曲线；纯本地采集、不拨连接）。
+      // watched 表保留「未连接主机的拉起声明」与跨会话恢复语义；显式关闭采集的
+      // id 记入 dismissed（内存），本面板会话内不再自动复活（④不回收，③跳过）。
+      const startIds = [...connected].filter(
+        (id) => !activeTasks.has(id) && (watched.value[id] || !dismissedAuto.value.has(id)),
+      );
       let startLimitFailures = 0;
       await Promise.all(
         startIds.map(async (id) => {
@@ -363,8 +369,11 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
       if (disposed) return;
       taskLimitReached.value = startLimitFailures > 0;
 
-      // ④ 有任务但不在 watched → stop（stop 幂等；sidecar 收到后移除注册表条目）。
-      const stopIds = tasks.value.filter((task) => !watched.value[task.connectionId]).map((task) => task.connectionId);
+      // ④ 回收失效任务：会话已不在线且用户未声明 watched → stop（stop 幂等，
+      // sidecar 收到后移除注册表条目）。已连接主机的任务一律保留（自动采集）。
+      const stopIds = tasks.value
+        .filter((task) => !connected.has(task.connectionId) && !watched.value[task.connectionId])
+        .map((task) => task.connectionId);
       await Promise.all(stopIds.map((id) => api.invoke("monitor/stop", { connectionId: id }).catch(() => undefined)));
     } finally {
       reconcileInFlight = false;
@@ -373,13 +382,17 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
 
   // —— 动作 ——
 
-  /** 加入/移除监控。on：写键 → 未连接则经 hostReopen 拉起 → 立即收敛补 start；
-   * off：先 stop（幂等）再删键（下一轮 reconcile 兜底）。 */
+  /** 加入/移除监控。on：写键（同时清 dismissed）→ 未连接则经 hostReopen 拉起 →
+   * 立即收敛补 start；off：先 stop（幂等）再删键，并记入 dismissedAuto——
+   * 已连接主机的自动采集被用户显式关闭后，本面板会话内不再自动复活。 */
   async function toggleWatch(connectionId: string, on: boolean) {
     if (on) {
       if (watched.value[connectionId]) return;
       watched.value = { ...watched.value, [connectionId]: { addedAt: Date.now() } };
       persistWatched();
+      const dismissed = new Set(dismissedAuto.value);
+      dismissed.delete(connectionId);
+      dismissedAuto.value = dismissed;
       const row = connections.value.find((candidate) => candidate.id === connectionId);
       if (row && !isConnectedRow(row)) void reopenHostConnection(api, connectionId);
       await reconcile();
@@ -394,6 +407,9 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
     delete next[connectionId];
     watched.value = next;
     persistWatched();
+    if (!dismissedAuto.value.has(connectionId)) {
+      dismissedAuto.value = new Set([...dismissedAuto.value, connectionId]);
+    }
   }
 
   /** failed 卡片的 Retry：协议约定的 stop→start 序列（终态不可原地重启）。 */
