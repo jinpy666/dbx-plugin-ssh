@@ -36,6 +36,7 @@ import {
   Download,
   Eraser,
   ExternalLink,
+  Activity,
   FilePlus,
   FileText,
   FileUp,
@@ -5651,6 +5652,22 @@ function openCopiedSessionTab() {
   void api.openWorkbench("io.dbx.ssh.workbench", sessionTabContext(true), { forceNew: true, target: "tab" });
 }
 
+// 监控面板入口：打开 io.dbx.ssh.monitor 独立 tab，并携带当前连接摘要（面板
+// 侧字段探测消费，可用于定位/高亮该主机；缺 openWorkbench 桥的老宿主隐藏按钮）。
+const canOpenMonitorPanel = computed(() => Boolean(window.dbxPlugin?.openWorkbench));
+function openMonitorPanel() {
+  const api = window.dbxPlugin;
+  if (!api.openWorkbench || !connectionId.value) return;
+  void api.openWorkbench(
+    "io.dbx.ssh.monitor",
+    {
+      connectionId: connectionId.value,
+      connection: { id: connectionId.value, name: connection.value.name, readOnly: connection.value.readOnly === true },
+    },
+    { forceNew: true, target: "tab" },
+  );
+}
+
 // 命令会话（WT-4，WezTerm spawn 对标）：复制会话的同族入口，channel 启动
 // 动作从 shell 换成执行指定命令（独立 PTY，后端 shell 单引号转义）。弹窗
 // 收命令后 forceNew 开新 tab；共享 transport 引用、MaxSessions 失败可见等
@@ -9634,6 +9651,8 @@ function flagHintsSource(command: string): string {
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
         <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
+        <!-- 监控面板入口（多服务器 dashboard 独立 tab，与连接右键 manage-monitor 同一落点）：SSH 专属，本地模式隐藏。 -->
+        <button v-if="!localUiMode && canOpenMonitorPanel" class="icon-button icon-cyan" :title="t('monitor.title')" :aria-label="t('monitor.title')" :disabled="!connectionId" @click="openMonitorPanel"><Activity /></button>
         <!-- 鲸鱼按钮打开统一工作台并定位 Docker tab；再次点击关闭。 -->
         <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="toggleDockerPanel"><DockerWhaleLogo /></button>
         <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
