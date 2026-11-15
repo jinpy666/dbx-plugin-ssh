@@ -1,7 +1,8 @@
 import { createApp } from "vue";
 import App from "./App.vue";
 import TunnelManager from "./TunnelManager.vue";
-import { isTunnelManagerContext } from "./lib/pluginContext";
+import MonitorPanel from "./components/MonitorPanel.vue";
+import { isMonitorContribution, isTunnelManagerContext } from "./lib/pluginContext";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import "./styles/tailwind.css";
@@ -112,7 +113,13 @@ const boot = async () => {
     ? await withTimeout(api.request<Record<string, unknown>>("host.getContext"), HOST_HANDSHAKE_TIMEOUT_MS, "host.getContext")
     : undefined) ?? {};
   const context = { ...injectedContext, ...readyContext, ...requestedContext, quickStart: readyContext.quickStart === true || injectedContext.quickStart === true || openedContributionId === "io.dbx.ssh.tunnels.quick" };
-  const app = isTunnelManagerContext(context) ? createApp(TunnelManager, { context }) : createApp(App);
+  // Monitor 面板按 contribution id 路由（优先于 tunnels 弹层：二者 context 形状不同，
+  // monitor 面板是 provider-scoped 无连接工作台，不吃 connection context-menu 语义）。
+  const app = isMonitorContribution(openedContributionId)
+    ? createApp(MonitorPanel, { context })
+    : isTunnelManagerContext(context)
+      ? createApp(TunnelManager, { context })
+      : createApp(App);
   app.config.errorHandler = (error, _instance, info) => {
     console.error(`[vue] ${info}`, error);
     showBootFailure(error, info);

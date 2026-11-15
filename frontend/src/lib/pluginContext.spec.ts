@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isTunnelManagerContext, readPluginMode, readPluginShell, resolveWorkbenchId, tunnelManagerConnectionId } from "./pluginContext";
+import { isMonitorContribution, isTunnelManagerContext, MONITOR_CONTRIBUTION_ID, readPluginMode, readPluginShell, resolveWorkbenchId, tunnelManagerConnectionId } from "./pluginContext";
 
 // Read helpers for the PR-A4 context.plugin namespace. The cases lock two things: type-safe reads of the A4 target shape
 // type-safe reads (including the hard-switch rejection of the legacy { localTerminal: true } passthrough shape) and
@@ -58,5 +58,17 @@ describe("pluginContext (PR-A4 context.plugin namespace)", () => {
     expect(resolveWorkbenchId({ workbenchId: "   " }, "fallback")).toBe("fallback");
     expect(resolveWorkbenchId({ workbenchId: "null" }, "fallback")).toBe("fallback");
     expect(resolveWorkbenchId({ workbenchId: 42 }, "fallback")).toBe("fallback");
+  });
+
+  it("isMonitorContribution matches only the monitor workbench contribution id", () => {
+    expect(isMonitorContribution(MONITOR_CONTRIBUTION_ID)).toBe(true);
+    expect(isMonitorContribution("io.dbx.ssh.monitor")).toBe(true);
+    // Other workbench contributions (tunnels panel / quick tab) must keep the App route.
+    expect(isMonitorContribution("io.dbx.ssh.tunnels")).toBe(false);
+    expect(isMonitorContribution("io.dbx.ssh.tunnels.quick")).toBe(false);
+    // Legacy hosts never fire dbx-plugin-init with an id → undefined/blank stay on the App route.
+    expect(isMonitorContribution(undefined)).toBe(false);
+    expect(isMonitorContribution(null)).toBe(false);
+    expect(isMonitorContribution("")).toBe(false);
   });
 });

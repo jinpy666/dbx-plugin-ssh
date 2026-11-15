@@ -50,3 +50,14 @@ export function readPluginShell(context: Record<string, unknown> | undefined | n
   const shell = (plugin as Record<string, unknown>).shell;
   return typeof shell === "string" ? shell.trim() : "";
 }
+
+/**
+ * Monitor 面板（多服务器监控，DESIGN_MONITOR_PANEL）的 workbench contribution id，
+ * 与 Lane C 在 manifest contributions 注册的 id 保持一致；宿主 dbx-plugin-init
+ * 事件携带该 id 时 main.ts 优先路由到 MonitorPanel（早于 tunnels 弹层）。
+ */
+export const MONITOR_CONTRIBUTION_ID = "io.dbx.ssh.monitor";
+
+export function isMonitorContribution(contributionId: string | undefined | null): boolean {
+  return contributionId === MONITOR_CONTRIBUTION_ID;
+}
