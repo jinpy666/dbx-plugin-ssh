@@ -35,6 +35,19 @@ const FAST_WATCHDOG: Duration = Duration::from_secs(3);
 /// Backoff between watchdog reopen attempts (still cancellable).
 const REOPEN_BACKOFF: Duration = Duration::from_millis(500);
 
+/// Consecutive failed channel reopens the fast loop tolerates: the second
+/// consecutive failure is terminal (`failed`), one failure backs off and
+/// retries.
+const MAX_REOPEN_FAILURES: u32 = 2;
+
+/// Reopen-ladder decision, pure so the give-up rule stays unit-testable
+/// without a russh channel mock: once `reopen_failures` reaches
+/// [`MAX_REOPEN_FAILURES`] the loop must report `failed` and exit instead
+/// of backing off yet again.
+fn should_fail_after_reopen(reopen_failures: u32) -> bool {
+    reopen_failures >= MAX_REOPEN_FAILURES
+}
+
 const MON_FAST_SCRIPT: &str = concat!(
     "echo \"dbx-mon-cap $(uname -sr)\"; ",
     "[ -r /proc/stat ] && [ -r /proc/net/dev ] && [ -r /proc/meminfo ] || ",
@@ -58,13 +71,13 @@ const MON_FAST_SCRIPT: &str = concat!(
     "n_rx=0; n_tx=0; ",
     "case \"$iface\" in ?*) eval \"$(awk -v IF=\"$iface\" 'NR>2{sub(/:.*/,\"\",$1);",
     "if($1==IF){print \"n_rx=\"$2; print \"n_tx=\"$10; exit}}' /proc/net/dev)\";; esac; ",
-    "l1=$(awk '{print int($1*100)}' /proc/loadavg); ",
-    "printf 'dbx-mon c=%s,%s m=%s,%s n=%s,%s,%s l=%s\\n' ",
-    "\"$c_total\" \"$c_idle\" \"$m_total\" \"$m_avail\" \"$n_rx\" \"$n_tx\" \"$iface\" \"$l1\"; ",
+    "printf 'dbx-mon c=%s,%s m=%s,%s n=%s,%s,%s\\n' ",
+    "\"$c_total\" \"$c_idle\" \"$m_total\" \"$m_avail\" \"$n_rx\" \"$n_tx\" \"$iface\"; ",
     "sleep 1; done",
 );
 
 const MON_SLOW_SCRIPT: &str = concat!(
+    "[ -r /proc/loadavg ] && [ -r /proc/uptime ] || { echo \"dbx-det end\"; exit 0; }; ",
     "while :; do ",
     "echo \"dbx-det load=$(cut -d' ' -f1-3 /proc/loadavg)\"; ",
     "echo \"dbx-det uptime=$(awk '{print int($1)}' /proc/uptime)\"; ",
@@ -172,7 +185,6 @@ pub struct Counters {
     pub rx: u64,
     pub tx: u64,
     pub iface: String,
-    pub load1_x100: u64,
 }
 
 /// Classifies one fast-loop output line. Anything that is not one of the
@@ -197,14 +209,13 @@ pub fn parse_counter_line(line: &str) -> CounterLine {
 }
 
 /// Parses the field block `c=<total>,<idle> m=<total>,<avail>
-/// n=<rx>,<tx>,<iface> l=<x100>` as printed by the `MON_FAST_SCRIPT` printf.
+/// n=<rx>,<tx>,<iface>` as printed by the `MON_FAST_SCRIPT` printf.
 /// Every field must be present and numeric or the row is dropped (the
 /// callers only push fully-parsed rows into the diff chain).
 fn parse_counters(rest: &str) -> Option<Counters> {
     let mut cpu: Option<(u64, u64)> = None;
     let mut mem: Option<(u64, u64)> = None;
     let mut net: Option<(u64, u64, String)> = None;
-    let mut load: Option<u64> = None;
     for field in rest.split_whitespace() {
         let (key, value) = field.split_once('=')?;
         match key {
@@ -226,7 +237,7 @@ fn parse_counters(rest: &str) -> Option<Counters> {
                 }
                 net = Some((rx.parse().ok()?, tx.parse().ok()?, iface.to_string()));
             }
-            "l" => load = Some(value.parse().ok()?),
+            // Unknown keys (the retired l= among them) drop the whole row.
             _ => return None,
         }
     }
@@ -242,7 +253,6 @@ fn parse_counters(rest: &str) -> Option<Counters> {
         rx,
         tx,
         iface,
-        load1_x100: load?,
     })
 }
 
@@ -819,7 +829,7 @@ async fn run_fast_loop(
             }
             Err(error) => {
                 reopen_failures += 1;
-                if reopen_failures >= 2 {
+                if should_fail_after_reopen(reopen_failures) {
                     fail(&task, format!("monitor channel failed: {error}"));
                     return;
                 }
@@ -996,9 +1006,8 @@ mod tests {
     use serde_json::json;
 
     /// Fixture origin: `/proc/stat` (`cpu  user nice system idle iowait irq
-    /// softirq`), `/proc/meminfo` kB rows, `/proc/net/dev` byte counters and
-    /// `/proc/loadavg` (load1 ×100), as emitted by the printf in
-    /// `MON_FAST_SCRIPT`.
+    /// softirq`), `/proc/meminfo` kB rows and `/proc/net/dev` byte counters,
+    /// as emitted by the printf in `MON_FAST_SCRIPT`.
     #[allow(clippy::too_many_arguments)]
     fn counters(
         t: u64,
@@ -1019,13 +1028,12 @@ mod tests {
             rx,
             tx,
             iface: iface.to_string(),
-            load1_x100: 42,
         }
     }
 
     #[test]
     fn parses_a_valid_counter_line() {
-        let line = "dbx-mon c=1234567,987654 m=16384000,8192000 n=1048576,2048,eth0 l=42";
+        let line = "dbx-mon c=1234567,987654 m=16384000,8192000 n=1048576,2048,eth0";
         match parse_counter_line(line) {
             CounterLine::Counters(c) => {
                 assert_eq!(c.cpu_total, 1234567);
@@ -1035,7 +1043,6 @@ mod tests {
                 assert_eq!(c.rx, 1048576);
                 assert_eq!(c.tx, 2048);
                 assert_eq!(c.iface, "eth0");
-                assert_eq!(c.load1_x100, 42);
             }
             other => panic!("expected counters, got {other:?}"),
         }
@@ -1060,11 +1067,14 @@ mod tests {
             "dbx-mon",
             "dbx-mon garbage",
             "dbx-mon c=1,2 m=3",
-            "dbx-mon c=x,y m=1,2 n=1,2,eth0 l=1",
-            "dbx-mon c=1,2 m=1,2 n=1,2 l=1",
-            "dbx-mon c=1,2 m=1,2 n=1,2, l=1",
+            "dbx-mon c=x,y m=1,2 n=1,2,eth0",
+            "dbx-mon c=1,2 m=1,2 n=1,2",
+            "dbx-mon c=1,2 m=1,2 n=1,2,",
+            // The load1 counter is gone from the fast loop: an l= field is
+            // unknown now and the whole row must be dropped, not half-parsed.
             "dbx-mon c=1,2 m=1,2 n=1,2,eth0 l=zz",
-            "dbx-mon c=1,2 m=-1,2 n=1,2,eth0 l=1",
+            "dbx-mon c=1,2 m=1,2 n=1,2,eth0 l=1",
+            "dbx-mon c=1,2 m=-1,2 n=1,2,eth0",
             "dbx-det uptime=12",
             "hello",
         ] {
@@ -1082,7 +1092,7 @@ mod tests {
         // printing. This fixture is what that awk formula yields for
         // MemFree=1000 Buffers=200 Cached=300 SReclaimable=50 Shmem=80.
         assert_eq!(1000 + 200 + 300 + 50 - 80, 1470);
-        match parse_counter_line("dbx-mon c=100,50 m=4000,1470 n=0,0,eth0 l=10") {
+        match parse_counter_line("dbx-mon c=100,50 m=4000,1470 n=0,0,eth0") {
             CounterLine::Counters(c) => assert_eq!(c.mem_avail_kb, 1470),
             other => panic!("expected counters, got {other:?}"),
         }
@@ -1435,11 +1445,57 @@ mod tests {
         assert_eq!(pending, "dbx-mon c=1,2 m=3,4");
         let lines = drain_lines(
             &mut pending,
-            " n=5,6,eth0 l=7\ndbx-mon c=8,9 m=10,11 n=12,13,eth1 l=14\n",
+            " n=5,6,eth0\ndbx-mon c=8,9 m=10,11 n=12,13,eth1\n",
         );
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "dbx-mon c=1,2 m=3,4 n=5,6,eth0 l=7");
-        assert_eq!(lines[1], "dbx-mon c=8,9 m=10,11 n=12,13,eth1 l=14");
+        assert_eq!(lines[0], "dbx-mon c=1,2 m=3,4 n=5,6,eth0");
+        assert_eq!(lines[1], "dbx-mon c=8,9 m=10,11 n=12,13,eth1");
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn second_consecutive_reopen_failure_is_terminal() {
+        // The reopen ladder: one failed reopen backs off and retries, the
+        // second consecutive failure reports `failed` and stops the loop.
+        assert!(!should_fail_after_reopen(0));
+        assert!(!should_fail_after_reopen(1));
+        assert!(should_fail_after_reopen(2));
+        assert!(should_fail_after_reopen(3));
+    }
+
+    #[tokio::test]
+    async fn reopen_backoff_is_interrupted_by_cancel() {
+        // A cancel request must beat the 500ms backoff — otherwise
+        // monitor/stop would wait out a full sleep per pending reopen.
+        let (_tx, mut rx) = watch::channel(false);
+        let started = std::time::Instant::now();
+        assert!(!wait_cancelled_for(Duration::from_millis(50), &mut rx).await);
+        assert!(started.elapsed() >= Duration::from_millis(50));
+
+        let (tx, mut rx) = watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = tx.send(true);
+        });
+        let started = std::time::Instant::now();
+        assert!(wait_cancelled_for(Duration::from_secs(60), &mut rx).await);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn slow_script_guards_procfs_and_exits_gracefully_before_its_loop() {
+        // Same procfs guard style as the fast channel: without the /proc
+        // files the slow readers need, the script echoes the pre-existing
+        // end marker and exits 0 — an empty-but-valid burst, then a clean
+        // EOF (details just freeze). No new line shape enters the protocol.
+        let guard_at = MON_SLOW_SCRIPT
+            .find("[ -r /proc/loadavg ] && [ -r /proc/uptime ] || { echo \"dbx-det end\"; exit 0; }; ")
+            .expect("slow procfs guard with graceful end-marker exit");
+        assert_eq!(guard_at, 0, "guard runs before the loop");
+        assert!(
+            guard_at < MON_SLOW_SCRIPT.find("while :; do").expect("slow loop"),
+            "guard precedes the burst loop"
+        );
+        assert!(!MON_SLOW_SCRIPT.contains("dbx-det-unsupported"));
     }
 }

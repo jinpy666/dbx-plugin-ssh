@@ -1338,7 +1338,7 @@ sudo 模式下向登录用户不可写目录（如 `/root`）上传（对标 sud
 ### monitor/start、monitor/stop、monitor/status、monitor/snapshot、monitor/details
 
 监控面板常驻流式采集，每连接一对**常驻** exec 通道（区别于 `ssh/metrics` 的单次采集）：
-**快通道**每秒输出一行 `/proc` 计数器（CPU 累计、内存 kB、默认 iface 收发字节、loadavg×100），
+**快通道**每秒输出一行 `/proc` 计数器（CPU 累计、内存 kB、默认 iface 收发字节），
 **慢通道**每 5s 输出一组 load/uptime/磁盘/登录用户详情；速率与百分比全部在 sidecar 侧差分，
 远端只发计数器。脚本为单条 POSIX sh（Linux `/proc` 读取器；其余平台首行报不支持）。通道在
 会话连接上复用：`monitor/start` 只要求该连接存在**已连接**会话（任一工作台均可），不新拨连接；
