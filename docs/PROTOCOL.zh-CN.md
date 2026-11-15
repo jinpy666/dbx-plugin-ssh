@@ -72,6 +72,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `ssh/agent/mode/get` | 连接级 AI 终端模式探针（供宿主 MCP 桥转发前判定路由）：`{connectionId}` → `{agentTerminalMode: "off"\|"auto"\|"strict", hasTerminalSession: bool}`；未知连接降级为 `off` + `false` 而非报错，宿主侧任何失败同样回落静默路径 |
 | `ssh/metrics` | 采集服务器指标（CPU/内存/负载/磁盘（含 inode 使用率）+ 网络接口速率 + Top CPU/内存进程，只读命令；`cached: true` 返回上次快照；每次新鲜采集顺带落一行趋势历史） |
 | `ssh/metrics/history` | 趋势历史查询（`metrics-history.jsonl` 环形 720 行，按连接维度过滤，见下文） |
+| `monitor/start`、`monitor/stop`、`monitor/status`、`monitor/snapshot`、`monitor/details` | 监控面板常驻流式采集：每连接一对快慢 exec 通道（1s `/proc` 计数器 / 5s load/磁盘/用户详情），速率与百分比在 sidecar 侧差分；类型、状态机、iface 断轴与上限见下文 |
 | `ssh/processes/list`、`ssh/processes/kill` | 全量进程表（CPU 序，上限 500 行）与进程信号（pid/signal 校验，pid 0/1 拒绝），见下文 |
 | `ssh/recording/start`、`stop`、`list`、`get`、`delete` | 会话录制（asciicast v2 `.cast` 落盘、回放分页读取、列表/删除，见下文） |
 | `ssh/recording/clear`、`ssh/recording/reveal` | 录制管理补齐（家族语义见下文「会话录制」节）：`clear` 无参 → `{success, deleted}`——只删 recordings 目录内 `.cast`，单个删除失败（如 Windows 上进行中录制）跳过计数不整批失败；`reveal {recordingId}` → `{success: true}`——id 走路径穿越校验（`/`/`\`/`..` 拒绝）、文件已不存在报错后在文件管理器定位，非任意路径打开原语 |
@@ -1333,6 +1334,50 @@ sudo 模式下向登录用户不可写目录（如 `/root`）上传（对标 sud
 落盘为 `<data_dir>/metrics-history.jsonl`，每次**新鲜** `ssh/metrics` 采集追加一行（缓存命中不落），
 环形上限 720 行（≈5s 轮询 × 1h）；行按连接 id 维度过滤读取，跨 sidecar 重启保留；坏行跳过。
 `cpuPercent`/`memoryPercent` 快照缺失时整键省略（非 null 占位）。
+
+### monitor/start、monitor/stop、monitor/status、monitor/snapshot、monitor/details
+
+监控面板常驻流式采集，每连接一对**常驻** exec 通道（区别于 `ssh/metrics` 的单次采集）：
+**快通道**每秒输出一行 `/proc` 计数器（CPU 累计、内存 kB、默认 iface 收发字节、loadavg×100），
+**慢通道**每 5s 输出一组 load/uptime/磁盘/登录用户详情；速率与百分比全部在 sidecar 侧差分，
+远端只发计数器。脚本为单条 POSIX sh（Linux `/proc` 读取器；其余平台首行报不支持）。通道在
+会话连接上复用：`monitor/start` 只要求该连接存在**已连接**会话（任一工作台均可），不新拨连接；
+连接全部断开后快通道 EOF → failed。
+
+| 方法 | 入参 | 返回 |
+|---|---|---|
+| `monitor/start` | `{connectionId}` | `{state, since}`。幂等：已有任务（任意状态）原样返回现状态，需先 `monitor/stop` 才能重启 |
+| `monitor/stop` | `{connectionId}` | `{state:"stopped"}`。幂等：未知连接同样返回 stopped。stop 会把任务从注册表移除并显式关闭通道（EOF+CLOSE，远端 `while` 循环由 sshd 回收——drop Channel 不发 SSH_MSG_CHANNEL_CLOSE，与 exec 侧同一不变量） |
+| `monitor/status` | `{}` | `{tasks:[{connectionId, state, error?, since, primaryInterface?}]}`；`error`/`primaryInterface` 仅存在时序列化（error 只在 failed 态出现） |
+| `monitor/snapshot` | `{connectionIds?: string[], points?: number=120}` | `{samples:{[connectionId]:{state, live: Sample\|null, history: (Sample\|Gap)[], details: Details\|null}}}`。无任务的连接不出现在 samples 中；`points` clamp 1..720，`history` 取快环环尾 N（旧→新）；`live` 仅 live 态非空（环内最新一条 Sample，跳过尾部 Gap） |
+| `monitor/details` | `{connectionId}` | `Details`（慢通道最近一组 burst；尚无 burst 报错） |
+
+类型（serde camelCase）：
+
+```ts
+type MonitorState = "connecting" | "live" | "failed" | "unsupported" | "stopped";
+type Sample = { t: number; cpuPct: number; memTotalMb: number; memUsedMb: number; netRxKbps: number; netTxKbps: number; iface?: string };
+type Gap = { t: number; gap: true };
+type Details = { load1: number; load5: number; load15: number; uptimeSec: number; disks: { mount: string; totalKb: number; usedKb: number }[]; users: { user: string; tty: string; from: string }[] };
+```
+
+单位约定：`t` = **sidecar 到达时刻** Unix 毫秒（不采远端时间戳——busybox `date` 无 `%3N`，
+远端时钟不可信）；`cpuPct` 0..100 一位小数；内存 MB=1024² B；`netRxKbps`/`netTxKbps` =
+KiB/s（字节差分 ÷ 采样秒 ÷ 1024）一位小数；磁盘 KB=1024 B；`Details.load*` 为原始 loadavg。
+
+状态机：`connecting →(首个计数行)→ live`；`→(dbx-mon-unsupported 行)→ unsupported`
+（远端缺 `/proc/stat`、`/proc/net/dev` 或 `/proc/meminfo`，如 macOS/BSD；无 error 载荷）；
+`→(通道 EOF)→ failed{error}`；快通道另有 3s 无行看门狗——超时即重开通道（内核计数器不归零，
+差分链延续），连续 2 次重开失败 → `failed{error}`。failed/unsupported/stopped 均为**终态**，
+仅显式 `monitor/stop` + `monitor/start` 可复活。`since` 为当前状态的进入时刻（Unix 毫秒）。
+
+iface 断轴语义：默认 iface（`/proc/net/route` 缺省时回退 `/proc/net/dev` 首个非 lo）发生变化时，
+快通道先 push 一条 `{t, gap:true}` 再以新 iface 为基线重新差分——绝不跨 iface 计算速率；
+前端把 Gap 渲染为断轴。
+
+上限与生命周期：并发任务上限 24，`monitor/start` 超限返回
+`Err("monitor task limit reached (24)")`；快环 720 点（12 min @ 1s）、慢环 144 点（12 min @ 5s），
+满则丢弃最旧；任务纯内存不落盘，sidecar 重启即消失。
 
 ### ssh/processes/list、ssh/processes/kill
 
