@@ -5475,8 +5475,11 @@ async function openLocalShellSurfaceMenu() {
   localShellSurfaceOpen.value = true;
   await loadLocalShells();
   try {
-    const listed = await window.dbxPlugin.request<{ connections?: typeof dockConnections.value }>("host.listConnections");
-    dockConnections.value = listed?.connections ?? [];
+    // 宿主 dispatch 返回裸数组（PluginConnectionSummary[]）；兼容旧包裹形状。
+    // （包裹形状曾让真机 dock 连接列表恒空——与监控面板同款 wire 误设。）
+    const listed = await window.dbxPlugin.request<Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly?: boolean }> | { connections?: Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly?: boolean }> }>("host.listConnections");
+    const rawRows = Array.isArray(listed) ? listed : (listed?.connections ?? []);
+    dockConnections.value = rawRows;
   } catch {
     // Legacy hosts without the listConnections extension point: the connection section stays hidden.
     dockConnections.value = [];

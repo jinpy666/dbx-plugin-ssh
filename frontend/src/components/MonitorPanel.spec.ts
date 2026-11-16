@@ -200,6 +200,36 @@ describe("MonitorPanel", () => {
     mounted.wrapper.unmount();
   });
 
+  it("mirrors the dock tree: host groupId rows render as tree tabs/sections and member chips group by tree", async () => {
+    // tree 模式（宿主 PR #15003 字段在位）：区块镜像宿主侧栏组；tab = tree:前缀；
+    // 管理浮层成员区按 tree 分节（组头全选）。
+    pluginStore.setItem(
+      MONITOR_GROUPS_KEY,
+      JSON.stringify({ groups: [{ id: "g-mon", name: "My monitor", color: "", connectionIds: [] }] }),
+    );
+    const mounted = await mountPanel({
+      rows: [
+        connectionRow("c1", { groupId: "h1", groupName: "Prod" }),
+        connectionRow("c2", { groupId: "h1", groupName: "Prod" }),
+        connectionRow("c3", { groupId: "h2", groupName: "Staging" }),
+      ],
+      samples: { c1: snapshot("live", [sample(10)]), c2: snapshot("live", [sample(20)]), c3: snapshot("live", [sample(30)]) },
+    });
+    // tab 条：全部 + 两个 tree 组（只读镜像）+ 自建组（过滤视图）+ 管理。
+    const tabs = mounted.wrapper.findAll(".monitor-tab").map((tab) => tab.text());
+    expect(tabs).toEqual(["All", "Prod", "Staging", "My monitor", "Manage groups"]);
+    // 区块镜像 tree：组名/计数来自宿主 groupName。
+    const headers = mounted.wrapper.findAll("[data-group-id]");
+    expect(headers.map((header) => header.attributes("data-group-id"))).toEqual(["h1", "h2"]);
+    expect(headers[0].text()).toContain("Prod");
+    expect(headers[0].text()).toContain("2");
+    // tree 组 tab 点击 → 只渲染该组区块。
+    await mounted.wrapper.findAll(".monitor-tab").filter((tab) => tab.text() === "Staging")[0].trigger("click");
+    const stagingHeaders = mounted.wrapper.findAll("[data-group-id]");
+    expect(stagingHeaders.map((header) => header.attributes("data-group-id"))).toEqual(["h2"]);
+    mounted.wrapper.unmount();
+  });
+
   it("wires the watch toggle to monitor/start and monitor/stop with the watched key persisted", async () => {
     const mounted = await mountPanel({ rows: [connectionRow("c1")] });
     // 未 watched：卡片头部显示「加入监控」。

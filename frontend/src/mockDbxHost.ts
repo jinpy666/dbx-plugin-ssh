@@ -836,9 +836,11 @@ const request: DbxPluginApi["request"] = async <T = unknown>(method: string, par
   if (method === "host.listConnections") {
     // 宿主 dispatch 返回裸数组（PluginConnectionSummary[]）——mock 必须与真机
     // wire 形状一致（早期误设 {connections} 包裹对象曾让真机列表恒空）。
+    // ?tree=0 关闭 tree 分组叙事（回退自建分组/平铺走查）。
+    const treeGroups = !fixtureParams.has("tree0");
     return (localOnlyContext || quickFixture
       ? []
-      : [{ id: "visual-connection", name: "Production SSH", dbType: "ssh", connected: true, isConnected: true, providerId: "io.dbx.ssh.connection", connectionType: "ssh", readOnly: !writable }]) as T;
+      : [{ id: "visual-connection", name: "Production SSH", dbType: "plugin", connected: true, isConnected: true, providerId: "io.dbx.ssh.connection", connectionType: "ssh", readOnly: !writable, ...(treeGroups ? { groupId: "tree-prod", groupName: "Production" } : {}) }]) as T;
   }
   return null as T;
 };
