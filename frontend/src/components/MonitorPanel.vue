@@ -10,7 +10,7 @@
 // - 卡片：MonitorCard（五态徽标 / gap 分段 sparkline / 详情 / Retry）。
 // locale 经 window.dbxPlugin 初始值 + env 事件跟随（TunnelManager 同款）。
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { Eye, EyeOff } from "@lucide/vue";
+import { Eye, EyeOff, RefreshCw, X } from "@lucide/vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import MonitorCard, { GROUP_COLOR_PALETTE, groupColorIndex } from "./MonitorCard.vue";
 import { workbenchMessage } from "../lib/i18n";
@@ -166,6 +166,13 @@ function submitNewGroup() {
   <div class="monitor-panel">
     <header class="monitor-toolbar">
       <h1 class="monitor-title">{{ t("monitor.title") }}</h1>
+      <!-- 服务器计数摘要：列表来源就绪后的直观规模感（列表空时不显示） -->
+      <span v-if="connections.length" class="monitor-summary" data-testid="monitor-summary">
+        {{ connections.length }} · {{ tasks.filter((task: { state: string }) => task.state === "live").length }} live
+      </span>
+      <button type="button" class="monitor-icon-btn" :aria-label="t('monitor.refresh')" :title="t('monitor.refresh')" data-testid="monitor-refresh" @click="() => refresh()">
+        <RefreshCw :size="14" aria-hidden="true" />
+      </button>
       <div class="monitor-filter" role="group" :aria-label="t('monitor.title')">
         <button
           v-for="filter in Object.keys(FILTER_KEYS) as StatusFilter[]"
@@ -236,39 +243,47 @@ function submitNewGroup() {
       </button>
     </nav>
 
-    <!-- 分组管理弹层：新建 + 每组（名称/8 色板/成员勾选/删除） -->
-    <section v-if="groupManagerOpen" class="monitor-group-manager" data-testid="monitor-group-manager">
-      <form class="monitor-group-new" @submit.prevent="submitNewGroup">
-        <input v-model="draftName" class="monitor-group-input" :placeholder="t('monitor.groupName')" :aria-label="t('monitor.groupName')" />
-        <button type="submit" class="monitor-toolbar-btn" :disabled="!draftName.trim()">{{ t("monitor.groupNew") }}</button>
-      </form>
-      <div v-for="group in pluginGroups" :key="group.id" class="monitor-group-row" :data-group-id="group.id">
-        <div class="monitor-group-row-head">
-          <input class="monitor-group-input" :value="group.name" :aria-label="t('monitor.groupName')" @change="(event) => renameGroup(group.id, (event.target as HTMLInputElement).value)" />
-          <div class="monitor-group-colors" role="group" :aria-label="t('monitor.groupColor')">
-            <button
-              v-for="palette in GROUP_COLOR_PALETTE"
-              :key="palette"
-              type="button"
-              class="monitor-color-dot"
-              :class="{ 'is-active': group.color === palette }"
-              :style="{ backgroundColor: palette }"
-              :aria-label="`${t('monitor.groupColor')} ${palette}`"
-              @click="setGroupColor(group.id, group.color === palette ? '' : palette)"
-            ></button>
-          </div>
-          <button type="button" class="monitor-group-delete" @click="deleteGroup(group.id); if (activeTab === group.id) activeTab = 'all'">
-            {{ t("monitor.groupDelete") }}
+    <!-- 分组管理浮层：backdrop + 居中卡（不再内联推挤 dashboard） -->
+    <div v-if="groupManagerOpen" class="monitor-manager-overlay" @click.self="groupManagerOpen = false">
+      <section class="monitor-group-manager" data-testid="monitor-group-manager" role="dialog" :aria-label="t('monitor.groupManage')">
+        <header class="monitor-manager-head">
+          <strong>{{ t("monitor.groupManage") }}</strong>
+          <button type="button" class="monitor-icon-btn" :aria-label="t('monitor.close')" data-testid="monitor-group-close" @click="groupManagerOpen = false">
+            <X :size="15" aria-hidden="true" />
           </button>
+        </header>
+        <form class="monitor-group-new" @submit.prevent="submitNewGroup">
+          <input v-model="draftName" class="monitor-group-input" :placeholder="t('monitor.groupName')" :aria-label="t('monitor.groupName')" />
+          <button type="submit" class="monitor-toolbar-btn" :disabled="!draftName.trim()">{{ t("monitor.groupNew") }}</button>
+        </form>
+        <div v-for="group in pluginGroups" :key="group.id" class="monitor-group-row" :data-group-id="group.id">
+          <div class="monitor-group-row-head">
+            <input class="monitor-group-input" :value="group.name" :aria-label="t('monitor.groupName')" @change="(event) => renameGroup(group.id, (event.target as HTMLInputElement).value)" />
+            <div class="monitor-group-colors" role="group" :aria-label="t('monitor.groupColor')">
+              <button
+                v-for="palette in GROUP_COLOR_PALETTE"
+                :key="palette"
+                type="button"
+                class="monitor-color-dot"
+                :class="{ 'is-active': group.color === palette }"
+                :style="{ backgroundColor: palette }"
+                :aria-label="`${t('monitor.groupColor')} ${palette}`"
+                @click="setGroupColor(group.id, group.color === palette ? '' : palette)"
+              ></button>
+            </div>
+            <button type="button" class="monitor-group-delete" @click="deleteGroup(group.id); if (activeTab === group.id) activeTab = 'all'">
+              {{ t("monitor.groupDelete") }}
+            </button>
+          </div>
+          <div class="monitor-group-members">
+            <label v-for="row in connections" :key="row.id" class="monitor-member-chip" :class="{ 'is-member': group.connectionIds.includes(row.id) }">
+              <input type="checkbox" :checked="group.connectionIds.includes(row.id)" @change="() => toggleGroupMember(group.id, row.id)" />
+              {{ privacy ? `#${connections.indexOf(row) + 1}` : row.name }}
+            </label>
+          </div>
         </div>
-        <div class="monitor-group-members">
-          <label v-for="row in connections" :key="row.id" class="monitor-member-chip" :class="{ 'is-member': group.connectionIds.includes(row.id) }">
-            <input type="checkbox" :checked="group.connectionIds.includes(row.id)" @change="() => toggleGroupMember(group.id, row.id)" />
-            {{ privacy ? `#${connections.indexOf(row) + 1}` : row.name }}
-          </label>
-        </div>
-      </div>
-    </section>
+      </section>
+    </div>
 
     <!-- 连续 3 次快照失败后轮询自停：横幅即恢复按钮（refresh 会清 pollStopped） -->
     <button v-if="pollStopped" type="button" class="monitor-banner" @click="() => refresh()">{{ t("monitor.pollStopped") }}</button>
@@ -388,6 +403,71 @@ function submitNewGroup() {
 }
 .monitor-tab-manage {
   border-style: dashed;
+}
+/* —— 工具栏摘要与刷新 —— */
+.monitor-summary {
+  font-size: 0.6875rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.monitor-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 6px;
+  border: none;
+  color: var(--muted-foreground);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.monitor-icon-btn:hover {
+  color: var(--foreground);
+  background: var(--muted);
+}
+.monitor-icon-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+/* —— 分组管理浮层（backdrop + 居中卡） —— */
+.monitor-manager-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 4rem 1rem 1rem;
+  background: rgb(0 0 0 / 0.5);
+  backdrop-filter: blur(2px);
+}
+.monitor-group-manager {
+  width: min(560px, 100%);
+  max-height: min(70vh, 560px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  padding: 0.875rem;
+  background: var(--card, var(--background));
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.35);
+}
+.monitor-manager-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.monitor-manager-head strong {
+  font-size: 0.8125rem;
 }
 /* —— 分组管理弹层 —— */
 .monitor-group-manager {

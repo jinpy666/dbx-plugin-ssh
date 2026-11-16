@@ -51,7 +51,7 @@ export function historySeries(history: readonly MonitorHistoryEntry[], pick: (sa
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { SquareTerminal } from "@lucide/vue";
+import { CheckCircle2, Loader2, PlusCircle, SquareTerminal } from "@lucide/vue";
 import { sparklineSegments } from "../lib/metricsSparkline";
 import type { MonitorConnectionRow, MonitorSnapshot, MonitorState } from "../composables/useMonitorPanel";
 
@@ -132,24 +132,28 @@ function formatUptime(seconds: number): string {
       <strong class="monitor-card-name">{{ displayName }}</strong>
       <span v-if="badgeKey" class="monitor-badge" :data-state="state">{{ t(badgeKey) }}</span>
       <span class="monitor-card-spacer" aria-hidden="true"></span>
+      <!-- 开关收敛为单一 icon-toggle：on=实色勾（title 承载移出文案），off=线框加号 -->
       <button
         type="button"
-        class="monitor-chip-btn"
+        class="monitor-icon-btn monitor-watch-btn"
+        :class="{ 'is-on': watched }"
         :aria-pressed="watched"
+        :aria-label="watched ? t('monitor.removeWatch') : t('monitor.addWatch')"
         :title="watched ? t('monitor.removeWatch') : t('monitor.addWatch')"
         @click="emit('toggle-watch', row.id, !watched)"
       >
-        {{ watched ? t("monitor.removeWatch") : t("monitor.addWatch") }}
+        <CheckCircle2 v-if="watched" :size="15" aria-hidden="true" />
+        <PlusCircle v-else :size="15" aria-hidden="true" />
       </button>
       <button
         v-if="connected"
         type="button"
-        class="monitor-chip-btn monitor-terminal-btn"
+        class="monitor-icon-btn"
         :aria-label="t('monitor.openTerminal')"
         :title="t('monitor.openTerminal')"
         @click="emit('open-terminal', row)"
       >
-        <SquareTerminal :size="13" aria-hidden="true" />
+        <SquareTerminal :size="15" aria-hidden="true" />
       </button>
     </header>
 
@@ -166,6 +170,7 @@ function formatUptime(seconds: number): string {
     <!-- 已连接、采集尚未起表（自动采集在途/watched 声明待首跑）：连接中叙事占位。
          自动采集下该状态只在 start 前一瞬；持续停留 = start 失败（状态徽标会转 failed）。 -->
     <div v-else-if="!watched && !state" class="monitor-placeholder">
+      <Loader2 class="monitor-placeholder-spin" :size="16" aria-hidden="true" />
       <p class="monitor-placeholder-text">{{ t("monitor.badgeConnecting") }}</p>
     </div>
 
@@ -247,6 +252,11 @@ function formatUptime(seconds: number): string {
   border-radius: var(--radius, 8px);
   background: var(--card, transparent);
   min-width: 0;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+.monitor-card:hover {
+  border-color: var(--muted-foreground);
+  box-shadow: 0 1px 6px rgb(0 0 0 / 0.18);
 }
 .monitor-card--dimmed {
   opacity: 0.55;
@@ -254,7 +264,7 @@ function formatUptime(seconds: number): string {
 .monitor-card-head {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
   min-width: 0;
 }
 .monitor-card-name {
@@ -269,20 +279,85 @@ function formatUptime(seconds: number): string {
 }
 .monitor-badge {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
   font-size: 0.6875rem;
   line-height: 1;
-  padding: 0.25rem 0.375rem;
+  padding: 0.25rem 0.5rem 0.25rem 0.4rem;
   border-radius: 999px;
   border: 1px solid var(--border);
   color: var(--muted-foreground);
 }
+/* 状态点：live 绿 + 呼吸脉冲；failed 红；connecting 黄 + 闪烁。 */
+.monitor-badge::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: currentColor;
+  flex: none;
+}
 .monitor-badge[data-state="live"] {
   color: var(--success);
-  border-color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+}
+.monitor-badge[data-state="live"]::before {
+  animation: monitor-pulse 2s ease-in-out infinite;
 }
 .monitor-badge[data-state="failed"] {
   color: var(--destructive);
-  border-color: var(--destructive);
+  border-color: color-mix(in srgb, var(--destructive) 45%, transparent);
+}
+.monitor-badge[data-state="connecting"] {
+  color: var(--warning, #eab308);
+  border-color: color-mix(in srgb, var(--warning, #eab308) 45%, transparent);
+}
+.monitor-badge[data-state="connecting"]::before {
+  animation: monitor-blink 1.1s ease-in-out infinite;
+}
+@keyframes monitor-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes monitor-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+.monitor-icon-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 6px;
+  border: none;
+  color: var(--muted-foreground);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.monitor-icon-btn:hover {
+  color: var(--foreground);
+  background: var(--muted);
+}
+.monitor-icon-btn.is-on {
+  color: var(--primary);
+}
+.monitor-icon-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
 }
 .monitor-chip-btn {
   flex: none;
@@ -296,6 +371,7 @@ function formatUptime(seconds: number): string {
   color: var(--muted-foreground);
   background: transparent;
   cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
 }
 .monitor-chip-btn:hover {
   color: var(--foreground);
@@ -305,19 +381,34 @@ function formatUptime(seconds: number): string {
   color: var(--primary);
   border-color: var(--primary);
 }
+.monitor-chip-btn[aria-expanded="true"] {
+  color: var(--foreground);
+  border-color: var(--muted-foreground);
+}
 .monitor-retry-btn {
   color: var(--destructive);
   border-color: var(--destructive);
 }
 .monitor-placeholder {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 0.375rem;
   min-height: 64px;
   padding: 0.5rem;
   border: 1px dashed var(--border);
   border-radius: 6px;
   background: var(--muted);
+}
+.monitor-placeholder-spin {
+  color: var(--muted-foreground);
+  animation: monitor-spin 1.2s linear infinite;
+}
+@keyframes monitor-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .monitor-placeholder-text {
   margin: 0;
@@ -332,10 +423,16 @@ function formatUptime(seconds: number): string {
 }
 .monitor-series {
   display: grid;
-  grid-template-columns: 3.25rem 1fr 5.5rem;
+  grid-template-columns: 3.25rem 1fr 6.5rem;
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
+  border-radius: 4px;
+  padding: 0 0.25rem;
+  transition: background-color 0.15s ease;
+}
+.monitor-series:hover {
+  background: var(--muted);
 }
 .monitor-series-label {
   font-size: 0.6875rem;
@@ -344,12 +441,14 @@ function formatUptime(seconds: number): string {
 .monitor-series-spark {
   display: block;
   width: 100%;
-  height: 24px;
+  height: 26px;
 }
 .monitor-series-spark polyline {
   fill: none;
   stroke: var(--primary);
-  stroke-width: 1.5;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .monitor-series-spark[data-metric="mem"] polyline {
   stroke: var(--success);
@@ -359,7 +458,8 @@ function formatUptime(seconds: number): string {
 }
 .monitor-series-value {
   font-size: 0.6875rem;
-  color: var(--muted-foreground);
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
   text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;

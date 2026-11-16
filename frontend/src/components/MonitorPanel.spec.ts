@@ -171,8 +171,8 @@ describe("MonitorPanel", () => {
     // unsupported 说明文案（占位区正文复用徽标文案）。
     expect(article("c3").find(".monitor-placeholder").text()).toContain("Not supported");
     // 终端按钮仅在已连接卡片出现；点击走 openWorkbench（App.vue openConnectionSurface 形状）。
-    expect(article("c1").find(".monitor-terminal-btn").exists()).toBe(true);
-    await article("c1").find(".monitor-terminal-btn").trigger("click");
+    expect(article("c1").find("button[aria-label='Open terminal']").exists()).toBe(true);
+    await article("c1").find("button[aria-label='Open terminal']").trigger("click");
     await flushPromises();
     expect(mounted.terminals).toEqual([
       {
@@ -203,7 +203,7 @@ describe("MonitorPanel", () => {
   it("wires the watch toggle to monitor/start and monitor/stop with the watched key persisted", async () => {
     const mounted = await mountPanel({ rows: [connectionRow("c1")] });
     // 未 watched：卡片头部显示「加入监控」。
-    const add = mounted.wrapper.find("article[data-connection-id='c1']").findAll("button").find((button) => button.text() === "Add to monitor");
+    const add = mounted.wrapper.find("article[data-connection-id='c1'] button[aria-label='Add to monitor']");
     expect(add).toBeTruthy();
     await add!.trigger("click");
     await flushPromises();
@@ -212,7 +212,7 @@ describe("MonitorPanel", () => {
     expect(Object.keys(raw.watched)).toEqual(["c1"]);
 
     // 已 watched：按钮翻转为「移出监控」→ stop + 删键。
-    const stop = mounted.wrapper.find("article[data-connection-id='c1']").findAll("button").find((button) => button.text() === "Remove from monitor");
+    const stop = mounted.wrapper.find("article[data-connection-id='c1'] button[aria-label='Remove from monitor']");
     expect(stop).toBeTruthy();
     await stop!.trigger("click");
     await flushPromises();

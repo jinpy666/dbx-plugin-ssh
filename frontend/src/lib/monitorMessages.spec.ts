@@ -31,6 +31,7 @@ const MONITOR_KEYS = [
   "monitor.detailsDisks",
   "monitor.detailsUsers",
   "monitor.sessionClosed",
+  "monitor.close",
   "monitor.pollStopped",
   "monitor.emptyGroup",
   "monitor.noServers",
