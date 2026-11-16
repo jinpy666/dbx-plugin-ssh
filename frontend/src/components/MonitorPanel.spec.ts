@@ -5,6 +5,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import MonitorPanel from "./MonitorPanel.vue";
 import { GROUP_COLOR_PALETTE, groupColorIndex } from "./MonitorCard.vue";
 import {
+  MONITOR_GROUPS_KEY,
   MONITOR_PRIVACY_KEY,
   MONITOR_WATCHED_KEY,
   type MonitorHistoryEntry,
@@ -72,20 +73,26 @@ async function mountPanel(options: { rows?: Row[]; samples?: Record<string, Moni
 afterEach(() => {
   pluginStore.removeItem(MONITOR_WATCHED_KEY);
   pluginStore.removeItem(MONITOR_PRIVACY_KEY);
+  pluginStore.removeItem(MONITOR_GROUPS_KEY);
   vi.unstubAllGlobals();
   document.body.innerHTML = "";
 });
 
 describe("MonitorPanel", () => {
-  it("renders grouped sections by first appearance and falls back to a flat grid without groupId", async () => {
-    // 分组：行含 groupId/groupName → 分组分区（组头 = 色条 + 组名 + 计数），
-    // 组序 = 数组首次出现序。
+  it("renders grouped sections from plugin group config and falls back to a flat grid without config", async () => {
+    // 自建分组驱动（面板 tab/区块/配色单一来源）：预置 ssh-monitor-groups，
+    // 组序 = 配置序；tab 条渲染「全部 + 各组」。
+    pluginStore.setItem(
+      MONITOR_GROUPS_KEY,
+      JSON.stringify({
+        groups: [
+          { id: "g1", name: "Prod", color: GROUP_COLOR_PALETTE[2], connectionIds: ["c1", "c2"] },
+          { id: "g2", name: "Staging", color: "", connectionIds: ["c3"] },
+        ],
+      }),
+    );
     const grouped = await mountPanel({
-      rows: [
-        connectionRow("c1", { groupId: "g1", groupName: "Prod" }),
-        connectionRow("c2", { groupId: "g1", groupName: "Prod" }),
-        connectionRow("c3", { groupId: "g2", groupName: "Staging" }),
-      ],
+      rows: [connectionRow("c1"), connectionRow("c2"), connectionRow("c3")],
       samples: { c1: snapshot("live", [sample(10)]), c2: snapshot("live", [sample(20)]), c3: snapshot("live", [sample(30)]) },
     });
     const headers = grouped.wrapper.findAll("[data-group-id]");
@@ -94,18 +101,25 @@ describe("MonitorPanel", () => {
     expect(headers[1].text()).toContain("Staging");
     expect(headers[0].text()).toContain("2");
     expect(headers[1].text()).toContain("1");
-    // 组头色条取 8 色板（FNV-1a hash % 8）。
-    expect(headers[0].find(".monitor-group-accent").attributes("style")).toContain(GROUP_COLOR_PALETTE[groupColorIndex("g1")]);
+    // 组头色条取组配置色（g1 显式色板值；g2 无配置走 hash 派生）。
+    expect(headers[0].find(".monitor-group-accent").attributes("style")).toContain(GROUP_COLOR_PALETTE[2]);
+    expect(headers[1].find(".monitor-group-accent").attributes("style")).toContain(GROUP_COLOR_PALETTE[groupColorIndex("g2")]);
+    // tab 条：全部 + 两个组 tab。
+    const tabs = grouped.wrapper.findAll(".monitor-tab");
+    expect(tabs.map((tab) => tab.text())).toEqual(["All", "Prod", "Staging", "Manage groups"]);
     expect(grouped.wrapper.findAll("article")).toHaveLength(3);
     grouped.wrapper.unmount();
 
-    // 降级：行无 groupId 字段 → 单一平铺区（无组头）。
+    // 无分组配置 → 单一平铺区（无组头，无组 tab）。
+    // 无分组配置 → 单一平铺区（无组头，无组 tab）；先清上一场景的 storage 残留。
+    pluginStore.removeItem(MONITOR_GROUPS_KEY);
     const flat = await mountPanel({
       rows: [connectionRow("c1"), connectionRow("c2"), connectionRow("c3")],
       samples: { c1: snapshot("live", [sample(10)]), c2: snapshot("live", [sample(20)]), c3: snapshot("live", [sample(30)]) },
     });
     expect(flat.wrapper.findAll("article")).toHaveLength(3);
     expect(flat.wrapper.find("[data-group-id]").exists()).toBe(false);
+    expect(flat.wrapper.findAll(".monitor-tab").map((tab) => tab.text())).toEqual(["All", "Manage groups"]);
     flat.wrapper.unmount();
   });
 

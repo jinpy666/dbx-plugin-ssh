@@ -159,6 +159,8 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-monitor-watched",
   "ssh-monitor-privacy",
   "ssh-monitor-refresh-ms",
+  // 监控分组配置（wire {groups:[{id,name,color,connectionIds}]}）：面板 tab/区块/配色单一来源。
+  "ssh-monitor-groups",
 ];
 
 export const pluginStore = createPluginKvStore([...PLUGIN_STORE_KEYS]);

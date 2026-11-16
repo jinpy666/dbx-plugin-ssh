@@ -105,6 +105,7 @@ describe("ssh pluginStore wiring", () => {
         "ssh-monitor-watched",
         "ssh-monitor-privacy",
         "ssh-monitor-refresh-ms",
+        "ssh-monitor-groups",
       ].sort(),
     );
     for (const banned of [

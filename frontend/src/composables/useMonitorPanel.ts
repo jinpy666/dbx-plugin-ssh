@@ -86,6 +86,32 @@ interface MonitorSessionRow {
   host?: string;
 }
 
+/** 插件自建监控分组（面板 tab/区块/配色单一来源；宿主侧栏组独立于本配置）。 */
+export interface MonitorGroupConfig {
+  id: string;
+  name: string;
+  /** 8 色板内的取值（GROUP_COLOR_PALETTE 语义）；空串 = 派生色（hash）。 */
+  color: string;
+  connectionIds: string[];
+}
+
+/** groups wire 校验：数组、每项 id/name 非空串、connectionIds 字符串数组。 */
+function isGroupsWire(value: unknown): value is { groups: MonitorGroupConfig[] } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const groups = (value as { groups?: unknown }).groups;
+  if (!Array.isArray(groups)) return false;
+  return groups.every(
+    (group) =>
+      group &&
+      typeof group === "object" &&
+      typeof (group as MonitorGroupConfig).id === "string" &&
+      !!(group as MonitorGroupConfig).id &&
+      typeof (group as MonitorGroupConfig).name === "string" &&
+      Array.isArray((group as MonitorGroupConfig).connectionIds) &&
+      (group as MonitorGroupConfig).connectionIds.every((id) => typeof id === "string"),
+  );
+}
+
 /** window.dbxPlugin 的 MonitorApi 子集（sidecar RPC 走 invoke，宿主扩展点走 request）。 */
 export interface MonitorApi {
   invoke(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<unknown>;
@@ -105,6 +131,7 @@ export interface MonitorTimers {
 export const MONITOR_WATCHED_KEY = "ssh-monitor-watched";
 export const MONITOR_PRIVACY_KEY = "ssh-monitor-privacy";
 export const MONITOR_REFRESH_MS_KEY = "ssh-monitor-refresh-ms";
+export const MONITOR_GROUPS_KEY = "ssh-monitor-groups";
 
 const RECONCILE_INTERVAL_MS = 5000;
 const SNAPSHOT_FAILURE_LIMIT = 3;
@@ -169,6 +196,8 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
   const listDiagnostics = ref<{ listState: "ok" | "null" | "error"; listCount: number }>({ listState: "ok", listCount: 0 });
   // 用户显式停止采集的连接（内存，面板会话内有效）：自动采集不复活的闸。
   const dismissedAuto = ref<Set<string>>(new Set());
+  // —— 插件自建分组（面板 tab/区块/配色）——
+  const groups: Ref<MonitorGroupConfig[]> = ref([]);
 
   // —— 偏好持久化（pluginStore 通道；键已登记水合白名单）——
 
@@ -190,6 +219,72 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
     } catch {
       // 存储不可用（无宿主桥的直连调试）：面板内存态仍可用，仅不跨重启。
     }
+  }
+
+  // —— 分组 CRUD（插件自建；wire 形态 {groups:[…]}）——
+
+  function persistGroups() {
+    try {
+      storage.setItem(MONITOR_GROUPS_KEY, JSON.stringify({ groups: groups.value }));
+    } catch {
+      // 同 watched：无桥直连调试时降级为会话内状态。
+    }
+  }
+
+  function loadGroups(): MonitorGroupConfig[] {
+    try {
+      const raw = storage.getItem(MONITOR_GROUPS_KEY);
+      if (!raw) return [];
+      const parsed: unknown = JSON.parse(raw);
+      return isGroupsWire(parsed) ? parsed.groups : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function createGroup(name: string): string {
+    const trimmed = name.trim();
+    if (!trimmed) return "";
+    const group: MonitorGroupConfig = {
+      id: `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      name: trimmed,
+      color: "",
+      connectionIds: [],
+    };
+    groups.value = [...groups.value, group];
+    persistGroups();
+    return group.id;
+  }
+
+  function renameGroup(groupId: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    groups.value = groups.value.map((group) => (group.id === groupId ? { ...group, name: trimmed } : group));
+    persistGroups();
+  }
+
+  function deleteGroup(groupId: string) {
+    groups.value = groups.value.filter((group) => group.id !== groupId);
+    persistGroups();
+  }
+
+  function setGroupColor(groupId: string, color: string) {
+    groups.value = groups.value.map((group) => (group.id === groupId ? { ...group, color } : group));
+    persistGroups();
+  }
+
+  function toggleGroupMember(groupId: string, connectionId: string) {
+    groups.value = groups.value.map((group) => {
+      if (group.id !== groupId) return group;
+      const has = group.connectionIds.includes(connectionId);
+      return { ...group, connectionIds: has ? group.connectionIds.filter((id) => id !== connectionId) : [...group.connectionIds, connectionId] };
+    });
+    persistGroups();
+  }
+
+  /** 连接的插件分组归属（一个连接至多属一个组——首次命中即返回）。 */
+  function groupOfConnection(connectionId: string): string {
+    return groups.value.find((group) => group.connectionIds.includes(connectionId))?.id ?? "";
   }
 
   function loadPrivacy(): boolean {
@@ -305,7 +400,11 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
         const rawRows: MonitorConnectionRow[] = Array.isArray(listed) ? listed : (listed?.connections ?? []);
         if (listed == null) listState = "null";
         listCount = rawRows.length;
-        rows = rawRows.filter((row) => row && typeof row.id === "string" && row.id && row.dbType === "ssh");
+        // 真机宿主把插件连接的 db_type 存为 "plugin"（connectionStore.ts:5446），
+        // SSH 身份看 plugin_connection_type === "ssh"（用户库实锤：db_type=plugin +
+        // provider=io.dbx.ssh.connection + type=ssh）；兼容原生 db_type="ssh" 的
+        // 表示。vnc/rdp/local 由 connectionType 白名单排除。
+        rows = rawRows.filter((row) => row && typeof row.id === "string" && row.id && (row.dbType === "ssh" ? row.connectionType === undefined || row.connectionType === "ssh" : row.dbType === "plugin" && row.providerId?.startsWith("io.dbx.ssh.") === true && row.connectionType === "ssh"));
       } catch {
         listState = "error";
       }
@@ -450,6 +549,7 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
     // 重入守卫：timer 未摘除前二次 start 会双开节拍（并覆盖 reconcileTimer 泄漏首柄）。
     if (disposed || snapshotTimer !== null || reconcileTimer !== null) return;
     watched.value = loadWatched();
+    groups.value = loadGroups();
     privacy.value = loadPrivacy();
     refreshMs.value = loadRefreshMs();
     await Promise.all([reconcile(), pollSnapshot()]);
@@ -473,6 +573,13 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
     tasks,
     snapshots,
     watched,
+    groups,
+    createGroup,
+    renameGroup,
+    deleteGroup,
+    setGroupColor,
+    toggleGroupMember,
+    groupOfConnection,
     privacy,
     refreshMs,
     pollStopped,

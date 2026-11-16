@@ -30,6 +30,12 @@ const {
   tasks,
   snapshots,
   watched,
+  groups: pluginGroups,
+  createGroup,
+  renameGroup,
+  deleteGroup,
+  setGroupColor,
+  toggleGroupMember,
   privacy,
   refreshMs,
   pollStopped,
@@ -70,6 +76,8 @@ type PanelCardState = (typeof CARD_STATES)[number];
 interface MonitorGroupView {
   /** 空串 = 平铺桶（无 groupId 字段的行/整体降级），不渲染组头。 */
   id: string;
+  /** 自建分组的显式色（空串走 hash 派生；平铺桶恒为空串）。 */
+  color?: string;
   name: string;
   rows: MonitorConnectionRow[];
 }
@@ -103,25 +111,30 @@ function matchesFilter(state: PanelCardState | ""): boolean {
 
 const groups = computed<MonitorGroupView[]>(() => {
   const rows = connections.value;
-  // Phase 1 降级：任一行都不带 groupId → 单一平铺区。
-  if (!rows.some((row) => typeof row.groupId === "string" && row.groupId)) {
-    return [{ id: "", name: "", rows }];
-  }
-  // 组序 = 数组首次出现序；无 groupId 的行落入尾部平铺桶（不渲染组头）。
-  const order: string[] = [];
-  const names = new Map<string, string>();
-  const byGroup = new Map<string, MonitorConnectionRow[]>();
-  for (const row of rows) {
-    const groupId = typeof row.groupId === "string" && row.groupId ? row.groupId : "";
-    if (!byGroup.has(groupId)) {
-      byGroup.set(groupId, []);
-      order.push(groupId);
-    }
-    if (!names.has(groupId) && typeof row.groupName === "string" && row.groupName) names.set(groupId, row.groupName);
-    byGroup.get(groupId)!.push(row);
-  }
-  return order.map((groupId) => ({ id: groupId, name: names.get(groupId) ?? groupId, rows: byGroup.get(groupId)! }));
+  // 自建分组驱动（面板 tab/区块/配色单一来源）：配置序 = 区块序；未入组成员
+  // 落尾部平铺桶（不渲染组头）。宿主 groupId 字段（PR #15003）暂不参与渲染，
+  // 避免双分组体系——落地后再评估合并策略。
+  const viewGroups: MonitorGroupView[] = pluginGroups.value.map((group) => ({
+    id: group.id,
+    name: group.name,
+    color: group.color,
+    rows: rows.filter((row) => group.connectionIds.includes(row.id)),
+  }));
+  const ungrouped = rows.filter((row) => !pluginGroups.value.some((group) => group.connectionIds.includes(row.id)));
+  if (ungrouped.length) viewGroups.push({ id: "", name: "", color: "", rows: ungrouped });
+  return viewGroups.filter((group) => group.id === "" || group.rows.length > 0);
 });
+
+/** 面板 tab：全部 + 自建分组（含空组——tab 是入口，删成员不该抹掉配置）。 */
+const groupTabs = computed(() => pluginGroups.value.map((group) => ({ id: group.id, name: group.name, color: group.color })));
+
+const activeTab = ref<string>("all");
+
+function groupAccent(group: MonitorGroupView): string {
+  const configured = pluginGroups.value.find((candidate) => candidate.id === group.id)?.color;
+  if (configured) return configured;
+  return GROUP_COLOR_PALETTE[groupColorIndex(group.id)];
+}
 
 function cardEntries(group: MonitorGroupView): MonitorCardEntry[] {
   const entries: MonitorCardEntry[] = [];
@@ -136,8 +149,16 @@ function cardEntries(group: MonitorGroupView): MonitorCardEntry[] {
   return entries;
 }
 
-function groupAccent(group: MonitorGroupView): string {
-  return GROUP_COLOR_PALETTE[groupColorIndex(group.id)];
+// —— 分组管理弹层 ——
+const groupManagerOpen = ref(false);
+const draftName = ref("");
+
+function submitNewGroup() {
+  const id = createGroup(draftName.value);
+  if (id) {
+    draftName.value = "";
+    activeTab.value = id;
+  }
 }
 </script>
 
@@ -183,6 +204,72 @@ function groupAccent(group: MonitorGroupView): string {
       </button>
     </header>
 
+    <!-- 分组 tab 条：全部 + 自建分组（色点）+ 管理入口。空连接列表也渲染，方便先建组。 -->
+    <nav class="monitor-tabs" role="tablist" :aria-label="t('monitor.groupAll')">
+      <button
+        type="button"
+        class="monitor-tab"
+        :class="{ 'is-active': activeTab === 'all' }"
+        role="tab"
+        data-testid="monitor-tab-all"
+        :aria-selected="activeTab === 'all'"
+        @click="activeTab = 'all'"
+      >
+        {{ t("monitor.groupAll") }}
+      </button>
+      <button
+        v-for="tab in groupTabs"
+        :key="tab.id"
+        type="button"
+        class="monitor-tab"
+        :class="{ 'is-active': activeTab === tab.id }"
+        role="tab"
+        :data-testid="`monitor-tab-${tab.id}`"
+        :aria-selected="activeTab === tab.id"
+        @click="activeTab = tab.id"
+      >
+        <span class="monitor-tab-dot" :style="{ backgroundColor: tab.color || groupAccent({ id: tab.id, name: tab.name, color: tab.color, rows: [] }) }" aria-hidden="true"></span>
+        {{ tab.name }}
+      </button>
+      <button type="button" class="monitor-tab monitor-tab-manage" :aria-pressed="groupManagerOpen" data-testid="monitor-group-manage" @click="groupManagerOpen = !groupManagerOpen">
+        {{ t("monitor.groupManage") }}
+      </button>
+    </nav>
+
+    <!-- 分组管理弹层：新建 + 每组（名称/8 色板/成员勾选/删除） -->
+    <section v-if="groupManagerOpen" class="monitor-group-manager" data-testid="monitor-group-manager">
+      <form class="monitor-group-new" @submit.prevent="submitNewGroup">
+        <input v-model="draftName" class="monitor-group-input" :placeholder="t('monitor.groupName')" :aria-label="t('monitor.groupName')" />
+        <button type="submit" class="monitor-toolbar-btn" :disabled="!draftName.trim()">{{ t("monitor.groupNew") }}</button>
+      </form>
+      <div v-for="group in pluginGroups" :key="group.id" class="monitor-group-row" :data-group-id="group.id">
+        <div class="monitor-group-row-head">
+          <input class="monitor-group-input" :value="group.name" :aria-label="t('monitor.groupName')" @change="(event) => renameGroup(group.id, (event.target as HTMLInputElement).value)" />
+          <div class="monitor-group-colors" role="group" :aria-label="t('monitor.groupColor')">
+            <button
+              v-for="palette in GROUP_COLOR_PALETTE"
+              :key="palette"
+              type="button"
+              class="monitor-color-dot"
+              :class="{ 'is-active': group.color === palette }"
+              :style="{ backgroundColor: palette }"
+              :aria-label="`${t('monitor.groupColor')} ${palette}`"
+              @click="setGroupColor(group.id, group.color === palette ? '' : palette)"
+            ></button>
+          </div>
+          <button type="button" class="monitor-group-delete" @click="deleteGroup(group.id); if (activeTab === group.id) activeTab = 'all'">
+            {{ t("monitor.groupDelete") }}
+          </button>
+        </div>
+        <div class="monitor-group-members">
+          <label v-for="row in connections" :key="row.id" class="monitor-member-chip" :class="{ 'is-member': group.connectionIds.includes(row.id) }">
+            <input type="checkbox" :checked="group.connectionIds.includes(row.id)" @change="() => toggleGroupMember(group.id, row.id)" />
+            {{ privacy ? `#${connections.indexOf(row) + 1}` : row.name }}
+          </label>
+        </div>
+      </div>
+    </section>
+
     <!-- 连续 3 次快照失败后轮询自停：横幅即恢复按钮（refresh 会清 pollStopped） -->
     <button v-if="pollStopped" type="button" class="monitor-banner" @click="() => refresh()">{{ t("monitor.pollStopped") }}</button>
     <p v-if="taskLimitReached" class="monitor-banner monitor-banner--error">{{ t("monitor.taskLimit") }}</p>
@@ -196,7 +283,9 @@ function groupAccent(group: MonitorGroupView): string {
     </template>
 
     <template v-else>
-      <section v-for="group in groups" :key="group.id || '__flat__'" class="monitor-group">
+      <!-- 空分组视图：选中 tab 的组暂无成员（groups computed 滤掉空组时也要有反馈） -->
+      <p v-if="activeTab !== 'all' && !groups.some((candidate) => candidate.id === activeTab)" class="monitor-empty">{{ t("monitor.emptyGroup") }}</p>
+      <section v-for="group in activeTab === 'all' ? groups : groups.filter((candidate) => candidate.id === activeTab)" :key="group.id || '__flat__'" class="monitor-group">
         <div v-if="group.id" class="monitor-group-head" :data-group-id="group.id">
           <span class="monitor-group-accent" :style="{ backgroundColor: groupAccent(group) }" aria-hidden="true"></span>
           <strong class="monitor-group-name">{{ group.name }}</strong>
@@ -265,6 +354,122 @@ function groupAccent(group: MonitorGroupView): string {
 .monitor-filter-btn[aria-pressed="true"] {
   background: var(--primary);
   color: var(--primary-foreground, #fff);
+}
+/* —— 分组 tab 条 —— */
+.monitor-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.75rem;
+}
+.monitor-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.monitor-tab.is-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground, #fff);
+}
+.monitor-tab-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  flex: none;
+}
+.monitor-tab-manage {
+  border-style: dashed;
+}
+/* —— 分组管理弹层 —— */
+.monitor-group-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  margin: 0 0 0.75rem;
+}
+.monitor-group-new {
+  display: flex;
+  gap: 0.5rem;
+}
+.monitor-group-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--foreground);
+}
+.monitor-group-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+.monitor-group-row-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.monitor-group-colors {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+.monitor-color-dot {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  padding: 0;
+}
+.monitor-color-dot.is-active {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.monitor-group-delete {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--destructive, #ef4444);
+  cursor: pointer;
+}
+.monitor-group-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+.monitor-member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.6875rem;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.monitor-member-chip.is-member {
+  border-color: var(--primary);
+  color: var(--foreground);
 }
 .monitor-refresh {
   display: inline-flex;
