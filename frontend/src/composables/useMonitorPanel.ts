@@ -274,11 +274,18 @@ export function useMonitorPanel(deps: { api: MonitorApi; storage: KvBacking; tim
   }
 
   function toggleGroupMember(groupId: string, connectionId: string) {
-    groups.value = groups.value.map((group) => {
-      if (group.id !== groupId) return group;
-      const has = group.connectionIds.includes(connectionId);
-      return { ...group, connectionIds: has ? group.connectionIds.filter((id) => id !== connectionId) : [...group.connectionIds, connectionId] };
-    });
+    // 互斥归属：加入新组时自动从旧组移除（一机一组，避免同卡在多组重复渲染）。
+    groups.value = groups.value
+      .map((group) => {
+        if (group.id === groupId) return group;
+        const without = group.connectionIds.filter((id) => id !== connectionId);
+        return without.length === group.connectionIds.length ? group : { ...group, connectionIds: without };
+      })
+      .map((group) => {
+        if (group.id !== groupId) return group;
+        const has = group.connectionIds.includes(connectionId);
+        return { ...group, connectionIds: has ? group.connectionIds.filter((id) => id !== connectionId) : [...group.connectionIds, connectionId] };
+      });
     persistGroups();
   }
 
