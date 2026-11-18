@@ -7,6 +7,8 @@ import {
   BELL_MODES,
   LEGACY_SELECT_COPY_KEY,
   LINK_MODIFIERS,
+  NOWRAP_COLUMNS_MAX,
+  NOWRAP_COLUMNS_MIN,
   RIGHT_CLICK_MODES,
   SCROLLBACK_MAX,
   SCROLLBACK_MIN,
@@ -271,5 +273,20 @@ describe("behaviorEquals", () => {
     expect(behaviorEquals(TERMINAL_BEHAVIOR_DEFAULTS, settings())).toBe(true);
     expect(behaviorEquals(TERMINAL_BEHAVIOR_DEFAULTS, settings({ bell: "visual" }))).toBe(false);
     expect(behaviorEquals(TERMINAL_BEHAVIOR_DEFAULTS, settings({ copyOnSelect: false }))).toBe(false);
+  });
+});
+
+describe("无折行模式字段 (#306)", () => {
+  it("sanitize：非法值回落默认（关/1000），合法值按范围钳位取整", () => {
+    const d = TERMINAL_BEHAVIOR_DEFAULTS;
+    expect(sanitizeTerminalBehavior({} as never).noWrap).toBe(d.noWrap);
+    expect(sanitizeTerminalBehavior({ noWrap: "yes" } as never).noWrap).toBe(d.noWrap);
+    expect(sanitizeTerminalBehavior({ noWrap: true } as never).noWrap).toBe(true);
+    expect(sanitizeTerminalBehavior({} as never).noWrapColumns).toBe(d.noWrapColumns);
+    expect(sanitizeTerminalBehavior({ noWrapColumns: 500 } as never).noWrapColumns).toBe(500);
+    expect(sanitizeTerminalBehavior({ noWrapColumns: 1 } as never).noWrapColumns).toBe(NOWRAP_COLUMNS_MIN);
+    expect(sanitizeTerminalBehavior({ noWrapColumns: 10 ** 9 } as never).noWrapColumns).toBe(NOWRAP_COLUMNS_MAX);
+    expect(sanitizeTerminalBehavior({ noWrapColumns: 519.9 } as never).noWrapColumns).toBe(520);
+    expect(sanitizeTerminalBehavior({ noWrapColumns: Number.NaN } as never).noWrapColumns).toBe(d.noWrapColumns);
   });
 });

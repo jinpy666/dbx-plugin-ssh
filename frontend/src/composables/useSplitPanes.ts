@@ -21,6 +21,7 @@ import type { FitAddon } from "@xterm/addon-fit";
 import type { Terminal } from "@xterm/xterm";
 import { randomUUID } from "../lib/uuid";
 import { normalizeTerminalInputBytes } from "../lib/terminalInput";
+import { applyNoWrapWidth, registerAltScreenWatch } from "../lib/terminalNoWrap";
 
 export const SPLIT_PANE_MAX = 3;
 
@@ -77,6 +78,8 @@ export interface UseSplitPanesDeps {
   spawnDimensions: () => { cols: number; rows: number };
   enqueueInput: (sessionId: string, data: Uint8Array) => void;
   invoke: <T = unknown>(method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<T>;
+  /** #306 无折行偏好（权威态在 App 的 terminalBehavior）。 */
+  noWrapPrefs: () => { enabled: boolean; columns: number };
 }
 
 interface SplitPaneInternal {
@@ -403,6 +406,12 @@ export function useSplitPanes(deps: UseSplitPanesDeps) {
     } catch {
       /* 宿主切 tab 时 iframe 短暂脱离：静默跳过 */
     }
+    // #306：备用屏切换（vim/htop）时窗格同样在宽列/可视列间同步并补发 PTY resize。
+    registerAltScreenWatch(terminal, () => {
+      applyPaneNoWrap(paneId);
+      const runtime = internal.runtime;
+      if (runtime.terminal) resizePane(paneId, runtime.terminal.cols, runtime.terminal.rows);
+    });
   }
 
   /** 组件卸载（窗格关闭/工作台拆除）时释放 xterm 实例；会话关闭由 closePane 负责。 */
@@ -428,6 +437,38 @@ export function useSplitPanes(deps: UseSplitPanesDeps) {
     const internal = internals.get(paneId);
     if (!internal || internal.record.state !== "connected") return;
     void deps.invoke("ssh/terminal/resize", { sessionId: internal.record.sessionId, cols, rows }).catch(() => undefined);
+  }
+
+  // —— #306 无折行模式：窗格宽度统一从 App 侧偏好解析（SplitTerminalPane 的
+  // fit 之后调用；设置开关/列数变化时由 App 经 resyncPaneWidths 全量重排）。 ——
+
+  function applyPaneNoWrap(paneId: string): void {
+    const internal = internals.get(paneId);
+    const runtime = internal?.runtime;
+    if (!runtime?.terminal || !runtime.fit) return;
+    const prefs = deps.noWrapPrefs();
+    applyNoWrapWidth(runtime.terminal, {
+      enabled: prefs.enabled,
+      configuredCols: prefs.columns,
+      viewportCols: runtime.fit.proposeDimensions()?.cols,
+    });
+  }
+
+  /** 设置开关/列数变化后的全量重排：逐窗格 fit → 抬列 → 补发 PTY resize。 */
+  function resyncPaneWidths(): void {
+    for (const paneId of internals.keys()) {
+      const internal = internals.get(paneId);
+      const runtime = internal?.runtime;
+      if (!runtime?.terminal || !runtime.fit) continue;
+      try {
+        runtime.fit.fit();
+      } catch {
+        /* iframe 短暂脱离 DOM：跳过该窗格 */
+        continue;
+      }
+      applyPaneNoWrap(paneId);
+      resizePane(paneId, runtime.terminal.cols, runtime.terminal.rows);
+    }
   }
 
   function closePane(paneId: string): void {
@@ -493,6 +534,8 @@ export function useSplitPanes(deps: UseSplitPanesDeps) {
     disposeAll,
     notifyMainDisconnected,
     markPaneClosed,
+    applyPaneNoWrap,
+    resyncPaneWidths,
   };
 }
 

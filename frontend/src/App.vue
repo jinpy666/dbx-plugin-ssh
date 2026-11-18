@@ -121,6 +121,7 @@ import { createGhostSelectionGuard } from "./lib/terminalGhostSelectionGuard";
 import { createTerminalInputQueue, terminalInputChannel, TerminalInputTimeoutError } from "./lib/terminalInputQueue";
 import { mergeTerminalFrames } from "./lib/terminalFrameBatch";
 import { inputTimeoutIndicatesStall } from "./lib/terminalInputGuard";
+import { applyNoWrapWidth, isAltScreenSwitch, registerAltScreenWatch, resolveNoWrapTargetCols } from "./lib/terminalNoWrap";
 import { SERIAL_STREAM_STDIN, isKnownStreamTag, supportsBinaryInput } from "./lib/serialTerminalFrames";
 import { buildRestoreCwdCommand, describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS } from "./lib/terminalReconnect";
 import { TERMINAL_TRANSPORT_PROBE_TIMEOUT_MS, useTerminalTransportWatch } from "./composables/useTerminalTransportWatch";
@@ -1766,6 +1767,7 @@ const splitPane = useSplitPanes({
   spawnDimensions: () => fitTerminalDimensions(),
   enqueueInput: (sessionId, data) => terminalInputQueue.enqueue(sessionId, data),
   invoke: <T,>(method: string, params?: unknown, options?: { timeoutMs?: number }) => window.dbxPlugin.invoke<T>(method, params, options),
+  noWrapPrefs: () => ({ enabled: terminalBehavior.value.noWrap, columns: terminalBehavior.value.noWrapColumns }),
 });
 const {
   panes: splitPaneRecords,
@@ -2425,6 +2427,8 @@ function createTerminal() {
       return true;
     }),
   ];
+  // #306：备用屏切换（vim/htop 进入/退出）自动在宽列/可视列间同步并补发 PTY resize。
+  registerAltScreenWatch(terminal, scheduleNoWrapSync);
   terminal.attachCustomKeyEventHandler(handleTerminalKey);
   searchAddon.onDidChangeResults(({ resultCount, resultIndex }) => {
     if (!searchOpen.value) return;
@@ -3750,21 +3754,51 @@ function scheduleFit() {
     if (!terminal || !fitAddon || !terminalHost.value?.clientWidth || !terminalHost.value.clientHeight) return;
     try {
       fitAddon.fit();
+      // #306：无折行模式抬列（备用屏已回退到可视宽度），以最终列数通知 PTY。
+      applyNoWrapWidthForMain();
       // trzsz 进度条按终端列宽渲染（filter 内部文本进度条虽未启用，列宽保持同步）。
       setTrzszTerminalColumns(terminal.cols);
-      const sshSessionId = activeTerminalSessionId || session.value?.sessionId;
-      if (telnetSession.value) {
-        // Telnet NAWS：sidecar 发 SB NAWS 子协商，尽力而为。
-        void window.dbxPlugin.notify("telnet/resize", { sessionId: telnetSession.value.sessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
-      } else if (localSession.value) {
-        void window.dbxPlugin.notify("local/terminal/resize", { sessionId: localSession.value.sessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
-      } else if (sshSessionId) {
-        void window.dbxPlugin.notify("ssh/terminal/resize", { sessionId: sshSessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
-      }
+      notifyTerminalPtyResize();
     } catch {
       // The iframe can briefly be detached while DBX switches tabs.
     }
   }, 20);
+}
+
+/** PTY 尺寸同步（telnet NAWS / local / ssh 三通道）。 */
+function notifyTerminalPtyResize() {
+  if (!terminal) return;
+  const sshSessionId = activeTerminalSessionId || session.value?.sessionId;
+  if (telnetSession.value) {
+    // Telnet NAWS：sidecar 发 SB NAWS 子协商，尽力而为。
+    void window.dbxPlugin.notify("telnet/resize", { sessionId: telnetSession.value.sessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
+  } else if (localSession.value) {
+    void window.dbxPlugin.notify("local/terminal/resize", { sessionId: localSession.value.sessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
+  } else if (sshSessionId) {
+    void window.dbxPlugin.notify("ssh/terminal/resize", { sessionId: sshSessionId, cols: terminal.cols, rows: terminal.rows }).catch(() => undefined);
+  }
+}
+
+// #306 无折行模式：主终端宽度统一从 resolveNoWrapTargetCols 解析（fit 覆盖、
+// #262 看门狗目标、备用屏回退共用同一解析器，互相不打架）。返回列数是否变化，
+// 调用方据此补发 PTY resize。
+function applyNoWrapWidthForMain(): boolean {
+  if (!terminal || !fitAddon) return false;
+  return applyNoWrapWidth(terminal, {
+    enabled: terminalBehavior.value.noWrap,
+    configuredCols: terminalBehavior.value.noWrapColumns,
+    viewportCols: fitAddon.proposeDimensions()?.cols,
+  });
+}
+
+// 备用屏切换（vim/htop 进入/退出）→ rAF 去抖同步列数与 PTY。
+let noWrapSyncHandle: number | null = null;
+function scheduleNoWrapSync() {
+  if (noWrapSyncHandle !== null) return;
+  noWrapSyncHandle = requestAnimationFrame(() => {
+    noWrapSyncHandle = null;
+    if (applyNoWrapWidthForMain()) notifyTerminalPtyResize();
+  });
 }
 
 /** Synchronous fit for spawn-time sizing: returns the real panel cols/rows.
@@ -3780,6 +3814,7 @@ function fitTerminalDimensions(): { cols: number; rows: number } {
       return { cols: terminal.cols, rows: terminal.rows };
     }
     fitAddon.fit();
+    applyNoWrapWidthForMain();
     setTrzszTerminalColumns(terminal.cols);
   } catch {
     // The iframe can briefly be detached while DBX switches tabs.
@@ -4395,7 +4430,22 @@ const terminalTransportWatch = useTerminalTransportWatch({
 // 即补偿 refit（无活跃会话时空转）。
 const terminalFitWatch = useTerminalFitWatch({
   hasActiveSession: () => !!(activeTerminalSessionId || session.value?.sessionId || localSession.value || telnetSession.value),
-  getProposedDimensions: () => (terminal && fitAddon ? fitAddon.proposeDimensions() : undefined),
+  // #306：无折行模式下看门狗的目标列数取宽列（备用屏回退），否则每秒误报
+  // 失配触发 fit 抖动。
+  getProposedDimensions: () => {
+    if (!terminal || !fitAddon) return undefined;
+    const proposed = fitAddon.proposeDimensions();
+    if (!proposed) return undefined;
+    return {
+      cols: resolveNoWrapTargetCols({
+        enabled: terminalBehavior.value.noWrap,
+        configuredCols: terminalBehavior.value.noWrapColumns,
+        viewportCols: proposed.cols,
+        alternate: terminal.buffer.active.type === "alternate",
+      }),
+      rows: proposed.rows,
+    };
+  },
   getTerminalDimensions: () => (terminal ? { cols: terminal.cols, rows: terminal.rows } : undefined),
   scheduleFit,
 });
@@ -7095,6 +7145,10 @@ function updateTerminalBehavior(patch: Partial<TerminalBehaviorSettings>) {
   terminalBehavior.value = next;
   persistTerminalBehavior(next);
   applyTerminalBehavior();
+  // 无折行开关/列数变化即时生效：主终端经 scheduleFit（debounce+零尺寸守卫）
+  // 重排，副屏逐一 fit+抬列并补发 PTY resize（issue #306）。
+  scheduleFit();
+  splitPane.resyncPaneWidths();
   // 选中复制沿用既有即时反馈文案。
   if (copyChanged) {
     showNotice(t(next.copyOnSelect ? "terminalSelectCopy.enabledNotice" : "terminalSelectCopy.disabledNotice"));
@@ -9999,14 +10053,14 @@ function flagHintsSource(command: string): string {
              低于浮层 z-index 2），xterm 左 padding 随 --dbx-gutter-width 加宽，
              不遮文本；drop-overlay/搜索面板/诊断浮层定位不受影响。 -->
         <TerminalGutter v-if="gutterVisible" :rows="gutterRows" :width="gutterWidth" />
-        <div ref="terminalHost" class="terminal-host" :class="{ 'bell-flash': terminalBellFlash }" @mousedown.middle="handleTerminalMiddleClick" />
+        <div ref="terminalHost" class="terminal-host" :class="{ 'bell-flash': terminalBellFlash, 'terminal-h-scroll': terminalBehavior.noWrap }" @mousedown.middle="handleTerminalMiddleClick" />
         <!-- 分屏副终端列（对标 CRT tiled sessions）：绝对定位贴右缘，宽度可拖
              分隔条调整（偏好落 ssh-split-pane-width）；主 terminal-host 经
              .split-active 收窄右缘让位。窗格纵向堆叠，副屏各自独立 xterm。 -->
         <template v-if="splitPaneOpen && splitPaneRecords.length">
           <div class="split-divider" :class="{ 'split-divider-row': splitPaneDirection === 'row' }" :aria-orientation="splitPaneDirection === 'row' ? 'horizontal' : 'vertical'" role="separator" @pointerdown.prevent="onSplitDividerPointerDown" />
           <div class="split-column" :class="{ 'split-row': splitPaneDirection === 'row' }" :style="splitPaneDirection === 'row' ? { height: `${splitPaneHeight}px` } : { width: `${splitPaneWidth}px` }">
-            <SplitTerminalPane v-for="entry in splitPaneRecords" :key="entry.id" :pane="entry" :split="splitPane" :t="t" />
+            <SplitTerminalPane v-for="entry in splitPaneRecords" :key="entry.id" :pane="entry" :split="splitPane" :t="t" :no-wrap="terminalBehavior.noWrap" />
             <div v-if="splitPanePickOpen" class="split-picker">
               <header class="split-picker-head">
                 <h3>{{ t("splitPaneMirrorPick") }}</h3>

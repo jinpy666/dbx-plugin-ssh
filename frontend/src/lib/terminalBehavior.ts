@@ -33,6 +33,10 @@ export const LEGACY_SELECT_COPY_KEY = "ssh-terminal-select-copy";
 export const SCROLLBACK_MIN = 100;
 export const SCROLLBACK_MAX = 200_000;
 export const WORD_SEPARATOR_MAX_LENGTH = 32;
+// 无折行模式列数上下限（issue #306）：下限与常用最小终端一致，上限够容纳
+// 超宽 JSON/日志但不至于让渲染器画布失控。
+export const NOWRAP_COLUMNS_MIN = 80;
+export const NOWRAP_COLUMNS_MAX = 10_000;
 
 export type TerminalRightClickMode = "off" | "menu" | "paste" | "clipboard";
 export type TerminalBellMode = "off" | "visual" | "audible";
@@ -67,6 +71,11 @@ export interface TerminalBehaviorSettings {
   trimWhitespaceOnPaste: boolean;
   /** Bell feedback. Tabby: "off". */
   bell: TerminalBellMode;
+  /** 关闭自动折行：PTY 抬到 noWrapColumns（≥可视宽度），容器横向滚动。
+   * 备用屏（vim/htop）激活期间自动回退可视宽度（issue #306）。 */
+  noWrap: boolean;
+  /** 无折行模式的目标列数（生效值取 max(可视宽度, 本值)）。 */
+  noWrapColumns: number;
 }
 
 export const TERMINAL_BEHAVIOR_DEFAULTS: TerminalBehaviorSettings = {
@@ -84,6 +93,8 @@ export const TERMINAL_BEHAVIOR_DEFAULTS: TerminalBehaviorSettings = {
   replaceNewlinesWithSpaces: false,
   trimWhitespaceOnPaste: false,
   bell: "off",
+  noWrap: false,
+  noWrapColumns: 1000,
 };
 
 export const RIGHT_CLICK_MODES: readonly TerminalRightClickMode[] = ["off", "menu", "paste", "clipboard"];
@@ -133,6 +144,8 @@ export function sanitizeTerminalBehavior(raw: unknown, legacySelectCopy?: boolea
     replaceNewlinesWithSpaces: pickBoolean(source.replaceNewlinesWithSpaces, TERMINAL_BEHAVIOR_DEFAULTS.replaceNewlinesWithSpaces),
     trimWhitespaceOnPaste: pickBoolean(source.trimWhitespaceOnPaste, TERMINAL_BEHAVIOR_DEFAULTS.trimWhitespaceOnPaste),
     bell: pickEnum(source.bell, BELL_MODES, TERMINAL_BEHAVIOR_DEFAULTS.bell),
+    noWrap: pickBoolean(source.noWrap, TERMINAL_BEHAVIOR_DEFAULTS.noWrap),
+    noWrapColumns: pickInteger(source.noWrapColumns, NOWRAP_COLUMNS_MIN, NOWRAP_COLUMNS_MAX, TERMINAL_BEHAVIOR_DEFAULTS.noWrapColumns),
   };
 }
 
@@ -266,6 +279,8 @@ export function behaviorEquals(a: TerminalBehaviorSettings, b: TerminalBehaviorS
     a.bracketedPaste === b.bracketedPaste &&
     a.warnOnMultilinePaste === b.warnOnMultilinePaste &&
     a.replaceNewlinesWithSpaces === b.replaceNewlinesWithSpaces &&
+    a.noWrap === b.noWrap &&
+    a.noWrapColumns === b.noWrapColumns &&
     a.trimWhitespaceOnPaste === b.trimWhitespaceOnPaste &&
     a.bell === b.bell
   );

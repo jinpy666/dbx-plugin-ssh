@@ -14,6 +14,8 @@ const props = defineProps<{
   pane: SplitPaneRecord;
   split: UseSplitPanes;
   t: (key: string, values?: Record<string, string | number>) => string;
+  /** #306 无折行模式：容器横向滚动承载宽列画布（权威态在 App 的 terminalBehavior）。 */
+  noWrap: boolean;
 }>();
 
 const host = ref<HTMLElement>();
@@ -28,6 +30,8 @@ function syncSize() {
   if (!terminal || !fit || !host.value?.clientWidth || !host.value.clientHeight) return;
   try {
     fit.fit();
+    // #306：无折行模式在 fit 之后抬列（备用屏自动回退），再以最终列数同步 PTY。
+    props.split.applyPaneNoWrap(props.pane.id);
     if (terminal.cols !== lastCols || terminal.rows !== lastRows) {
       lastCols = terminal.cols;
       lastRows = terminal.rows;
@@ -68,6 +72,6 @@ onBeforeUnmount(() => {
         @click="split.closePane(pane.id)"
       ><X /></button>
     </header>
-    <div ref="host" class="split-pane-host" />
+    <div ref="host" class="split-pane-host" :class="{ 'terminal-h-scroll': noWrap }" />
   </div>
 </template>
