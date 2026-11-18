@@ -69,7 +69,12 @@ const uploadAckWaiters = new Map<string, { nextOffset: number; resolve: () => vo
 // 评审 H-1（2026-09-30）：等待器自带 watchdog 轮询——终态事件丢失（宿主
 // 桥抖动）或 sidecar 在长推送期间重启时，靠 sftp/transfer/status 兜底
 // 结算，不再让 uploadSource 永久挂起拖死整批队列。
-const COMPLETION_WATCHDOG_MS = 15_000;
+// issue #305：固定 15s 的首轮兜底正是「几 KB 小文件成功提示迟到十几秒」
+// 的主因——事件丢失后用户至少要盯着一动不动的卡片等一整轮。改为 1s 起步
+// 逐级退避：健康链路事件亚秒到达，轮询只是丢失后的保险；退避到 15s 封顶，
+// 长推送期间也不会产生高频轮询。
+const COMPLETION_WATCHDOG_STEPS_MS = [1_000, 2_000, 4_000, 8_000];
+const COMPLETION_WATCHDOG_MAX_MS = 15_000;
 const transferCompletionWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void; watchdog: number }>();
 const downloadChunkWaiters = new Map<string, { offset: number; resolve: (bytes: Uint8Array) => void; reject: (error: Error) => void; timer: number }>();
 const transferSamples = new Map<string, TransferSpeedSample>();
@@ -236,13 +241,14 @@ async function pollTransferStatus(taskId: string): Promise<boolean> {
   }
 }
 
-function armCompletionWatchdog(taskId: string): number {
+function armCompletionWatchdog(taskId: string, step = 0): number {
+  const delay = step < COMPLETION_WATCHDOG_STEPS_MS.length ? COMPLETION_WATCHDOG_STEPS_MS[step]! : COMPLETION_WATCHDOG_MAX_MS;
   return window.setTimeout(async () => {
     if (!transferCompletionWaiters.has(taskId)) return;
     if (await pollTransferStatus(taskId)) return;
     const waiter = transferCompletionWaiters.get(taskId);
-    if (waiter) waiter.watchdog = armCompletionWatchdog(taskId);
-  }, COMPLETION_WATCHDOG_MS);
+    if (waiter) waiter.watchdog = armCompletionWatchdog(taskId, step + 1);
+  }, delay);
 }
 
 /** 挂起直到该任务收到终态 progress 事件（完成/取消/失败）；注册前已终态则
@@ -469,19 +475,42 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
   }
 }
 
+// issue #305：分片 ACK 事件丢失时不再死等 30s——按阶梯轮询 sftp/transfer/
+// status 兜底。3s 首查（健康链路 ACK 亚秒到达，缺席即异常），之后 8s/15s/30s
+// 退避重查；transferred 达标即放行，大分片慢链路不受影响（轮询只在 ACK 缺席
+// 时发生，正常传输零额外 RPC）。
+const UPLOAD_ACK_POLL_STEPS_MS = [3_000, 8_000, 15_000, 30_000];
+
 function waitForUploadAck(taskId: string, nextOffset: number) {
   return new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(async () => {
+    const settle = (outcome: () => void) => {
       uploadAckWaiters.delete(taskId);
-      try {
-        const status = await window.dbxPlugin.invoke<{ transferred: number; status: string }>("sftp/transfer/status", { taskId });
-        if (status.transferred >= nextOffset && status.status === "running") resolve();
-        else reject(Object.assign(new Error(t("errors.uploadAckTimeout")), { code: "upload-ack-timeout" }));
-      } catch (cause) {
-        reject(cause instanceof Error ? cause : new Error(String(cause)));
-      }
-    }, 30_000);
-    uploadAckWaiters.set(taskId, { nextOffset, resolve, reject, timer });
+      outcome();
+    };
+    const poll = (step: number) => {
+      const delay = UPLOAD_ACK_POLL_STEPS_MS[Math.min(step, UPLOAD_ACK_POLL_STEPS_MS.length - 1)]!;
+      const timer = window.setTimeout(async () => {
+        try {
+          const status = await window.dbxPlugin.invoke<{ transferred: number; status: string }>("sftp/transfer/status", { taskId });
+          if (status.transferred >= nextOffset && status.status !== "cancelled" && status.status !== "failed") {
+            settle(resolve);
+            return;
+          }
+          if (status.status === "cancelled" || status.status === "failed") {
+            settle(() => reject(Object.assign(new Error(transferTasks[taskId]?.error || t(`transferStatus.${status.status}`)), { code: status.status === "cancelled" ? "transfer-cancelled" : "transfer-terminal" })));
+            return;
+          }
+          poll(step + 1);
+        } catch {
+          // 状态查询失败（sidecar 重启中/任务已清收）：按阶梯继续重试；
+          // 封顶后以 30s 周期持续轮询直到结算（评审 H-1 同款：轻量 RPC
+          // 不设次数上限），大分片慢链路的 ACK 迟到不再被误杀。
+          poll(step + 1);
+        }
+      }, delay);
+      uploadAckWaiters.set(taskId, { nextOffset, resolve, reject, timer });
+    };
+    poll(0);
   });
 }
 
