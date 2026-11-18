@@ -94,8 +94,9 @@ function probeLocalCapabilities() {
 /** 单文件/目录下载入口；forceSudo 走 sudo/download/start（M14-C DownloadSudo，
  * root 大文件二进制下载）——start 换方法换参数名（path），分块循环、finish、
  * 取消与进度面板全部复用既有下载管线，取消路径的 sftp/transfer/cancel 对
- * sudo 任务同样生效（sidecar 会顺带清掉远端临时件）。 */
-async function downloadEntry(entry: DownloadListEntry, forceSudo = false, expandLzpack = false) {
+ * sudo 任务同样生效（sidecar 会顺带清掉远端临时件）。askTarget（issue #303
+ * 右键「下载到…」）：对该次下载强制走目录询问，不必翻转全局「使用默认地址」。 */
+async function downloadEntry(entry: DownloadListEntry, forceSudo = false, expandLzpack = false, askTarget = false) {
   fileMenu.value = undefined;
   // 目录条目走递归文件夹下载（tree/start + 同一分块管线）；文件沿用单文件管线。
   // sudo 下载只覆盖普通文件：root 目录没有对应的暂存语义，明确拒绝。
@@ -125,7 +126,7 @@ async function downloadEntry(entry: DownloadListEntry, forceSudo = false, expand
   // 仅本地落盘可指定目录——web/docker 浏览器下载由浏览器决定位置。
   let dirOverride = "";
   let setDefaultAfter = false;
-  if (saveToLocal && !loadDownloadUseDefaultDir()) {
+  if (saveToLocal && (askTarget || !loadDownloadUseDefaultDir())) {
     const chosen = await askDownloadTarget(entry.name);
     if (chosen === undefined) return;
     dirOverride = chosen.dir.trim();

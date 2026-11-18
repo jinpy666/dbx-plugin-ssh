@@ -11036,6 +11036,10 @@ function flagHintsSource(command: string): string {
                 <template v-else-if="fileMenu">
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'directory' || fileMenu.entry.kind === 'file'" @select="openEntry(fileMenu.entry)"><Folder v-if="fileMenu.entry.kind === 'directory'" /><FileText v-else />{{ fileMenu.entry.kind === "directory" ? t("openFolder") : t("preview") }}</ContextMenuItem>
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' || fileMenu.entry.kind === 'directory'" @select="downloadEntry(fileMenu.entry, sudoMode && canWrite && fileMenu.entry.kind === 'file')"><Download />{{ t("download") }}</ContextMenuItem>
+                  <!-- 一次性「下载到…」（issue #303）：该次下载强制弹目录询问，
+                       不必翻转全局「使用默认地址」；仅文件——目录走递归树下载，
+                       目标目录覆盖未接入树下载管线。 -->
+                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" @select="downloadEntry(fileMenu.entry, sudoMode && canWrite, false, true)"><FolderOpen />{{ t("downloadTo") }}</ContextMenuItem>
                   <!-- ST10 显式压缩包模式（自研 lzpack，远端零依赖）：文件级入口。
                        压缩上传交付 <名>.dbxz；解压下载要求源是 .dbxz。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' && !sudoMode" :disabled="!canWrite" @select="chooseUploadLzpack()"><PackageOpen />{{ t("sftpLzpack.uploadAction") }}</ContextMenuItem>
