@@ -119,6 +119,8 @@ import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/t
 import { createOutputGate } from "./lib/terminalBackpressure";
 import { createGhostSelectionGuard } from "./lib/terminalGhostSelectionGuard";
 import { createTerminalInputQueue, terminalInputChannel, TerminalInputTimeoutError } from "./lib/terminalInputQueue";
+import { mergeTerminalFrames } from "./lib/terminalFrameBatch";
+import { inputTimeoutIndicatesStall } from "./lib/terminalInputGuard";
 import { SERIAL_STREAM_STDIN, isKnownStreamTag, supportsBinaryInput } from "./lib/serialTerminalFrames";
 import { buildRestoreCwdCommand, describeReconnectRestoredNotice, isConnectionInactiveError, isSessionGoneError, shouldReattachTerminal, terminalReconnectDelay, TERMINAL_RECONNECT_DELAYS } from "./lib/terminalReconnect";
 import { TERMINAL_TRANSPORT_PROBE_TIMEOUT_MS, useTerminalTransportWatch } from "./composables/useTerminalTransportWatch";
@@ -594,6 +596,9 @@ const PASTE_CONFIRM_CHAR_THRESHOLD = 200;
 // Upper bound for out-of-order terminal frames held while waiting for the
 // missing sequence; the replay path re-delivers anything dropped beyond it.
 const TERMINAL_PENDING_FRAME_LIMIT = 1024;
+// #302 合帧上限：单次 drain 合并的数据段字节峰值。只约束单段拼接的内存
+// 上限（超过就在帧间切段），不改变帧序与语义；xterm 写入另有 1MiB 节流帽。
+const TERMINAL_MERGED_FLUSH_BYTES = 4 * 1024 * 1024;
 // 命令历史 / 终端字号：pluginStore 持久化（敏感命令不入持久层；快速命令已迁 sidecar，见 QUICK_COMMANDS_KEY）。
 const COMMAND_HISTORY_KEY = "ssh-command-history";
 // 执行时间并行映射（Warp 式 history 面板的右侧相对时间）：command → 最近一次
@@ -1392,6 +1397,12 @@ let pendingTerminalInput = "";
 let wordEditedLineUntrusted = false;
 let activeTerminalSessionId = "";
 const pendingTerminalFrames = new Map<number, { stream: number; data: Uint8Array }>();
+// 最近一次终端帧到达时刻（#302 输入守卫）：输入超时时若输出仍在到达，
+// transport 显然活着，只是请求路径拥塞——不按失联上报。
+let lastTerminalDataAt = 0;
+// rAF 合帧调度（#302）：handleBinary 每帧到达只入队不定排，drain 与 xterm
+// 写入节流同帧对齐；隐藏标签页 rAF 停摆时退化为宏任务，后台输出不滞留。
+let terminalDrainHandle: number | null = null;
 const directoryParser = new Osc7DirectoryParser();
 // 提示符换行修复（t8y2/dbx#10750）：sidecar 给每个交互 shell 会话武装了
 // 按提示符发 OSC 7 的钩子，这里把帧当作"提示符即将绘制"的信号——可见输出
@@ -1655,6 +1666,10 @@ const terminalInputQueue = createTerminalInputQueue({
     }
     const sshSessionId = session.value?.sessionId;
     if (!isTelnetMode.value && sshSessionId && (cause instanceof TerminalInputTimeoutError || isSessionGoneError(cause))) {
+      // #302：终端输出仍在到达（宽限期内）说明 SSH 通道活着，输入超时只是
+      // 请求路径拥塞（洪峰后桥上排队）——按失联上报会把一次拥塞放大成整套
+      // 重连梯子。这里只复位队列丢弃拥塞键入，下一击键自愈。
+      if (cause instanceof TerminalInputTimeoutError && inputTimeoutIndicatesStall(lastTerminalDataAt, Date.now())) return;
       terminalTransportWatch.reportUnavailable(sshSessionId);
       return;
     }
@@ -4192,7 +4207,7 @@ function handleBinary(event: DbxPluginBinaryEvent) {
     const sequence = readU64(payload, 1);
     if (sequence <= lastSequence) return;
     pendingTerminalFrames.set(sequence, { stream: payload[0], data: payload.slice(9) });
-    drainTerminalFrames();
+    scheduleTerminalDrain();
     return;
   }
   // 分屏副终端：主会话之外的 ssh/terminal/out/{id} 帧按 sessionId 路由到
@@ -4215,13 +4230,39 @@ function handleBinary(event: DbxPluginBinaryEvent) {
   waiter.resolve(payload.slice(8));
 }
 
+/** #302：终端帧合帧调度。洪峰时每帧同步跑一遍中间件链（zmodem 扫描、
+ * trzsz、OSC、stripAnsi）会吃满主线程，把桥背压传导成整会话停摆；入队后
+ * 统一到 rAF 排水，与 xterm 写入节流同帧对齐，延迟上限不劣于现状。 */
+function scheduleTerminalDrain() {
+  if (terminalDrainHandle !== null) return;
+  if (typeof document !== "undefined" && !document.hidden && typeof requestAnimationFrame === "function") {
+    terminalDrainHandle = requestAnimationFrame(() => {
+      terminalDrainHandle = null;
+      drainTerminalFrames();
+    });
+  } else {
+    terminalDrainHandle = window.setTimeout(() => {
+      terminalDrainHandle = null;
+      drainTerminalFrames();
+    }, 0);
+  }
+}
+
 function drainTerminalFrames() {
+  // 两段式消费（先收齐再处理）：本次 drain 期间处理产生的同步副作用不会
+  // 与下一批帧交错，乱序重组语义不变。
+  const batch: { stream: number; data: Uint8Array }[] = [];
   let frame = pendingTerminalFrames.get(lastSequence + 1);
   while (frame) {
     pendingTerminalFrames.delete(lastSequence + 1);
     lastSequence += 1;
-    if (frame.stream === 2) {
-      const state = new TextDecoder().decode(frame.data);
+    batch.push(frame);
+    frame = pendingTerminalFrames.get(lastSequence + 1);
+  }
+  if (batch.length) lastTerminalDataAt = Date.now();
+  for (const segment of mergeTerminalFrames(batch, TERMINAL_MERGED_FLUSH_BYTES)) {
+    if (segment.stream === 2) {
+      const state = new TextDecoder().decode(segment.data);
       if (state === "directory-tracking-unavailable") {
         followDirectory.value = false;
         directoryTrackingSupported.value = false;
@@ -4243,9 +4284,8 @@ function drainTerminalFrames() {
         splitPane.notifyMainDisconnected();
       }
     } else {
-      consumeFrameViaZmodem(frame.data);
+      consumeFrameViaZmodem(segment.data);
     }
-    frame = pendingTerminalFrames.get(lastSequence + 1);
   }
   persistState();
   // A stalled gap must not grow the pending map without bound: once the
@@ -4871,7 +4911,16 @@ async function closeSession(updateStatus = true) {
   // trzsz 在途传输同样静默停止（死会话上的 sendToServer 会因无 sessionId 空转）。
   teardownTrzsz();
   pendingTerminalFrames.clear();
+  if (terminalDrainHandle !== null) {
+    // rAF 与 setTimeout 共用 number 句柄；挂起中的排水一并取消，避免卸载后
+    // 触碰已清空的状态。
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(terminalDrainHandle);
+    window.clearTimeout(terminalDrainHandle);
+    terminalDrainHandle = null;
+  }
   lastSequence = 0;
+  // 新会话尚未收到任何输出：守卫时间戳归零，输入超时按真实失联处理。
+  lastTerminalDataAt = 0;
   terminalInputQueue.reset();
   reconnectPending.value = false;
   resetCommandMarker();
