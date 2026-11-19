@@ -57,6 +57,26 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// in the dispatch envelope — and can be discovered via `server/discover`.
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] = ["2026-07-28", "2024-11-05"];
 
+/// MCP `InitializeResult.instructions`: the one contract a caller cannot read
+/// off a tool schema. Hosts forward arguments without validating the
+/// `anyOf` selector clause, so a session that never learns the addressing
+/// order (discover → connectionId) will invent an endpoint on its first call.
+const MCP_INSTRUCTIONS: &str = "SSH/SFTP tools address a saved DBX connection: call \
+     ssh_list_connections first, then pass an entry's id as connectionId (or its name as \
+     connectionName). Inline credentials (host + username, plus password or private key) are \
+     only the fallback when nothing is saved; never invent a host. ssh_exec_sudo takes the \
+     same selector, and Quick Sudo profiles supply its sudo password/TOTP.";
+
+/// Answer for a connection-addressed call that named no connection at all.
+/// Spelled out end to end because the schema `anyOf` that states this rule is
+/// advisory in practice (hosts pass arguments through unchecked), so this
+/// message is where the caller actually learns what a selector is. Naming a
+/// single leaf parameter instead (`host`) reads as "host is required even with
+/// a connectionId" and sends the caller hunting for an endpoint.
+const SELECTOR_MISSING_GUIDANCE: &str = "No connection selected: pass connectionId (saved DBX \
+     connections are listed by ssh_list_connections), connectionName, or inline credentials \
+     (host + username, plus password or private key).";
+
 /// Ceilings for the MCP size settings (tiny-rdm's PreferencesMCPSFTP
 /// equivalent): `mcp/settings/set` may lower a limit freely or raise it up
 /// to these values, never beyond. The same ceilings clamp the values after
@@ -925,6 +945,9 @@ impl McpState {
                     "name": "io.dbx.ssh",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
+                // 连接寻址的会话级引导：schema 的 anyOf 在宿主侧不强制，
+                // 只有这里能把「先发现连接、再传 connectionId」讲给调用方。
+                "instructions": MCP_INSTRUCTIONS,
             })),
             "ping" => Ok(json!({})),
             // 2026-07-28 removed the initialize handshake; version discovery
@@ -3056,6 +3079,14 @@ impl McpState {
                          (host/username plus password or privateKeyPath/privateKeyContent)."
                     ));
                 } else {
+                    // No id, no name, no complete endpoint: without this the
+                    // inline path fails on the first missing leaf (`host`),
+                    // which reads as "host is required even with a
+                    // connectionId" — the caller then invents an endpoint
+                    // instead of discovering the saved connection.
+                    if !has_connection_selector(arguments) {
+                        return Err(SELECTOR_MISSING_GUIDANCE.to_string());
+                    }
                     (
                         connection_pool_id(arguments),
                         Some(stored_connection_from_arguments(arguments)?),
@@ -3656,6 +3687,18 @@ fn non_empty_argument<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+/// Every route a caller can take to name a connection: a saved id, a saved
+/// name, or a complete inline endpoint. A payload with none of them is the
+/// one case that must be answered with `SELECTOR_MISSING_GUIDANCE` instead of
+/// a per-field complaint, because the schema `anyOf` that expresses this
+/// contract is not enforced by MCP hosts — they forward arguments unchecked
+/// and the server-side message is the only place the caller learns the rule.
+fn has_connection_selector(arguments: &Value) -> bool {
+    non_empty_argument(arguments, "connectionId").is_some()
+        || non_empty_argument(arguments, "connectionName").is_some()
+        || endpoint_selector(arguments).is_some()
 }
 
 /// A host selector is intentionally complete: host plus username, with port
@@ -5736,6 +5779,14 @@ mod tests {
         assert!(init["result"]["capabilities"]["tools"].is_object());
         // 同族基线：serverInfo.name 用完整插件 id（files/ldap/kafka 同款）。
         assert_eq!(init["result"]["serverInfo"]["name"], "io.dbx.ssh");
+        // 会话级引导：连接寻址规则随 initialize 下发，不能只靠 schema。
+        let instructions = init["result"]["instructions"]
+            .as_str()
+            .expect("initialize must carry instructions");
+        assert!(
+            instructions.contains("ssh_list_connections") && instructions.contains("connectionId"),
+            "{instructions}"
+        );
 
         // 版本协商：客户端请求受支持版本时原样回显（各修订版通用规则）。
         let negotiated = state
@@ -7160,6 +7211,73 @@ mod tests {
             error.contains("ssh_list_connections") && error.contains("inline credentials"),
             "expected the self-heal hints, got: {error}"
         );
+    }
+
+    /// The `anyOf` selector clause is advisory at most hosts, so a call that
+    /// names no connection must be answered with the whole contract. The
+    /// observed failure (Codex, ssh_exec_sudo with only `command`) was a
+    /// `host` complaint that made the caller believe host was required
+    /// alongside connectionId.
+    #[tokio::test]
+    async fn connection_without_selector_guides_to_discovery() {
+        let state = state();
+        let error = state
+            .connection(&json!({ "command": "id" }))
+            .await
+            .err()
+            .expect("no selector must be refused");
+        assert!(error.contains("No connection selected"), "{error}");
+        for hint in [
+            "connectionId",
+            "connectionName",
+            "ssh_list_connections",
+            "host + username",
+        ] {
+            assert!(error.contains(hint), "missing {hint}: {error}");
+        }
+        // 单个 host（缺 username）与空串 host 都按「没选连接」回答：叶子级
+        // 报错会再次把调用方引向「补 host」而不是「去发现连接」。
+        for partial in [
+            json!({ "host": "prod.example.test" }),
+            json!({ "host": "", "username": "deploy" }),
+        ] {
+            let error = state
+                .connection(&partial)
+                .await
+                .err()
+                .expect("incomplete endpoint must be refused");
+            assert!(
+                error.contains("No connection selected"),
+                "{partial}: {error}"
+            );
+        }
+        // 走完整 dispatch：同一条指引必须在 call_tool 路径上（门禁之后、
+        // 拨号之前）原样到达调用方。
+        let error = state
+            .call_tool("ssh_exec", &json!({ "command": "true" }), None)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("No connection selected"), "{error}");
+    }
+
+    /// The selector predicate behind that error must agree with the schema
+    /// `anyOf`: any one of the three routes is enough, and a half endpoint is
+    /// not one of them.
+    #[test]
+    fn connection_selector_detection_matches_the_schema_anyof() {
+        assert!(!has_connection_selector(&json!({ "command": "true" })));
+        assert!(!has_connection_selector(&json!({ "host": "h" })));
+        assert!(!has_connection_selector(&json!({ "username": "u" })));
+        assert!(!has_connection_selector(
+            &json!({ "host": "", "username": "u" })
+        ));
+        assert!(has_connection_selector(&json!({ "connectionId": "id" })));
+        assert!(has_connection_selector(
+            &json!({ "connectionName": "name" })
+        ));
+        assert!(has_connection_selector(
+            &json!({ "host": "h", "username": "u" })
+        ));
     }
 
     /// L1: the forward decision reads only the registry — a registered id

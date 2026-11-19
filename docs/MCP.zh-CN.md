@@ -83,6 +83,7 @@ stdio JSON-RPC 层错误码与同系列插件一致：**传输层用标准码**�
 
 - **`resultType`（2026-07-28 硬性要求）**：所有成功结果的 `result` 一律携带 `resultType: "complete"`（本服务端不产生 `input_required` 形态）。缺失即 complete 的桥接只对更早修订版的 peer 生效——客户端报 `Invalid result for tools/call: missing required resultType` 即说明对端在跑旧构建 sidecar，重建/重装即可。旧修订版客户端按原样忽略该额外字段，行为不变。
 - **`initialize` 版本回显**：请求里的 `protocolVersion` 命中受支持集合时原样回显，否则回落 `2024-11-05`（各修订版通用版本协商规则）。
+- **`initialize.instructions`**：`initialize` 结果携带一段会话级连接寻址引导——先 `ssh_list_connections`，再把条目 id 作为 `connectionId`（或 name 作为 `connectionName`）；内联 `host` + `username` 只是没有保存连接时的兜底，不得凭空编造 host；`ssh_exec_sudo` 用同一套选择器。工具 schema 里表达该约束的 `anyOf` 多数宿主不校验、只透传参数，会话级引导 + 服务端报错才是可靠的引导面。
 - **`server/discover`**（2026-07-28 起 initialize 握手移除后的能力发现）：返回 `{supportedVersions, capabilities}`；客户端 MAY 调用，未实现也不致命，但实现后新客户端可正确识别服务器能力面。
 
 ### 传输层健壮性
@@ -182,7 +183,7 @@ MCP 调用方是 LLM，`sftp_upload`（本地读）与 `sftp_download`（本地�
 | `sftp_upload` / `sftp_download` | 本地 ↔ 远端单文件传输（受 `maxUploadBytes` / `maxDownloadBytes` 限制；本地路径校验先于拨号，校验拒绝不清连接池）。latin-1 连接上远端路径按显示形式还原服务器字节走裸包 OPEN/READ/WRITE（M19，upload 响应的 `remotePath` 原样回传给 download 即命中同一组字节；回退策略同其他 SFTP 工具，见 PROTOCOL「扩展文件操作」M19 节）。本地路径受传输根约束：必须落在 `localTransferRoot`（未配置时为系统临时目录 + 插件数据目录）之内，且任何模式下都拒绝敏感路径（凭据库、shell 启动文件等，见下文「本地传输路径约束」） |
 | `sftp_write_file` 的目录前提 | 变更族（mkdir/rm/mv/chmod/cp）已随 #203 瘦身移出 MCP 面：用 `ssh_exec` 执行 shell 等价命令（`mkdir -p`、`rm`、`mv`、`chmod`、`cp -a`、`df`、`docker ps`），灾难确认门与只读白名单在 exec 路径上等价生效。`sftp_write_file` 仍要求父目录已存在（先 `ssh_exec mkdir -p`） |
 
-**连接寻址（保存连接优先，内联凭据兜底）**：上表除 `ssh_list_connections`、known_hosts 管理与本地工具外的连接类工具，都可用 `connectionId` 精确定位；也可用 `connectionName`，重名时补充 `host` / `port` / `username` 做唯一筛选。若不传 id/name，提供完整 endpoint（`host` + `username`，`port` 默认 22）也会唯一复用已注册连接，因此不需要重复传密码。候选为零时才回落内联凭据/stdio bridge 兜底；候选超过一个时拒绝并列出候选 id，避免静默连错主机或账户。`connectionId` 与其它 selector 同时出现但不一致也会拒绝。
+**连接寻址（保存连接优先，内联凭据兜底）**：上表除 `ssh_list_connections`、known_hosts 管理与本地工具外的连接类工具，都可用 `connectionId` 精确定位；也可用 `connectionName`，重名时补充 `host` / `port` / `username` 做唯一筛选。若不传 id/name，提供完整 endpoint（`host` + `username`，`port` 默认 22）也会唯一复用已注册连接，因此不需要重复传密码。候选为零时才回落内联凭据/stdio bridge 兜底；候选超过一个时拒绝并列出候选 id，避免静默连错主机或账户。`connectionId` 与其它 selector 同时出现但不一致也会拒绝。**完全不给选择器**（无 `connectionId` / `connectionName`，且 `host` + `username` 不完整）不按叶子参数报错，而是返回 `No connection selected: ...` 并列出三条路径（`connectionId` → 先 `ssh_list_connections` / `connectionName` / 内联 `host` + `username`）：schema 的 `anyOf` 在多数宿主侧不被强制执行，逐字段报错（如 `Missing or invalid parameter: host`）会被调用方误读成「必须给 host」。
 
 **工具 annotations（MCP 规范 Tool annotations）**：`tools/list` 与 `mcp/tools`（DBX MCP 桥共用同一份定义）为全部 16 个工具附加 `annotations` 元数据——`title`（客户端工具选择器的人读名）、`readOnlyHint`（可证明只读的巡检/读取类工具为 true）、`destructiveHint`（exec 家族与 overwrite/删除类为 true；`ssh_close` 为 false）、`idempotentHint`、`openWorldHint`（默认 true）。hints 仅是建议信号，供 MCP 客户端做只读预放行与破坏性确认分级；服务端安全门（mcp_safety 白名单、confirm 门、只读连接门）始终是最终裁决，hints 分类与内部门禁分类保持一致。宿主侧两条桥路径——dbx-mcp `LocalBackend::list_plugin_tools` 与桌面 `mcp_bridge.rs` ——对工具定义响应均为 serde_json Value 纯透传，annotations 原样到达 `dbx_list_plugin_tools` 客户端。
 
