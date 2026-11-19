@@ -4355,8 +4355,7 @@ impl SshRuntime {
         sessions
             .values()
             .find(|entry| {
-                entry.connection_id == connection_id
-                    && entry.connected.load(Ordering::Acquire)
+                entry.connection_id == connection_id && entry.connected.load(Ordering::Acquire)
             })
             .map(|entry| Arc::clone(&entry.handle))
     }

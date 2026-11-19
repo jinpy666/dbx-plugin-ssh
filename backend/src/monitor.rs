@@ -324,14 +324,10 @@ pub fn parse_detail_block(lines: &[&str]) -> Details {
         };
         if let Some(value) = rest.strip_prefix("load=") {
             let mut parts = value.split_whitespace();
-            if let (Some(l1), Some(l5), Some(l15)) =
-                (parts.next(), parts.next(), parts.next())
-            {
-                if let (Ok(l1), Ok(l5), Ok(l15)) = (
-                    l1.parse::<f64>(),
-                    l5.parse::<f64>(),
-                    l15.parse::<f64>(),
-                ) {
+            if let (Some(l1), Some(l5), Some(l15)) = (parts.next(), parts.next(), parts.next()) {
+                if let (Ok(l1), Ok(l5), Ok(l15)) =
+                    (l1.parse::<f64>(), l5.parse::<f64>(), l15.parse::<f64>())
+                {
                     details.load1 = l1;
                     details.load5 = l5;
                     details.load15 = l15;
@@ -487,16 +483,12 @@ impl MonitorRegistry {
             return Ok(task.state_and_since());
         }
         if self.task_count() >= MONITOR_TASK_LIMIT {
-            return Err(format!(
-                "monitor task limit reached ({MONITOR_TASK_LIMIT})"
-            ));
+            return Err(format!("monitor task limit reached ({MONITOR_TASK_LIMIT})"));
         }
         let handle = ssh
             .live_handle_for_connection(connection_id)
             .await
-            .ok_or_else(|| {
-                format!("no live SSH session for connection '{connection_id}'")
-            })?;
+            .ok_or_else(|| format!("no live SSH session for connection '{connection_id}'"))?;
         // Re-check under the lock: two concurrent starts for one connection
         // must stay idempotent and the limit must hold against the race.
         let mut tasks = self.lock_tasks();
@@ -504,9 +496,7 @@ impl MonitorRegistry {
             return Ok(existing.state_and_since());
         }
         if tasks.len() >= MONITOR_TASK_LIMIT {
-            return Err(format!(
-                "monitor task limit reached ({MONITOR_TASK_LIMIT})"
-            ));
+            return Err(format!("monitor task limit reached ({MONITOR_TASK_LIMIT})"));
         }
         let (cancel, cancel_rx) = watch::channel(false);
         let task = Arc::new(TaskHandle {
@@ -562,10 +552,7 @@ impl MonitorRegistry {
     /// `monitor/status`: every resident task's lifecycle row.
     pub async fn status(&self) -> Value {
         let tasks = self.lock_tasks();
-        let rows: Vec<Value> = tasks
-            .iter()
-            .map(|(id, task)| task.status_row(id))
-            .collect();
+        let rows: Vec<Value> = tasks.iter().map(|(id, task)| task.status_row(id)).collect();
         json!({ "tasks": rows })
     }
 
@@ -598,18 +585,13 @@ impl MonitorRegistry {
 
     /// `monitor/details`: the latest slow-loop burst for one connection.
     pub async fn details(&self, connection_id: &str) -> Result<Value, String> {
-        let task = self
-            .task(connection_id)
-            .ok_or_else(|| {
-                format!(
-                    "monitor task was not found for connection '{connection_id}'"
-                )
-            })?;
+        let task = self.task(connection_id).ok_or_else(|| {
+            format!("monitor task was not found for connection '{connection_id}'")
+        })?;
         let latest = task.lock_slow().back().cloned();
         match latest {
-            Some(burst) => serde_json::to_value(&burst.details).map_err(|error| {
-                format!("failed to serialize monitor details: {error}")
-            }),
+            Some(burst) => serde_json::to_value(&burst.details)
+                .map_err(|error| format!("failed to serialize monitor details: {error}")),
             None => Err(format!(
                 "no monitor detail burst has arrived yet for connection '{connection_id}'"
             )),
@@ -676,11 +658,7 @@ impl TaskHandle {
             state: *self.state.read().expect("monitor state poisoned"),
             error: self.error.read().expect("monitor error poisoned").clone(),
             since: *self.since.read().expect("monitor since poisoned"),
-            primary_interface: self
-                .iface
-                .read()
-                .expect("monitor iface poisoned")
-                .clone(),
+            primary_interface: self.iface.read().expect("monitor iface poisoned").clone(),
         };
         serde_json::to_value(row).expect("monitor status row serializes")
     }
@@ -748,9 +726,7 @@ fn ingest_counter_line(task: &TaskHandle, line: &str) {
             let t = now_ms();
             // First counter row flips connecting → live and only sets the
             // baseline; every later row diffs into a sample.
-            if *task.state.read().expect("monitor state poisoned")
-                == MonitorState::Connecting
-            {
+            if *task.state.read().expect("monitor state poisoned") == MonitorState::Connecting {
                 *task.lock_state() = MonitorState::Live;
                 *task.lock_since() = t;
             }
@@ -872,7 +848,10 @@ async fn run_fast_loop(
             }
         }
         if remote_closed {
-            fail(&task, "monitor channel was closed by the remote host".to_string());
+            fail(
+                &task,
+                "monitor channel was closed by the remote host".to_string(),
+            );
             return;
         }
     }
@@ -1097,13 +1076,21 @@ mod tests {
             other => panic!("expected counters, got {other:?}"),
         }
         // The fallback expression must stay part of the script.
-        assert!(MON_FAST_SCRIPT.contains("MemFree"), "fallback formula missing");
-        assert!(MON_FAST_SCRIPT.contains("SReclaimable"), "fallback formula missing");
+        assert!(
+            MON_FAST_SCRIPT.contains("MemFree"),
+            "fallback formula missing"
+        );
+        assert!(
+            MON_FAST_SCRIPT.contains("SReclaimable"),
+            "fallback formula missing"
+        );
     }
 
     #[test]
     fn diff_computes_cpu_memory_and_rates() {
-        let prev = counters(1000, 1_000_000, 900_000, 16_384_000, 8_192_000, 1_048_576, 2048, "eth0");
+        let prev = counters(
+            1000, 1_000_000, 900_000, 16_384_000, 8_192_000, 1_048_576, 2048, "eth0",
+        );
         let next = counters(
             2000,
             1_100_000,
@@ -1195,7 +1182,10 @@ mod tests {
             iface: Some("eth0".into()),
             ..sample
         };
-        assert_eq!(serde_json::to_value(&with_iface).unwrap()["iface"], json!("eth0"));
+        assert_eq!(
+            serde_json::to_value(&with_iface).unwrap()["iface"],
+            json!("eth0")
+        );
     }
 
     #[test]
@@ -1240,12 +1230,19 @@ mod tests {
             value["disks"][0],
             json!({"mount": "/", "totalKb": 10485760, "usedKb": 2097152})
         );
-        assert_eq!(value["users"][0], json!({"user": "alice", "tty": "pts/0", "from": "10.0.0.5"}));
+        assert_eq!(
+            value["users"][0],
+            json!({"user": "alice", "tty": "pts/0", "from": "10.0.0.5"})
+        );
     }
 
     #[test]
     fn detail_block_without_end_marker_still_parses() {
-        let details = parse_detail_block(&["dbx-det load=1 2 3", "dbx-det uptime=10", "dbx-det disk=/data,100,50"]);
+        let details = parse_detail_block(&[
+            "dbx-det load=1 2 3",
+            "dbx-det uptime=10",
+            "dbx-det disk=/data,100,50",
+        ]);
         assert_eq!(details.uptime_sec, 10);
         assert_eq!(details.disks.len(), 1);
         assert_eq!(details.disks[0].mount, "/data");
@@ -1367,8 +1364,12 @@ mod tests {
             .map(|(index, _)| index)
             .collect();
         assert_eq!(gates.len(), 2, "route and fallback ifaces share one gate");
-        let fallback = MON_FAST_SCRIPT.find("/proc/net/dev").expect("fallback source");
-        let eval = MON_FAST_SCRIPT.find("eval \"$(awk -v IF=").expect("counter eval");
+        let fallback = MON_FAST_SCRIPT
+            .find("/proc/net/dev")
+            .expect("fallback source");
+        let eval = MON_FAST_SCRIPT
+            .find("eval \"$(awk -v IF=")
+            .expect("counter eval");
         assert!(fallback < gates[1] && gates[1] < eval);
     }
 
