@@ -1517,6 +1517,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
   scrollbar-width: none !important;
   background: var(--ssh-terminal-background);
 }
+/* #306 无折行模式：宽列画布由容器横向滚动承载；普通模式画布与容器同宽，
+   不出现滚动条（:class 绑定 terminal-h-scroll）。 */
+.terminal-host.terminal-h-scroll { overflow-x: auto; }
+.split-pane-host.terminal-h-scroll { overflow-x: auto; }
 /* 工具条悬浮化：三按钮仅图标（文案进 tooltip/aria-label），绝对定位钉在
    分屏区右下角，不再作为 flex 项参与布局——row 模式下此前的带文字按钮会
    吃掉一整列宽度并换行成高条。默认完全隐藏（opacity:0），悬停分屏区或

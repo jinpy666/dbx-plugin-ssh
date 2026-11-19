@@ -14,7 +14,8 @@ function mountQueue(handlers: Record<string, (...args: unknown[]) => Promise<unk
     if (!handler) return Promise.resolve(undefined);
     return handler(...rest);
   });
-  (window as unknown as { dbxPlugin: { invoke: typeof invoke } }).dbxPlugin = { invoke };
+  const sendBinary = vi.fn(async () => {});
+  (window as unknown as { dbxPlugin: { invoke: typeof invoke; sendBinary: typeof sendBinary } }).dbxPlugin = { invoke, sendBinary };
   return useTransferQueue({
     t: (key) => key,
     session: ref({ sessionId: "s1" }),
@@ -77,5 +78,98 @@ describe("uploadSource 占位卡 (#272)", () => {
     });
     await expect(queue.uploadSource("a.bin", 10, async () => new Uint8Array(0))).rejects.toThrow("start boom");
     expect(pendingKeyOf(queue)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// issue #305：小文件上传「一直卡着没动静，过很久才显示成功」——终态 progress
+// 事件或分片 ACK 事件在宿主桥上丢失时，兜底轮询的时间常数收敛：
+// 完成 watchdog 从固定 15s 改为 1s 起步逐级退避；分片 ACK 等待器从一次性
+// 30s 改为 3s 起步的状态轮询阶梯（大分片慢链路不误伤：轮询只在 ACK 缺席时
+// 发生，且 transferred 达标即放行）。
+// ---------------------------------------------------------------------------
+
+describe("兜底轮询时间常数 (#305)", () => {
+  const tick = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+
+  it("完成事件丢失时 watchdog 首轮 1s 即轮询状态并结算", async () => {
+    vi.useFakeTimers();
+    try {
+      let finished = false;
+      let statusPolls = 0;
+      const queue = mountQueue({
+        "sftp/upload/start": async () => ({ taskId: "t1", chunkSize: 512 }),
+        "sftp/upload/finish": async () => {
+          finished = true;
+          return undefined;
+        },
+        "sftp/transfer/status": async () => {
+          statusPolls += 1;
+          return { transferred: 0, status: finished ? "completed" : "running" };
+        },
+      });
+      const pending = queue.uploadSource("a.bin", 0, async () => new Uint8Array(0));
+      await tick(0);
+      // 模拟终态事件丢失：不喂 updateTransfer，只靠 watchdog 兜底
+      await tick(1_000);
+      expect(statusPolls).toBe(1);
+      await expect(pending).resolves.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("watchdog 逐级退避：1s→2s，未终态继续等", async () => {
+    vi.useFakeTimers();
+    try {
+      let statusPolls = 0;
+      const pollTimes: number[] = [];
+      const queue = mountQueue({
+        "sftp/upload/start": async () => ({ taskId: "t1", chunkSize: 512 }),
+        "sftp/upload/finish": async () => undefined,
+        "sftp/transfer/status": async () => {
+          statusPolls += 1;
+          pollTimes.push(Date.now());
+          return { transferred: 0, status: statusPolls >= 2 ? "completed" : "running" };
+        },
+      });
+      const pending = queue.uploadSource("a.bin", 0, async () => new Uint8Array(0));
+      await tick(0);
+      await tick(1_000);
+      await tick(2_000);
+      expect(pollTimes).toHaveLength(2);
+      expect(pollTimes[1]! - pollTimes[0]!).toBe(2_000);
+      await expect(pending).resolves.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("分片 ACK 丢失时 3s 状态轮询兜底继续传输（原实现要等满 30s）", async () => {
+    vi.useFakeTimers();
+    try {
+      let finished = false;
+      let statusPolls = 0;
+      const queue = mountQueue({
+        "sftp/upload/start": async () => ({ taskId: "t1", chunkSize: 512 }),
+        "sftp/upload/finish": async () => {
+          finished = true;
+          return undefined;
+        },
+        "sftp/transfer/status": async () => {
+          statusPolls += 1;
+          return { transferred: 8, status: finished ? "completed" : "running" };
+        },
+      });
+      const pending = queue.uploadSource("a.bin", 8, async () => new Uint8Array(8));
+      await tick(0);
+      await tick(3_000);
+      // 3s 内状态轮询已兜底 ACK 缺席，无需等满 30s
+      expect(statusPolls).toBe(1);
+      await tick(1_000);
+      await expect(pending).resolves.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

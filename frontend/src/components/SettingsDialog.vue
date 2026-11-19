@@ -49,6 +49,8 @@ import {
   RIGHT_CLICK_MODES,
   SCROLLBACK_MAX,
   SCROLLBACK_MIN,
+  NOWRAP_COLUMNS_MAX,
+  NOWRAP_COLUMNS_MIN,
   WORD_SEPARATOR_MAX_LENGTH,
   type TerminalBehaviorSettings,
   type TerminalBellMode,
@@ -1146,6 +1148,15 @@ function updateScrollback(raw: string) {
   const value = Number(trimmed);
   if (!Number.isFinite(value)) return;
   updateBehavior({ scrollbackLines: value });
+}
+
+/** #306 无折行列数：空串/非数值忽略，范围钳位交给 App 侧 sanitize。 */
+function updateNoWrapColumns(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) return;
+  const value = Number(trimmed);
+  if (!Number.isFinite(value)) return;
+  updateBehavior({ noWrapColumns: value });
 }
 
 /** 快捷键整表替换：编辑器内部管草稿，只把最终结果上抛给 App 持久化。 */
@@ -2288,6 +2299,16 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <input type="number" :min="SCROLLBACK_MIN" :max="SCROLLBACK_MAX" step="100" :value="terminalBehavior.scrollbackLines" @change="updateScrollback(numberFieldValue($event))" />
             </label>
             <p class="muted settings-note">{{ t("terminalBehavior.scrollbackHint") }}</p>
+            <!-- #306 无折行模式：宽 PTY + 横向滚动；vim/htop 等备用屏自动回退可视宽度。 -->
+            <label class="settings-field settings-switch-row">
+              <Switch size="sm" :model-value="terminalBehavior.noWrap" @update:model-value="(value) => updateBehavior({ noWrap: value === true })" />
+              <span>{{ t("terminalBehavior.noWrap") }}</span>
+            </label>
+            <label class="settings-field" v-if="terminalBehavior.noWrap">
+              <span>{{ t("terminalBehavior.noWrapColumns") }}</span>
+              <input type="number" :min="NOWRAP_COLUMNS_MIN" :max="NOWRAP_COLUMNS_MAX" step="50" :value="terminalBehavior.noWrapColumns" @change="updateNoWrapColumns(numberFieldValue($event))" />
+            </label>
+            <p class="muted settings-note">{{ t("terminalBehavior.noWrapHint") }}</p>
 
             <h3 class="settings-section-title">{{ t("terminalBehavior.localShellSection") }}</h3>
             <label class="settings-field">

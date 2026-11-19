@@ -321,7 +321,6 @@ describe("workbench localization", () => {
       "errors.probeOutput",
       "errors.remoteNotFound",
       "errors.sessionChanged",
-      "errors.uploadAckTimeout",
       "errors.workbenchDetached",
     ]);
     for (const locale of locales) {

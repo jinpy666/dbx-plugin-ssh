@@ -1458,24 +1458,18 @@ impl Plugin {
             // 终态仅 stop+start 复活。
             "monitor/start" => {
                 let connection_id = required_string(&params, "connectionId")?;
-                self.runtime.block_on(self.monitors.start(
-                    &self.ssh,
-                    connection_id,
-                    &self.runtime,
-                ))
+                self.runtime
+                    .block_on(self.monitors.start(&self.ssh, connection_id, &self.runtime))
             }
             "monitor/stop" => {
                 let connection_id = required_string(&params, "connectionId")?;
                 self.runtime.block_on(self.monitors.stop(connection_id))
             }
             "monitor/status" => Ok(self.runtime.block_on(self.monitors.status())),
-            "monitor/snapshot" => {
-                Ok(self.runtime.block_on(self.monitors.snapshot(&params)))
-            }
+            "monitor/snapshot" => Ok(self.runtime.block_on(self.monitors.snapshot(&params))),
             "monitor/details" => {
                 let connection_id = required_string(&params, "connectionId")?;
-                self.runtime
-                    .block_on(self.monitors.details(connection_id))
+                self.runtime.block_on(self.monitors.details(connection_id))
             }
             // Docker 管理面板（IMPL_PLAN Task P2-4）。列表/日志是只读采集
             // 脚本（探针区分「未装容器 CLI」与「daemon socket 拒绝」）；动作
