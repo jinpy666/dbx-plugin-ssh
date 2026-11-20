@@ -15,6 +15,7 @@ import { ACTION_IDS, type TerminalHotkeyBindings } from "../lib/terminalHotkeys"
 import { ACTION_LINK_SETTINGS_DEFAULTS } from "../lib/actionLinksMatcher";
 import { DEFAULT_TERMINAL_APPEARANCE_SETTINGS } from "../lib/terminalAppearance";
 import { GUTTER_TIMESTAMP_DEFAULT_FORMAT } from "../lib/terminalGutter";
+import { TOOLBAR_HIDDEN_DEFAULTS } from "../lib/toolbarVisibility";
 
 const t = (key: string, values?: Record<string, string | number>) => workbenchMessage("zh-CN", key, values);
 
@@ -93,6 +94,7 @@ function mountSettings(sessionId?: string, transferPrefsOverrides: Record<string
       localShell: "/bin/zsh",
       terminalBehavior: { ...TERMINAL_BEHAVIOR_DEFAULTS },
       paneDirection: "auto",
+      toolbarVisibility: { ...TOOLBAR_HIDDEN_DEFAULTS },
       terminalHotkeys: hotkeyBindings,
       applePlatform: false,
       actionLinks: { ...ACTION_LINK_SETTINGS_DEFAULTS, matchers: { ...ACTION_LINK_SETTINGS_DEFAULTS.matchers } },

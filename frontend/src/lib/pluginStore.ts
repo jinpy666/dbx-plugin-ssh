@@ -62,6 +62,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-terminal-appearance",
   // dock 面板（底部栏）精简工具条的隐藏偏好（"1" = 隐藏）。
   "ssh-panel-toolbar-hidden",
+  // 工具栏按钮可配置隐藏（issue #309，toolbarVisibility.ts 自治读写）：单键
+  // JSON，false = 隐藏，未登记 id 恒显示。漏登记 = 水合不拉，重启静默回全显。
+  "ssh-toolbar-hidden-buttons",
   // Docker 浮层宽度（issue #170，拖拽手柄调宽 300..720）：persistDockerPanelWidth
   // 写穿。漏登记 = 水合不拉，拖宽后重启回落默认 680。
   "ssh-docker-panel-width",
