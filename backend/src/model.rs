@@ -2045,6 +2045,10 @@ mod manifest_contract_tests {
     // can regression-test the form contract without importing it:
     //   * `pluginFieldConditions.ts` — visibility cascades through the
     //     referenced sibling; `required_when` never implies required.
+    //     Required-field presence goes through `pluginFieldHasValue` (#215,
+    //     jinpy666/dbx@7dada51e5): whitespace is significant in secrets, so
+    //     `type: "password"` inputs count as filled unless the string is empty,
+    //     while other text fields treat trim-to-empty as missing.
     //   * `ConnectionDialog.connectionConfigForSubmit` — "save" is blocked by
     //     the first field that is visible, required and empty (surfaced as
     //     `connection.pluginRequiredField` = "请填写{field}").
@@ -2142,10 +2146,20 @@ mod manifest_contract_tests {
         }
     }
 
-    fn form_value_present(value: Option<&Value>) -> bool {
+    fn form_value_present(entry: &Value, value: Option<&Value>) -> bool {
         match value {
             None | Some(Value::Null) => false,
-            Some(Value::String(text)) => !text.trim().is_empty(),
+            Some(Value::String(text)) => {
+                // Host `pluginFieldHasValue` (#215): whitespace is significant
+                // in secrets, so `type: "password"` inputs only count as
+                // missing when the string is empty — a single space is a real
+                // password. Other text fields keep the trim semantics.
+                if entry["type"].as_str() == Some("password") {
+                    !text.is_empty()
+                } else {
+                    !text.trim().is_empty()
+                }
+            }
             Some(_) => true,
         }
     }
@@ -2157,7 +2171,7 @@ mod manifest_contract_tests {
             .find(|entry| {
                 form_field_visible(entry, values, fields)
                     && form_field_required(entry, values, fields)
-                    && !form_value_present(form_value(values, entry).as_ref())
+                    && !form_value_present(entry, form_value(values, entry).as_ref())
             })
             .map(|entry| entry["key"].as_str().unwrap_or_default().to_string())
     }
@@ -2273,7 +2287,10 @@ mod manifest_contract_tests {
                     ] {
                         for read_only in [false, true] {
                             for triggers_enabled in [false, true] {
-                                for password in ["", "secret"] {
+                                // "" blocks the form; " " must not (#215): the
+                                // space is the password, and the parser takes
+                                // credentials verbatim.
+                                for password in ["", " ", "secret"] {
                                     for password_command in ["", "echo pw"] {
                                         for password_source in ["direct", "command"] {
                                             for private_key_path in ["", "~/.ssh/id_ed25519"] {
@@ -2403,6 +2420,69 @@ mod manifest_contract_tests {
             cases >= 15_000,
             "form/parser matrix shrank unexpectedly ({cases} cases)"
         );
+    }
+
+    /// #215 回归：空格是真实密码。宿主 `pluginFieldHasValue` 对 `type: "password"`
+    /// 字段不做 trim 归一——仅 undefined/null/"" 视为缺失；纯空格密码不再让
+    /// 「保存并连接」置灰，且保存后解析层逐字接受（含首/尾空格）。
+    /// 非秘密文本字段保持 trim 语义：空白串仍视为未填。
+    #[test]
+    fn whitespace_passwords_count_as_form_values() {
+        let fields = connection_fields();
+        let field = |key: &str| {
+            fields
+                .iter()
+                .find(|entry| entry["key"].as_str() == Some(key))
+                .unwrap()
+        };
+
+        // 宿主 spec `pluginFieldHasValue` 的镜像：password 字段跳过 trim，
+        // text 字段保持「trim 后非空才算已填」。
+        assert!(form_value_present(field("password"), Some(&json!(" "))));
+        assert!(form_value_present(field("password"), Some(&json!("\t"))));
+        assert!(form_value_present(
+            field("password"),
+            Some(&json!(" spaced "))
+        ));
+        assert!(!form_value_present(field("password"), Some(&json!(""))));
+        assert!(!form_value_present(field("password"), None));
+        assert!(!form_value_present(field("username"), Some(&json!(" "))));
+        assert!(form_value_present(field("username"), Some(&json!("root"))));
+        // 私钥口令同为 `type: "password"`，语义一致。
+        assert!(form_value_present(
+            field("private_key_passphrase"),
+            Some(&json!(" "))
+        ));
+
+        // 保存→解析 round-trip：空格密码逐字进入连接解析层。
+        let defaults: BTreeMap<String, Value> = fields
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("default")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        (
+                            entry["key"].as_str().unwrap_or_default().to_string(),
+                            value.clone(),
+                        )
+                    })
+            })
+            .collect();
+        let mut values = defaults.clone();
+        for (key, value) in [
+            ("authentication", json!("password")),
+            ("password_source", json!("direct")),
+        ] {
+            values.insert(key.to_string(), value);
+        }
+        for password in [" ", "\t", " spaced "] {
+            values.insert("password".to_string(), json!(password));
+            let payload = connection_payload(&fields, &values);
+            let parsed = StoredConnection::from_lifecycle_params(&json!({ "connection": payload }))
+                .expect("whitespace password must be accepted by the parser");
+            assert_eq!(parsed.password, password);
+        }
     }
 
     /// 端口在表单里只受 `type: number` 约束，宿主 Rust 层与解析层各自校验
