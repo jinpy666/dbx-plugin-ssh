@@ -8072,6 +8072,7 @@ const {
   pickBatchQuick,
   browseBatchHistoryUp,
   browseBatchHistoryDown,
+  onBatchCommandEnterKey,
   batchSessionLabel,
   sendBatchCommand,
   dismissBatchResult,
@@ -8093,6 +8094,19 @@ const {
   confirmRiskyPaste,
   terminalInputQueue,
 });
+
+// 多行批量命令（issue #310）：命令输入为自增高 textarea，草稿含换行时给
+// 底部条让出更高空间，避免盖住终端末行；高度跟随草稿内容变化。
+const batchDraftInput = ref<HTMLTextAreaElement | null>(null);
+const BATCH_DRAFT_MAX_HEIGHT = 72;
+function autosizeBatchDraftInput() {
+  const el = batchDraftInput.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight, BATCH_DRAFT_MAX_HEIGHT)}px`;
+}
+// batchSaveMode 切换会重挂 textarea，一并纳入 watch 源兜住重挂后的高度。
+watch([batchDraft, batchSaveMode], () => void nextTick(autosizeBatchDraftInput));
 
 // 批量上传：与批量发送共用同一条批量条（「命令 / 上传」双模式）与同一份
 // 目标勾选；每个目标按自己的 sessionId 走 sftp/upload/* 分块通道（与 SFTP
@@ -8130,6 +8144,10 @@ const {
 
 /** 已选文件字节数展示（与传输面板同口径的 KiB/MiB 进位）。 */
 const batchUploadBytesLabel = computed(() => formatBytes(uploadTotalBytes.value));
+
+// 草稿含换行（多行粘贴，issue #310）时批量条增高，终端宿主让位同步上移，
+// 避免底部条盖住终端末行；上载模式/单行草稿回落常态高度。
+const batchBarTall = computed(() => batchBarOpen.value && batchMode.value === "command" && batchDraft.value.includes("\n"));
 
 // 连接建立后刷新 AI 模式；断开时收起模式弹出层。
 watch(connected, (value) => {
@@ -10045,7 +10063,7 @@ function flagHintsSource(command: string): string {
     <section ref="paneContainer" :class="orderedPaneClass" :style="paneSplitStyle">
       <ContextMenu :open="terminalMenuOpen" @update:open="(open) => { if (!open) terminalMenuOpen = false; }">
         <ContextMenuTrigger as-child>
-      <section class="terminal-pane" :class="{ 'drag-active': terminalDragActive, 'batch-bar-open': connected && batchBarOpen, 'marker-visible': commandMarker.installed, 'gutter-visible': gutterPaneVisible, 'wallpaper-active': wallpaperActive, ...transferBusyPaneClass(terminalTransferBusy) }" :style="[terminalBasis, gutterPaneStyle, splitHostStyle]" @contextmenu="showTerminalMenu" @dragenter.prevent="onTerminalDragEnter" @dragover.prevent @dragleave="onTerminalDragLeave" @drop.prevent="onTerminalDrop($event)">
+      <section class="terminal-pane" :class="{ 'drag-active': terminalDragActive, 'batch-bar-open': connected && batchBarOpen, 'batch-bar-tall': batchBarTall, 'marker-visible': commandMarker.installed, 'gutter-visible': gutterPaneVisible, 'wallpaper-active': wallpaperActive, ...transferBusyPaneClass(terminalTransferBusy) }" :style="[terminalBasis, gutterPaneStyle, splitHostStyle]" @contextmenu="showTerminalMenu" @dragenter.prevent="onTerminalDragEnter" @dragover.prevent @dragleave="onTerminalDragLeave" @drop.prevent="onTerminalDrop($event)">
         <!-- P2-9 背景图层：pointer-events:none 垫底（DOM 序先于 terminal-host），
              透明度 0.1-0.9 由设置页滑杆控制；开启期间强制 DOM 渲染器透出本层。 -->
         <div v-if="wallpaperActive" class="terminal-wallpaper" :style="{ backgroundImage: `url(${wallpaperDataUrl})`, opacity: wallpaperOpacity / 100 }" aria-hidden="true" />
@@ -10721,17 +10739,21 @@ function flagHintsSource(command: string): string {
             :disabled="batchSaving"
             @keydown.enter="confirmBatchBarSave"
           />
-          <input
+          <!-- 多行命令（issue #310）：textarea 自增高支持多行粘贴，Enter 发送
+               （IME 组合中交还输入法），Shift+Enter 换行，↑↓ 光标在首/末行才翻历史 -->
+          <textarea
             v-else
+            ref="batchDraftInput"
             v-model="batchDraft"
-            class="batch-bar-input mono"
+            class="batch-bar-input batch-bar-input--multi mono"
+            rows="1"
             spellcheck="false"
             :placeholder="t('batchSendPlaceholder')"
             :disabled="batchSending"
             @input="broadcastBatchBarState()"
-            @keydown.up.prevent="browseBatchHistoryUp"
-            @keydown.down.prevent="browseBatchHistoryDown"
-            @keydown.enter="sendBatchCommand"
+            @keydown.up="browseBatchHistoryUp"
+            @keydown.down="browseBatchHistoryDown"
+            @keydown.enter="onBatchCommandEnterKey"
           />
           <template v-if="batchSaveMode">
             <button class="icon-button icon-emerald" :title="t('save')" :aria-label="t('save')" :disabled="batchSaving" @click="confirmBatchBarSave"><Save /></button>

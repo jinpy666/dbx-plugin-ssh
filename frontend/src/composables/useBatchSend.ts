@@ -7,6 +7,7 @@ import {
   batchTargetLabel,
   deriveBatchCommandName,
   filterLiveBatchTargets,
+  normalizeBatchCommandLines,
   normalizeBatchTargets,
   normalizeLocalBatchTargets,
   selectBatchTargets,
@@ -240,17 +241,33 @@ function pickBatchQuick(item: QuickCommand) {
 }
 
 // 命令条 ↑↓ 浏览历史（与终端历史面板共用 commandHistory，历史来源保持一致）。
-function browseBatchHistoryUp() {
+// 多行草稿（issue #310）：光标不在首行/末行时不抢按键，保持 textarea 内移动光标。
+function browseBatchHistoryUp(event?: Event) {
+  const el = event?.target as HTMLTextAreaElement | undefined;
+  if (el && (el.selectionStart !== el.selectionEnd || el.value.slice(0, el.selectionStart).includes("\n"))) return;
+  event?.preventDefault();
   batchHistoryBackup.value = batchHistoryIndex.value === -1 ? batchDraft.value : batchHistoryBackup.value;
   const step = browseCommandHistory(commandHistory.value, batchHistoryIndex.value, "up", batchHistoryBackup.value);
   batchHistoryIndex.value = step.index;
   batchDraft.value = step.draft;
 }
 
-function browseBatchHistoryDown() {
+function browseBatchHistoryDown(event?: Event) {
+  const el = event?.target as HTMLTextAreaElement | undefined;
+  if (el && (el.selectionStart !== el.selectionEnd || el.value.slice(el.selectionEnd).includes("\n"))) return;
+  event?.preventDefault();
   const step = browseCommandHistory(commandHistory.value, batchHistoryIndex.value, "down", batchHistoryBackup.value);
   batchHistoryIndex.value = step.index;
   batchDraft.value = step.draft;
+}
+
+/** 命令条回车：发送而非换行（多行粘贴用 Shift+Enter 手动换行，issue #310）。
+ * Shift+Enter 落到 textarea 默认换行；IME 组合中的回车是候选确认键，交还
+ * 输入法不做 preventDefault。 */
+function onBatchCommandEnterKey(event: KeyboardEvent) {
+  if (event.shiftKey || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  sendBatchCommand();
 }
 
 function batchSessionLabel(sessionId: string): string {
@@ -297,8 +314,9 @@ async function sendBatchCommand() {
         continue;
       }
       // enqueue 即本地 PTY 的受理边界（与 SSH 路径的桥受理语义一致）；
-      // 异步发送失败由输入队列的全局 onError 上报。
-      terminalInputQueue.enqueue(sessionId, new TextEncoder().encode(`${command}\r`));
+      // 异步发送失败由输入队列的全局 onError 上报。多行草稿先归一换行
+      // （issue #310：\n → \r，与 sidecar batch_input_payload 同语义）。
+      terminalInputQueue.enqueue(sessionId, new TextEncoder().encode(`${normalizeBatchCommandLines(command)}\r`));
       results.push({ sessionId, success: true });
     }
     batchSummary.value = summarizeBatchResults(results);
@@ -411,6 +429,7 @@ onBeforeUnmount(() => {
     pickBatchQuick,
     browseBatchHistoryUp,
     browseBatchHistoryDown,
+    onBatchCommandEnterKey,
     batchSessionLabel,
     sendBatchCommand,
     dismissBatchResult,

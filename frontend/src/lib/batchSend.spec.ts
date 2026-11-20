@@ -5,6 +5,7 @@ import {
   deriveBatchCommandName,
   filterLiveBatchTargets,
   normalizeBatchTargets,
+  normalizeBatchCommandLines,
   normalizeLocalBatchTargets,
   quickPickCommandById,
   selectBatchTargets,
@@ -245,5 +246,16 @@ describe("normalizeLocalBatchTargets", () => {
       ]),
     ).toEqual([{ sessionId: "l1", connectionId: "", local: true, host: "Local · shell" }]);
     expect(normalizeLocalBatchTargets("nope")).toEqual([]);
+  });
+});
+
+describe("normalizeBatchCommandLines", () => {
+  it("turns every line break into a PTY carriage return (sidecar batch_input_payload 语义)", () => {
+    expect(normalizeBatchCommandLines("ls\ncd /usr\nls")).toBe("ls\rcd /usr\rls");
+    expect(normalizeBatchCommandLines("a\r\nb\rc\nd")).toBe("a\rb\rc\rd");
+  });
+  it("leaves single-line commands untouched", () => {
+    expect(normalizeBatchCommandLines("df -h")).toBe("df -h");
+    expect(normalizeBatchCommandLines("")).toBe("");
   });
 });
