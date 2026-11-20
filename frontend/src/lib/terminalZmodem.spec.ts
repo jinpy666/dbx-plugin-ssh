@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createZmodemDetectionFeeder,
   createZmodemSentry,
   decideZmodemDetection,
   mergeZmodemChunks,
@@ -304,5 +305,83 @@ describe("hex ZRINIT detection (classic lrzsz rz, issue #171)", () => {
     expect(handlers.onDetect).toHaveBeenCalledTimes(1);
     const detection = onDetect.mock.calls[0][0] as { get_session_role(): string };
     expect(detection.get_session_role()).toBe("receive");
+  });
+});
+
+/**
+ * 检测定界器（issue #307）：zmodem.js 的会话检测只在「hex 首帧恰为本次
+ * consume burst 的末尾」时发出；#302 合帧后尾部杂字节跟在同一 burst 里会让
+ * 该次检测永久丢失（首帧字节已从 sentry 缓存剔除、哨兵随之湮灭），远端 sz
+ * 就再也收不到 ZRINIT——界面上既无进度也无完成反馈。定界器把完整 hex 首帧
+ * 切成独立 burst，恢复逐帧时代的确定性。
+ */
+describe("createZmodemDetectionFeeder (merged-burst detection guard, issue #307)", () => {
+  const BANNER = [...new TextEncoder().encode("sz waiting to send.\r\n")];
+  const TRAILING = [...new TextEncoder().encode("background output\r\n")];
+
+  function latin1(bytes: readonly number[] | Uint8Array): string {
+    return Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  }
+
+  /** 真实接收路径：检测即确认（useZmodem 的 receive 分支同款）。 */
+  function makeFeeder() {
+    const onDetect = vi.fn((detection: { confirm(): unknown }) => detection.confirm());
+    const toTerminal: string[] = [];
+    const sentry = createZmodemSentry({
+      send: vi.fn(),
+      toTerminal: (data) => toTerminal.push(latin1(data)),
+      onDetect: onDetect as never,
+      onRetract: vi.fn(),
+    });
+    const feeder = createZmodemDetectionFeeder((chunk) => sentry.consume(chunk.slice().buffer));
+    return { onDetect, toTerminal, feeder };
+  }
+
+  it("isolates a complete ZRQINIT header so detection survives merged trailing output", () => {
+    const { onDetect, toTerminal, feeder } = makeFeeder();
+    const merged = [...BANNER, ...hexFirstFrame(0x00), ...TRAILING];
+    feeder.feed(new Uint8Array(merged));
+    expect(onDetect).toHaveBeenCalledTimes(1);
+    const detection = onDetect.mock.calls[0][0] as unknown as { get_session_role(): string };
+    expect(detection.get_session_role()).toBe("receive");
+    // 哨兵前的显示字节不受影响，照常上屏。
+    expect(toTerminal.join("")).toContain("sz waiting to send.");
+  });
+
+  it("carries a sentinel split across feed boundaries and still detects", () => {
+    const { onDetect, feeder } = makeFeeder();
+    const header = hexFirstFrame(0x00);
+    feeder.feed(new Uint8Array([...BANNER, 0x2a, 0x2a, 0x18]));
+    expect(onDetect).not.toHaveBeenCalled();
+    feeder.feed(new Uint8Array([0x42, ...header.slice(4), ...TRAILING]));
+    expect(onDetect).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds an incomplete header until the next feed completes it", () => {
+    const { onDetect, feeder } = makeFeeder();
+    const header = hexFirstFrame(0x00);
+    feeder.feed(new Uint8Array([...BANNER, ...header.slice(0, 14)]));
+    expect(onDetect).not.toHaveBeenCalled();
+    feeder.feed(new Uint8Array([...header.slice(14), ...TRAILING]));
+    expect(onDetect).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a false sentinel (broken shape) without stalling later output", () => {
+    const { onDetect, toTerminal, feeder } = makeFeeder();
+    // 文件直出等场景里的假哨兵：`**\x18B` 后不是合法 hex 头。
+    const junk = [...new TextEncoder().encode("cat **\x18Bzz.. not a header\r\n")];
+    feeder.feed(new Uint8Array(junk));
+    expect(onDetect).not.toHaveBeenCalled();
+    feeder.feed(new Uint8Array(TRAILING));
+    // 假哨兵不得滞留字节：后续输出完整上屏。
+    expect(toTerminal.join("")).toContain(latin1(TRAILING));
+  });
+
+  it("passes plain display bytes through untouched on the fast path", () => {
+    const { onDetect, toTerminal, feeder } = makeFeeder();
+    feeder.feed(new Uint8Array([...BANNER]));
+    feeder.feed(new Uint8Array([...TRAILING]));
+    expect(onDetect).not.toHaveBeenCalled();
+    expect(toTerminal.join("")).toBe(latin1([...BANNER, ...TRAILING]));
   });
 });

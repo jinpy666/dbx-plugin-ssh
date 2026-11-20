@@ -1,6 +1,7 @@
 import type { Detection as ZmodemDetection, Session as ZmodemSession, Sentry as ZmodemSentry, ZmodemFileDetails, ZmodemOffer } from "zmodem.js";
 import { computed, onBeforeUnmount, ref, type Ref } from "vue";
 import {
+  createZmodemDetectionFeeder,
   createZmodemSentry,
   decideZmodemDetection,
   mergeZmodemChunks,
@@ -103,6 +104,12 @@ function resetZmodemSentry() {
     onRetract() {},
   });
 }
+
+// 空闲帧的检测定界器（issue #307）：consume 闭包晚绑定 zmodemSentry，
+// sentry 重建后自动跟随新实例；held 残留是显示字节，跨重建只需继续放行。
+const zmodemDetectionFeeder = createZmodemDetectionFeeder((chunk) => {
+  zmodemSentry?.consume(chunk.slice().buffer);
+});
 
 function handleZmodemDetection(detection: ZmodemDetection) {
   // 提示挂起期间 rz 会重发 ZRINIT（keep-alive）：静默忽略重复检测，
@@ -281,7 +288,17 @@ function onZmodemInput(event: Event) {
 function consumeFrameViaZmodem(data: Uint8Array) {
   try {
     if (!zmodemSentry) resetZmodemSentry();
-    zmodemSentry?.consume(data.slice().buffer);
+    if (zmodemBusy.value) {
+      // 会话进行中：会话内解析是真正的流式解析，与 burst 边界无关，整帧直喂。
+      zmodemSentry?.consume(data.slice().buffer);
+      return;
+    }
+    // 空闲路径经检测定界器喂入（issue #307）：#302 合帧后 ZRQINIT 常与
+    // 回显/提示符等杂字节拼在同一 consume burst 里，zmodem.js 只在「hex 首帧
+    // 恰为 burst 末尾」时发出检测，尾部杂字节会让该次检测永久丢失——远端 sz
+    // 收不到 ZRINIT，界面上进度/完成反馈全不出现。定界器把完整 hex 首帧切成
+    // 独立 burst，字节逐个恰好喂入一次、顺序不变。
+    zmodemDetectionFeeder.feed(data);
   } catch (cause) {
     if (zmodemBusy.value) finishZmodemUpload(cause);
     else {
