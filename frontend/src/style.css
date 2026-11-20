@@ -862,6 +862,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--primary); }
 .batch-bar-quick { flex: 0 1 170px; min-width: 0; }
 .batch-bar-input { flex: 1 1 auto; min-width: 60px; height: 26px; border: 1px solid var(--border); border-radius: 4px; padding: 0 8px; background: var(--background); color: var(--foreground); font-size: 12px; }
 .batch-bar-input:focus { border-color: color-mix(in srgb, var(--primary) 70%, var(--border)); }
+/* 多行命令输入（issue #310）：自增高 textarea，草稿含换行时批量条变高，
+   终端让位同步上移（+42px 梯度），避免盖住终端末行。 */
+.batch-bar-input--multi { height: auto; max-height: 72px; padding: 4px 8px; line-height: 1.4; resize: none; overflow-y: auto; }
+.terminal-pane.batch-bar-tall .terminal-host { inset: 0 0 84px 0; }
+.terminal-pane.batch-bar-tall.marker-visible .terminal-host { inset: 0 0 108px 0; }
+.terminal-pane.batch-bar-tall .terminal-command-marker,
+.terminal-pane.batch-bar-tall .zmodem-status { bottom: 92px; }
+.terminal-pane.batch-bar-tall.marker-visible .zmodem-status { bottom: 112px; }
 .batch-bar .icon-button { flex: 0 0 auto; }
 .batch-bar-send { color: var(--success); }
 /* 底部条上的 popover 向上展开：定位由 reka side="top" 负责，这里只管尺寸布局。 */

@@ -117,6 +117,13 @@ export function normalizeLocalBatchTargets(raw: unknown): BatchSendTarget[] {
   return targets;
 }
 
+/** 批量命令换行归一（issue #310）：多行粘贴的 `\n` / `\r\n` / `\r` 统一变成
+ * PTY 回车 `\r`，与 sidecar `batch_input_payload` 同语义——每一行就是一次
+ * 回车，多行脚本逐行进入远端 shell。纯函数。 */
+export function normalizeBatchCommandLines(command: string): string {
+  return command.replace(/\r\n/g, "\r").replace(/[\n\r]/g, "\r");
+}
+
 /** 目标行主标签：连接名优先（终端改名后批量目标同步显示新名，issue #10232），
  * 未命名回退 `user@host`，连接信息缺失再回退短 session id。 */
 export function batchTargetLabel(target: BatchSendTarget): string {
