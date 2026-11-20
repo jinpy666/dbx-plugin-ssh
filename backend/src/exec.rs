@@ -2175,8 +2175,9 @@ pub(crate) fn prompt_tail_line(normalized: &str) -> Option<&str> {
 /// How much context a password prompt line carries on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PasswordPromptShape {
-    /// sudo names itself: `[sudo] password for <user>:`. Self-identifying, so
-    /// it can be answered on sight.
+    /// sudo names itself: `[sudo] password for <user>:` (classic sudo) or
+    /// `[sudo: authenticate] Password:` (sudo-rs, Ubuntu 25.10+).
+    /// Self-identifying, so it can be answered on sight.
     SudoNamed,
     /// A bare `password:` / `passphrase:` / `密码:` line. macOS sudo and
     /// passphrase readers print exactly this, but so do `docker login`,
@@ -2200,6 +2201,24 @@ pub(crate) fn password_prompt_shape(normalized: &str) -> Option<PasswordPromptSh
     // have to open the line — prompt column 0 — so a nested YAML key, a log
     // continuation or a diff hunk never qualifies.
     if lower.contains("[sudo] password for") {
+        return Some(PasswordPromptShape::SudoNamed);
+    }
+    // sudo-rs (Ubuntu 25.10+, the Rust reimplementation) renders
+    // `[<program>: <configured prompt>] <PAM message>`, by default
+    // `[sudo: authenticate] Password: `. The bracket names sudo itself, so
+    // the password message that follows is as trustworthy as the classic
+    // prompt; a hidden prompt for something else (e.g. `Login:`) stays bare.
+    // The configured prompt may carry brackets of its own (`-p '[sudo]
+    // password: '`), so the PAM message follows the *last* `]` on the line.
+    let sudo_rs_pam_message = lower
+        .strip_prefix("[sudo:")
+        .and_then(|rest| rest.rsplit_once(']'))
+        .map(|(_, message)| message);
+    if sudo_rs_pam_message.is_some_and(|message| {
+        PASSWORD_PROMPT_PATTERS
+            .iter()
+            .any(|pattern| message.contains(pattern))
+    }) {
         return Some(PasswordPromptShape::SudoNamed);
     }
     PASSWORD_PROMPT_PATTERS
@@ -3612,6 +3631,31 @@ mod tests {
         // Direct sudo prompts keep working after the reset.
         assert_eq!(
             auto.observe("We trust you... [sudo] password for user:"),
+            Some((AutoSudoKind::Password, "pw".to_string()))
+        );
+    }
+
+    #[test]
+    fn terminal_auto_sudo_answers_sudo_rs_password() {
+        // sudo-rs (Ubuntu 25.10+, the Rust reimplementation) renders
+        // `[sudo: authenticate] Password: ` instead of the classic
+        // `[sudo] password for <user>:`. The bracket still names sudo itself,
+        // so this prompt is answered without a preceding sudo command line.
+        let mut auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+        // The bracket alone is not enough: a hidden prompt that asks for
+        // something else must stay unanswered (echo-on prompts render as
+        // `[sudo: input needed ...`, but keep the guard shape explicit).
+        assert_eq!(auto.observe("[sudo: authenticate] Login: "), None);
+        assert_eq!(
+            auto.observe("[sudo: authenticate] Password: "),
+            Some((AutoSudoKind::Password, "pw".to_string()))
+        );
+        // The PTY sudo lane passes `-p '[sudo] password: '`; sudo-rs wraps the
+        // configured prompt in its own bracket, so the PAM message follows the
+        // last `]` — the nested rendering is still sudo naming itself.
+        let mut pty_auto = TerminalAutoSudo::new(Arc::new(RwLock::new(terminal_auth())));
+        assert_eq!(
+            pty_auto.observe("[sudo: [sudo] password: ] Password: "),
             Some((AutoSudoKind::Password, "pw".to_string()))
         );
     }
