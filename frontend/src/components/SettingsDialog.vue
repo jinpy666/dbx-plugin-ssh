@@ -60,6 +60,7 @@ import {
 import type { TerminalHotkeyBindings } from "../lib/terminalHotkeys";
 import type { PaneDirectionPref } from "../lib/paneLayout";
 import type { AiSettings } from "../lib/aiSettings";
+import { TOOLBAR_BUTTONS, type ToolbarButtonId, type ToolbarVisibility } from "../lib/toolbarVisibility";
 import { type ActionLinkMatcherToggles, type ActionLinksSettings } from "../lib/actionLinksMatcher";
 import { rdpExperimentalEnabled as parseRdpExperimentalEnabled } from "../lib/rdpExperimental";
 import { GUTTER_TIMESTAMP_DEFAULT_FORMAT, type GutterSettings } from "../lib/terminalGutter";
@@ -499,6 +500,8 @@ const props = defineProps<{
   terminalBehavior: TerminalBehaviorSettings;
   /** 分栏布局方向偏好（issue #187，权威态在 App）：只读 + 上抛改动。 */
   paneDirection: PaneDirectionPref;
+  /** 工具栏按钮可配置隐藏（issue #309，权威态在 App）：只读 + 上抛改动。 */
+  toolbarVisibility: ToolbarVisibility;
   /** ghost 接受键（批 4e/反馈迭代）：权威态在 App，本组件只读 + 上抛改动。 */
   ghostTabAccept: boolean;
   /** AI 助手设置（Warp AI 对齐批）：权威态在 App（pluginStore 单键 JSON），
@@ -624,6 +627,8 @@ const emit = defineEmits<{
   (e: "update-behavior", patch: Partial<TerminalBehaviorSettings>): void;
   /** 分栏布局方向改动（issue #187）：App 侧持久化 + 重排终端。 */
   (e: "update:paneDirection", value: PaneDirectionPref): void;
+  /** 工具栏按钮显隐增量（issue #309）：归一化与落地在 App。 */
+  (e: "update-toolbar-visibility", id: ToolbarButtonId, visible: boolean): void;
   /** 快捷键整表替换（编辑器内部管理增删改，只上抛最终结果）。 */
   (e: "update-hotkeys", bindings: TerminalHotkeyBindings): void;
   (e: "apply-font", payload: { family: string | null; size: number }): void;
@@ -2287,6 +2292,14 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
                   <SelectItem value="horizontal">{{ t("workbenchLayout.directionHorizontal") }}</SelectItem>
                 </SelectContent>
               </Select>
+            </label>
+            <!-- 工具栏按钮可配置隐藏（issue #309）：逐按钮开关，默认全显示；
+                 隐藏只收敛主工作台工具条视觉密度，核心入口不进清单。 -->
+            <h3 class="settings-section-title">{{ t("toolbarButtons.sectionTitle") }}</h3>
+            <p class="muted settings-note">{{ t("toolbarButtons.hint") }}</p>
+            <label v-for="button in TOOLBAR_BUTTONS" :key="button.id" class="settings-field settings-switch-row">
+              <Switch size="sm" :model-value="toolbarVisibility[button.id] !== false" @update:model-value="(value) => emit('update-toolbar-visibility', button.id, value === true)" />
+              <span>{{ t(button.labelKey) }}</span>
             </label>
             <h3 class="settings-section-title">{{ t("terminalBehavior.renderingSection") }}</h3>
             <label class="settings-field settings-switch-row">

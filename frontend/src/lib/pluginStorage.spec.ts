@@ -44,6 +44,8 @@ describe("ssh pluginStore wiring", () => {
         "ssh-terminal-appearance",
         // dock 面板精简工具条隐藏偏好。
         "ssh-panel-toolbar-hidden",
+        // 工具栏按钮可配置隐藏（issue #309，toolbarVisibility.ts 自治读写）。
+        "ssh-toolbar-hidden-buttons",
         // Docker 浮层宽度（issue #170，拖拽手柄 300..720）。
         "ssh-docker-panel-width",
         "telnet-connect-last",

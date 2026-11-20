@@ -201,6 +201,7 @@ import { parseAiResultText } from "./lib/aiResultParse";
 import { buildAiAssistRequest, buildAiFixPrompt, buildAiFixRequest, buildAiSearchPrompt, buildAiSearchRequest } from "./lib/aiRequests";
 import { canActivateAiSearch, classifyAiSearchInput, createAiSearchState, nextAiSearchState, type AiSearchState } from "./lib/aiSearchMode";
 import { loadAiSettings, saveAiSettings, sanitizeAiSettings, type AiSettings } from "./lib/aiSettings";
+import { loadToolbarVisibility, saveToolbarVisibility, type ToolbarButtonId, type ToolbarVisibility } from "./lib/toolbarVisibility";
 import { isExpectedNonZeroExit, shouldOfferAiFix } from "./lib/aiFix";
 import { prepareAiOutputSnapshot, stripAnsiEscapes } from "./lib/outputRedaction";
 // 结构化补全（FIG wave-1 最终架构）：唯一结构化补全来源 = fig 引擎
@@ -698,6 +699,18 @@ function aiBridgeOk(): boolean {
 function updateAiSettings(patch: Partial<AiSettings>) {
   aiSettingsState.value = sanitizeAiSettings({ ...aiSettingsState.value, ...patch });
   saveAiSettings(aiSettingsState.value);
+}
+// 工具栏按钮可配置隐藏（issue #309）：默认全显示（false 才落盘），设置·终端
+// 「工具栏按钮」分组逐按钮开关，权威值 pluginStore（单键 JSON）。隐藏只收敛
+// 主工作台工具条视觉密度，功能仍经既有入口可达；核心入口不进清单。
+const toolbarVisibilityState = ref<ToolbarVisibility>(loadToolbarVisibility());
+function setToolbarButtonVisible(id: ToolbarButtonId, visible: boolean) {
+  toolbarVisibilityState.value = { ...toolbarVisibilityState.value, [id]: visible };
+  saveToolbarVisibility(toolbarVisibilityState.value);
+}
+/** 模板门控辅助：隐藏 = 显式 false；常显按钮不进清单恒 true。 */
+function toolbarButtonVisible(id: ToolbarButtonId): boolean {
+  return toolbarVisibilityState.value[id] !== false;
 }
 function resetAiFixConsent() {
   updateAiSettings({ fixConsent: false });
@@ -9608,7 +9621,7 @@ function flagHintsSource(command: string): string {
              新开工作台 tab，并在当前已认证 transport 上另开 channel（不重复 MFA/
              不重复输密码），与「+」菜单里的同名项是同一个函数。 -->
         <button
-          v-if="!localUiMode && !isRdpConnection"
+          v-if="!localUiMode && !isRdpConnection && toolbarButtonVisible('copySession')"
           class="icon-button icon-emerald"
           :disabled="!connectionId || !connected"
           :title="t('copySessionTab')"
@@ -9619,7 +9632,7 @@ function flagHintsSource(command: string): string {
              并自动开第一个副屏（复用已认证 transport）；再点继续加窗格至上限。
              开启后可用「镜像会话」挂载其他连接/其他 tab 的存活会话。 -->
         <button
-          v-if="!localUiMode && !isRdpConnection"
+          v-if="!localUiMode && !isRdpConnection && toolbarButtonVisible('splitPane')"
           class="icon-button icon-emerald"
           :class="{ 'is-active': splitPaneOpen }"
           :disabled="!connectionId || !connected"
@@ -9775,23 +9788,23 @@ function flagHintsSource(command: string): string {
         <button v-if="!localUiMode" class="icon-button icon-emerald" :title="t('sudoRefresh.title')" :aria-label="t('sudoRefresh.title')" :disabled="!connected" @click="sendSudoRefresh"><ShieldCheck /></button>
         <!-- quick sudo profiles 管理入口（M32-A）已归位设置·sudo：工具条不再放
              管理类按钮，sudoRefresh 保留为会话内即时动作。 -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
+        <button v-if="!localUiMode && toolbarButtonVisible('alertTriage')" class="icon-button icon-cyan" :title="t('alertTriage.title')" :aria-label="t('alertTriage.title')" @click="openAlertTriage"><Siren /></button>
         <!-- main 新增的端口转发入口同属 SSH 专属：沿用 A4 惯例在本地模式整体隐藏。 -->
-        <button v-if="!localUiMode" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
+        <button v-if="!localUiMode && toolbarButtonVisible('forwards')" class="icon-button icon-cyan" :title="t('forwards.title')" :aria-label="t('forwards.title')" :disabled="!connectionId" @click="forwardsOpen = true"><Network /></button>
         <!-- 监控面板入口（多服务器 dashboard 独立 tab，与连接右键 manage-monitor 同一落点）：SSH 专属，本地模式隐藏。 -->
-        <button v-if="!localUiMode && canOpenMonitorPanel" class="icon-button icon-cyan" :title="t('monitor.title')" :aria-label="t('monitor.title')" :disabled="!connectionId" @click="openMonitorPanel"><Activity /></button>
+        <button v-if="!localUiMode && canOpenMonitorPanel && toolbarButtonVisible('monitor')" class="icon-button icon-cyan" :title="t('monitor.title')" :aria-label="t('monitor.title')" :disabled="!connectionId" @click="openMonitorPanel"><Activity /></button>
         <!-- 鲸鱼按钮打开统一工作台并定位 Docker tab；再次点击关闭。 -->
-        <button class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="toggleDockerPanel"><DockerWhaleLogo /></button>
+        <button v-if="toolbarButtonVisible('docker')" class="icon-button icon-blue" :class="{ 'is-active': dockerPanelOpen }" :title="t('docker.toolbarTitle')" :aria-label="t('docker.toolbarTitle')" :aria-pressed="dockerPanelOpen" @click.stop="toggleDockerPanel"><DockerWhaleLogo /></button>
         <label v-if="!localUiMode" class="follow-directory-control" :title="t('followTerminal')">
           <Switch size="sm" :model-value="followDirectory" :disabled="!connected || panelSurface" @update:model-value="setDirectoryTracking" />
           <span>{{ t("followTerminal") }}</span>
         </label>
         <span class="toolbar-separator" aria-hidden="true" />
-        <button v-if="!localUiMode && !panelSurface" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
+        <button v-if="!localUiMode && !panelSurface && toolbarButtonVisible('batchSend')" class="icon-button icon-neutral" :class="{ 'is-active': batchBarOpen }" :title="t('batchSendTitle')" :aria-label="t('batchSendTitle')" :aria-pressed="batchBarOpen" :disabled="!connected" @click="toggleBatchBar"><ListChecks /></button>
         <div>
           <Popover :open="quickMenuOpen" @update:open="(open) => { if (!open) quickMenuOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-amber" :title="t('quickCommands')" :aria-label="t('quickCommands')" :disabled="!connected" @click.stop="toggleQuickMenu"><Zap /></button>
+              <button v-if="toolbarButtonVisible('quickCommands')" class="icon-button icon-amber" :title="t('quickCommands')" :aria-label="t('quickCommands')" :disabled="!connected" @click.stop="toggleQuickMenu"><Zap /></button>
             </PopoverAnchor>
             <PopoverContent class="popover quick-commands-popover" align="end" :side-offset="5">
             <!-- M32-A3 后工具条只留"列表 + 搜索 + 执行"（Termius Snippets 式）：
@@ -9854,7 +9867,7 @@ function flagHintsSource(command: string): string {
         <div>
           <Popover :open="agentModeOpen" @update:open="(open) => { if (!open) agentModeOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button" :class="agentMode === 'off' ? 'icon-neutral' : 'icon-emerald is-active'" :title="t('agentTerminalQuickHint')" :aria-label="t('agentTerminalQuickHint')" :aria-pressed="agentMode !== 'off'" :disabled="!connected" @click.stop="toggleAgentModeMenu"><Bot /></button>
+              <button v-if="toolbarButtonVisible('agentMode')" class="icon-button" :class="agentMode === 'off' ? 'icon-neutral' : 'icon-emerald is-active'" :title="t('agentTerminalQuickHint')" :aria-label="t('agentTerminalQuickHint')" :aria-pressed="agentMode !== 'off'" :disabled="!connected" @click.stop="toggleAgentModeMenu"><Bot /></button>
             </PopoverAnchor>
             <PopoverContent class="popover agent-mode-popover" align="end" :side-offset="5">
             <h3>{{ t("agentTerminalSection") }}</h3>
@@ -9869,19 +9882,19 @@ function flagHintsSource(command: string): string {
         <!-- 高亮规则管理（M32-A2）已归位设置·终端（HighlightRulesSection）：
              工具条不再放配置编辑器，渲染扫描（compiledHighlightRules）仍在。 -->
         <span class="toolbar-separator" aria-hidden="true" />
-        <button class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-label="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
-        <button class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
-        <button class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-label="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
+        <button v-if="toolbarButtonVisible('metrics')" class="icon-button icon-emerald" :class="{ 'is-active': metricsOpen }" :title="t('metrics')" :aria-label="t('metrics')" :aria-pressed="metricsOpen" :disabled="!connected" @click="toggleMetrics"><Gauge /></button>
+        <button v-if="toolbarButtonVisible('recording')" class="icon-button" :class="{ 'is-recording': recordingActive }" :title="recordingActive ? t('recordingStop') : t('recordingTitle')" :aria-label="recordingActive ? t('recordingStop') : t('recordingTitle')" :disabled="!recordingTarget" @click="toggleRecording"><Disc /></button>
+        <button v-if="toolbarButtonVisible('recordings')" class="icon-button" :class="{ 'is-active': recordingsOpen }" :title="t('recordingsTitle')" :aria-label="t('recordingsTitle')" :aria-pressed="recordingsOpen" @click="toggleRecordings"><Film /></button>
         <!-- 设置弹窗承载 SSH/SFTP/终端专属分节（sudo/agent/安全/命名编码…），
              RDP 连接下整类不适用——入口随之隐藏（RDP 实验开关在非 RDP tab 的
              设置·终端里仍可达）；审计日志只记录 SSH/SFTP 操作，RDP 从不入审计。 -->
         <button class="icon-button icon-violet" :title="t('settings')" :aria-label="t('settings')" @click="openSettings"><Settings /></button>
-        <button class="icon-button icon-amber" :title="t('auditLog.title')" :aria-label="t('auditLog.title')" @click="openAuditLog"><FileText /></button>
+        <button v-if="toolbarButtonVisible('auditLog')" class="icon-button icon-amber" :title="t('auditLog.title')" :aria-label="t('auditLog.title')" @click="openAuditLog"><FileText /></button>
         <span class="toolbar-separator" aria-hidden="true" />
         <div>
           <Popover :open="columnsOpen" @update:open="(open) => { if (!open) columnsOpen = false; }">
             <PopoverAnchor as-child>
-              <button class="icon-button icon-violet" :title="t('customizeColumns')" :aria-label="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
+              <button v-if="toolbarButtonVisible('columns')" class="icon-button icon-violet" :title="t('customizeColumns')" :aria-label="t('customizeColumns')" :disabled="panelSurface" @click.stop="toggleColumnsMenu"><Columns3 /></button>
             </PopoverAnchor>
             <PopoverContent class="popover columns-popover" align="end" :side-offset="5">
             <label v-for="column in (['modified', 'size', 'kind', 'owner', 'group'] as SftpColumn[])" :key="column"><input type="checkbox" :checked="visibleColumns.includes(column)" @change="toggleColumn(column)" />{{ column === "kind" ? t("sftpKind") : t(column) }}</label>
@@ -9896,7 +9909,7 @@ function flagHintsSource(command: string): string {
           <!-- 历史卡右键菜单（ContextMenu）打开时忽略弹层的外点关闭请求：
                菜单项 pointerdown 相对弹层是"外部"，不加守卫会在 select 前把宿主弹层
                连同菜单一起卸载，动作丢失。 -->
-          <button class="icon-button icon-blue" :title="t('transfers')" :aria-label="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
+          <button v-if="toolbarButtonVisible('transfers')" class="icon-button icon-blue" :title="t('transfers')" :aria-label="t('transfers')" :disabled="panelSurface" @click.stop="toggleTransferPanel"><ArrowUpDown /><span v-if="activeTransfers" class="activity-dot" /></button>
 
         </div>
         </template>
@@ -11548,6 +11561,8 @@ function flagHintsSource(command: string): string {
       :terminal-behavior="terminalBehavior"
       :pane-direction="paneDirection"
       @update:pane-direction="setPaneDirection"
+      :toolbar-visibility="toolbarVisibilityState"
+      @update-toolbar-visibility="setToolbarButtonVisible"
       :terminal-hotkeys="terminalHotkeys"
       :apple-platform="applePlatform"
       :action-links="actionLinksSettings"
