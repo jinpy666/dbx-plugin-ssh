@@ -90,6 +90,136 @@ export function createZmodemSentry(handlers: ZmodemSentryHandlers): Sentry {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 检测定界器（issue #307）：恢复「hex 首帧 = 独立 burst」的检测前提。
+//
+// zmodem.js Sentry._parse 只在 hex 首帧恰为本次 consume 末尾时发出检测；
+// 否则首帧字节已从其缓存剔除，若尾部杂字节把哨兵挤出 21 字节缓存窗口，
+// 该次检测连同哨兵一起永久丢失。逐帧消费时代 PTY 写边界天然满足此前提；
+// #302 合帧后同一 drain 批次里的回显/提示符等杂字节会跟在 ZRQINIT 后面，
+// 远端 sz 的检测就此静默失效——状态条、进度、完成提示全不出现。
+// ---------------------------------------------------------------------------
+
+/** ZMODEM hex 首帧哨兵：`**` + ZDLE(0x18) + 'B'。 */
+const ZMODEM_HEX_SENTINEL = [0x2a, 0x2a, 0x18, 0x42];
+const ZMODEM_IS_HEX = /^[0-9a-f]$/i;
+
+function bytesEqualAt(buf: Uint8Array, at: number, expected: readonly number[]): boolean {
+  if (at + expected.length > buf.length) return false;
+  for (let i = 0; i < expected.length; i += 1) {
+    if (buf[at + i] !== expected[i]) return false;
+  }
+  return true;
+}
+
+function findHexSentinel(buf: Uint8Array, from: number): number {
+  for (let at = from; at + ZMODEM_HEX_SENTINEL.length <= buf.length; at += 1) {
+    if (bytesEqualAt(buf, at, ZMODEM_HEX_SENTINEL)) return at;
+  }
+  return -1;
+}
+
+/**
+ * buf[at] 是哨兵。判定 hex 首帧的形状：
+ * - 返回 >0：完整首帧的结束索引（哨兵 + 14 hex + CR/LF，可选紧随 XON）；
+ * - 返回 -1：形状破坏（必不是首帧，可直接按显示字节放行）；
+ * - 返回 -2：字节不足（可能是跨帧首帧，需要等待）。
+ */
+function classifyHexHeader(buf: Uint8Array, at: number): number {
+  const hexEnd = at + 18;
+  for (let i = at + 4; i < hexEnd; i += 1) {
+    if (i >= buf.length) return -2;
+    if (!ZMODEM_IS_HEX.test(String.fromCharCode(buf[i]))) return -1;
+  }
+  if (hexEnd >= buf.length) return -2;
+  const cr = buf[hexEnd];
+  if (cr !== 0x0d && cr !== 0x8d) return -1;
+  const lfIndex = hexEnd + 1;
+  if (lfIndex >= buf.length) return -2;
+  const lf = buf[lfIndex];
+  if (lf !== 0x0a && lf !== 0x8a) return -1;
+  const xonIndex = lfIndex + 1;
+  // zmlib 的 XON(0x11)：lrzsz hex 首帧可能紧跟一个（被流控吃掉也无妨）。
+  if (xonIndex < buf.length && buf[xonIndex] === 0x11) return xonIndex + 1;
+  return lfIndex + 1;
+}
+
+/** buf 尾部若挂着哨兵前缀（`*` / `**` / `**\x18` / `**\x18B`），返回其长度。 */
+function tailSentinelPrefixLength(buf: Uint8Array): number {
+  for (let keep = ZMODEM_HEX_SENTINEL.length - 1; keep >= 1; keep -= 1) {
+    let matches = true;
+    for (let i = 0; i < keep; i += 1) {
+      if (buf[buf.length - keep + i] !== ZMODEM_HEX_SENTINEL[i]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return keep;
+  }
+  return 0;
+}
+
+export interface ZmodemDetectionFeeder {
+  feed(data: Uint8Array): void;
+}
+
+/**
+ * 把下行帧按检测边界切分后喂给 sentry 的 consume。字节保证逐个恰好喂入
+ * 一次、顺序不变（显示流只是重新分块，不增不减）；空闲时（无活动会话）
+ * 使用。会话进行中不必喂入：会话内解析是真正的流式解析，与 burst 边界
+ * 无关。
+ */
+export function createZmodemDetectionFeeder(consume: (data: Uint8Array) => void): ZmodemDetectionFeeder {
+  // 帧尾未完的哨兵/首帧残留（≤21 字节），与下一帧拼合后再判定。这是显示
+  // 字节的极小延迟（一个 drain 帧），不是滞留：下一帧必然续完或判破放行。
+  let held: Uint8Array = new Uint8Array(0);
+
+  function feed(data: Uint8Array): void {
+    let buf = data;
+    if (held.length) {
+      // held ≤ 21 字节：拼合而非展开（合帧批次可达 MiB 级，避免中间大数组）。
+      buf = new Uint8Array(held.length + data.length);
+      buf.set(held);
+      buf.set(data, held.length);
+      held = new Uint8Array(0);
+    }
+    let cursor = 0;
+    while (cursor < buf.length) {
+      const at = findHexSentinel(buf, cursor);
+      if (at < 0) {
+        // 快路径：无哨兵。帧尾挂哨兵前缀则留少量字节到下一帧续判。
+        const keep = tailSentinelPrefixLength(buf.subarray(cursor));
+        const cut = buf.length - keep;
+        if (keep > 0) {
+          if (cut > cursor) consume(buf.subarray(cursor, cut));
+          held = buf.slice(cut);
+        } else {
+          consume(buf.subarray(cursor));
+        }
+        return;
+      }
+      if (at > cursor) consume(buf.subarray(cursor, at));
+      const end = classifyHexHeader(buf, at);
+      if (end === -2) {
+        // 哨兵起的首帧未完：留到下一帧拼成完整独立 burst。
+        held = buf.slice(at);
+        return;
+      }
+      if (end === -1) {
+        // 形状破坏：哨兵不是首帧开头，按显示字节放行并从其后继续扫。
+        consume(buf.subarray(at, at + ZMODEM_HEX_SENTINEL.length));
+        cursor = at + ZMODEM_HEX_SENTINEL.length;
+        continue;
+      }
+      // 完整 hex 首帧：独占一个 consume burst，检测确定性恢复（issue #307）。
+      consume(buf.subarray(at, end));
+      cursor = end;
+    }
+  }
+
+  return { feed };
+}
+
 export async function sendZmodemFiles(session: Session, files: readonly File[], onProgress?: (progress: ZmodemUploadProgress) => void): Promise<void> {
   const totalSize = files.reduce((sum, file) => sum + file.size, 0);
   let totalTransferred = 0;
