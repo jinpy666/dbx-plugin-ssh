@@ -4,6 +4,37 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.15-beta.2] — 2026-11-21
+
+### 修复
+- **批量命令支持多行粘贴**：批量命令条此前是单行输入框，粘贴多行脚本时
+  换行被浏览器丢弃、整段挤成一行执行。现改为自增高输入区：粘贴的每一行
+  都会作为独立回车逐行进入远端 shell；Enter 发送、Shift+Enter 手动换行，
+  ↑↓ 在多行文本内移动光标、首/末行才翻历史；草稿含换行时命令条自动增高
+  并给终端让位，不遮挡末行（#310）。
+- **sz 命令下载无任何反馈**：远端 `sz` 下载时状态条、进度、完成通知全不
+  出现。根因是日志洪峰合帧优化（beta.1）把 ZMODEM 握手首帧与命令回显等
+  尾随字节拼进同一批数据，zmodem.js 的会话检测静默失效且无法自愈。现在
+  空闲阶段按完整握手帧定界喂入，字节逐个恰好送达一次，检测在任何合帧
+  批次下都能触发（#307）。
+- **空格密码无法保存并连接**：密码为一个空格（或含首尾空格）时「保存并
+  连接」按钮置灰。原因是表单必填判定把空白统一视为未填；现在密码类字段
+  仅空字符串才算缺失，空格密码完整保存、逐字生效；host/用户名等其他字段
+  的空白仍视为未填（#215）。
+- **MCP 无选择器调用误导 AI 编造连接**：外部 AI 调用 `ssh_exec_sudo` 等
+  工具漏传连接选择器时，逐字段报 "Missing parameter: host" 会让 AI 误判
+  host 必填并自行编造 host+username 重试。现在改报 "No connection
+  selected" 并列出三条正确路径（含 `ssh_list_connections`），initialize
+  的 instructions 同步下发「先发现连接、再传 connectionId」。
+
+### 新增
+- **工具栏按钮可配置隐藏**：设置 → 终端新增「工具栏按钮」分组，录制终端、
+  端口映射、Docker、监控、审计日志等 15 个次要按钮逐按钮开关，默认全部
+  显示（与现状零差异）；连接、SFTP、设置等核心入口保持常显（#309）。
+- **sudo-rs（Ubuntu 25.10+）密码提示识别**：Ubuntu 25.10 起 sudo 换为
+  Rust 重实现，提示变为 `[sudo: authenticate] Password:`，终端自动提权
+  因此失灵。现在识别该提示并按经典 sudo 同等策略应答；`Login:` 等非密码
+  消息不代答。
 ## [0.7.15-beta.1] — 2026-11-19
 
 ### 修复
