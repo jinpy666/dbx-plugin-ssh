@@ -16,6 +16,7 @@ import { resolveCompletionKey, type CompletionKeyboardState } from "../lib/compl
 import { withShellBuiltinsSource, detectShellKind } from "../lib/completion/shell/shellBuiltins";
 import { createEngineRunner } from "../lib/completion/worker/engineRunner";
 import { pluginStore, loadCompletionEngine } from "../lib/pluginStore";
+import { terminalLineEraseSequence, type WindowsShellEraseKind } from "../lib/terminalInput";
 import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "../lib/suggestionGuard";
 import { cursorViewportRow, measureCellSizeFromDom } from "../lib/terminalAnchor";
 import { ArrowDown, ArrowUp } from "@lucide/vue";
@@ -54,12 +55,16 @@ export function useCommandSuggestions(options: {
    *  惰性求值——useGhostSuggest 在本 composable 之后初始化，闭包在 onData
    *  期才调用，无 TDZ 风险。 */
   inlineGhostActive: () => boolean;
+  /** 本地会话的 Windows shell 行清字节能力（issue #317）：提示符采样 miss
+   *  （自定义 oh-my-posh 提示符）时按 shell 程序名兜底；SSH 会话必须返回
+   *  null 保持 Ctrl+U 语义。惰性求值，回填期才调用。 */
+  getLocalShellEraseKind: () => WindowsShellEraseKind;
   /** 终端交互提示待答（issue #150 及其反馈扩展，MFA/验证码/密码待输入、
    *  选择菜单与 y/n 确认）：惰性求值，键入期采样——交互应答不是命令键入，
    *  不开建议/补全浮层。 */
   isInteractivePromptPending: () => boolean;
 }) {
-  const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, persistCommandHistory, isHistoryPanelOpen, syncHistoryPanelAnchor, updateHistoryPanelFilter, pushTerminalCommandHistory, inlineGhostActive, isInteractivePromptPending } = options;
+  const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, getLocalShellEraseKind, persistCommandHistory, isHistoryPanelOpen, syncHistoryPanelAnchor, updateHistoryPanelFilter, pushTerminalCommandHistory, inlineGhostActive, isInteractivePromptPending } = options;
 
 // 命令输入建议浮层（P1-1）运行时状态：条目/选中项/光标锚点与抑制门锁存。
 // 开关与长度上下限的权威值在上方 suggestions*State（sidecar 偏好）。
@@ -689,15 +694,20 @@ function handleSuggestionKey(event: KeyboardEvent): boolean {
   return false;
 }
 
-/** 把当前输入行替换为建议命令（readline 清行后重新写入）。清行用 Ctrl+U
- *  （\u0015，bash/zsh/busybox/fish 均默认绑定为删至行首）而非按模型长度发
- *  N 个退格：pendingTerminalInput 是纯键入模型，Tab 补全/历史展开等回显改写
- *  不进模型，按模型长度退格会擦不干净或擦过头，回填与「Esc 恢复原输入行」
- *  因此破坏屏幕上真实的行（issue #169）；Ctrl+U 让远端 readline 自己删，天然
- *  与屏幕一致。 */
+/** 把当前输入行替换为建议命令（readline 清行后重新写入）。清行字节按 shell
+ *  行编辑能力选择（issue #317）：POSIX/未知 shell 用 Ctrl+U（\u0015，bash/
+ *  zsh/busybox/fish 均默认绑定为删至行首）；Windows PowerShell 的 PSReadLine
+ *  Windows 编辑模式不绑定 Ctrl+U、cmd 的 cooked 行编辑同样不认它——那里
+ *  Ctrl+U 是 no-op，替换文本会追加到现有行上（上下键切历史越拼越乱），
+ *  改用 Ctrl+Home+Ctrl+End（PSReadLine Windows 模式默认绑定，与模型无关地
+ *  清整行）或按模型长度退格（cmd）。pendingTerminalInput 是纯键入模型，Tab
+ *  补全/历史展开等回显改写不进模型，按模型长度退格会擦不干净或擦过头——
+ *  Ctrl+U 让远端 readline 自己删，天然与屏幕一致（issue #169），仅在不认
+ *  Ctrl+U 的 shell 上退化到模型。 */
 function replaceTerminalLineWith(nextLine: string, pressEnter: boolean) {
   if (!terminalGet()) return;
-  const payload = "\u0015" + nextLine + (pressEnter ? "\r" : "");
+  const erase = terminalLineEraseSequence(sniffTerminalShell() ?? getLocalShellEraseKind(), getPendingTerminalInput().length);
+  const payload = erase + nextLine + (pressEnter ? "\r" : "");
   setPendingTerminalInput(pressEnter ? "" : nextLine);
   if (pressEnter) {
     lastTerminalCommand.value = nextLine;

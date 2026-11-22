@@ -49,6 +49,7 @@ function harness(): Harness {
     session: ref(undefined),
     getSessionId: () => "session-a",
     getLocalSessionId: () => undefined,
+    getLocalShellEraseKind: () => null,
     persistCommandHistory: () => undefined,
     isHistoryPanelOpen: () => false,
     syncHistoryPanelAnchor: () => undefined,
