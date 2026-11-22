@@ -80,10 +80,11 @@ const PFLAGS_TRUNC: u32 = 0x10;
 /// 包上限是 256 KiB，但旧服务器可能更小），调用方按此切分数据。
 pub const MAX_WRITE_CHUNK: usize = 32 * 1024;
 
-/// 流水线写窗口深度（latin-1 裸包上传）：一次在途 WRITE 数。8 × 32KiB =
-/// 256KiB 在途字节，与 IPC 块大小同量级；100ms RTT 链路吞吐约从 0.3 MiB/s
-/// 提升至 2.5 MiB/s 量级。上限同时约束服务端乱序处理的内存占用。
-pub const RAW_WRITE_PIPELINE_DEPTH: usize = 8;
+/// 流水线写窗口深度（latin-1 裸包上传）：一次在途 WRITE 数。64 × 32KiB =
+/// 2MiB 在途字节，与高层客户端的非 compat 写窗口对齐（#237）；100ms RTT
+/// 链路吞吐约从 2.5 MiB/s 提升至 20 MiB/s 量级。上限同时约束服务端乱序
+/// 处理的内存占用，仍是 ACK 全收 + 错误即停的有界流水线。
+pub const RAW_WRITE_PIPELINE_DEPTH: usize = 64;
 
 /// READ 单请求建议长度：与写侧同取 v3 规范建议的 32 KiB（`read_file` 的
 /// 分块粒度；workbench 下载逐 chunk 的 256 KiB 是高层客户端语义，这里按
@@ -979,6 +980,13 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> RawSftp<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 裸包写窗口与高层客户端对齐（#237）：64 × 32KiB = 2MiB 在途字节，
+    /// 两条上传推送腿的窗口深度不再成为高 RTT 链路的吞吐天花板。
+    #[test]
+    fn write_pipeline_window_matches_high_level_path() {
+        assert_eq!(RAW_WRITE_PIPELINE_DEPTH * MAX_WRITE_CHUNK, 2 * 1024 * 1024);
+    }
 
     #[test]
     fn frames_carry_big_endian_length() {

@@ -35,6 +35,10 @@ export interface TransferTask {
   // 任务共享一个 batchId，面板聚合成「文件 N/M + 总字节」进度卡。事件
   // 从不携带该键，updateTransfer 透传已有记录上的值。
   batchId?: string;
+  // 上传分片 ACK 事件缺席、兜底轮询进行中（issue #237）：卡片外显「确认
+  // 滞后」，串行停等链路上的静默卡住变成可感知状态。ACK 到达/等待器结算
+  // 即清除；事件从不携带该键，updateTransfer 透传已有记录上的值。
+  ackLagging?: boolean;
 }
 
 /** 一批多文件上传的聚合视图（issue #165）：文件计数由批次编排器（已知
