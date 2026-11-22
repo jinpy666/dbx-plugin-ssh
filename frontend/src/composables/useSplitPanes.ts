@@ -275,6 +275,22 @@ export function useSplitPanes(deps: UseSplitPanesDeps) {
     }
   }
 
+  /**
+   * #304 快速多窗格：一次动作并行开 `count` 个副屏（截断到剩余配额）。
+   * 与用户快速连点 addPane 完全同一条会话管线，只是并行触发——addPane 在
+   * 首个 await 前同步登记窗格记录，并行调用因此互不抢占配额、标题唯一；
+   * 单个会话打开失败只影响该窗格（落断开态），不回滚其余窗格。
+   */
+  async function addPanes(count: number): Promise<void> {
+    if (panes.value.length >= SPLIT_PANE_MAX) {
+      deps.notify(deps.t("splitPaneMaxPanes", { max: SPLIT_PANE_MAX }));
+      return;
+    }
+    const quota = Math.min(Math.max(Math.floor(count), 0), SPLIT_PANE_MAX - panes.value.length);
+    if (quota <= 0) return;
+    await Promise.all(Array.from({ length: quota }, () => addPane()));
+  }
+
   /** 镜像副屏：挂载任意存活会话（含其他连接/其他 tab）。 */
   async function openPicker(): Promise<void> {
     pickOpen.value = true;
@@ -519,6 +535,7 @@ export function useSplitPanes(deps: UseSplitPanesDeps) {
     togglePane,
     toggleDirection,
     addPane,
+    addPanes,
     openPicker,
     closePicker,
     attachPane,

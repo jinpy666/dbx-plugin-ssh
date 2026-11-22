@@ -31,6 +31,7 @@ import {
   Proportions,
   Columns3,
   Rows3,
+  LayoutGrid,
   Copy,
   Crosshair,
   Download,
@@ -10118,6 +10119,9 @@ function flagHintsSource(command: string): string {
               <button type="button" class="split-footer-button" :title="t('splitPaneLayout')" :aria-label="t('splitPaneLayout')" @click="onSplitDirectionToggle">
                 <Rows3 v-if="splitPaneDirection === 'column'" /><Columns3 v-else />
               </button>
+              <!-- #304 快速多窗格：一次并行开满剩余窗格（对标 xterminal 的一键多分屏），
+                   会话打开与逐个 + 完全同管线（复用已认证 transport），只是并行触发。 -->
+              <button type="button" class="split-footer-button" :disabled="splitPaneRecords.length >= 3" :title="t('splitPaneQuickFill')" :aria-label="t('splitPaneQuickFill')" @click="splitPane.addPanes(3)"><LayoutGrid /></button>
               <button type="button" class="split-footer-button" :disabled="splitPaneRecords.length >= 3" :title="t('splitPaneAdd')" :aria-label="t('splitPaneAdd')" @click="splitPane.addPane()"><Plus /></button>
               <button type="button" class="split-footer-button" :title="t('splitPaneMirror')" :aria-label="t('splitPaneMirror')" @click="splitPane.openPicker()"><TerminalIcon /></button>
             </div>
@@ -10855,6 +10859,9 @@ function flagHintsSource(command: string): string {
           <ContextMenuItem @select="selectAllTerminal"><TextSelect />{{ t("terminalSelectAll") }}</ContextMenuItem>
           <ContextMenuItem @select="openTerminalSearch"><Search />{{ t("terminalSearch.open") }}</ContextMenuItem>
           <ContextMenuItem @select="clearTerminal"><Eraser />{{ t("terminalClear") }}</ContextMenuItem>
+          <!-- #304 快速分屏入口下沉到右键菜单：一次动作并行开满窗格（SSH 模式专属），
+               分屏未开时首个成功会话会把分屏栏带出来，无需先点工具条按钮。 -->
+          <ContextMenuItem v-if="!localUiMode && !isRdpConnection" :disabled="!connected" @select="splitPane.addPanes(3)"><LayoutGrid />{{ t("splitPaneQuickFill") }}</ContextMenuItem>
           <ContextMenuItem :disabled="!connected" @select="sendSudoRefresh"><ShieldCheck />{{ t("sudoRefresh.title") }}</ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem :disabled="!connected || terminalTransferBusy || !canWrite" @select="chooseZmodem"><FileUp />{{ t("zmodemUpload") }}</ContextMenuItem>
