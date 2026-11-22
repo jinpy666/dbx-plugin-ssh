@@ -13817,9 +13817,17 @@ pub fn connection_id_param(params: &Value) -> Result<&str, String> {
 /// 失败，大文件上传被误杀（#206），统一放宽到 60 秒。
 const SFTP_REQUEST_TIMEOUT_SECS: u64 = 60;
 
+/// SFTP 写流水线在途深度（非 compat，#237）。crate 默认 16 × 32KiB = 512KiB
+/// 在途窗口，高 RTT 链路吞吐被窗口/RTT 封顶（100ms ≈ 5 MiB/s）；加深到
+/// 64 × 32KiB = 2MiB（与 latin-1 裸包车道 `RAW_WRITE_PIPELINE_DEPTH` 对齐，
+/// OpenSSH 自家 sftp 客户端的在途请求数同为 64 量级）。写包大小保持 32KiB
+/// 不动（v3 兼容口径），ACK 仍由 `File::flush` 全量收齐并上抛错误，语义不变。
+const SFTP_WRITE_PIPELINE_DEPTH: usize = 64;
+
 /// SFTP 客户端配置（纯函数，供单测）。`compat` 为老旧服务器兼容模式
-/// （M14-B）：请求/响应不做流水线并发（读写各 1 路）；非 compat 沿用
-/// crate 默认并发。两种模式都放宽每请求超时（见 [`SFTP_REQUEST_TIMEOUT_SECS`]）。
+/// （M14-B）：请求/响应不做流水线并发（读写各 1 路）；非 compat 读侧沿用
+/// crate 默认并发（下载另有 multistream/预读窗口调参），写侧加深在途窗口
+/// （#237）。两种模式都放宽每请求超时（见 [`SFTP_REQUEST_TIMEOUT_SECS`]）。
 pub(crate) fn sftp_client_config(compat: bool) -> SftpConfig {
     SftpConfig {
         max_concurrent_reads: if compat {
@@ -13827,11 +13835,7 @@ pub(crate) fn sftp_client_config(compat: bool) -> SftpConfig {
         } else {
             SftpConfig::default().max_concurrent_reads
         },
-        max_concurrent_writes: if compat {
-            1
-        } else {
-            SftpConfig::default().max_concurrent_writes
-        },
+        max_concurrent_writes: if compat { 1 } else { SFTP_WRITE_PIPELINE_DEPTH },
         request_timeout_secs: SFTP_REQUEST_TIMEOUT_SECS,
         ..SftpConfig::default()
     }
@@ -18376,17 +18380,20 @@ matrix-ed25519";
     }
 
     #[test]
-    fn sftp_client_config_non_compat_keeps_default_pipeline_concurrency() {
-        // 非 compat 保持 crate 默认流水线并发，只放宽每请求超时（#206）。
+    fn sftp_client_config_non_compat_deepens_write_pipeline() {
+        // 非 compat：读侧保持 crate 默认并发（下载另有 multistream 调参）；
+        // 写侧加深到 64 路在途（#237），每请求超时放宽（#206）。
         let config = sftp_client_config(false);
         assert_eq!(
             config.max_concurrent_reads,
             SftpConfig::default().max_concurrent_reads
         );
-        assert_eq!(
-            config.max_concurrent_writes,
-            SftpConfig::default().max_concurrent_writes
-        );
+        assert_eq!(config.max_concurrent_writes, SFTP_WRITE_PIPELINE_DEPTH);
         assert_eq!(config.request_timeout_secs, 60);
+        // 在途窗口 = 深度 × 写包大小（russh-sftp 默认写包 32KiB）：2MiB。
+        assert_eq!(
+            config.max_concurrent_writes * SftpConfig::default().max_write_packet_len as usize,
+            2 * 1024 * 1024
+        );
     }
 }

@@ -133,6 +133,8 @@ function updateTransfer(params: Record<string, unknown>) {
     currentFile: currentFile || undefined,
     // 事件从不携带批次键（issue #165）：透传首见记录上的 batchId。
     batchId: existing?.batchId,
+    // 事件从不携带确认滞后键（issue #237）：透传 ACK 兜底轮询的实时标记。
+    ackLagging: existing?.ackLagging,
   };
   settleTransferCompletion(taskId, status);
   if (!isLiveTransferStatus(status)) scheduleTerminalTaskSweep(taskId);
@@ -479,10 +481,24 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
 // status 兜底。3s 首查（健康链路 ACK 亚秒到达，缺席即异常），之后 8s/15s/30s
 // 退避重查；transferred 达标即放行，大分片慢链路不受影响（轮询只在 ACK 缺席
 // 时发生，正常传输零额外 RPC）。
+// issue #237：轮询触发即给任务挂 ackLagging 标记（卡片外显「确认滞后」），
+// 串行停等链路上的静默卡住变成可感知状态；等待器结算（ACK 事件、error
+// 事件、兜底轮询放行/拒绝、面板分离拒绝）一律先清标记再收场。
 const UPLOAD_ACK_POLL_STEPS_MS = [3_000, 8_000, 15_000, 30_000];
 
 function waitForUploadAck(taskId: string, nextOffset: number) {
+  const clearAckLagging = () => {
+    if (transferTasks[taskId]?.ackLagging) delete transferTasks[taskId].ackLagging;
+  };
   return new Promise<void>((resolve, reject) => {
+    const resolveSettled = () => {
+      clearAckLagging();
+      resolve();
+    };
+    const rejectSettled = (error: Error) => {
+      clearAckLagging();
+      reject(error);
+    };
     const settle = (outcome: () => void) => {
       uploadAckWaiters.delete(taskId);
       outcome();
@@ -490,14 +506,16 @@ function waitForUploadAck(taskId: string, nextOffset: number) {
     const poll = (step: number) => {
       const delay = UPLOAD_ACK_POLL_STEPS_MS[Math.min(step, UPLOAD_ACK_POLL_STEPS_MS.length - 1)]!;
       const timer = window.setTimeout(async () => {
+        // ACK 事件在阶梯步长内缺席：挂上可感知标记（任务已被清收则跳过）。
+        if (transferTasks[taskId]) transferTasks[taskId].ackLagging = true;
         try {
           const status = await window.dbxPlugin.invoke<{ transferred: number; status: string }>("sftp/transfer/status", { taskId });
           if (status.transferred >= nextOffset && status.status !== "cancelled" && status.status !== "failed") {
-            settle(resolve);
+            settle(resolveSettled);
             return;
           }
           if (status.status === "cancelled" || status.status === "failed") {
-            settle(() => reject(Object.assign(new Error(transferTasks[taskId]?.error || t(`transferStatus.${status.status}`)), { code: status.status === "cancelled" ? "transfer-cancelled" : "transfer-terminal" })));
+            settle(() => rejectSettled(Object.assign(new Error(transferTasks[taskId]?.error || t(`transferStatus.${status.status}`)), { code: status.status === "cancelled" ? "transfer-cancelled" : "transfer-terminal" })));
             return;
           }
           poll(step + 1);
@@ -508,7 +526,7 @@ function waitForUploadAck(taskId: string, nextOffset: number) {
           poll(step + 1);
         }
       }, delay);
-      uploadAckWaiters.set(taskId, { nextOffset, resolve, reject, timer });
+      uploadAckWaiters.set(taskId, { nextOffset, resolve: resolveSettled, reject: rejectSettled, timer });
     };
     poll(0);
   });

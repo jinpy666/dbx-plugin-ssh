@@ -609,6 +609,8 @@ export const messages = {
       completed: "Completed",
       cancelled: "Cancelled",
       failed: "Failed",
+      ackLagging: "Chunk confirmations lagging",
+      ackLaggingHint: "Chunk acknowledgement events have not arrived; the queue is verifying progress against the sidecar. The transfer continues.",
     },
     highlightRules: {
       title: "Keyword highlighting",
@@ -1250,7 +1252,7 @@ export const messages = {
       saved: "Límites MCP guardados",
       skipped: "Los demás ajustes se guardaron, pero los límites MCP no son válidos y no se enviaron.",
     },
-    transferStatus: { queued: "En cola", running: "Transfiriendo", staging: "Almacenando", completed: "Completado", cancelled: "Cancelado", failed: "Fallido" },
+    transferStatus: { queued: "En cola", running: "Transfiriendo", staging: "Almacenando", completed: "Completado", cancelled: "Cancelado", failed: "Fallido", ackLagging: "Confirmación de fragmentos retrasada", ackLaggingHint: "Los eventos de confirmación no han llegado; se está verificando el progreso con el sidecar. La transferencia continúa." },
     highlightRules: {
       title: "Resaltado de palabras clave",
       add: "Añadir regla",
@@ -1891,7 +1893,7 @@ export const messages = {
       saved: "Limiti MCP salvati",
       skipped: "Le altre impostazioni sono state salvate, ma i limiti MCP non sono validi e non sono stati inviati.",
     },
-    transferStatus: { queued: "In coda", running: "Trasferimento", staging: "Buffering", completed: "Completato", cancelled: "Annullato", failed: "Non riuscito" },
+    transferStatus: { queued: "In coda", running: "Trasferimento", staging: "Buffering", completed: "Completato", cancelled: "Annullato", failed: "Non riuscito", ackLagging: "Conferma dei frammenti in ritardo", ackLaggingHint: "Gli eventi di conferma non sono arrivati; l'avanzamento viene verificato con il sidecar. Il trasferimento continua." },
     highlightRules: {
       title: "Evidenziazione parole chiave",
       add: "Aggiungi regola",
@@ -2532,7 +2534,7 @@ export const messages = {
       saved: "MCP サイズ上限を保存しました",
       skipped: "その他の設定は保存されましたが、MCP サイズ上限は入力が不正なため送信されませんでした。",
     },
-    transferStatus: { queued: "待機中", running: "転送中", staging: "バッファ中", completed: "完了", cancelled: "キャンセル", failed: "失敗" },
+    transferStatus: { queued: "待機中", running: "転送中", staging: "バッファ中", completed: "完了", cancelled: "キャンセル", failed: "失敗", ackLagging: "分割確認の遅延", ackLaggingHint: "分割確認イベントが未着のため、sidecar に進捗を確認中です。転送は継続しています。" },
     highlightRules: {
       title: "キーワード ハイライト",
       add: "ルールを追加",
@@ -3173,7 +3175,7 @@ export const messages = {
       saved: "Limites MCP salvos",
       skipped: "As demais configurações foram salvas, mas os limites MCP são inválidos e não foram enviados.",
     },
-    transferStatus: { queued: "Na fila", running: "Transferindo", staging: "Bufferizando", completed: "Concluído", cancelled: "Cancelado", failed: "Falhou" },
+    transferStatus: { queued: "Na fila", running: "Transferindo", staging: "Bufferizando", completed: "Concluído", cancelled: "Cancelado", failed: "Falhou", ackLagging: "Confirmação de fragmentos atrasada", ackLaggingHint: "Os eventos de confirmação não chegaram; o progresso está sendo verificado com o sidecar. A transferência continua." },
     highlightRules: {
       title: "Realce de palavras-chave",
       add: "Adicionar regra",
@@ -3821,6 +3823,8 @@ export const messages = {
       completed: "已完成",
       cancelled: "已取消",
       failed: "失败",
+      ackLagging: "分片确认滞后",
+      ackLaggingHint: "分片确认事件暂未到达，正在向 sidecar 校验进度；传输仍在继续。",
     },
     highlightRules: {
       title: "关键词高亮",
@@ -4469,6 +4473,8 @@ export const messages = {
       completed: "已完成",
       cancelled: "已取消",
       failed: "失敗",
+      ackLagging: "分片確認滯後",
+      ackLaggingHint: "分片確認事件暫未到達，正在向 sidecar 校驗進度；傳輸仍在繼續。",
     },
     highlightRules: {
       title: "關鍵詞高亮",

@@ -172,4 +172,35 @@ describe("兜底轮询时间常数 (#305)", () => {
       vi.useRealTimers();
     }
   });
+
+  it("ACK 缺席兜底轮询期间外显「确认滞后」标记，结算即清除（#237）", async () => {
+    vi.useFakeTimers();
+    try {
+      let finished = false;
+      let transferred = 0;
+      const queue = mountQueue({
+        "sftp/upload/start": async () => ({ taskId: "t1", chunkSize: 512 }),
+        "sftp/upload/finish": async () => {
+          finished = true;
+          return undefined;
+        },
+        "sftp/transfer/status": async () => ({ transferred, status: finished ? "completed" : "running" }),
+      });
+      const pending = queue.uploadSource("a.bin", 8, async () => new Uint8Array(8));
+      await tick(0);
+      // ACK 事件缺席但兜底轮询未触发：卡片不应提前报滞后
+      expect(queue.transferTasks["t1"]?.ackLagging).toBeUndefined();
+      await tick(3_000);
+      // 兜底轮询触发且 spool 尚未推进：串行停等链路上的静默卡住变成可感知状态
+      expect(queue.transferTasks["t1"]?.ackLagging).toBe(true);
+      transferred = 8;
+      await tick(8_000);
+      await tick(1_000);
+      await expect(pending).resolves.toBe(true);
+      // 等待器结算（兜底轮询放行）即清除标记
+      expect(queue.transferTasks["t1"]?.ackLagging).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
