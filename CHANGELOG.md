@@ -4,6 +4,27 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.15-beta.3] — 2026-11-22
+
+### 修复
+- **Windows 本地终端上下方向键切历史乱行**：本地 PowerShell 经 shell
+  integration 启用 Warp 式历史面板后，回填清行固定发 Ctrl+U——PSReadLine
+  的 Windows 编辑模式（默认）不绑定该键，清行变 no-op，历史命令文本被
+  追加到现有行上，↑↓ 越切越乱。现在按 shell 能力选择清行序列：
+  PowerShell 用 Ctrl+Home+Ctrl+End（PSReadLine 默认绑定）、cmd 按行长退格、
+  其余保持 Ctrl+U 语义；SSH 路径不受影响（#317）。
+
+### 新增
+- **快速分屏**：分屏悬浮工具条与终端右键菜单新增「快速分屏」——一次动作
+  并行开满剩余副屏窗格（上限 3），与逐个点「+」同一条会话管线，单窗格
+  失败只落本窗格断开态，不再逐个连点等待（#304）。
+
+### 优化
+- **SFTP 上传吞吐（Part 1）**：上传推送腿在途窗口从 512KiB 加深到 2MiB
+  （64 深度 × 32KiB 分块，与 OpenSSH sftp -R 64 同量级；老服务器兼容模式
+  不变），高 RTT 链路不再被「窗口/RTT」封顶；ACK 兜底等待期间传输卡片
+  显示「确认滞后」徽标，不再长时间静默无反馈（#237，上传并发多流续做）。
+
 ## [0.7.15-beta.2] — 2026-11-21
 
 ### 修复
