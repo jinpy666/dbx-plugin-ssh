@@ -228,7 +228,7 @@ import type { DownloadConflictPolicy } from "./lib/downloadPrefs";
 import { commandMarkerTooltip, formatCommandDuration, Osc633CommandParser, runningCommandElapsedMs, type Osc633StreamUpdates } from "./lib/terminalCommandMarkers";
 import { batchProgressPercent, type BatchProgressState } from "./lib/sftpBatchProgress";
 import { describeWorkbenchSessionStatus, type WorkbenchSessionStatus } from "./lib/sessionStatus";
-import { normalizeTerminalInputBytes } from "./lib/terminalInput";
+import { normalizeTerminalInputBytes, shellKindFromProgramName } from "./lib/terminalInput";
 import { type TerminalSyncOutput } from "./lib/terminalModeQueries";
 import { installMacWebkitInputFallback } from "./lib/terminalWebkitInput";
 import { formatBytes, formatRate } from "./lib/format";
@@ -1076,6 +1076,10 @@ const {
   session,
   getSessionId: () => session.value?.sessionId ?? localSession.value?.sessionId ?? serialSession.value?.sessionId ?? "",
   getLocalSessionId: () => localSession.value?.sessionId,
+  // issue #317：本地 Windows shell（PSReadLine/cmd 不认 Ctrl+U 清行）的
+  // 行清字节能力兜底；SSH 会话恒 null（readline Ctrl+U 语义不变）。
+  getLocalShellEraseKind: () =>
+    isLocalMode.value ? shellKindFromProgramName(localSession.value?.shell) : null,
   persistCommandHistory,
   isHistoryPanelOpen: () => historyPanelOpen.value,
   updateHistoryPanelFilter,
