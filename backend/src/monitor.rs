@@ -1381,6 +1381,12 @@ mod tests {
         }
     }
 
+    /// Windows hosts have no `/bin/sh` and no POSIX-sh semantics to probe;
+    /// the call site keeps a no-op so the drift assertions below (pure
+    /// string matching) still compile and run on every platform.
+    #[cfg(not(unix))]
+    fn sh_gate_clears_hostile_names(_gate: &str) {}
+
     #[test]
     fn snapshot_points_clamp_into_1_cap() {
         assert_eq!(clamp_points(None), SNAPSHOT_DEFAULT_POINTS);
