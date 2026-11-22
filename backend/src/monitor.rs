@@ -1337,6 +1337,26 @@ mod tests {
         // two gates, the second sitting between the fallback read and the
         // eval.
         let gate = "case \"$iface\" in *[!A-Za-z0-9.@_-]*) iface=;; esac; ";
+        sh_gate_clears_hostile_names(gate);
+        let gates: Vec<usize> = MON_FAST_SCRIPT
+            .match_indices(gate)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(gates.len(), 2, "route and fallback ifaces share one gate");
+        let fallback = MON_FAST_SCRIPT
+            .find("/proc/net/dev")
+            .expect("fallback source");
+        let eval = MON_FAST_SCRIPT
+            .find("eval \"$(awk -v IF=")
+            .expect("counter eval");
+        assert!(fallback < gates[1] && gates[1] < eval);
+    }
+
+    /// The gate's POSIX-sh behaviour can only be exercised where a `/bin/sh`
+    /// exists (the monitor script itself targets POSIX sh). On Windows the
+    /// drift assertions above still run; this half is compiled out.
+    #[cfg(unix)]
+    fn sh_gate_clears_hostile_names(gate: &str) {
         for (name, kept) in [
             ("eth0", true),
             ("eth0.100", true),
@@ -1359,18 +1379,6 @@ mod tests {
                 "iface {name:?}"
             );
         }
-        let gates: Vec<usize> = MON_FAST_SCRIPT
-            .match_indices(gate)
-            .map(|(index, _)| index)
-            .collect();
-        assert_eq!(gates.len(), 2, "route and fallback ifaces share one gate");
-        let fallback = MON_FAST_SCRIPT
-            .find("/proc/net/dev")
-            .expect("fallback source");
-        let eval = MON_FAST_SCRIPT
-            .find("eval \"$(awk -v IF=")
-            .expect("counter eval");
-        assert!(fallback < gates[1] && gates[1] < eval);
     }
 
     #[test]
