@@ -4,6 +4,11 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.15] — 2026-11-23
+
+- **0.7.15 正式版**。汇总 beta.1～beta.3：修复日志洪峰卡死（帧到达只入队、rAF 合帧排水 + 输入超时按拥塞处理不再误报重连，#302）与小文件上传兜底等待（watchdog 1s 起步退避、ACK 阶梯轮询，#305）；修复 Windows 本地终端上下方向键切历史乱行（PSReadLine 用 Ctrl+Home+Ctrl+End，#317）；批量命令支持多行粘贴（逐行执行、Shift+Enter 换行，#310）；修复远端 sz/ZMODEM 下载握手帧被合帧吞掉导致完全无反馈（按完整握手帧定界，#307）；修复空格密码无法保存并连接（#215）；MCP 工具无选择器调用改报「未选择连接」+ 连接发现指引，不再误导 AI 编造 host；识别 sudo-rs（Ubuntu 25.10+）密码提示；新增 SFTP 右键「下载到…」（#303）；终端可选关闭自动换行（默认列数 1000，全屏程序自动回退，#306）；工具栏 15 个次要按钮逐个可隐藏（#309）；快速分屏一键并行开满副屏（#304）；SFTP 上传在途窗口加深至 2MiB、ACK 滞后徽标（#237 Part 1）。
+  **0.7.15 stable.** Includes beta.1–beta.3: log-flood freeze fix (frames enqueued then drained on rAF, input timeout treated as congestion instead of reconnect ladder, #302) and small-upload fallback waits (1s watchdog backoff, stepped ACK polling, #305); Windows local terminal ↑/↓ history recall no longer appends garbled lines (Ctrl+Home+Ctrl+End for PSReadLine, #317); batch commands accept multi-line paste executed line-by-line with Shift+Enter for manual breaks (#310); remote `sz`/ZMODEM downloads no longer stay silent when framing merges the handshake bytes (whole-handshake-frame delimiting, #307); space-only passwords save and connect (#215); MCP tool calls without a connection selector now report "No connection selected" with discovery guidance instead of misleading per-field errors; sudo-rs (Ubuntu 25.10+) password prompts recognized; SFTP right-click "Download to…" (#303); optional terminal line-wrap off with 1000-column default and automatic fullscreen fallback (#306); 15 secondary toolbar buttons individually hideable (#309); one-click quick split opening all remaining panes in parallel (#304); SFTP upload in-flight window deepened to 2MiB with an ACK-lag badge (#237 Part 1).
+
 ## [0.7.15-beta.3] — 2026-11-22
 
 ### 修复
