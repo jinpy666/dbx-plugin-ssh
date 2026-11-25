@@ -4,10 +4,10 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
-## [Unreleased]
+## [0.7.16-beta.1] — 2026-11-25
 
-- MCP 内联拨号支持出站代理：新增 `socksProxy`（SOCKS5）/ `httpProxy`（HTTP CONNECT）工具参数（可带用户名密码 Basic 认证，仅作用初始拨号，与 `jumpHosts` 跳板链兼容），AI 直连只允许代理出网的机器不再失败；引用已保存连接的路径仍由宿主 runtime 隧道端点接管，不受影响（#324）。
-  Inline MCP dials gain outbound proxy support: new `socksProxy` (SOCKS5) / `httpProxy` (HTTP CONNECT) tool parameters (optional username/password Basic auth, initial dial only, composable with the `jumpHosts` chain) so AI-driven connections to proxy-only hosts no longer fail; saved-connection traffic still routes through the host runtime tunnel endpoint, unaffected (#324).
+### 新增
+- **MCP 内联拨号支持出站代理**：新增 `socksProxy`（SOCKS5）/ `httpProxy`（HTTP CONNECT）工具参数（可带用户名密码 Basic 认证，端口缺省 1080/8080，仅作用初始拨号，与 `jumpHosts` 跳板链兼容），AI 直连只允许代理出网的机器不再失败；引用已保存连接的路径仍由宿主 runtime 隧道端点接管，不受影响（#324）。
 
 ## [0.7.15] — 2026-11-23
 
