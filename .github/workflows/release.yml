@@ -249,6 +249,19 @@ jobs:
             echo "No .dbxp packages were downloaded" >&2
             exit 1
           fi
-          gh release upload "$RELEASE_TAG" "${packages[@]}" dist/release-candidates.json \
+          # uploads.github.com 偶发 HTTP 5xx（0.7.16-beta.2 发布时 Windows 产物
+          # 上传中 500，五个构建全绿但产物只挂上一半）。--clobber 幂等，整批
+          # 重传即可补齐；指数退避重试，全部尝试失败才让 job 失败。
+          attempt=1
+          max=5
+          until gh release upload "$RELEASE_TAG" "${packages[@]}" dist/release-candidates.json \
             --repo "$GITHUB_REPOSITORY" \
-            --clobber
+            --clobber; do
+            if [ "$attempt" -ge "$max" ]; then
+              echo "gh release upload failed after $max attempts" >&2
+              exit 1
+            fi
+            echo "upload attempt $attempt failed; retrying in $((attempt * 20))s" >&2
+            sleep $((attempt * 20))
+            attempt=$((attempt + 1))
+          done
