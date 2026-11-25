@@ -35,6 +35,8 @@ describe("ssh pluginStore wiring", () => {
         "ssh-batch-bar-open",
         // 批量上传上次使用的目标目录（批量条上传模式）。
         "ssh-batch-upload-dir",
+        // 「下载到…」按连接记忆上次落点（#303）：与 pluginStore 白名单镜像同步。
+        "ssh-download-to-dir",
         "ssh-terminal-search-options",
         "ssh-terminal-webgl",
         "ssh-terminal-font-size",

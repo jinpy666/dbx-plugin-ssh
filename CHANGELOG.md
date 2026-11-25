@@ -4,6 +4,11 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.16-beta.2] — 2026-11-25
+
+### 新增
+- **「下载到…」记忆上次落点**：手动选择下载目录后按连接（“项目”）记住该位置，下次下载询问弹窗预填、目录选择器直接从该处打开，不再每次从「此电脑」根页重新导航；「设为默认地址」全局默认与连接级记忆并行不冲突（#303 反馈）。
+
 ## [0.7.16-beta.1] — 2026-11-25
 
 ### 新增
