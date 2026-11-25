@@ -46,6 +46,9 @@ sha1 = "0.11"
 sha2 = "0.11"
 sha3 = "0.11"
 tokio = { version = "1", features = ["full"] }
+# MCP 内联拨号代理（src/proxy.rs，#324）：SOCKS5 认证协商协议面大，
+# 手写易错，用 0.5 的纯 Rust tokio 实现；HTTP CONNECT 手写不引入依赖。
+tokio-socks = "0.5"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 # SFTP 压缩传输（src/transfer_compress.rs）：gzip 通道的本地编解码端。默认

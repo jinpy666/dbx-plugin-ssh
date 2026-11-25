@@ -60,7 +60,7 @@ dbx_plugin_call {
 dbx-plugin-ssh --mcp
 ```
 
-此模式下没有 DBX 连接存储，凭据随每次调用内联传入（`host`/`username`/`password` 或 `privateKeyPath`，及 Quick Sudo/2FA 编排字段、`jumpHosts` 跳板链），按 `username@host:port` 进程内池化。未知主机密钥采用 **TOFU 首次信任**（记录后变化仍拒绝）。MCP 模式与 DBX 插件模式互斥：同一进程只运行其中一种。`initialize` 的 `serverInfo.name` 为完整插件 id `io.dbx.ssh`（与同系列插件一致）。带 `connectionId` / `connectionName` 的调用另有桥接兜底，见下节。
+此模式下没有 DBX 连接存储，凭据随每次调用内联传入（`host`/`username`/`password` 或 `privateKeyPath`，及 Quick Sudo/2FA 编排字段、`jumpHosts` 跳板链），按 `username@host:port` 进程内池化。目标机只能经代理出网时，内联参数另带 `socksProxy`（SOCKS5）或 `httpProxy`（HTTP CONNECT）出站代理对象（`{"host","port","username","password"}`，端口缺省 1080/8080，可带 Basic 认证；二者互斥，仅作用于初始拨号，跳板链后续跳走既有隧道；#324）——引用已保存连接（经宿主 `runtime` 隧道端点）的流量不经过此参数，是否走代理由宿主传输层决定。未知主机密钥采用 **TOFU 首次信任**（记录后变化仍拒绝）。MCP 模式与 DBX 插件模式互斥：同一进程只运行其中一种。`initialize` 的 `serverInfo.name` 为完整插件 id `io.dbx.ssh`（与同系列插件一致）。带 `connectionId` / `connectionName` 的调用另有桥接兜底，见下节。
 
 ### stdio 桥接兜底（免内联凭据）
 

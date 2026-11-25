@@ -284,11 +284,13 @@ pub(crate) fn effective_sudo_profile(
     }
 }
 
-/// How the next SSH hop is reached: a fresh TCP connection, or a
-/// direct-tcpip channel tunneled through an established jump-host handle.
+/// How the next SSH hop is reached: a fresh TCP connection, a
+/// direct-tcpip channel tunneled through an established jump-host handle,
+/// or a pre-connected stream punched through an outbound proxy (#324).
 enum DialTarget {
     Tcp((String, u16)),
     JumpStream(russh::ChannelStream<russh::client::Msg>),
+    Proxied(Box<dyn crate::proxy::ProxyStream>),
 }
 
 impl DialTarget {
@@ -3247,11 +3249,35 @@ impl SshRuntime {
         };
         let seen = probe.seen.clone();
         let timeout = Duration::from_secs(connection.connect_timeout_secs.max(1));
-        let connect = client::connect(
-            config,
-            (connection.runtime_host.as_str(), connection.runtime_port),
-            probe,
-        );
+        // #324：代理路径与正式拨号同源——代理握手失败直接按 unreachable
+        // 上报（等价 TCP 拨不通的语义），流建立后再做密钥交换预检。
+        // 两个分支的具体 future 类型不同，统一放进 async 块在 await 点
+        // 收敛成同一 Output。
+        let connect = async {
+            match &connection.proxy {
+                Some(proxy) => {
+                    let stream = match proxy
+                        .connect(&connection.runtime_host, connection.runtime_port, timeout)
+                        .await
+                    {
+                        Ok(stream) => stream,
+                        Err(error) => return Err(error),
+                    };
+                    client::connect_stream(config, stream, probe)
+                        .await
+                        .map_err(|error| error.to_string())
+                }
+                None => {
+                    client::connect(
+                        config,
+                        (connection.runtime_host.as_str(), connection.runtime_port),
+                        probe,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+                }
+            }
+        };
         let failure = match tokio::time::timeout(timeout, connect).await {
             // The probe always rejects the key, so a handle here would be
             // unexpected; disconnect defensively anyway.
@@ -3305,7 +3331,21 @@ impl SshRuntime {
         emitter: Option<PluginEmitter>,
     ) -> Result<(Handle<SshClient>, Vec<Handle<SshClient>>), String> {
         let mut jump_handles = Vec::new();
-        let mut dial = DialTarget::Tcp((connection.runtime_host.clone(), connection.runtime_port));
+        // #324：代理挂在初始拨号上——无论是直接到目标还是先到第一跳跳板，
+        // 出站的第一个 TCP 都要经代理摸出去；后续跳板链走已建立的隧道，
+        // 不再涉及代理。
+        let mut dial = match &connection.proxy {
+            Some(proxy) => DialTarget::Proxied(
+                proxy
+                    .connect(
+                        &connection.runtime_host,
+                        connection.runtime_port,
+                        Duration::from_secs(connection.connect_timeout_secs.max(1)),
+                    )
+                    .await?,
+            ),
+            None => DialTarget::Tcp((connection.runtime_host.clone(), connection.runtime_port)),
+        };
 
         for (position, jump) in connection.jump_hosts.iter().enumerate() {
             let jump_connection = jump.to_connection(
@@ -3401,6 +3441,24 @@ impl SshRuntime {
                 }
             }
             DialTarget::JumpStream(stream) => {
+                let connect = client::connect_stream(config, stream, handler);
+                tokio::pin!(connect);
+                loop {
+                    let remaining = dial_deadline.remaining().ok_or_else(timeout_message)?;
+                    match tokio::time::timeout_at(
+                        tokio::time::Instant::now() + remaining,
+                        &mut connect,
+                    )
+                    .await
+                    {
+                        Ok(result) => break result.map_err(dial_error_message)?,
+                        Err(_elapsed) => continue,
+                    }
+                }
+            }
+            DialTarget::Proxied(stream) => {
+                // 与 JumpStream 同形：预连流直接喂 russh，SSH 握手预算
+                // 继续由 dial_deadline 管（代理握手已消耗独立超时）。
                 let connect = client::connect_stream(config, stream, handler);
                 tokio::pin!(connect);
                 loop {

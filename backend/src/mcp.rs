@@ -4265,6 +4265,9 @@ fn stored_connection_from_arguments(arguments: &Value) -> Result<StoredConnectio
         password_command,
         passphrase_command,
         jump_hosts,
+        // #324：内联拨号唯一能表达代理的入口——AI 显式传 socksProxy/
+        // httpProxy 时经代理拨号，否则维持直连。
+        proxy: crate::proxy::ProxyConfig::from_mcp_args(arguments)?,
     })
 }
 
@@ -4377,6 +4380,8 @@ fn connection_properties(extra: &[(&str, &str, &str)]) -> Value {
         "passwordPromptHint": { "type": "string" },
         "totpPromptHint": { "type": "string" },
         "jumpHosts": { "type": "array", "description": "ProxyJump chain (up to 3): [{\"host\":\"bastion\",\"port\":22,\"username\":\"ops\",\"password\":\"…\"}]; replaces direct dialing" },
+        "socksProxy": { "type": "object", "description": "SOCKS5 proxy for inline dials {\"host\",\"port\"(default 1080),\"username\",\"password\"}" },
+        "httpProxy": { "type": "object", "description": "HTTP CONNECT proxy for inline dials {\"host\",\"port\"(default 8080),\"username\",\"password\"}" },
         "triggers": { "type": "string", "description": "Expect-style triggers, JSON or tssh text, e.g. {\"stages\":[{\"pattern\":\"(?i)code\",\"sendText\":\"654321\\\\r\"}]}; each stage replies when its regex matches PTY output; invalid rules fail the dial. A malicious server can fake prompts to harvest replies" },
         "passwordCommand": { "type": "string", "description": "Local command; stdout (minus newline) is the login password. Placeholders: %h %u %p %%; explicit args win" },
         "passphraseCommand": { "type": "string", "description": "Local command; stdout is the key passphrase. Same placeholders as passwordCommand" },
@@ -6502,6 +6507,44 @@ mod tests {
             "jumpHosts": [{ "host": "bastion", "username": "ops" }],
         });
         assert!(stored_connection_from_arguments(&missing_password).is_err());
+    }
+
+    #[test]
+    fn inline_proxy_arguments_land_on_the_connection() {
+        let connection = stored_connection_from_arguments(&json!({
+            "host": "target", "username": "u", "password": "p",
+            "socksProxy": { "host": "127.0.0.1", "port": 1080, "username": "pu", "password": "pp" },
+        }))
+        .unwrap();
+        let proxy = connection.proxy.expect("socksProxy should be parsed");
+        assert_eq!(proxy.kind, crate::proxy::ProxyKind::Socks5);
+        assert_eq!(proxy.host, "127.0.0.1");
+        assert_eq!(proxy.port, 1080);
+        assert_eq!(proxy.username, "pu");
+
+        // 显式 null 与缺省等价：保持直连现状。
+        let nulled = stored_connection_from_arguments(&json!({
+            "host": "target", "username": "u", "password": "p",
+            "httpProxy": null,
+        }))
+        .unwrap();
+        assert!(nulled.proxy.is_none());
+
+        let direct = stored_connection_from_arguments(&json!({
+            "host": "target", "username": "u", "password": "p",
+        }))
+        .unwrap();
+        assert!(direct.proxy.is_none());
+    }
+
+    #[test]
+    fn inline_proxy_kinds_conflict() {
+        let both = json!({
+            "host": "target", "username": "u", "password": "p",
+            "socksProxy": { "host": "a" }, "httpProxy": { "host": "b" },
+        });
+        let error = stored_connection_from_arguments(&both).err().unwrap();
+        assert!(error.contains("mutually exclusive"));
     }
 
     #[test]
