@@ -103,6 +103,7 @@ import {
 } from "./lib/terminalOscChannels";
 import { findForwardConflict, forwardStartParams, parseForwards } from "./lib/portForward";
 import { loadTunnelProfiles, type TunnelProfile } from "./lib/tunnelProfiles";
+import { rememberDownloadToDir, sanitizeDownloadToMemory } from "./lib/downloadToMemory";
 import {
   createTerminalCopyCache,
   resolveTerminalPasteText,
@@ -7044,13 +7045,39 @@ const downloadPrompt = ref<DownloadPrompt | null>(null);
 // 后到者的询问等先到者结算完成后再占槽；弹窗 UI 保持一次只问一个。
 let downloadPromptAskChain: Promise<unknown> = Promise.resolve();
 
+// —— 「下载到…」记忆（issue #303）：按连接（“项目”）记住上次手动选择的 ——
+
+// 落点，下次询问弹窗预填、目录选择器直接开在该处，不必每次从
+// 「此电脑」根重新导航。登记键见 PLUGIN_STORE_KEYS；按连接动态键名登记
+// 不进白名单，故单键 JSON 桶（同 ssh-docker-engine 先例）。
+const DOWNLOAD_TO_DIR_KEY = "ssh-download-to-dir";
+
+function loadDownloadToMemory(): Record<string, string> {
+  try {
+    return sanitizeDownloadToMemory(JSON.parse(pluginStore.getItem(DOWNLOAD_TO_DIR_KEY) || "{}"));
+  } catch {
+    return {};
+  }
+}
+
+const downloadToMemory = ref(loadDownloadToMemory());
+
+function persistDownloadToMemory() {
+  try {
+    pluginStore.setItem(DOWNLOAD_TO_DIR_KEY, JSON.stringify(downloadToMemory.value));
+  } catch {
+    // localStorage 不可用时记忆仅对当前会话生效。
+  }
+}
+
 function askDownloadTarget(fileName: string): Promise<{ dir: string; setDefault: boolean } | undefined> {
   const asked = downloadPromptAskChain.then(
     () =>
       new Promise<{ dir: string; setDefault: boolean } | undefined>((resolve) => {
         downloadPrompt.value = {
           fileName,
-          dir: loadDownloadDir() || localDownloadDir.value,
+          // #303：优先本连接上次「下载到」的落点，其次全局默认目录。
+          dir: downloadToMemory.value[connectionId.value || "default"] || loadDownloadDir() || localDownloadDir.value,
           setDefault: false,
           resolve,
         };
@@ -7061,6 +7088,16 @@ function askDownloadTarget(fileName: string): Promise<{ dir: string; setDefault:
 }
 
 function resolveDownloadPrompt(result?: { dir: string; setDefault: boolean }) {
+  if (result?.dir) {
+    // #303：手动选过的落点按连接记住（勾选「设为默认地址」时全局默认
+    // 已同步回写，此处的连接级记忆与其并行不冲突）。
+    downloadToMemory.value = rememberDownloadToDir(
+      downloadToMemory.value,
+      connectionId.value || "default",
+      result.dir,
+    );
+    persistDownloadToMemory();
+  }
   downloadPrompt.value?.resolve(result);
   downloadPrompt.value = null;
 }
@@ -11875,11 +11912,13 @@ function flagHintsSource(command: string): string {
     </Dialog>
 
     <!-- 目录选择器：DOM 末尾渲染，保证叠在设置弹窗/下载询问弹窗之上。
-         不传 initialPath：默认从「此电脑」盘符页开始（macOS/Linux 无盘符概念，
-         回退到默认下载目录），与 kimi-code-desktop 的选择器行为对齐。 -->
+         prompt 场景（下载询问「浏览」）带上弹窗当前目录作为 initialPath
+         （#303：从上次落点/默认目录开始，而非「此电脑」根页）；settings
+         场景保持旧行为。initialPath 目录已不存在时选择器自行回落。 -->
     <FolderPickerDialog
       v-if="folderPickerTarget"
       :locale="locale"
+      :initial-path="folderPickerTarget === 'prompt' ? downloadPrompt?.dir || undefined : undefined"
       @select="onFolderPicked"
       @close="folderPickerTarget = null"
     />

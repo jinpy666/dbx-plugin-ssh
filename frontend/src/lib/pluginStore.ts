@@ -40,6 +40,10 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-sftp-pane-open",
   // 批量上传（多目标会话）上次使用的目标目录：跨会话复用同一落点。
   "ssh-batch-upload-dir",
+  // 「下载到…」按连接记住上次手动选择的落点（issue #303）：wire 形态
+  // {[connectionId]: dir} 单键桶（宿主 storage 无列键方法，动态键名
+  // 登记不进白名单——与 ssh-docker-engine 同款单键 JSON 桶）。
+  "ssh-download-to-dir",
   "ssh-follow-directory",
   "ssh-sftp-show-permissions",
   // 文件浏览双击行为（preview/edit，issue #288）：此前只在运行时写入、漏登记

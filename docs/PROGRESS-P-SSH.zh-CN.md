@@ -4671,3 +4671,24 @@ runtime，但**内联拨号**的工具参数白名单（`connection_properties`�
 **遗留**：宿主 MCP 桥接生命周期未保证携带 `runtime` 字段——引用已保存
 连接走桥接时若宿主侧未带，仍会静默直连（需与宿主确认，属宿主侧改进项）；
 MCP 工具面新增依赖 tokio-socks 0.5（理由见 Cargo.toml 注释）。
+
+## 「下载到…」记忆上次落点：按连接单键 JSON 桶（2026-11-25，#303 反馈）
+
+**问题**（#303 报告者复测反馈）：「下载到…」可用后提出——每次目录选择器
+都从「此电脑」根页开始，希望能记忆上次下载位置、按项目（连接）区分。
+
+**修复**（纯前端）：
+- 新 `frontend/src/lib/downloadToMemory.ts`（纯函数 + 5 例单测）：
+  `sanitizeDownloadToMemory`（localStorage 档收敛）+ `rememberDownloadToDir`
+  （按连接分桶、空目录清条目）；
+- 持久化走 `pluginStore` 新活键 `ssh-download-to-dir`（单键 JSON 桶
+  `{[connectionId]: dir}`——按连接动态键名登记不进宿主水合白名单，
+  同 `ssh-docker-engine` 先例；镜像清单 spec 同步）；
+- `askDownloadTarget` 预填改为「本连接上次落点 → 全局默认目录 → 本地
+  下载目录」；`resolveDownloadPrompt` 把手动选中的落点按连接记住
+  （勾选「设为默认地址」时全局默认回写照旧，两者并行不冲突）；
+- 下载询问「浏览」打开的 `FolderPickerDialog` 传 `initial-path`（弹窗
+  当前目录），不再从根页开始；settings 场景保持旧行为。
+
+**测试**：downloadToMemory 5 例（TDD 先红后绿）；前端 vitest 2360 全绿、
+vue-tsc 0 错。后端零改动，无新增七语文案（纯行为无新 UI 文本）。
