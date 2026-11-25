@@ -4,6 +4,11 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.16] — 2026-11-26
+
+- **0.7.16 正式版**。汇总 beta.1～beta.2：MCP 内联拨号支持出站代理——新增 `socksProxy`（SOCKS5）/ `httpProxy`（HTTP CONNECT）工具参数（可带用户名密码认证、互斥、与 `jumpHosts` 跳板链兼容），AI 直连只允许代理出网的机器不再失败，引用已保存连接仍由宿主 runtime 隧道端点接管（#324）；「下载到…」按连接记忆上次落点——手动选过的目录下次弹窗预填、目录选择器直接从该处打开，不再从「此电脑」根页重新导航，「设为默认地址」全局默认与其并行不冲突（#303 反馈）。
+  **0.7.16 stable.** Includes beta.1–beta.2: inline MCP dials gain outbound proxy support — new `socksProxy` (SOCKS5) / `httpProxy` (HTTP CONNECT) tool parameters (optional auth, mutually exclusive, composable with the `jumpHosts` chain) so AI-driven connections to proxy-only hosts no longer fail, while saved-connection traffic keeps routing through the host runtime tunnel endpoint (#324); "Download to…" now remembers the last chosen folder per connection — the ask dialog prefills it and the folder picker opens there instead of the This-PC root page, with the global default-dir toggle running in parallel (#303 feedback).
+
 ## [0.7.16-beta.2] — 2026-11-25
 
 ### 新增
