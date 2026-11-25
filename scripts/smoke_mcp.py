@@ -594,6 +594,23 @@ def main() -> None:
         # part of the advertised schema or runInTerminal is unreachable there.
         assert "connectionId" in exec_schema, "ssh_exec lacks connectionId"
 
+        # #324: inline proxy dialing must be schema-advertised (strict hosts
+        # strip undeclared arguments) and mutually-exclusive at parse time;
+        # the conflict reply is parse-level, so offline smoke can pin it.
+        for prop in ("socksProxy", "httpProxy"):
+            assert prop in exec_schema, f"ssh_exec lacks {prop}"
+        send(proc, {
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": "ssh_exec", "arguments": {
+                "host": "203.0.113.1", "username": "u", "password": "p", "command": "true",
+                "socksProxy": {"host": "127.0.0.1"},
+                "httpProxy": {"host": "127.0.0.1"},
+            }},
+        })
+        proxy_conflict = recv(proc, 8)["error"]["message"]
+        assert "mutually exclusive" in proxy_conflict, f"unexpected error: {proxy_conflict}"
+        print("inline proxy surface ok")
+
         # Connection addressing usability: EVERY connection-bound tool must
         # advertise connectionName plus the selector anyOf (id | name |
         # endpoint), or strict hosts refuse the call before the sidecar can

@@ -4636,3 +4636,38 @@ clippy -D warnings、fmt 通过。
 **边界**：服务端明确拒绝（非重放）某个码时仍不会自动换下一条密钥重试；
 终端 watcher 的 `otp_sent` 一次性门保持原语义（避免连续烧码/刷认证）。
 如需"被拒后换密钥重试"需单独评估重试上限、失败告警与锁号风险。
+
+## MCP 内联拨号出站代理：socksProxy/httpProxy + SOCKS5/HTTP CONNECT 拨号器（2026-11-25，#324）
+
+**问题**（issue #324）：AI 经 MCP 工具内联 `host`/账号密码拨号时忽略代理——
+插件自身没有任何代理拨号能力：`socksProxy`/`httpProxy` 是宿主侧连接配置，
+插件完全依赖宿主生命周期下发的 `runtime` 隧道端点（`model.rs
+from_lifecycle_params` 缺失时静默直连）；MCP 桥接/注册表路径能沿用宿主
+runtime，但**内联拨号**的工具参数白名单（`connection_properties`）没有代理
+字段、`DialTarget` 只有直连 Tcp 一种，代理-only 目标必失败。
+
+**修复**：
+- 新模块 `backend/src/proxy.rs`：`ProxyConfig`（socks5/http-connect 两型，
+  host/port/username/password，端口缺省 1080/8080）+ `connect()`——SOCKS5
+  走 tokio-socks 0.5（新依赖，认证协商协议面大不手写；目标以域名转交代理解
+  析），HTTP CONNECT 手写（请求报文 + 8KiB 头读取 + 状态行解析，纯函数单测
+  覆盖）；
+- `StoredConnection` 增 `proxy: Option<ProxyConfig>`：宿主生命周期路径恒
+  None（流量由宿主传输层接管），仅 MCP 内联路径经
+  `ProxyConfig::from_mcp_args` 解析（socksProxy/httpProxy 互斥，显式 null
+  等价缺省）；
+- `DialTarget` 增 `Proxied(Box<dyn ProxyStream>)`：代理挂在**初始拨号**
+  （直达目标或先摸第一跳跳板），后续跳板链走既有隧道；`dial_and_authenticate`
+  与 `check_host_key`（代理握手失败按 unreachable 上报）同源接入；SSH 握手
+  预算仍由 dial_deadline 管，代理拨号独立受 connect_timeout 约束；
+- `connection_properties` 声明两参数（严格宿主丢弃未声明参数，schema 预算
+  测试通过）；凭据与连接密码同寿命：只进内存，不落盘不回显。
+
+**测试**：proxy 模块 8 例 + stored_connection 代理落库/互斥 2 例（TDD，
+先红后绿）；cargo test 1373 全绿；smoke_mcp.py 新增离线探针（schema 声明
++ 互斥错误回包），离线段 all green；`scripts/test.sh` 全套见末轮记录。
+七语 N/A（无前端 UI 文案，MCP schema 描述面向 AI 客户端为英文契约文本）。
+
+**遗留**：宿主 MCP 桥接生命周期未保证携带 `runtime` 字段——引用已保存
+连接走桥接时若宿主侧未带，仍会静默直连（需与宿主确认，属宿主侧改进项）；
+MCP 工具面新增依赖 tokio-socks 0.5（理由见 Cargo.toml 注释）。

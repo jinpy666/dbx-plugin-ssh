@@ -32,6 +32,7 @@ mod otp;
 mod otp_store;
 mod preferences;
 mod progress_throttle;
+mod proxy;
 mod quick_commands;
 mod rdp;
 mod serial_session;

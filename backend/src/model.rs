@@ -246,6 +246,11 @@ pub struct StoredConnection {
     /// ProxyJump chain: each entry is dialed before the target, the final hop
     /// reaching `host:port` directly (the runtime tunnel endpoint is skipped).
     pub jump_hosts: Vec<JumpHost>,
+    /// #324：MCP 内联拨号的出站代理（socksProxy/httpProxy）。宿主生命周期
+    /// 路径保持 None——引用已保存连接的流量由宿主 runtime 隧道端点接管，
+    /// 这里只服务 AI 内联 host/账号密码、且网络只能经代理出网的场景。
+    /// 代理凭据与连接密码同寿命：只进内存，不落盘、不回显。
+    pub proxy: Option<crate::proxy::ProxyConfig>,
 }
 
 /// One hop of a `external_config.jump_hosts` chain. Credentials live inline
@@ -392,6 +397,9 @@ impl JumpHost {
             password_command: String::new(),
             passphrase_command: String::new(),
             jump_hosts: Vec::new(),
+            // 跳板自身的连接对象不继承代理：代理只挂在目标连接的初始
+            // 拨号上（可能经代理摸到第一跳跳板）。
+            proxy: None,
         }
     }
 }
@@ -669,6 +677,9 @@ impl StoredConnection {
             password_command,
             passphrase_command,
             jump_hosts,
+            // 宿主生命周期不带代理参数：引用已保存连接的流量由宿主
+            // runtime 隧道端点接管（是否走代理由宿主传输层决定）。
+            proxy: None,
         })
     }
 }
@@ -801,7 +812,7 @@ fn parse_jump_hosts(
 /// Host fields must be a dialable hostname/IP: no internal whitespace and no
 /// URI scheme syntax (`ssh://…`) that would silently become a bogus TCP
 /// target instead of failing fast at parse time.
-fn validate_host_field(host: String) -> Result<String, String> {
+pub(crate) fn validate_host_field(host: String) -> Result<String, String> {
     if host.chars().any(char::is_whitespace) {
         return Err(format!(
             "Invalid SSH host '{host}': must not contain whitespace"
