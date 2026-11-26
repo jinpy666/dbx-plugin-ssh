@@ -62,7 +62,7 @@
 
 ## MCP 自动化
 
-插件内置 31 个 MCP 工具——远程命令、sudo 提权、SFTP 文件、服务器指标、告警分诊——
+插件内置 16 个 MCP 工具——远程命令、sudo 提权、批量执行、终端输入、后台任务、known hosts 管理、连接清单与 SFTP 文件——
 让 AI 编码代理（ZCode、Claude 等任何 MCP 客户端）在你的权限边界内操作服务器。
 支持两种接入方式：
 
@@ -95,11 +95,13 @@ DBX_SSH_MCP_READ_ONLY=1 dbx-plugin-ssh --mcp
 
 | 任务 | 工具 |
 | --- | --- |
-| 远程巡检 | `ssh_exec`、`ssh_metrics`、`sftp_list_dir`、`ssh_test_connection` |
-| 特权操作 | `ssh_exec_sudo`（自动应答 TOTP）、Quick Sudo 档案 |
+| 远程巡检 | `ssh_exec`、`ssh_list_connections`、`sftp_list_dir`、`sftp_stat` |
+| 特权操作 | `ssh_exec_sudo`（自动应答 TOTP） |
+| 批量执行 | `ssh_multi_exec`（最多 10 个已保存连接，并行或顺序） |
 | 长任务 | `ssh_run_bg` + `ssh_task_status`（断线、换会话不丢） |
 | 文件传输 | `sftp_upload` / `sftp_download` / `sftp_read_file` / `sftp_write_file` |
-| 告警排查 | `ssh_alert_triage` → 只读诊断命令清单 → `ssh_exec` 执行 |
+| 终端注入 | `ssh_terminal_input`（应答提示、Ctrl+C；输出不收集） |
+| 主机与会话管理 | `ssh_list_known_hosts` / `ssh_remove_known_host` / `ssh_close` |
 
 完整配置、连接寻址（免内联凭据）、工具清单与安全边界见
 [MCP 使用指南](docs/MCP_USAGE.zh-CN.md)与[SSH MCP 参考](docs/MCP.zh-CN.md)。

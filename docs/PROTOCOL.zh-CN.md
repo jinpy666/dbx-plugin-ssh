@@ -43,7 +43,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 > **兼容基线口径**：manifest `engines.host_api` 固定 `">=1.0.0"` 作粗粒度声明；`permissions` 中的
 > `host.storage` / `host.ai` 实为宿主 1.2 能力，运行时全程 `?.` 存在性守卫并逐级降级
 > （`pluginStore.ts` 宿主桥 → guarded localStorage → 内存三级回退），缺失只降功能不致死。
-> **权威安装下限由 `engines.dbx` 承担**（当前 `>=0.6.31`）——宿主 `SUPPORTED_PLUGIN_HOST_API_VERSION`
+> **权威安装下限由 `manifest.json` 的 `engines.dbx` 承担**（该字段是唯一事实源，当前 `>=0.6.59`）——宿主 `SUPPORTED_PLUGIN_HOST_API_VERSION`
 > 的演进先于部分能力面，`host_api` 无法用来门控细粒度能力（论证见 `private_key_path` picker 兼容性段）。
 
 | 方法 | 作用 |

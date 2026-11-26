@@ -60,7 +60,7 @@ and cross-device config sync. DBX SSH & SFTP differs on the server operations ch
 - Stronger authentication and privilege-escalation orchestration: global Quick Sudo
   profiles, TOTP/2FA auto-answer, sudo allowlists, read-only gates, and host secret
   binding are all built in; Tabby usually relies on plugins or scripts.
-- 31 built-in MCP automation tools let AI clients operate servers inside the same
+- 16 built-in MCP automation tools let AI clients operate servers inside the same
   connection and permission boundary.
 - Session recording/replay with GIF export, batch commands across sessions, resumable
   transfers, and Zmodem/Trzsz are built in.
