@@ -1,7 +1,8 @@
 # SSH MCP 使用指南
 
-本插件向 MCP 客户端（ZCode、Claude 等 AI 代理）暴露 31 个 SSH/SFTP 工具：
-远程命令、sudo 提权、文件传输、服务器指标与告警分诊。有两种接入方式，
+本插件向 MCP 客户端（ZCode、Claude 等 AI 代理）暴露 16 个 SSH/SFTP 工具：
+远程命令、sudo 提权、批量执行、终端输入、后台任务、文件传输与连接/主机管理。
+有两种接入方式，
 协议细节与完整安全设计见 [SSH MCP 参考](MCP.zh-CN.md)。
 
 ## 两种接入方式
@@ -78,7 +79,7 @@ dbx-plugin-ssh --mcp
 
 说明：
 
-- `tools/list` 即 31 个工具，无需 DBX 在场。
+- `tools/list` 即 16 个工具，无需 DBX 在场。
 - 此模式没有 DBX 连接存储，凭据随调用内联传入（`host`/`username`/`password`
   或 `privateKeyPath`，及跳板链、Quick Sudo 编排字段）。
 - 带 `connectionId` / `connectionName` 的调用会自动转发给运行中的 DBX 应用执行
@@ -106,7 +107,7 @@ DBX_SSH_MCP_READ_ONLY=1 dbx-plugin-ssh --mcp
    绝不猜选。
 3. **内联凭据**（最后兜底）：凭据会进工具参数与 LLM 上下文，仅限本机可信会话。
 
-## 工具速览（31 个）
+## 工具速览（16 个）
 
 ### 远程执行
 
@@ -119,24 +120,17 @@ DBX_SSH_MCP_READ_ONLY=1 dbx-plugin-ssh --mcp
 | `ssh_task_status` | 轮询后台任务：状态、退出码、输出尾部 |
 | `ssh_terminal_input` | 向已打开的 DBX 终端注入交互输入（应答提示、Ctrl+C）；输出不收集 |
 
-### 观测与诊断
-
-| 工具 | 用途 |
-| --- | --- |
-| `ssh_metrics` | CPU/内存/磁盘/网络/进程指标；可用 `sections` 参数只取所需分片 |
-| `ssh_test_connection` | 验证连通性与认证（含跳板链），返回延迟 |
-| `ssh_alert_triage` | 告警分诊（离线，从不执行）：任意 schema 告警 → 分类 + 只读诊断命令清单 |
-
 ### 文件传输（SFTP）
 
 | 工具 | 用途 |
 | --- | --- |
-| `sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_pwd` | 浏览与检查远端路径 |
+| `sftp_list_dir` / `sftp_stat` | 浏览目录、检查路径（大小、权限、时间戳） |
 | `sftp_read_file` / `sftp_write_file` | 读写远端文件（文本或 base64，支持 offset 分页） |
 | `sftp_upload` / `sftp_download` | 本地 ↔ 远端单文件传输（受尺寸上限与本地路径约束） |
-| `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` | 目录与文件管理 |
-| `sftp_copy` / `sftp_move` | 服务器内复制/移动（`from` 单值或数组） |
-| `sftp_disk_usage` | 路径所在挂载的磁盘用量 |
+
+> 目录创建/删除/改名/改权限/复制/移动走 `ssh_exec`（`mkdir`/`rm`/`mv`/`chmod`/`cp`）
+> 或前端工作台的 SFTP 操作，MCP 面不再单列（#203 瘦身，只读白名单与
+> sensitive-path 门在 exec 路径上等价生效）。
 
 ### 连接与主机管理
 
@@ -144,7 +138,6 @@ DBX_SSH_MCP_READ_ONLY=1 dbx-plugin-ssh --mcp
 | --- | --- |
 | `ssh_list_connections` | 列出已保存连接元数据（id / name / host / port / username / authentication / readOnly） |
 | `ssh_list_known_hosts` / `ssh_remove_known_host` | 插件 known_hosts 管理（不改系统文件） |
-| `ssh_quick_sudo_profiles_list` / `_save` / `_delete` | Quick Sudo 全局档案（sudo 密码/TOTP 预设） |
 | `ssh_close` | 关闭缓存的连接 |
 
 ## 典型用法
@@ -152,8 +145,8 @@ DBX_SSH_MCP_READ_ONLY=1 dbx-plugin-ssh --mcp
 **服务器巡检**：
 
 ```
-ssh_list_connections → ssh_metrics {connectionId, sections: ["cpu","memory","disks"]}
-→ ssh_exec {connectionId, command: "df -h /data"}
+ssh_list_connections → sftp_list_dir {connectionId, path: "/etc/nginx"}
+→ ssh_exec {connectionId, command: "nginx -t && df -h /data"}
 ```
 
 **长任务**（包管理器、构建、备份）：
@@ -163,17 +156,17 @@ ssh_run_bg {connectionId, command: "apt upgrade -y"} → 得到 taskId/logPath
 → ssh_task_status {connectionId, logPath}   # 断线、换会话后仍可轮询
 ```
 
-**告警 → 排查**：
+**批量执行**：
 
 ```
-ssh_alert_triage {payload: "<告警原文>"}     # → 分类 + 只读诊断命令清单
-→ ssh_exec {connectionId, command: "<清单命令>"}  # 逐条执行
+ssh_list_connections                              # 取多台 connectionId
+→ ssh_multi_exec {connectionId 数组, command: "uptime", mode: "parallel"}
 ```
 
 **文件分发**：
 
 ```
-sftp_upload {connectionId, localPath, remotePath} → sftp_copy {connectionId, from, toDir}
+sftp_upload {connectionId, localPath, remotePath} → sftp_list_dir {connectionId, path: dirname}
 ```
 
 ## 安全边界

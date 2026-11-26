@@ -72,8 +72,9 @@ More screenshots live in the [showcase page](docs/MEDIA.en.md).
 
 ## MCP automation
 
-The plugin ships 31 MCP tools — remote commands, sudo elevation, SFTP file transfer,
-server metrics, and alert triage — so AI coding agents (ZCode, Claude, or any MCP
+The plugin ships 16 MCP tools — remote commands, sudo elevation, multi-exec, terminal
+input, background tasks, known-hosts management, connection listing, and SFTP files —
+so AI coding agents (ZCode, Claude, or any MCP
 client) can operate your servers inside your permission boundaries. Two ways to connect:
 
 **Option 1: the DBX MCP bridge (recommended).** DBX's MCP server ships two generic
@@ -108,11 +109,13 @@ DBX_SSH_MCP_READ_ONLY=1 dbx-plugin-ssh --mcp
 
 | Job | Tools |
 | --- | --- |
-| Remote inspection | `ssh_exec`, `ssh_metrics`, `sftp_list_dir`, `ssh_test_connection` |
-| Privileged work | `ssh_exec_sudo` (auto-answers TOTP), Quick Sudo profiles |
+| Remote inspection | `ssh_exec`, `ssh_list_connections`, `sftp_list_dir`, `sftp_stat` |
+| Privileged work | `ssh_exec_sudo` (auto-answers TOTP) |
+| Multi-exec | `ssh_multi_exec` (up to 10 saved connections, parallel or sequential) |
 | Long-running jobs | `ssh_run_bg` + `ssh_task_status` (survive disconnects and new sessions) |
 | File transfer | `sftp_upload` / `sftp_download` / `sftp_read_file` / `sftp_write_file` |
-| Alert triage | `ssh_alert_triage` → read-only diagnostic playbook → `ssh_exec` |
+| Terminal input | `ssh_terminal_input` (answer prompts, Ctrl+C; output is not collected) |
+| Host and session management | `ssh_list_known_hosts` / `ssh_remove_known_host` / `ssh_close` |
 
 For full configuration, credential-free connection addressing, the tool catalog, and the
 safety model, see the [MCP guide](docs/MCP_USAGE.en.md) and the

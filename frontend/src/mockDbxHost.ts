@@ -593,8 +593,11 @@ let mockTransferHistoryCleared = false;
 // "保存 → 重开预览" 在可视化夹具里闭环（真实 sidecar 写远端文件）。
 const mockFileContents = new Map<string, Uint8Array>();
 // 全局快速命令（ssh/quickCommands/*）与批量发送（ssh/terminal/batchInput）的
-// mock 状态：镜像真实 sidecar 的响应形状与上限/错误语义，防可视化夹具脱节。
-const QUICK_COMMANDS_LIMIT = 20;
+// mock 状态：镜像 UI 侧的响应形状、上限与错误语义，防可视化夹具脱节。上限对齐
+// 前端权威常量 lib/quickCommands.ts 的 200（legacy sidecar RPC 的 20 条上限已
+// 不驱动 UI：工作台权威存储是宿主 pluginStore，sidecar 仅作一次性迁移种子）——
+// mock 若继续按 20 拦，演示导入会比生产早 180 条失败。
+const QUICK_COMMANDS_LIMIT = 200;
 const quickCommandsState: { id: string; name: string; command: string; createdAt: number; updatedAt: number }[] = [];
 const settingsState = { quickSudo: true, sudoUsePty: false, sudoPasswordSet: true, totpConfigured: false, authFlowMode: "password_then_otp", passwordPromptHint: "", totpPromptHint: "", agentTerminalMode: "off", rememberedCommands: [] as string[] };
 

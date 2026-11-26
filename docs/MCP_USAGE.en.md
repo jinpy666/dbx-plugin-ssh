@@ -1,8 +1,9 @@
 # SSH MCP Guide
 
-The plugin exposes 31 SSH/SFTP MCP tools to MCP clients (ZCode, Claude, or any
-AI agent): remote commands, sudo elevation, file transfer, server metrics, and
-alert triage. Two ways to connect. Protocol details and the full safety model
+The plugin exposes 16 SSH/SFTP MCP tools to MCP clients (ZCode, Claude, or any
+AI agent): remote commands, sudo elevation, multi-exec, terminal input, background
+tasks, file transfer, and host/connection management. Two ways to connect. Protocol
+details and the full safety model
 live in the [SSH MCP reference](MCP.zh-CN.md).
 
 ## Two ways to connect
@@ -83,7 +84,7 @@ ZCode example — register in the user-level `~/.zcode/cli/config.json`
 
 Notes:
 
-- `tools/list` returns all 31 tools; no DBX required.
+- `tools/list` returns all 16 tools; no DBX required.
 - This mode has no DBX connection store, so credentials travel inline per call
   (`host`/`username`/`password` or `privateKeyPath`, plus jump-chain and
   Quick Sudo orchestration fields).
@@ -117,7 +118,7 @@ credential exposure footprint:
 3. **Inline credentials** (last resort): credentials enter tool arguments and
    the LLM context; use only in trusted local sessions.
 
-## Tool catalog (31 tools)
+## Tool catalog (16 tools)
 
 ### Remote execution
 
@@ -130,24 +131,18 @@ credential exposure footprint:
 | `ssh_task_status` | Poll a background task: state, exit code, output tail |
 | `ssh_terminal_input` | Inject interactive input (prompt answers, Ctrl+C) into the open DBX terminal; output is not collected |
 
-### Observation and diagnostics
-
-| Tool | Purpose |
-| --- | --- |
-| `ssh_metrics` | CPU/memory/disk/network/process metrics; use the `sections` parameter to fetch only the slices you need |
-| `ssh_test_connection` | Verify connectivity and authentication (including jump chains), returns latency |
-| `ssh_alert_triage` | Alert triage (offline, never executes): any-schema alert → classification + read-only diagnostic playbook |
-
 ### File transfer (SFTP)
 
 | Tool | Purpose |
 | --- | --- |
-| `sftp_list_dir` / `sftp_stat` / `sftp_exists` / `sftp_pwd` | Browse and inspect remote paths |
+| `sftp_list_dir` / `sftp_stat` | Browse directories and inspect paths (size, mode, timestamps) |
 | `sftp_read_file` / `sftp_write_file` | Read/write remote files (text or base64, offset paging) |
 | `sftp_upload` / `sftp_download` | Single-file local ↔ remote transfer (size caps and local-path constraints apply) |
-| `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` | Directory and file management |
-| `sftp_copy` / `sftp_move` | Server-side copy/move (`from` accepts one path or an array) |
-| `sftp_disk_usage` | Filesystem usage for the mount holding a path |
+
+> Directory create/remove/rename/chmod and server-side copy/move go through
+> `ssh_exec` (`mkdir`/`rm`/`mv`/`chmod`/`cp`) or the workbench SFTP UI; they are no
+> longer separate MCP tools (#203 slim-down — the read-only whitelist and
+> sensitive-path gate apply identically on the exec path).
 
 ### Connection and host management
 
@@ -155,7 +150,6 @@ credential exposure footprint:
 | --- | --- |
 | `ssh_list_connections` | List saved connections (id / name / host / port / username / authentication / readOnly) |
 | `ssh_list_known_hosts` / `ssh_remove_known_host` | Plugin known_hosts management (system files are never touched) |
-| `ssh_quick_sudo_profiles_list` / `_save` / `_delete` | Global Quick Sudo profiles (sudo password/TOTP presets) |
 | `ssh_close` | Close a cached connection |
 
 ## Typical workflows
@@ -163,8 +157,8 @@ credential exposure footprint:
 **Server inspection**:
 
 ```
-ssh_list_connections → ssh_metrics {connectionId, sections: ["cpu","memory","disks"]}
-→ ssh_exec {connectionId, command: "df -h /data"}
+ssh_list_connections → sftp_list_dir {connectionId, path: "/etc/nginx"}
+→ ssh_exec {connectionId, command: "nginx -t && df -h /data"}
 ```
 
 **Long-running jobs** (package managers, builds, backups):
@@ -174,17 +168,17 @@ ssh_run_bg {connectionId, command: "apt upgrade -y"} → taskId/logPath
 → ssh_task_status {connectionId, logPath}   # survives disconnects and new sessions
 ```
 
-**Alert → triage**:
+**Multi-exec**:
 
 ```
-ssh_alert_triage {payload: "<raw alert>"}     # → classification + read-only playbook
-→ ssh_exec {connectionId, command: "<playbook command>"}  # run step by step
+ssh_list_connections                              # collect several connectionIds
+→ ssh_multi_exec {connectionId array, command: "uptime", mode: "parallel"}
 ```
 
 **File distribution**:
 
 ```
-sftp_upload {connectionId, localPath, remotePath} → sftp_copy {connectionId, from, toDir}
+sftp_upload {connectionId, localPath, remotePath} → sftp_list_dir {connectionId, path: dirname}
 ```
 
 ## Safety model
