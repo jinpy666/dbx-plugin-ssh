@@ -326,6 +326,7 @@ import {
   parseSftpPermissionVisibility,
   sanitizeVisibleColumns,
   sftpEntryIconKind,
+  sftpEntryIsDirectoryLike,
   sftpFileTypeName,
   type SftpColumn,
 } from "./lib/sftpEntries";
@@ -473,6 +474,9 @@ interface SftpEntry {
   name: string;
   uri: string;
   kind: "file" | "directory" | "symlink" | "other";
+  /** issue #330：sidecar 对 symlink 跟随探测的结果；缺省=未知（旧版本/
+   * 断链/探测失败），行为与旧版一致（链接图标、双击不进入）。 */
+  targetKind?: "directory" | "file" | "other";
   size?: number;
   modifiedAt?: number;
   permissions?: string;
@@ -11117,13 +11121,14 @@ function flagHintsSource(command: string): string {
                 @keydown="onFileRowKeydown($event, entry)"
               >
                 <span class="file-name">
-                  <!-- issue #36：图标只认 sftpEntryIconKind —— 仅 directory 出文件夹，
-                       other/未知一律文件图标，symlink 保持链接文档。文件类型图标
-                       按扩展名区分（files 插件同款 fileIcons）。 -->
-                  <Folder v-if="sftpEntryIconKind(entry.kind) === 'folder'" class="folder-icon" />
+                  <!-- issue #36：图标只认 sftpEntryIconKind —— 仅"可进入的目录"
+                       出文件夹，other/未知一律文件图标，普通 symlink 保持链接文档。
+                       issue #330：指向目录的 symlink（targetKind==="directory"）
+                       同样出文件夹图标。文件类型图标按扩展名区分。 -->
+                  <Folder v-if="sftpEntryIconKind(entry.kind, entry.targetKind) === 'folder'" class="folder-icon" />
                   <component
                     :is="fileIcon(entry.name)"
-                    v-else-if="sftpEntryIconKind(entry.kind) === 'file'"
+                    v-else-if="sftpEntryIconKind(entry.kind, entry.targetKind) === 'file'"
                     :class="fileIconClass(entry.name)"
                     aria-hidden="true"
                   />
@@ -11153,7 +11158,7 @@ function flagHintsSource(command: string): string {
                 </span>
                 <span v-if="visibleColumns.includes('modified')">{{ formatModified(entry.modifiedAt) }}</span>
                 <span v-if="visibleColumns.includes('size')">{{ entry.kind === "file" ? formatBytes(entry.size) : "--" }}</span>
-                <span v-if="visibleColumns.includes('kind')">{{ entry.kind === "directory" ? t("sftpFilter.folders") : sftpFileTypeName(entry.name) || t("sftpFilter.files") }}</span>
+                <span v-if="visibleColumns.includes('kind')">{{ sftpEntryIsDirectoryLike(entry.kind, entry.targetKind) ? t("sftpFilter.folders") : sftpFileTypeName(entry.name) || t("sftpFilter.files") }}</span>
                 <span v-if="visibleColumns.includes('owner')" class="mono" :title="entry.owner">{{ entry.owner || "-" }}</span>
                 <span v-if="visibleColumns.includes('group')" class="mono" :title="entry.group">{{ entry.group || "-" }}</span>
               </button>
@@ -11171,7 +11176,7 @@ function flagHintsSource(command: string): string {
                   <ContextMenuItem @select="copySelectedPaths"><Copy />{{ t("sftpCopy.copySelected") }}</ContextMenuItem>
                 </template>
                 <template v-else-if="fileMenu">
-                  <ContextMenuItem v-if="fileMenu.entry.kind === 'directory' || fileMenu.entry.kind === 'file'" @select="openEntry(fileMenu.entry)"><Folder v-if="fileMenu.entry.kind === 'directory'" /><FileText v-else />{{ fileMenu.entry.kind === "directory" ? t("openFolder") : t("preview") }}</ContextMenuItem>
+                  <ContextMenuItem v-if="sftpEntryIsDirectoryLike(fileMenu.entry.kind, fileMenu.entry.targetKind) || fileMenu.entry.kind === 'file'" @select="openEntry(fileMenu.entry)"><Folder v-if="sftpEntryIsDirectoryLike(fileMenu.entry.kind, fileMenu.entry.targetKind)" /><FileText v-else />{{ sftpEntryIsDirectoryLike(fileMenu.entry.kind, fileMenu.entry.targetKind) ? t("openFolder") : t("preview") }}</ContextMenuItem>
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' || fileMenu.entry.kind === 'directory'" @select="downloadEntry(fileMenu.entry, sudoMode && canWrite && fileMenu.entry.kind === 'file')"><Download />{{ t("download") }}</ContextMenuItem>
                   <!-- 一次性「下载到…」（issue #303）：该次下载强制弹目录询问，
                        不必翻转全局「使用默认地址」；仅文件——目录走递归树下载，

@@ -1,4 +1,5 @@
-import type { SftpEntryKind } from "../lib/sftpEntries";
+import type { SftpEntryKind, SftpEntryTargetKind } from "../lib/sftpEntries";
+import { sftpEntryIsDirectoryLike } from "../lib/sftpEntries";
 import { computed, ref, type Ref } from "vue";
 import { confirmDialog } from "../lib/confirmDialog";
 import { formatBytes } from "../lib/format";
@@ -8,7 +9,14 @@ import { MIB } from "../lib/settingsModel";
 import { looksBinary } from "../lib/textSniff";
 
 // 列表条目的最小结构（App.vue 的 SftpEntry 为局部接口，按消费字段收敛）。
-type PreviewEntry = { uri: string; name: string; kind: SftpEntryKind; size?: number };
+type PreviewEntry = {
+  uri: string;
+  name: string;
+  kind: SftpEntryKind;
+  /** issue #330：symlink 目标类型；目录链接双击同样进入目标目录。 */
+  targetKind?: SftpEntryTargetKind;
+  size?: number;
+};
 
 /** 文件预览（文本/图片/JSON）：打开前确认（大文件/二进制嗅探/sudo 读取）、
  * 编辑草稿与脏检查、保存（sudo/write 分流）、图片缩放状态、JSON 格式化视图。 */
@@ -72,7 +80,7 @@ const jsonPreviewState = computed<JsonPreviewState>(() =>
 async function openEntry(entry: PreviewEntry) {
   if (previewOpen.value && previewDirty.value && !(await confirmDialog(t("editSave.closeConfirm")))) return;
 
-  if (entry.kind === "directory") {
+  if (sftpEntryIsDirectoryLike(entry.kind, entry.targetKind)) {
     await loadDirectory(pathFromUri(entry.uri));
     return;
   }

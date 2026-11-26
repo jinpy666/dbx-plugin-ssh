@@ -11,7 +11,7 @@ vi.mock("../lib/confirmDialog", async (importOriginal) => ({
   confirmDialog: vi.fn(async () => true),
 }));
 
-function makeEntry(overrides: Partial<{ uri: string; name: string; kind: "file" | "directory"; size: number }> = {}) {
+function makeEntry(overrides: Partial<{ uri: string; name: string; kind: "file" | "directory" | "symlink" | "other"; targetKind: "directory" | "file" | "other"; size: number }> = {}) {
   return { uri: "/remote/docs/notes.txt", name: "notes.txt", kind: "file" as const, size: 1024, ...overrides };
 }
 
@@ -35,7 +35,7 @@ function installPluginStub(handler: (method: string, params?: unknown) => Promis
 
 type DoubleClickAction = "preview" | "edit";
 
-function setup(options: { canWrite?: boolean; doubleClickAction?: DoubleClickAction } = {}) {
+function setup(options: { canWrite?: boolean; doubleClickAction?: DoubleClickAction; loadDirectory?: (path?: string) => Promise<void> } = {}) {
   const session: Ref<{ sessionId?: string } | undefined> = ref({ sessionId: "session-1" });
   const sudoMode = ref(false);
   const canWrite = ref(options.canWrite ?? true);
@@ -50,7 +50,7 @@ function setup(options: { canWrite?: boolean; doubleClickAction?: DoubleClickAct
     sudoMode,
     canWrite,
     doubleClickAction,
-    loadDirectory: async () => {},
+    loadDirectory: options.loadDirectory ?? (async () => {}),
     downloadEntry: async () => {},
     pathFromUri: (uri: string) => uri,
   });
@@ -108,5 +108,32 @@ describe("useFilePreview 双击行为偏好", () => {
     await composable.openEntry(makeEntry());
     expect(composable.previewEditable.value).toBe(false);
     expect(errors.length).toBe(0);
+  });
+});
+
+// issue #330：双击目录符号链接 = 进入目标目录；文件/未知目标的链接维持旧
+// 行为（不导航、不打开预览），避免把链接误当文件读。
+describe("useFilePreview 目录符号链接双击", () => {
+  it("navigates into a symlink whose target is a directory", async () => {
+    const loadDirectory = vi.fn(async () => {});
+    const { composable } = setup({ loadDirectory });
+    await composable.openEntry(
+      makeEntry({ uri: "/remote/docs/link-dir", name: "link-dir", kind: "symlink", targetKind: "directory" }),
+    );
+    expect(loadDirectory).toHaveBeenCalledWith("/remote/docs/link-dir");
+    expect(composable.previewOpen.value).toBe(false);
+  });
+
+  it("does not navigate into file or unknown-target symlinks", async () => {
+    const loadDirectory = vi.fn(async () => {});
+    const { composable } = setup({ loadDirectory });
+    await composable.openEntry(
+      makeEntry({ uri: "/remote/docs/link-file", name: "link-file", kind: "symlink", targetKind: "file" }),
+    );
+    await composable.openEntry(
+      makeEntry({ uri: "/remote/docs/link-unknown", name: "link-unknown", kind: "symlink" }),
+    );
+    expect(loadDirectory).not.toHaveBeenCalled();
+    expect(composable.previewOpen.value).toBe(false);
   });
 });

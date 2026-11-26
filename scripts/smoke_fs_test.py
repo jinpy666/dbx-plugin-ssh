@@ -488,6 +488,55 @@ def main() -> None:
             if bad:
                 raise AssertionError(f"owner must be a string or absent: {bad}")
 
+        def case_sftp_list_symlink_target_kind():
+            """issue #330: 目录符号链接带 targetKind="directory"，文件链接
+            targetKind="file"；普通条目不得出现该字段（只有 symlink 付探测
+            RTT）。"""
+            stamp = int(time.time())
+            base = f"{home}/.dbx-link-kind-{stamp}"
+            target_dir = f"{base}/dir"
+            target_file = f"{base}/file.txt"
+            link_dir = f"{base}/link-dir"
+            link_file = f"{base}/link-file"
+            req("sftp/createDirectory", {"sessionId": session_id, "path": base})
+            try:
+                req("sftp/createDirectory", {"sessionId": session_id, "path": target_dir})
+                req("sftp/write", {"sessionId": session_id, "remotePath": target_file,
+                                   "dataBase64": base64.b64encode(b"symlink target\n").decode()})
+                req("sftp/symlink-create", {"sessionId": session_id,
+                                            "target": target_dir, "linkPath": link_dir})
+                req("sftp/symlink-create", {"sessionId": session_id,
+                                            "target": target_file, "linkPath": link_file})
+                listing = client.request("sftp/list", {"sessionId": session_id, "path": base})
+                rows = {entry.get("name"): entry for entry in (listing.get("entries") or [])}
+                print(f"    {base}: "
+                      f"{[(name, row.get('kind'), row.get('targetKind')) for name, row in rows.items()]}")
+                dir_link = rows.get("link-dir")
+                file_link = rows.get("link-file")
+                if dir_link is None or file_link is None:
+                    raise AssertionError(f"symlinks missing from {base} listing: {sorted(rows)}")
+                if entry_kind(dir_link) != "symlink" or dir_link.get("targetKind") != "directory":
+                    raise AssertionError(
+                        f"dir link = {dir_link!r}, want kind=symlink targetKind=directory")
+                if entry_kind(file_link) != "symlink" or file_link.get("targetKind") != "file":
+                    raise AssertionError(
+                        f"file link = {file_link!r}, want kind=symlink targetKind=file")
+                # 普通条目零探测：字段必须缺席而不是 null/空串。
+                for name, row in rows.items():
+                    if entry_kind(row) != "symlink" and "targetKind" in row:
+                        raise AssertionError(f"non-symlink entry {name} leaked targetKind: {row!r}")
+            finally:
+                for path in (link_dir, link_file):
+                    try:
+                        req("sftp/delete", {"sessionId": session_id, "path": path})
+                    except SidecarError:
+                        pass
+                try:
+                    req("sftp/delete", {"sessionId": session_id, "path": base,
+                                        "recursive": True})
+                except SidecarError:
+                    pass
+
         # -- sudo_fs group (container sshuser has NOPASSWD sudo) ------------------
 
         def case_sudo_stat():
@@ -1462,7 +1511,8 @@ def main() -> None:
         report.run("sftp/lzpack scratch cleanup", "sftp/delete", case_sftp_lzpack_cleanup,
                    needs="sftp/lzpack expand download restores")
         report.run("sftp/list includeOwner owner/group", "sftp/list", case_sftp_list_owner)
-
+        report.run("sftp/list symlink targetKind (#330)", "sftp/list",
+                   case_sftp_list_symlink_target_kind)
         print("\n--- sudo_fs group ---")
         report.run("sudo/stat /config", "sudo/stat", case_sudo_stat)
         report.run("sudo/exists true/false", "sudo/exists", case_sudo_exists)
@@ -2453,6 +2503,11 @@ def main() -> None:
                 if entry is None or entry.get("kind") != "symlink":
                     raise AssertionError(f"latin-1 named symlink missing from listing: "
                                          f"{[e.get('name') for e in listing.get('entries', [])]}")
+                # issue #330：latin-1 裸包车道同样要对链接做目标探测（FXP_STAT），
+                # 目标 anchor.txt 是普通文件。
+                if entry.get("targetKind") != "file":
+                    raise AssertionError(f"latin-1 symlink targetKind={entry.get('targetKind')!r}, "
+                                         f"want 'file' (raw lane probe)")
                 read_back = req("sftp/symlink-read", {"sessionId": session_id, "linkPath": link_wire})
                 if read_back.get("target") != "anchor.txt":
                     raise AssertionError(f"symlink-read target mismatch: {read_back!r}")
