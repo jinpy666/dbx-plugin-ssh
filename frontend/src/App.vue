@@ -556,6 +556,9 @@ interface ConnectionSummary {
   username?: string;
   color?: string;
   readOnly?: boolean;
+  /** 连接备注（#329，manifest note 字段 binding=config）；真实宿主的 webview
+   *  上下文不带 external_config，缺失时以 connection/protocol 返回的 note 兜底。 */
+  note?: string;
   /** 宿主连接表单的 protocol 字段（缺省 ssh）：非 SSH 连接在 openSession 里路由到各自会话。 */
   protocol?: "ssh" | "telnet" | "vnc" | "serial" | "rdp";
   /** 串口连接配置（M32-B，manifest serial_* 字段；缺失时回落连接表单）。 */
@@ -1866,6 +1869,7 @@ const connection = computed<ConnectionSummary>(() => {
     username: normalizeConnectionText(raw.username),
     color: normalizeConnectionText(raw.color),
     readOnly: raw.readOnly === true,
+    note: normalizeConnectionText(field("note")),
     protocol: protocolRaw === "telnet" || protocolRaw === "vnc" || protocolRaw === "serial" || protocolRaw === "rdp" ? protocolRaw : "ssh",
     serialPort: normalizeConnectionText(field("serial_port")),
     serialBaud: [9600, 19200, 38400, 57600, 115200, 230400].includes(Number(field("serial_baud"))) ? Number(field("serial_baud")) : undefined,
@@ -1987,6 +1991,10 @@ const connectionAuthMethodLabel = computed(() => formatAuthMethodLabel(connectio
   };
   return labels[method];
 }));
+// 连接备注（#329）：webview 上下文若带 note（未来宿主/降级形态）优先，否则
+// 用 openSession 里 connection/protocol 查回的 sidecar 权威值。
+const storedConnectionNote = ref("");
+const connectionNoteText = computed(() => normalizeConnectionText(connection.value.note) || storedConnectionNote.value);
 // 连接色染色按主题分级（light 压低 alpha 保 muted 文字 AA 对比度，P2-4）。
 const toolbarStyle = computed(() => toolbarTintStyle(connection.value.color, appearance.value.colorScheme));
 // 终端让宽（纯计算在 lib/paneLayout）：SFTP 分栏按用户拖拽比例。Docker 面板
@@ -4504,16 +4512,19 @@ const connectCardStatusText = computed(() => {
 // 恢复态标签更晚的凭据重推，以及非 SSH 协议的迟到推送：恢复态 4×250ms、常规
 // 2×250ms。旧 sidecar 对 SSH 仍回空串，最多多等 0.75s，路由结果不变；真未命中
 // 的连接落进既有重试梯子（每次重试都会重新查询，协议一到就路由）。
-async function resolveStoredConnectionProtocol(connectionId: string, bootRestore: boolean): Promise<{ protocol: string; shell: string; cwd: string; env: Array<{ name: string; value: string }> }> {
+async function resolveStoredConnectionProtocol(connectionId: string, bootRestore: boolean): Promise<{ protocol: string; note: string; shell: string; cwd: string; env: Array<{ name: string; value: string }> }> {
   const attempts = bootRestore ? 4 : 2;
   const delayMs = 250;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const result = await window.dbxPlugin.invoke<{ protocol?: string; shell?: string; cwd?: string; env?: Array<{ name?: unknown; value?: unknown }> }>("connection/protocol", { connectionId });
+      const result = await window.dbxPlugin.invoke<{ protocol?: string; note?: string; shell?: string; cwd?: string; env?: Array<{ name?: unknown; value?: unknown }> }>("connection/protocol", { connectionId });
       const protocol = typeof result?.protocol === "string" ? result.protocol : "";
       if (protocol) {
         return {
           protocol,
+          // 连接备注（#329）：sidecar 从 lifecycle external_config.note 取值；
+          // 旧 sidecar 无此键 → 空串（连接信息面板不显示该行）。
+          note: typeof result.note === "string" ? result.note.trim() : "",
           shell: typeof result.shell === "string" ? result.shell : "",
           // 连接表单的启动目录/环境变量（旧 sidecar 无键 → 空 = 未配置）。
           cwd: typeof result.cwd === "string" ? result.cwd.trim() : "",
@@ -4526,11 +4537,11 @@ async function resolveStoredConnectionProtocol(connectionId: string, bootRestore
       }
     } catch {
       // sidecar 未就绪/旧版 sidecar 无此方法：按未暂存处理，走推送协议。
-      return { protocol: "", shell: "", cwd: "", env: [] };
+      return { protocol: "", note: "", shell: "", cwd: "", env: [] };
     }
     if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
-  return { protocol: "", shell: "", cwd: "", env: [] };
+  return { protocol: "", note: "", shell: "", cwd: "", env: [] };
 }
 
 // RDP 路由重入保护（与 sidecar 同 workbenchId 幂等查重双保险）：reconnect
@@ -4601,6 +4612,7 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
   if (connectionProtocol.value === "ssh" && connectionId.value) {
     const stored = await resolveStoredConnectionProtocol(connectionId.value, bootRestore);
     const storedProtocol = stored.protocol;
+    storedConnectionNote.value = stored.note;
     // 权威协议写回响应式状态（storedConnectionProtocol）：路由之外的连接级
     // 门控（isRdpConnection）也以它为准，否则真实宿主下 RDP 连接的 SSH 入口
     // 整组漏出（宿主推送上下文缺 protocol，查询结果不落状态就只够当次路由）。
@@ -9575,6 +9587,7 @@ function flagHintsSource(command: string): string {
             <dt>{{ t("connectionInfoPort") }}</dt><dd class="mono">{{ connection.port || 22 }}</dd>
             <dt>{{ t("connectionInfoUser") }}</dt><dd class="mono">{{ connection.username || "–" }}</dd>
             <dt>{{ t("connectionInfoAuth") }}</dt><dd>{{ connectionAuthMethodLabel }}</dd>
+            <template v-if="connectionNoteText"><dt>{{ t("connectionInfoNote") }}</dt><dd class="connection-note">{{ connectionNoteText }}</dd></template>
             <template v-if="connection.readOnly || connectionReadOnly"><dt>{{ t("readOnly") }}</dt><dd>{{ t("yes") }}</dd></template>
             <dt>{{ t("connectionInfoLatency") }}</dt>
             <dd>
@@ -12136,6 +12149,7 @@ function flagHintsSource(command: string): string {
 .connection-info-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; font-size: 12px; }
 .connection-info-grid dt { max-width: 16ch; overflow: hidden; color: var(--muted-foreground); text-overflow: ellipsis; white-space: nowrap; }
 .connection-info-grid dd { display: flex; min-width: 0; align-items: center; gap: 8px; margin: 0; overflow-wrap: anywhere; }
+.connection-info-grid dd.connection-note { align-items: flex-start; white-space: pre-wrap; }
 .connection-info-grid .task-error { font-size: 10px; }
 .connection-info-grid .link-button { flex: 0 0 auto; align-self: center; font-size: 10px; }
 

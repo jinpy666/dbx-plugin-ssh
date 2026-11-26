@@ -50,6 +50,13 @@
           "default": "SSH server"
         },
         {
+          "key": "note",
+          "label": "Remark",
+          "type": "textarea",
+          "binding": "config",
+          "placeholder": "Optional note for this connection"
+        },
+        {
           "key": "protocol",
           "label": "Protocol",
           "type": "select",
@@ -1671,7 +1678,14 @@
       "name": "SSH",
       "description": "A secure terminal for interactive sessions, SFTP file transfer, remote commands, and guarded server operations.",
       "contributions": {
-        "io.dbx.ssh.connection": {},
+        "io.dbx.ssh.connection": {
+          "fields": {
+            "note": {
+              "label": "Remark",
+              "placeholder": "Optional note for this connection"
+            }
+          }
+        },
         "io.dbx.ssh.local": {},
         "io.dbx.ssh.open-local-terminal": {
           "label": "Terminal",
@@ -1754,6 +1768,10 @@
           "fields": {
             "display_name": {
               "label": "Nombre de conexión"
+            },
+            "note": {
+              "label": "Nota",
+              "placeholder": "Nota opcional para esta conexión"
             },
             "protocol": {
               "label": "Protocolo",
@@ -2109,6 +2127,10 @@
             "display_name": {
               "label": "Nome connessione"
             },
+            "note": {
+              "label": "Nota",
+              "placeholder": "Nota facoltativa per questa connessione"
+            },
             "protocol": {
               "label": "Protocollo",
               "options": {
@@ -2462,6 +2484,10 @@
           "fields": {
             "display_name": {
               "label": "接続名"
+            },
+            "note": {
+              "label": "メモ",
+              "placeholder": "この接続の任意メモ"
             },
             "protocol": {
               "label": "プロトコル",
@@ -2817,6 +2843,10 @@
             "display_name": {
               "label": "Nome da conexão"
             },
+            "note": {
+              "label": "Observação",
+              "placeholder": "Observação opcional para esta conexão"
+            },
             "protocol": {
               "label": "Protocolo",
               "options": {
@@ -3171,6 +3201,10 @@
             "display_name": {
               "label": "连接名称"
             },
+            "note": {
+              "label": "备注",
+              "placeholder": "此连接的可选备注"
+            },
             "protocol": {
               "label": "协议",
               "options": {
@@ -3524,6 +3558,10 @@
           "fields": {
             "display_name": {
               "label": "連線名稱"
+            },
+            "note": {
+              "label": "備註",
+              "placeholder": "此連線的選用備註"
             },
             "protocol": {
               "label": "協議",

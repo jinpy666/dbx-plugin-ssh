@@ -4767,3 +4767,61 @@ SFTP 面板把目录符号链接当普通文件显示（链接文档图标），
 需额外 `stat` RTT，暂不做）；一个目录内大量符号链接会各付一次探测 RTT
 （只读、串行；只在链接条目上发生）；服务器 STAT 不跟随链接（少见非
 标准实现）时归为 `other`，仍显示链接图标。
+
+## 连接备注字段 + 下载分块等待超时修复（2026-11-26，#329）
+
+**问题一**：连接编辑表单只有名称，用户需要类似 DBX 数据库连接的备注/说明。
+宿主 `PluginFormFieldBinding` 没有 `note` 绑定（config/secret/name/host/port/
+username/password/database），`ConnectionConfig.note` 无法由插件表单写入。
+
+**修复一**：
+- `manifest.json` 连接 provider 新增 `note`（`type: textarea`、
+  `binding: config`、可选）紧跟 `display_name`；写入 `external_config.note`。
+  七语 label/placeholder 均补齐（en Remark / zh-CN 备注 / zh-TW 備註 /
+  es Nota / it Nota / ja メモ / pt-BR Observação）。
+- 工作台展示：真实宿主的 webview 上下文只带 `{id,name,host,port,username,
+  readOnly}`（`queryStore.openPluginConnection`），既无 `external_config`
+  也无 note。因此 sidecar 在 lifecycle `connection/connect` 时把备注解析进
+  `StoredConnection.note`（`external_config.note` 优先、宿主
+  `ConnectionConfig.note` 回退，trim + 2000 字符截断），并由既有
+  `connection/protocol` 响应新增 `note` 字段回传；`App.vue` 在 `openSession`
+  查询协议时同步写入 `storedConnectionNote`，连接信息 Popover 新增「备注」
+  行（`connectionInfoNote`，七语），空值不渲染。上下文若未来直接带 note 则
+  优先使用上下文值。
+- 协议文档 `docs/PROTOCOL.zh-CN.md` 的 `connection/protocol` 行已更新
+  （`{protocol, note, shell?}`）。
+
+**问题二**（`SFTP 下载分块等待超时`）：排查确认后端没有分块 ack/整传输
+时限（`backend/src/ssh.rs` 下载管线只用 `TRANSFER_CHUNK_SIZE = 256 KiB`，
+无整任务 deadline）；缺陷在前端 `useSftpDownload.ts` 的
+`waitForDownloadChunk`——它在发起 `sftp/download/next` 前挂一个**固定
+30s** 定时器，超时即 reject 并 `sftp/transfer/cancel`，与 #305 修复前的
+上传分片 ACK 完全同一形态。慢链路/远端盘繁忙时一片 256 KiB 读取 >30s
+（<8.7 KiB/s）会把仍在推进的下载误杀，报的正是
+`errors.downloadChunkTimeout`。事件流：定时器先于
+`sftp/download/next` 武装 → sidecar 读满一片后才发
+`sftp/download/{taskId}` 二进制帧并推进 `next_offset`
+（`ssh.rs` 10310–10324）→ 前端 App.vue onBinary 按 offset 结算等待器。
+
+**修复二**（纯前端，不改后端下载管线）：
+- 新 `frontend/src/lib/downloadChunkWait.ts`（纯策略）：首查 30s、
+  其后 60s 重查，单块总上限 10 分钟；超时后查 `sftp/transfer/status`：
+  仍在跑且 `transferred <= offset` → 继续等；`transferred > offset`
+  （sidecar 已推进，说明二进制帧在桥上丢失）→ 立即失败；终态
+  （failed/cancelled/completed）→ 立即失败；状态查询连续失败 3 次 →
+  判失联失败（桥抖动容忍）。
+- `useSftpDownload.ts` 的等待器改为可重挂：状态 RPC 在途时若分片帧已到达
+  （App.vue 已结算/删除等待器）则不再重挂；其余分支沿用新增纯函数。
+
+**测试**：`downloadChunkWait.spec.ts` 6 例（步长/分类，TDD 先红后绿）+
+`useSftpDownload.chunkWait.spec.ts` 5 例（30s 不误杀、丢帧快失败、终态
+失败、连续查询失败 3 次失败、10 分钟上限）；后端新增
+`connection_note_comes_from_the_form_field_with_host_fallback`、
+`connection_note_is_capped_for_display`，并同步 manifest↔解析面契约用例
+（`config_keys` / `expected` 增加 note）。`cargo test` 1376 全绿；
+`pnpm typecheck` 0 错；前端 vitest 229 文件 / 2371 例全绿；
+`node scripts/connection-forms/verify.mjs` 新增 note 字段契约断言（textarea /
+config / 可选 / 所有协议可见）全 PASS；`scripts/mock_host_registry_check.mjs`
+PASS。后端发布版 smoke 未跑（需 SSH 测试容器；本次无协议方法新增，仅
+`connection/protocol` 响应加键）。七语文案：manifest note 标签/占位 7 语 +
+`connectionInfoNote` 7 语。
