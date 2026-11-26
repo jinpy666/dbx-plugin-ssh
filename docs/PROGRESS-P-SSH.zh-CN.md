@@ -4825,3 +4825,63 @@ config / 可选 / 所有协议可见）全 PASS；`scripts/mock_host_registry_ch
 PASS。后端发布版 smoke 未跑（需 SSH 测试容器；本次无协议方法新增，仅
 `connection/protocol` 响应加键）。七语文案：manifest note 标签/占位 7 语 +
 `connectionInfoNote` 7 语。
+
+## 连接首屏与 issue #326/#327/#328 跟进（2026-11-26）
+
+**来源**：#326「SSH 建立连接很慢」、#327「多选多个 SSH 连接同时分屏打开 +
+批量发送命令」、#328「自动检测延迟并显示在左侧连接列表」。三者先做宿主契约
+取证，再只对 #326 落了插件侧可验证的低风险优化（其余两份属宿主缺口，
+按 AGENTS 规则 8 只出提案，不改 `host/`）。完整取证、证据表与可直接贴的
+中文回复稿见 `docs/drafts/ISSUE-FOLLOWUP-326-328.zh-CN.md`。
+
+**#326（插件侧，已改）**：sidecar 连接链路本机实测已接近协议下界——
+`connection/connect` 只登记配置（不拨号），首个 `ssh/session/open` 对
+127.0.0.1:2222 测试容器 5 轮平均 **22.4ms**（TCP+握手 10.5–18.9ms、
+password 认证完成 16.5–25.6ms、认证后 channel/PTY/shell 仅 1.4–1.6ms），
+无 sleep/重试/串行探针可删。真正能动的首屏成本在**前端 UI 单文件**：
+`frontend/build.mjs` 把 JS/CSS 全内联、`codeSplitting: false`，宿主以
+`<iframe srcdoc sandbox="allow-scripts">` 加载（
+`host/apps/desktop/src/components/plugins/PluginWorkbenchHost.vue:967`），
+产物已达 **25.1MB**（文件预览链路 `@file-viewer/*` 的 PDF/Office/表格/媒体
+renderer 占约 11.4MB）。这些 renderer 原本由 `App.vue` 静态 import，连接首屏
+就付解析/求值成本。
+
+**改动（纯前端）**：
+- `frontend/src/App.vue`：`PreviewPane` / `TextPreview` / `JsonPreviewPanel`
+  改为 `defineAsyncComponent(() => import(...))`；仍进同一单文件 bundle，
+  但模块体留在惰性工厂，首屏只付文本解析，首次打开预览时才求值。
+- `frontend/src/lib/workbench.spec.ts`：模板组件解析守卫识别
+  `defineAsyncComponent` 本地绑定（否则异步组件被误判「未导入」）。
+- 新增 `frontend/src/connectFirstPaint.spec.ts`（6 例）：锁住三个预览组件
+  必须异步装载、不得回退静态 import。
+
+**测量（headless Chrome，同一 25.1MB 产物，baseline/async 交替 5 对）**：
+`domContentLoaded` 中位 **565ms → 533ms（-32ms，-5.7%）**，
+first-paint 中位 **364ms → 328ms（-36ms，-10%）**，5 对全部变快。
+上限实测（临时移除 `@file-viewer` 装配）：13.7MB / ~340ms —— 即剩余约
+11.4MB 字节仍随首屏付文本解析成本，彻底解决需把 renderer 移出 single-file
+文档（桌面宿主 CSP 已允许插件资产源；Web 宿主无资产 base、外链 chunk 会被拦），
+已写入提案。
+
+**#327（needs host）**：宿主侧已有多选（`connectionMultiSelectActive`、
+批量 connect/disconnect），但（a）没有把「侧栏多选连接」交给插件命令的
+上下文/选择读取 API，（b）分屏是宿主 shell 的 editor group（
+`queryStore.splitTab`，上限 4 组），插件桥只暴露
+`host.openWorkbench` / `host.reopenConnection` / `host.getConnections`，
+没有 split API。插件侧分屏（`useSplitPanes`，同连接副屏 + 镜像会话，上限 3）
+与跨会话批量命令（`ssh/terminal/batchInput`，目标取 `ssh/sessions/list`
+全部活跃会话）都已存在——缺的是「宿主多选 → 一次并行开多个连接窗格/分屏」
+这段编排。
+
+**#328（needs host）**：manifest 贡献点只有 connection-provider /
+workbench / filesystem / context-menu / result-view / command / menus / mcp
+（`host/crates/dbx-plugin-runtime/src/plugins/manifest.rs:280-289`），
+连接行没有插件可写的徽标/状态槽；仓库内的宿主 UI 提案也明确「动态状态栏、
+badge 留待运行时状态协议明确后再发布」（`docs/HOST_PLUGIN_UI_SPEC.zh-CN.md:6,44,338-344`）。
+插件侧已有部分交付面：连接信息气泡里的手动 echo 往返延迟
+（`frontend/src/composables/useConnectionInfo.ts:43-61`，显示于
+`App.vue:9582` 附近），但不做周期自动探测，也不在侧栏列表内。
+
+**验证**：`vue-tsc --noEmit` 0 错；`vitest run` **228 文件 2366 例全绿**
+（含新增 6 例与 workbench 守卫 69 例）；`node build.mjs` 产出单文件 UI 通过
+其自带的单文件护栏。后端零改动，本轮无新增七语文案（纯装载时机，无新 UI 文本）。
