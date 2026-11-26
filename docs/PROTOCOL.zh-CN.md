@@ -924,12 +924,12 @@ RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRD
 `DBX_PLUGIN_DATA_DIR/quick-commands.json`（原子写、Unix 0600、坏文件降级为空清单），
 **所有连接与工作台共享一份**（全局共享语义；此前存工作台
 localStorage 会因宿主 webview 存储分区表现为"绑连接"，已废弃该存储）。
-上限 20 条、`name` ≤ 60 字符、`command` ≤ 500 字符（与前端 `lib/quickCommands.ts`
+上限 200 条、`name` ≤ 60 字符、`command` ≤ 500 字符（与前端 `lib/quickCommands.ts`
 常量一致）。命令不含凭据字段，无脱敏需求，但文件权限与 sudo 配置存储保持同款收紧。
 
 `ssh/quickCommands/list`：参数无。返回 `{ commands: [{ id, name, command, createdAt, updatedAt }] }`，按插入顺序（`createdAt` 升序）排列。
 
-`ssh/quickCommands/save`：参数 `id?`（空/缺省=新建，非空=更新须存在）、`name?`（空/缺省取 `command` 截断兜底）、`command`（必填，trim 后非空）。返回 `{ quickCommand: {…}, created: bool, commands: [...] }`（完整清单随响应下发，工作台可直接采纳权威顺序）。错误：超限（"At most 20 quick commands…"）、字段超长、`command` 缺失。
+`ssh/quickCommands/save`：参数 `id?`（空/缺省=新建，非空=更新须存在）、`name?`（空/缺省取 `command` 截断兜底）、`command`（必填，trim 后非空）。返回 `{ quickCommand: {…}, created: bool, commands: [...] }`（完整清单随响应下发，工作台可直接采纳权威顺序）。错误：超限（"At most 200 quick commands…"）、字段超长、`command` 缺失。
 
 `ssh/quickCommands/delete`：参数 `id`。返回 `{ removed: bool, commands: [...] }`；id 不存在时 `removed: false` 不算错误（对齐 `ssh/knownHosts/remove` 语义），此时不重写存储文件。
 

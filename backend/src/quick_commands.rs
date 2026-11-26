@@ -10,8 +10,11 @@ use serde_json::{json, Value};
 
 const STORAGE_VERSION: u64 = 1;
 const FILE_NAME: &str = "quick-commands.json";
-/// Cap shared with the workbench editor (`QUICK_COMMANDS_LIMIT`).
-pub const MAX_COMMANDS: usize = 20;
+/// Cap shared with the workbench editor: mirrors `QUICK_COMMANDS_LIMIT = 200`
+/// in `frontend/src/lib/quickCommands.ts`. Change both together — this RPC path
+/// still serves the mock/legacy save route, so a lower value here rejects saves
+/// the editor accepts.
+pub const MAX_COMMANDS: usize = 200;
 const MAX_NAME_LEN: usize = 60;
 const MAX_COMMAND_LEN: usize = 500;
 
