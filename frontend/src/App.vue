@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
@@ -368,9 +368,6 @@ import { bridgeBinaryBytes } from "../../shared/frontend/binaryEvent";
 import { findTreeNode } from "./lib/sftpDirTree";
 import { workbenchMessage } from "./lib/i18n";
 import { randomUUID } from "./lib/uuid";
-import TextPreview from "./components/TextPreview.vue";
-import PreviewPane from "./components/PreviewPane.vue";
-import JsonPreviewPanel from "./components/JsonPreviewPanel.vue";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
 import TerminalQuickSelectPanel from "./components/TerminalQuickSelectPanel.vue";
 import TerminalHistoryPanel from "./components/TerminalHistoryPanel.vue";
@@ -451,6 +448,16 @@ import {
   type RdpSessionStateView,
 } from "./rdp/rdpFrame";
 import { ToastAction, ToastClose, ToastProvider, ToastRoot, ToastViewport } from "./components/ui/toast";
+
+// 预览链路（CodeMirror 语言包、@file-viewer 的 PDF/Office/表格/媒体等
+// renderer）体积占整个单文件 UI 的大头，但只有用户真正打开文件预览时才
+// 用得上。宿主以 srcdoc 单文件加载工作台，静态 import 会让这份代码在
+// 每次连接首屏就被解析/求值，直接拖慢「点击连接 → 终端可用」（#326）。
+// 改成异步组件后模块体保留在惰性函数里，首屏只付文本解析成本，首次打开
+// 预览时再求值（单 bundle 内 import() 不产生网络请求，仍是即成）。
+const TextPreview = defineAsyncComponent(() => import("./components/TextPreview.vue"));
+const PreviewPane = defineAsyncComponent(() => import("./components/PreviewPane.vue"));
+const JsonPreviewPanel = defineAsyncComponent(() => import("./components/JsonPreviewPanel.vue"));
 
 interface SessionInfo {
   sessionId: string;

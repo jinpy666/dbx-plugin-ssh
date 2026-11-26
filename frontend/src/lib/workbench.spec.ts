@@ -942,6 +942,11 @@ describe("App.vue template component resolution guard", () => {
       if (alias) importedNames.add(alias);
     }
   }
+  // #326：预览组件改为 defineAsyncComponent(() => import(...)) 的本地绑定，
+  // 不再走静态 import；它们同样是模板可解析的 script-setup 绑定。
+  for (const hit of appScript.matchAll(/const\s+([\w$]+)\s*=\s*defineAsyncComponent\s*\(/g)) {
+    importedNames.add(hit[1]);
+  }
   const templateTags = new Set<string>();
   for (const hit of appTemplate.matchAll(/<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g)) {
     templateTags.add(hit[1]);
