@@ -126,6 +126,16 @@ function state(overrides) {
 assert.equal(byKey.advanced_options.type, "boolean");
 assert.equal(byKey.advanced_options.binding, "config");
 assert.equal(byKey.advanced_options.default, false, "advanced_options: must default to off");
+
+// issue #329：连接备注（free-text remark）。宿主 PluginFormFieldBinding 没有
+// note 绑定，只能落 config（external_config.note）；始终可见且可选，任何协议
+// 都适用，不进 required 集合。
+assert.equal(byKey.note.type, "textarea", "note: must render as a free-text textarea");
+assert.equal(byKey.note.binding, "config", "note: must persist in external_config");
+assert.equal(byKey.note.required, undefined, "note: must stay optional");
+state({}).visible("note", true);
+state({ protocol: "serial" }).visible("note", true);
+state({ protocol: "rdp" }).visible("note", true);
 const advancedFields = [
   "connect_timeout_secs", "keepalive_interval_secs",
   "terminal_keepalive_secs", "set_env", "triggers_enabled",

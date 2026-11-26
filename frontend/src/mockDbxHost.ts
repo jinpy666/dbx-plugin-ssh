@@ -174,6 +174,8 @@ const context = quickFixture
     username: "user",
     color: "#3b82f6",
     readOnly: !writable,
+    // #329 连接备注走 sidecar（connection/protocol 的 note），上下文不带
+    // external_config；这里留空以覆盖真实宿主的降级路径。
     ...(autoAuthActive ? { authentication: "auto" } : {}),
   },
 };
@@ -911,7 +913,7 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   // 宿主尚未推送该连接时才是空串。?proto=pending 模拟最后那种迟到场景。
   else if (method === "connection/protocol") {
     const staged = protoFixture === "rdp" || protoFixture === "telnet" || protoFixture === "vnc" || protoFixture === "serial" ? protoFixture : "";
-    result = { protocol: protoFixture === "pending" ? "" : staged || "ssh" };
+    result = { protocol: protoFixture === "pending" ? "" : staged || "ssh", note: protoFixture === "pending" ? "" : "Staging bastion — change window Tue 02:00" };
   }
   else if (method === "ssh/sessions/list") result = { sessions: failSessionOpen || freshSessionOpen ? [] : [{ sessionId: "visual-session", connectionId: context.connectionId, workbenchId: context.workbenchId, readOnly: !writable, connected: true, sudoKeepalive: true, createdAt: Math.floor(Date.now() / 1000), authMethod: authFixture === "auto" ? "auto" : "private-key", host: "server.demo.internal", port: 22, username: "demo" }] };
   else if (method === "ssh/session/attach") {

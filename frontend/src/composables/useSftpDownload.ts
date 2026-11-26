@@ -8,6 +8,12 @@ import { formatBytes } from "../lib/format";
 import { MIB } from "../lib/settingsModel";
 import { folderDownloadOutcome, type FolderDownloadFinish } from "../lib/sftpFolderDownload";
 import { standaloneArrayBuffer } from "../lib/standaloneBuffer";
+import {
+  classifyDownloadChunkWait,
+  downloadChunkWaitDelayMs,
+  DOWNLOAD_CHUNK_WAIT_MAX_MS,
+  DOWNLOAD_CHUNK_WAIT_MAX_STATUS_FAILURES,
+} from "../lib/downloadChunkWait";
 
 /** SFTP 下载落盘链：单文件/目录/批量下载（saveToLocal 直落 vs 分块拉取）、
  * 本机能力探测缓存、宿主 saveFile 兜底（沙箱 iframe 内 <a download> 被静默
@@ -408,11 +414,56 @@ async function saveHostFile(chunks: Uint8Array[], fileName: string): Promise<voi
 
 function waitForDownloadChunk(taskId: string, offset: number) {
   return new Promise<Uint8Array>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      downloadChunkWaiters.delete(taskId);
-      reject(new Error(t("errors.downloadChunkTimeout")));
-    }, 30_000);
-    downloadChunkWaiters.set(taskId, { offset, resolve, reject, timer });
+    const startedAt = Date.now();
+    let settled = false;
+    let statusFailures = 0;
+    const settle = (outcome: () => void) => {
+      if (settled) return;
+      settled = true;
+      const waiter = downloadChunkWaiters.get(taskId);
+      if (waiter) {
+        window.clearTimeout(waiter.timer);
+        downloadChunkWaiters.delete(taskId);
+      }
+      outcome();
+    };
+    const arm = (step: number) => {
+      const timer = window.setTimeout(async () => {
+        if (settled) return;
+        if (Date.now() - startedAt >= DOWNLOAD_CHUNK_WAIT_MAX_MS) {
+          settle(() => reject(new Error(t("errors.downloadChunkTimeout"))));
+          return;
+        }
+        // 首查/重查只确认任务是否还健康（#329）：慢链路上一片读满 256 KiB
+        // 可能远超 30s，固定死线会误杀仍在推进的下载（与 #305 上传 ACK
+        // 同一根因）。查询失败不算终态，连续失败才判失联。
+        const snapshot = await window.dbxPlugin
+          .invoke<{ status?: string; transferred?: number }>("sftp/transfer/status", { taskId })
+          .catch(() => undefined);
+        // 状态 RPC 在途期间本片二进制帧可能已到达（App.vue 已结算并删除
+        // 等待器）——此时不能再排下一轮。
+        if (settled || !downloadChunkWaiters.has(taskId)) return;
+        const outcome = classifyDownloadChunkWait(snapshot, offset);
+        if (outcome === "unavailable") statusFailures += 1;
+        else statusFailures = 0;
+        if (
+          outcome === "terminal"
+          || outcome === "chunk-lost"
+          || statusFailures >= DOWNLOAD_CHUNK_WAIT_MAX_STATUS_FAILURES
+        ) {
+          settle(() => reject(new Error(t("errors.downloadChunkTimeout"))));
+          return;
+        }
+        arm(step + 1);
+      }, downloadChunkWaitDelayMs(step));
+      downloadChunkWaiters.set(taskId, {
+        offset,
+        resolve: (bytes) => settle(() => resolve(bytes)),
+        reject: (error) => settle(() => reject(error)),
+        timer,
+      });
+    };
+    arm(0);
   });
 }
 

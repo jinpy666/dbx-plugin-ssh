@@ -535,11 +535,20 @@ impl Plugin {
                     .get("connectionId")
                     .and_then(Value::as_str)
                     .ok_or("Missing connectionId")?;
-                let payload = connection_protocol_payload(
+                let mut payload = connection_protocol_payload(
                     self.runtime.block_on(self.ssh.local_target(connection_id)),
                     self.non_ssh_creds.protocol_of(connection_id),
                     self.ssh.has_connection(connection_id),
                 );
+                // 连接备注（#329）：表单字段 binding=config → external_config.note，
+                // 由 lifecycle connection/connect 推送进来；webview 上下文的
+                // connection 对象不带 external_config，工作台只能从这里取。
+                if let Some(object) = payload.as_object_mut() {
+                    object.insert(
+                        "note".to_string(),
+                        json!(self.ssh.connection_note(connection_id)),
+                    );
+                }
                 log_rdp_debug(format!(
                     "connection/protocol query id={connection_id} -> {payload}"
                 ));

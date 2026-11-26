@@ -2126,6 +2126,20 @@ impl SshRuntime {
             .unwrap_or(false)
     }
 
+    /// Free-text connection remark from the last lifecycle push (issue #329).
+    /// Empty when the connection is unknown or the user left the field blank.
+    pub fn connection_note(&self, connection_id: &str) -> String {
+        self.connections
+            .read()
+            .ok()
+            .and_then(|connections| {
+                connections
+                    .get(connection_id)
+                    .map(|connection| connection.note.clone())
+            })
+            .unwrap_or_default()
+    }
+
     pub fn store_connection(&self, connection: StoredConnection) -> Result<(), String> {
         let connection_id = connection.id.clone();
         self.connections
