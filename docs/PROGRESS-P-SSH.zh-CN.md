@@ -4692,3 +4692,34 @@ MCP 工具面新增依赖 tokio-socks 0.5（理由见 Cargo.toml 注释）。
 
 **测试**：downloadToMemory 5 例（TDD 先红后绿）；前端 vitest 2360 全绿、
 vue-tsc 0 错。后端零改动，无新增七语文案（纯行为无新 UI 文本）。
+
+## 安全修复：只读连接禁止命令执行与终端注入（2026-11-26，P0）
+
+**问题**：只读连接的 `ssh_exec` 依赖"只读命令白名单"分类器，该分类器对
+shell 解析不 sound，且 `ssh_terminal_input` 的"纯控制字符"门挡不住回车：
+
+- `cat <(rm -rf /tmp/x)`：分类器只识别 `$(`/反引号，不识别进程替换 `<(`，
+  `cat` 是只读动词 → 判 ReadOnly → 只读连接放行 → 远端 bash 执行。
+- 形似只读、实可变更的动词参数：`hostname NEW`、`date -s`、
+  `uniq IN OUT`、`git log --output=FILE`、`file -C`、`ss -K`、
+  `journalctl --flush` 等均判 ReadOnly。
+- `ssh_terminal_input {input:"\r"}`：`\r` 是控制字符 → 通过"纯控制字符"门，
+  在存活 PTY 里回车执行已输入/历史命令；`Ctrl-P` + `\r` 可执行历史命令。
+
+**修复**：只读连接改为 inspection-only——`ssh_exec` 与 `ssh_terminal_input`
+在 `call_tool` 的只读门直接拒绝（错误信息指向 `sftp_list_dir` /
+`sftp_stat` / `sftp_read_file`）；`confirmDestructive` 不能覆盖；
+`ssh_multi_exec` 维持逐目标只读拒绝。`ssh_exec_sudo` / `ssh_run_bg` /
+SFTP 写族 / `ssh_remove_known_host` 原有写门不变。
+
+**影响**：只读连接不再能执行巡检命令；文件巡检改走 SFTP 读工具。文档
+`docs/MCP.zh-CN.md` 的门禁章节、工具表与告警排查说明同步改写。
+
+**测试**：新增 `read_only_refuses_exec_and_terminal_input_outright`（TDD 先红
+后绿，覆盖 `ls` / 进程替换 / `hostname` / `git --output` / 终止输入）；
+`read_only_connection_gates_writes_and_unknown_commands`、
+`gate_combo_matrix_read_only_destructive_sudo_and_scope`、
+`read_only_refuses_exec_outright_even_for_sensitive_paths` 更新为新契约；
+`cargo test` 1374 全绿；`scripts/smoke_mcp.py` 全绿（read-only server gate
+覆盖 exec 进程替换/参数形态与 terminal 回车拒绝，破坏性确认无法覆盖）。
+七语 N/A（无前端 UI 文案，MCP 描述为英文契约文本）。

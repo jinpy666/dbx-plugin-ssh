@@ -1172,13 +1172,17 @@ impl McpState {
         //    connection they reference was opened read-only (mirroring the
         //    workbench `ensure_writable` gate) or the operator forced the
         //    whole server read-only via DBX_SSH_MCP_READ_ONLY.
-        // 2. Read-only command whitelist: `ssh_exec` stays available on
-        //    read-only connections, but only for provably read-only
-        //    commands (ls, df, systemctl status, ...).
-        // 3. Sensitive-path denylist: on read-only connections even
-        //    whitelisted inspection tools may not touch credential/key paths
-        //    (~/.ssh, /etc/shadow, .env, *.pem, ...) — the exfiltration
-        //    channel the command whitelist cannot see for SFTP tools.
+        // 2. Read-only execution gate: `ssh_exec` / `ssh_terminal_input` are
+        //    refused outright. The command whitelist is not sound against
+        //    shell parsing (process substitution `<(...)`, input redirection,
+        //    verb argument shapes such as `hostname NEW` or
+        //    `git --output=FILE`) and a control-only Enter can run whatever
+        //    the live PTY already holds. Read-only connections are
+        //    inspection-only; SFTP read tools cover file inspection.
+        // 3. Sensitive-path denylist: on read-only connections even the SFTP
+        //    read tools may not touch credential/key paths (~/.ssh,
+        //    /etc/shadow, .env, *.pem, ...) — the exfiltration channel the
+        //    read tools cannot classify.
         // 4. Destructive-command confirmation: recognized catastrophic
         //    patterns require an explicit confirmDestructive: true on every
         //    connection (and are refused outright on read-only ones).
@@ -1186,6 +1190,13 @@ impl McpState {
         if is_write_tool(name) && read_only {
             return Err(format!(
                 "Tool {name} is a write operation and the connection is read-only"
+            ));
+        }
+        if read_only && matches!(name, "ssh_exec" | "ssh_terminal_input") {
+            return Err(format!(
+                "Tool {name} runs shell input and is refused on read-only connections; \
+                 use the SFTP read tools (sftp_list_dir / sftp_stat / sftp_read_file) \
+                 for inspection"
             ));
         }
         if read_only {
@@ -2333,8 +2344,9 @@ impl McpState {
 
     /// Command-text gates shared by the first pass (the caller-submitted text)
     /// and the post-approval re-check (a human-edited confirmation text): the
-    /// per-connection sudo allowlist, the destructive assessment, the
-    /// read-only command whitelist, and the terminal-input gate. `command` is
+    /// per-connection sudo allowlist, the destructive assessment, and the
+    /// terminal-input gate. Read-only connections never reach this helper for
+    /// exec/terminal tools: `call_tool` refuses them outright. `command` is
     /// the raw text for exec tools and the typed payload for
     /// `ssh_terminal_input`.
     async fn enforce_command_text_gates(
@@ -3795,17 +3807,19 @@ fn render_connection_candidates(connections: &[&StoredConnection]) -> String {
 
 /// Tools that mutate remote state and must be rejected on read-only
 /// connections (mirrors the workbench `ensure_writable` / sudo-exec gates).
-/// Plain `ssh_exec` is not listed: on read-only connections it is gated by
-/// the read-only command whitelist in `call_tool` instead, so inspection
-/// commands (`df`, `systemctl status`, ...) stay available. Like the
-/// workbench read-only terminal, `sudo` execution is always refused.
+/// Plain `ssh_exec` and `ssh_terminal_input` are *also* rejected on read-only
+/// connections, by an unconditional gate in `call_tool`: the command
+/// whitelist cannot be made sound against shell parsing (process
+/// substitution, input redirection, verb argument shapes) and a control-only
+/// Enter can run whatever the live PTY holds. Like the workbench read-only
+/// terminal, `sudo` execution is always refused.
 /// `sftp_download` stays allowed too: it only reads the remote side (its
 /// local write target is guarded by `is_sensitive_local_path`, and the
 /// remote path by the sensitive-path denylist on read-only connections).
 /// Terminal-input gate (IMPL_PLAN_NETCATTY §1.2, A2-T5). `normalized` is
 /// already through `normalize_terminal_input`. Ordered cheapest-first:
-/// ① read-only connections only accept control-only input (Enter / Ctrl+C /
-/// escape runs — anything shell-visible could mutate state); ② any `\r`
+/// ① read-only connections only accept control-only input (defense in
+/// depth: `call_tool` refuses the tool before this gate can run); ② any `\r`
 /// line that assesses destructive needs `confirmDestructive` (refused
 /// outright on read-only, mirroring `ssh_exec`); ③ `sudo …` lines go
 /// through the connection's sudo allowlist when it declares one. ④ the
@@ -4487,7 +4501,7 @@ pub fn tool_definitions() -> Value {
     let mut tools = json!([
         {
             "name": "ssh_exec",
-            "description": "Run a non-interactive remote shell command over SSH. Quick Sudo is NOT applied; use ssh_exec_sudo for privileged commands. Catastrophic patterns (disk formatting, recursive system deletes, shutdown, raw device writes, SQL DROP) require confirmDestructive: true; read-only connections only accept whitelisted inspection commands (ls, cat, df, ps, systemctl status, journalctl, docker ps, ...). Hosts may abandon the wait after ~15s while the command keeps running remotely; for anything slow use ssh_run_bg + ssh_task_status. After a timeout the command may STILL be running: verify before rerunning.",
+            "description": "Run a non-interactive remote shell command over SSH. Quick Sudo is NOT applied; use ssh_exec_sudo for privileged commands. Catastrophic patterns (disk formatting, recursive system deletes, shutdown, raw device writes, SQL DROP) require confirmDestructive: true; read-only connections refuse every command outright (use sftp_list_dir / sftp_stat / sftp_read_file for inspection). Hosts may abandon the wait after ~15s while the command keeps running remotely; for anything slow use ssh_run_bg + ssh_task_status. After a timeout the command may STILL be running: verify before rerunning.",
             "inputSchema": {
                 "type": "object",
                 "properties": connection_properties(&[
@@ -4518,7 +4532,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "ssh_multi_exec",
-            "description": "Run one command on several saved connections and collect per-target results (hidden channel; never a visible terminal). targets: 1-10 connection references (connectionId or connectionName), deduplicated in order. mode: parallel (default) or sequential; stopOnError (sequential only) stops at the first failure. confirmDestructive: true covers catastrophic commands on every target; sudo is NOT available here - use single-target ssh_exec_sudo for escalation. Per target: read-only connections only accept whitelisted inspection commands; the host may abandon the wait after ~15s while commands keep running - for anything slow use ssh_run_bg.",
+            "description": "Run one command on several saved connections and collect per-target results (hidden channel; never a visible terminal). targets: 1-10 connection references (connectionId or connectionName), deduplicated in order. mode: parallel (default) or sequential; stopOnError (sequential only) stops at the first failure. confirmDestructive: true covers catastrophic commands on every target; sudo is NOT available here - use single-target ssh_exec_sudo for escalation. Per target: read-only connections are refused (each target is gated independently); the host may abandon the wait after ~15s while commands keep running - for anything slow use ssh_run_bg.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4536,7 +4550,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "ssh_terminal_input",
-            "description": "Inject raw input (interactive answers, Ctrl+C, escape sequences) into the connection's LIVE DBX terminal so the human can watch it happen; the terminal must already be open. Newlines fold to Enter (\\r), NUL is stripped, input capped at 8 KiB. appendNewline (default false) appends one Enter - set it to run a typed command, leave it off for prompt answers or control keys. Output is NOT collected; for captured output use ssh_exec with runInTerminal: true. Gates: read-only connections only accept control-only input; catastrophic lines require confirmDestructive: true; sudo lines must match the connection's sudo whitelist when one is configured.",
+            "description": "Inject raw input (interactive answers, Ctrl+C, escape sequences) into the connection's LIVE DBX terminal so the human can watch it happen; the terminal must already be open. Newlines fold to Enter (\\r), NUL is stripped, input capped at 8 KiB. appendNewline (default false) appends one Enter - set it to run a typed command, leave it off for prompt answers or control keys. Output is NOT collected; for captured output use ssh_exec with runInTerminal: true. Gates: read-only connections refuse terminal input outright (a control-only Enter can run whatever the live PTY already holds); catastrophic lines require confirmDestructive: true; sudo lines must match the connection's sudo whitelist when one is configured.",
             "inputSchema": {
                 "type": "object",
                 "properties": connection_properties(&[
@@ -5576,7 +5590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_whitelist_refuses_sensitive_paths_on_read_only() {
+    async fn read_only_refuses_exec_outright_even_for_sensitive_paths() {
         let mut state = state();
         state.global_read_only = true;
         let error = state
@@ -5592,8 +5606,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.contains("not recognized"),
-            "expected whitelist refusal for a sensitive path, got: {error}"
+            error.contains("read-only") && error.contains("sftp_"),
+            "expected the read-only execution refusal, got: {error}"
         );
     }
 
@@ -7790,57 +7804,77 @@ mod tests {
             assert!(error.contains("read-only"), "unexpected: {error}");
         }
 
-        // ssh_exec survives only for provably read-only commands: an
-        // unrecognized mutating command is refused by the whitelist (before
-        // any dialing), while a destructive pattern is refused outright.
-        let unknown = state
-            .call_dbx_with(
-                &json!({
-                    "tool": "ssh_exec",
-                    "arguments": { "command": "systemctl restart nginx" },
-                    "lifecycle": lifecycle,
-                }),
-                None,
-            )
-            .await
-            .err()
-            .unwrap();
-        assert!(unknown.contains("not recognized"), "unexpected: {unknown}");
+        // Command execution is inspection-only on read-only connections:
+        // every command is refused, including whitelisted inspection
+        // commands and anything carrying confirmDestructive (the whitelist
+        // is not sound against shell parsing; see the P0 hardening commit).
+        for command in ["systemctl restart nginx", "rm -rf /etc", "ls /tmp"] {
+            let error = state
+                .call_dbx_with(
+                    &json!({
+                        "tool": "ssh_exec",
+                        "arguments": { "command": command, "confirmDestructive": true },
+                        "lifecycle": lifecycle,
+                    }),
+                    None,
+                )
+                .await
+                .expect_err("ssh_exec must be refused on a read-only connection");
+            assert!(
+                error.contains("refused on read-only") && error.contains("sftp_"),
+                "unexpected: {error}"
+            );
+        }
+    }
 
-        let destructive = state
-            .call_dbx_with(
-                &json!({
-                    "tool": "ssh_exec",
-                    "arguments": { "command": "rm -rf /etc" },
-                    "lifecycle": lifecycle,
-                }),
-                None,
-            )
-            .await
-            .err()
-            .unwrap();
-        assert!(
-            destructive.contains("Refused on read-only"),
-            "unexpected: {destructive}"
-        );
+    #[tokio::test]
+    async fn read_only_refuses_exec_and_terminal_input_outright() {
+        // P0 hardening: the read-only command whitelist is not sound against
+        // shell parsing (process substitution, input redirection, verb
+        // argument shapes such as `hostname NEW` / `git --output`) and a
+        // control-only Enter can execute whatever the live PTY already holds.
+        // Read-only connections are therefore inspection-only: no command
+        // execution and no terminal injection; SFTP read tools stay available.
+        let mut state = state();
+        state.global_read_only = true;
 
-        // confirmDestructive cannot override a read-only connection.
-        let confirmed = state
-            .call_dbx_with(
+        for command in [
+            "ls /tmp",
+            "cat <(rm -rf /tmp/x)",
+            "hostname pwned",
+            "git log --output=/tmp/x",
+        ] {
+            let error = state
+                .call_tool(
+                    "ssh_exec",
+                    &json!({
+                        "host": "h.test",
+                        "username": "op",
+                        "command": command,
+                    }),
+                    None,
+                )
+                .await
+                .expect_err("ssh_exec must be refused on a read-only connection");
+            assert!(
+                error.contains("read-only") && error.contains("sftp_"),
+                "unexpected refusal for {command}: {error}"
+            );
+        }
+
+        let error = state
+            .call_tool(
+                "ssh_terminal_input",
                 &json!({
-                    "tool": "ssh_exec",
-                    "arguments": { "command": "rm -rf /etc", "confirmDestructive": true },
-                    "lifecycle": lifecycle,
+                    "host": "h.test",
+                    "username": "op",
+                    "input": "\u{3}",
                 }),
                 None,
             )
             .await
-            .err()
-            .unwrap();
-        assert!(
-            confirmed.contains("Refused on read-only"),
-            "unexpected: {confirmed}"
-        );
+            .expect_err("terminal input must be refused on a read-only connection");
+        assert!(error.contains("read-only"), "unexpected: {error}");
     }
 
     // —— MCP 容错性专项（2026-09-13 测试覆盖审计）———
@@ -8311,7 +8345,7 @@ mod tests {
         );
 
         // 组合 5：只读连接 + 白名单巡检命令 + confirmDestructive:true →
-        // 确认位不改变白名单判定，调用照常走到拨号。
+        // 只读连接不再放行任何命令执行，确认位也救不回。
         let error = ro_state
             .call_tool(
                 "ssh_exec",
@@ -8325,8 +8359,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            !error.contains("read-only") && !error.contains("not recognized"),
-            "inspection command must stay available on read-only, got: {error}"
+            error.contains("refused on read-only") && error.contains("sftp_"),
+            "read-only connections must refuse command execution outright, got: {error}"
         );
 
         // 组合 6：只读连接 + 灾难命令 + confirmDestructive:true →
@@ -8344,7 +8378,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.contains("Refused on read-only"),
+            error.contains("refused on read-only"),
             "read-only must refuse destructive commands outright, got: {error}"
         );
 
@@ -8369,11 +8403,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.contains("Refused on read-only"),
+            error.contains("refused on read-only"),
             "process kill switch must dominate the connection flag, got: {error}"
         );
-        // 同开关下白名单巡检命令仍可用（fail-closed 不等于全拒）：错误来自
-        // 拨号层而不是任何一道门。
+        // 同开关下任何命令都被拒（fail-closed 的只读现在等于不可执行）：
+        // 巡检命令也不会走到拨号层。
         let error = killed_state
             .call_tool(
                 "ssh_exec",
@@ -8383,10 +8417,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            !error.contains("read-only")
-                && !error.contains("not recognized")
-                && !error.contains("confirmDestructive"),
-            "uptime must pass the gates and fail at dialing, got: {error}"
+            error.contains("refused on read-only") && error.contains("sftp_"),
+            "the kill switch must refuse command execution outright, got: {error}"
         );
 
         // 组合 8：connectionScope 非空 × 内联凭据 × 灾难命令 → scope 是

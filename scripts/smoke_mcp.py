@@ -13,8 +13,8 @@ Spawns the sidecar with --mcp and verifies, against the real process:
   7. production misoperation guards: destructive commands require
      confirmDestructive (gate fires before credential validation), and a
      second server started with DBX_SSH_MCP_READ_ONLY=1 enforces the
-     read-only gates process-wide (write tools refused, ssh_exec limited
-     to whitelisted inspection commands, confirmation cannot override),
+     read-only gates process-wide (write tools refused, ssh_exec /
+     ssh_terminal_input refused outright, confirmation cannot override),
   8. the stdio app-bridge path failing with an actionable error when the
      DBX app has not published its bridge port (empty app-data dir, no-op
      launch command — no UI, no SSH server involved),
@@ -61,8 +61,8 @@ regression), ssh_exec, the SFTP file family
 (write→read→stat→verify + shell-equivalent mutations: since #203 the
 change face (mkdir/copy/rename/chmod/move/remove/disk_usage) runs via
 ssh_exec shell commands, the same way an agent would), an ssh_run_bg →
-ssh_task_status round-trip, a read-only collection probe (uptime via
-ssh_exec — ssh_metrics left the MCP face), and an sftp_upload →
+ssh_task_status round-trip, an inspection collection probe (uptime via
+ssh_exec on a writable connection — ssh_metrics left the MCP face), and an sftp_upload →
 sftp_download loop compared byte-for-byte. Round 7 adds the live
 enum/assertion tail that the offline schema-check probes cannot reach
 past the connection gate: the ssh_multi_exec mode enum (invalid AND
@@ -317,8 +317,8 @@ def live_round_trip(proc: subprocess.Popen, args, id_base: int) -> None:
     assert "confirmDestructive" in refused_live, refused_live
     print("live destructive-command gate ok")
 
-    # ssh_metrics left the MCP face (#203): read-only collection goes
-    # through ssh_exec exactly as an agent would.
+    # ssh_metrics left the MCP face (#203): inspection collection goes
+    # through ssh_exec on writable connections exactly as an agent would.
     uptime = call_tool(proc, next_id, "ssh_exec", {
         **connection, "command": "uptime",
     })
@@ -562,7 +562,7 @@ def main() -> None:
         print("tools/call round-trip ok")
 
         # Docker panel moved off the MCP face (#203): container inspection
-        # goes through ssh_exec (`docker ps` is in the read-only whitelist).
+        # goes through ssh_exec on writable connections.
         # Global Quick Sudo profile management moved to the workbench UI;
         # the MCP face no longer carries the list/save/delete tools (#203
         # tool slimming). What must keep working on this surface: the
@@ -1348,43 +1348,32 @@ def read_only_server_section(args: argparse.Namespace) -> None:
         write_refusal = expect_error("uptime", name="ssh_exec_sudo")
         assert "read-only" in write_refusal, write_refusal
 
-        # ssh_exec keeps inspection commands: the gate passes and the call
-        # proceeds to fail on the missing password (no gate complaint).
-        inspection = expect_error("df -h")
-        assert "password" in inspection, inspection
-
-        # Unrecognized mutating commands are refused by the whitelist before
-        # any dialing, destructive patterns are refused outright, and
-        # confirmDestructive cannot override a read-only server.
-        whitelist = expect_error("systemctl restart nginx")
-        assert "not recognized" in whitelist, whitelist
-        destructive = expect_error("rm -rf /etc")
-        assert "Refused on read-only" in destructive, destructive
-        override = expect_error("rm -rf /etc", arguments={"confirmDestructive": True})
-        assert "Refused on read-only" in override, override
-
-        # Whitelist-hardening: shape-readonly-but-mutating forms stay Unknown.
-        for hardened in (
-            "ip link set dev eth0 down",
-            "ip route flush all",
-            "git branch -D main",
-            "git tag -d v1",
-            "sort -o /etc/cron.d/x /tmp/in",
-            "find / -fprint /tmp/keys",
-            "dmesg -C",
-            "history -c",
+        # Command execution and terminal injection are refused outright:
+        # the command whitelist is not sound against shell parsing
+        # (process substitution, input redirection, verb argument shapes)
+        # and a control-only Enter can run whatever the PTY already holds.
+        for command in (
+            "df -h",
+            "ls /tmp",
+            "cat <(rm -rf /tmp/x)",
+            "hostname pwned",
+            "date -s 2020-01-01",
+            "uniq /dev/null /tmp/x",
+            "git log --output=/tmp/x",
+            "systemctl restart nginx",
+            "rm -rf /etc",
         ):
-            message = expect_error(hardened)
-            assert "not recognized" in message, f"{hardened}: {message}"
-        # Listing shapes of the same verbs still pass the gate.
-        for allowed in ("git branch -a", "git tag -l 'v*'", "git remote -v", "dmesg -T"):
-            message = expect_error(allowed)
-            assert "not recognized" not in message, f"{allowed}: {message}"
+            message = expect_error(command)
+            assert "refused on read-only" in message and "sftp_" in message, f"{command}: {message}"
+        terminal = expect_error("", name="ssh_terminal_input", arguments={"input": "\r"})
+        assert "refused on read-only" in terminal, terminal
+        # confirmDestructive cannot override a read-only server.
+        override = expect_error("rm -rf /etc", arguments={"confirmDestructive": True})
+        assert "refused on read-only" in override, override
 
-        # Sensitive-path denylist: credential paths are refused on read-only
-        # connections, both through exec verbs and SFTP read tools.
-        message = expect_error("cat /root/.ssh/id_rsa")
-        assert "not recognized" in message, message
+        # Sensitive-path denylist: SFTP read tools still refuse credential
+        # paths on read-only connections (exec is refused before the path
+        # classifier runs, so only the SFTP channel is exercised here).
         message = expect_error("", name="sftp_read_file", arguments={"path": "/root/.ssh/id_rsa"})
         assert "sensitive" in message, message
         message = expect_error("", name="sftp_list_dir", arguments={"path": "/root/.ssh"})

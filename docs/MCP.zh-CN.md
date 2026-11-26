@@ -35,7 +35,7 @@ dbx_plugin_call {
 
 实现细节：
 
-- 桥由宿主 `dbx-mcp` 提供（`LocalBackend`），通过标准 sidecar 协议调用插件的 `mcp/tools`（工具发现）与 `mcp/call`（工具执行）方法；连接凭据以标准 connection lifecycle payload 转发（`PluginHost::connection_params_standalone`），与工作台连接共用同一份配置——包括跳板链、Quick Sudo、TOTP、提示词、`auth_flow_mode` 等全部设置项。`dbx_plugin_call` 为逐次判定：过宿主全局 MCP 策略后仍要过插件内部门（只读连接白名单、灾难命令确认、confirm 权限档、connectionScope）。
+- 桥由宿主 `dbx-mcp` 提供（`LocalBackend`），通过标准 sidecar 协议调用插件的 `mcp/tools`（工具发现）与 `mcp/call`（工具执行）方法；连接凭据以标准 connection lifecycle payload 转发（`PluginHost::connection_params_standalone`），与工作台连接共用同一份配置——包括跳板链、Quick Sudo、TOTP、提示词、`auth_flow_mode` 等全部设置项。`dbx_plugin_call` 为逐次判定：过宿主全局 MCP 策略后仍要过插件内部门（只读执行门、灾难命令确认、confirm 权限档、connectionScope）。
 - 插件侧按 `connectionId` 维护连接池，断线自动重连；主机密钥沿用插件的 known_hosts 存储（首次未知主机需先在工作台连接一次确认，或在方式二中用 TOFU）。
 - Scoped AI 会话中 `dbx_plugin_call` 被禁用（可能触发变更操作），`dbx_plugin_list`/`dbx_plugin_tools` 保持可见。
 
@@ -142,9 +142,8 @@ stdio 分发循环对敌意输入保持"进程不崩、连接不挂、后续请�
 > 真实调用暴露同样信息）、`ssh_alert_triage`（工作台入口与 `ssh/alert/triage`
 > sidecar 方法保留）、`ssh_quick_sudo_profiles_*`（管理走工作台 UI，
 > `ssh_exec_sudo` 的 `quickSudoProfile` 引用保留）、`ssh_metrics` /
-> `sftp_disk_usage`（内部本是 uptime/df，改用 `ssh_exec` 执行，只读白名单
-> 同样放行）、`docker_list` / `docker_action`（`docker ps` 在只读白名单内）、
-> SFTP 变更族 `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` /
+> `sftp_disk_usage`（已移除；只读连接不再执行命令）、`docker_list` /
+> `docker_action`（已移除，改用 SFTP 读工具与 `ssh_exec`）、SFTP 变更族 `sftp_mkdir` / `sftp_remove` / `sftp_rename` / `sftp_chmod` /
 > `sftp_copy` / `sftp_move`（shell `mkdir`/`rm`/`mv`/`chmod`/`cp` 语义重复，
 > 走 `ssh_exec`，灾难确认门在 exec 路径上等价生效）。前端工作台的对应
 > sidecar RPC 方法**全部保留**，UI 不受影响；`tools/list` 从 ≈100k 字符降到
@@ -171,17 +170,17 @@ MCP 调用方是 LLM，`sftp_upload`（本地读）与 `sftp_download`（本地�
 | 工具 | 说明 |
 | --- | --- |
 | `ssh_list_connections` | 列出已保存连接的元数据（id / name / host / port / username / authentication / readOnly），参数无；**仅元数据，任何密钥只出布尔标志位，绝不出值**。数据源为 DBX 应用本地桥（`source: "dbx-app-bridge"`）；桥不可用或应用版本过旧时降级为"仅本会话注册表"（`source: "session-registry"`）并附 `note` 字段说明（详见「方式二」的「connectionId 从哪来」） |
-| `ssh_exec` / `ssh_exec_sudo` | 非交互远程命令；sudo 版注入密码并自动应答 2FA/TOTP。TOTP 支持多密钥（换行/分号分隔）：跨调用与跨 TOTP 窗口自动轮换（最久未被选中的密钥优先，不会总用第一条），优先未过期且未使用过的验证码，重放窗口内已提交的码不参与选择也不再注入。两者均受危险命令确认门约束（见下节），只读连接上 `ssh_exec` 仅放行白名单巡检命令，配置了连接 sudo 白名单时特权命令还须命中白名单条目（见下节）。两者均支持可选 `runInTerminal`（见「AI 终端同步执行」）；stdio 模式传 `true` 且带 `connectionId` 时自动转发到运行中的 DBX app（未运行则唤起），在 app 的可见终端里执行。**超过 ~10 秒的命令请改用 `ssh_run_bg`**（宿主等待上限与防重复执行见「长任务与断线恢复」） |
+| `ssh_exec` / `ssh_exec_sudo` | 非交互远程命令；sudo 版注入密码并自动应答 2FA/TOTP。TOTP 支持多密钥（换行/分号分隔）：跨调用与跨 TOTP 窗口自动轮换（最久未被选中的密钥优先，不会总用第一条），优先未过期且未使用过的验证码，重放窗口内已提交的码不参与选择也不再注入。两者均受危险命令确认门约束（见下节）；**只读连接上 `ssh_exec` 直接拒绝**（词表白名单对 shell 解析不 sound，巡检改用 SFTP 读工具），配置了连接 sudo 白名单时特权命令还须命中白名单条目（见下节）。两者均支持可选 `runInTerminal`（见「AI 终端同步执行」）；stdio 模式传 `true` 且带 `connectionId` 时自动转发到运行中的 DBX app（未运行则唤起），在 app 的可见终端里执行。**超过 ~10 秒的命令请改用 `ssh_run_bg`**（宿主等待上限与防重复执行见「长任务与断线恢复」） |
 | `ssh_run_bg` | 把长命令以 nohup 方式脱离会话启动，立即返回 `taskId`/`pid`/`logPath`；输出落在服务器**操作系统临时目录**下的每任务目录（`mktemp -d`，如 `/tmp/dbx-ssh-tasks.AbCdEf1234/<taskId>.log`，0700 随机名），断线、超时、换会话均不丢，且由操作系统自身的临时目录清理策略（systemd-tmpfiles / macOS periodic / tmpwatch）回收，不在家目录堆积。与 `ssh_exec` 同受危险命令确认门与只读写门约束 |
-| `ssh_multi_exec` | 一条命令在多个**已保存连接**上聚合执行并逐目标回结果（隐藏通道语义，不经可见终端/agentTerminalMode）。`targets`：1–10 个连接引用（connectionId/connectionName），保序去重，任一未解析整体拒绝；`mode` parallel（默认，并发）/ sequential（顺序）；`stopOnError` 仅 sequential 生效（首败即停）；`confirmDestructive` 一次覆盖全部目标的灾难门；**不提供 sudo**（提权走单目标 `ssh_exec_sudo`）。逐目标独立过只读白名单门（连接只读时仅放行巡检命令）。stdio 独立模式无注册表，targets 解析即报引导 |
-| `ssh_terminal_input` | 向连接的**存活 DBX 终端**注入原始输入（交互应答 / Ctrl+C / 方向键语义；终端必须已打开）。`\n`/`\r\n` 折叠为 Enter，NUL 剥离，8 KiB 截断；`appendNewline` 默认 false（交互应答自带 `\r`，要执行键入命令置 true）。**输出不收集**——终端本身可见，要收集输出用 `ssh_exec{runInTerminal:true}`。门禁：只读连接仅放行纯控制序列；灾难行需 `confirmDestructive: true`（只读上一律拒绝）；sudo 行受连接 sudo 白名单约束。stdio 模式无工作台 PTY，调用报引导错误 |
+| `ssh_multi_exec` | 一条命令在多个**已保存连接**上聚合执行并逐目标回结果（隐藏通道语义，不经可见终端/agentTerminalMode）。`targets`：1–10 个连接引用（connectionId/connectionName），保序去重，任一未解析整体拒绝；`mode` parallel（默认，并发）/ sequential（顺序）；`stopOnError` 仅 sequential 生效（首败即停）；`confirmDestructive` 一次覆盖全部目标的灾难门；**不提供 sudo**（提权走单目标 `ssh_exec_sudo`）。逐目标独立过只读门（只读目标直接拒绝）。stdio 独立模式无注册表，targets 解析即报引导 |
+| `ssh_terminal_input` | 向连接的**存活 DBX 终端**注入原始输入（交互应答 / Ctrl+C / 方向键语义；终端必须已打开）。`\n`/`\r\n` 折叠为 Enter，NUL 剥离，8 KiB 截断；`appendNewline` 默认 false（交互应答自带 `\r`，要执行键入命令置 true）。**输出不收集**——终端本身可见，要收集输出用 `ssh_exec{runInTerminal:true}`。门禁：**只读连接直接拒绝**（纯控制字符门挡不住回车执行 PTY 已有输入）；灾难行需 `confirmDestructive: true`（只读上一律拒绝）；sudo 行受连接 sudo 白名单约束。stdio 模式无工作台 PTY，调用报引导错误 |
 | `ssh_task_status` | 轮询 `ssh_run_bg` 任务：`state`（running/done/missing）、完成后的 `exitCode`、pid 存活状态与输出尾部（`tailBytes`，200–16000）。通过服务器侧日志文件查询，天然跨连接/跨会话 |
 | `ssh_list_known_hosts` / `ssh_remove_known_host` | 管理插件 known_hosts（不改系统 `~/.ssh/known_hosts`） |
 | `ssh_close` | 关闭缓存的连接（方式二按连接键；方式一由 sidecar 生命周期管理） |
 | `sftp_list_dir` / `sftp_stat` | 浏览与检查远端路径；**懒建立连接**：无需先 `ssh_exec` 预热，首次调用即按寻址解析并拨号。文件名编码跟随连接级偏好（连接覆盖 > 全局 `sftp_name_encoding` > auto，见 PROTOCOL「扩展文件操作」M17/M18 节）：latin-1 连接上 `sftp_list_dir` 返回的 `name`/`path` 为显示形式（与工作台一致），把返回的 `path` 原样回传给其余 SFTP 工具即落回同一组服务器字节；latin-1 下 `sftp_stat` 走裸包 LSTAT（uid/gid 经 shell 查询尽力而为，非 ASCII 名可能为 `null`）。「路径不存在」由 `sftp_stat` 显式报错表达（绝不误报），0.7.8 起 `sftp_exists` / `sftp_pwd` 已从 MCP 面移除（`sftp_stat` 为严格超集；#203 工具瘦身） |
 | `sftp_read_file` / `sftp_write_file` | 读写远端文件（文本或 base64，支持 offset 分页）。latin-1 连接上按显示路径还原服务器字节走裸包 OPEN/READ/WRITE（32 KiB 分块；读侧 `maxBytes` 截断语义不变） |
 | `sftp_upload` / `sftp_download` | 本地 ↔ 远端单文件传输（受 `maxUploadBytes` / `maxDownloadBytes` 限制；本地路径校验先于拨号，校验拒绝不清连接池）。latin-1 连接上远端路径按显示形式还原服务器字节走裸包 OPEN/READ/WRITE（M19，upload 响应的 `remotePath` 原样回传给 download 即命中同一组字节；回退策略同其他 SFTP 工具，见 PROTOCOL「扩展文件操作」M19 节）。本地路径受传输根约束：必须落在 `localTransferRoot`（未配置时为系统临时目录 + 插件数据目录）之内，且任何模式下都拒绝敏感路径（凭据库、shell 启动文件等，见下文「本地传输路径约束」） |
-| `sftp_write_file` 的目录前提 | 变更族（mkdir/rm/mv/chmod/cp）已随 #203 瘦身移出 MCP 面：用 `ssh_exec` 执行 shell 等价命令（`mkdir -p`、`rm`、`mv`、`chmod`、`cp -a`、`df`、`docker ps`），灾难确认门与只读白名单在 exec 路径上等价生效。`sftp_write_file` 仍要求父目录已存在（先 `ssh_exec mkdir -p`） |
+| `sftp_write_file` 的目录前提 | 变更族（mkdir/rm/mv/chmod/cp）已随 #203 瘦身移出 MCP 面：用 `ssh_exec` 执行 shell 等价命令（`mkdir -p`、`rm`、`mv`、`chmod`、`cp -a`、`df`、`docker ps`）。**只读连接上 `ssh_exec` 直接拒绝**，变更族只能走可写连接；`sftp_write_file` 仍要求父目录已存在（先 `ssh_exec mkdir -p`） |
 
 **连接寻址（保存连接优先，内联凭据兜底）**：上表除 `ssh_list_connections`、known_hosts 管理与本地工具外的连接类工具，都可用 `connectionId` 精确定位；也可用 `connectionName`，重名时补充 `host` / `port` / `username` 做唯一筛选。若不传 id/name，提供完整 endpoint（`host` + `username`，`port` 默认 22）也会唯一复用已注册连接，因此不需要重复传密码。候选为零时才回落内联凭据/stdio bridge 兜底；候选超过一个时拒绝并列出候选 id，避免静默连错主机或账户。`connectionId` 与其它 selector 同时出现但不一致也会拒绝。**完全不给选择器**（无 `connectionId` / `connectionName`，且 `host` + `username` 不完整）不按叶子参数报错，而是返回 `No connection selected: ...` 并列出三条路径（`connectionId` → 先 `ssh_list_connections` / `connectionName` / 内联 `host` + `username`）：schema 的 `anyOf` 在多数宿主侧不被强制执行，逐字段报错（如 `Missing or invalid parameter: host`）会被调用方误读成「必须给 host」。
 
@@ -218,22 +217,24 @@ MCP 调用方是 LLM，误操作的代价与人在终端敲错相同——因此
    账号——该端点上存在任一只读注册即拒绝（fail-closed），同一主机换个用户名
    或端口写法重拨不绕过门禁；端点上精确命中的可写注册仍按可写放行，不因同端
    点的只读兄弟账号被误伤。
-2. **只读命令白名单**：只读连接上的 `ssh_exec` 只放行**可证明只读**的巡检命令
-   （`ls` / `cat` / `df` / `ps` / `systemctl status` / `journalctl` / `docker ps`
-   / `git log` 等，含管道组合；重定向、命令替换、`sudo`、白名单外的动词一律
-   拒绝）。白名单而非黑名单：识别不了 = 不放行。若干"形似只读、实可变更"的
-   形态按 Unknown 处理：`sort -o`（输出落盘）、`find -fprint/-fprintf/-fls`
-   （结果写文件）、`ip` 深层变更子命令（`route flush`、`link set`、`addr add`）、
-   git 变更形态（`branch <名>`、`branch -D`、`tag <名>`、`tag -d`、`remote add`、
-   `reflog delete`）、`dmesg -c/-C/-n`、`history -c/-w` 等。
-3. **敏感路径拒绝清单**（只读连接）：命令参数或 SFTP 读工具（`sftp_list_dir`
+2. **只读连接禁止命令执行与终端注入**：`ssh_exec` 与 `ssh_terminal_input` 在
+   只读连接上直接拒绝。基于词表的"只读命令白名单"对 shell 解析无法做到
+   sound：进程替换（`cat <(rm -rf /tmp/x)`）、输入重定向，以及形似只读但带
+   写参数的动词（`hostname <名>`、`date -s`、`uniq IN OUT`、`git log
+   --output=FILE`、`file -C`、`ss -K`、`journalctl --flush`）都能穿透；
+   `ssh_terminal_input` 只放行"纯控制字符"时，一个 `\r` 就能执行 PTY 里已有
+   的输入。巡检改用 SFTP 读工具（`sftp_list_dir` / `sftp_stat` /
+   `sftp_read_file`）。`ssh_multi_exec` 对只读目标逐目标拒绝；
+   `confirmDestructive` 不能覆盖只读。
+3. **敏感路径拒绝清单**（只读连接）：SFTP 读工具（`sftp_list_dir`
    / `sftp_read_file` / `sftp_stat` / `sftp_download` /
    `ssh_task_status`）的路径命中凭据/私钥位置即拒绝——`~/.ssh`、`.gnupg`、
    `.aws`、`.kube` 目录，`id_rsa` 等 `id_*` / `ssh_host_*_key` 私钥、
    `*.pem/*.key/*.p12/*.pfx`、`/etc/shadow`、`/etc/sudoers`、`.env`、
    `.netrc`、`.git-credentials`、`.pgpass`、`my.cnf` 及各类 shell history。
    针对的是"LLM 被注入后凭只读连接偷凭据"这一现实威胁；普通连接不设限
-   （操作员已授予全权）。纵深防御而非穷举——白名单外动词本来就进不来。
+   （操作员已授予全权）。纵深防御而非穷举——只读连接已不执行命令，此清单
+   保护的是 SFTP 读通道。
 4. **危险命令确认**：任何连接（含非只读）上，命中已知灾难模式的命令要求显式
    `confirmDestructive: true` 才执行；只读连接上直接拒绝、确认位也无法覆盖。
    覆盖的模式：`rm -rf` 深层系统根（`/`、`/etc`、`/usr` 等 ≤2 层路径；`/tmp`、
@@ -246,8 +247,8 @@ MCP 调用方是 LLM，误操作的代价与人在终端敲错相同——因此
    （`sudo rm -rf /`、`sudo -u root rm -rf /etc`、`sudo -- mkfs …`）、
    `sh/bash/zsh -c` 脚本文本递归评估（`sh -c 'rm -rf /'`）、`$(…)`/反引号
    子命令载荷扫描（`echo $(rm -rf /)`、嵌套替换）——三者只做
-   Unknown→Destructive 的**单向收紧**，绝不反向把包装命令升级为只读白名单
-   （`sh -c 'df -h'` 仍是 Unknown、只读连接照拒）。敏感路径匹配统一走归一化
+   Unknown→Destructive 的**单向收紧**，绝不反向把包装命令升级为只读放行
+   （`sh -c 'df -h'` 仍是 Unknown；只读连接一律拒绝执行，不存在放宽面）。敏感路径匹配统一走归一化
    形态：`//etc//shadow`、`/etc/./shadow`、相对路径 `./etc/shadow` 与系统目录
    cwd 下的裸文件名（`cat shadow`）不再绕过；`%2e%2e` 等 URL 编码**刻意不解码**
    （shell 与 SFTP 都不解码百分号，字面文件名不构成穿越）。`sftp_download`
@@ -387,7 +388,7 @@ confirm fail-closed 与 scope fail-closed（含 list 在作用域下可用）。
 - sudo + 终端路径不注入密码：`sudo …` 原文进用户 shell，密码/TOTP 由终端内
   auto-sudo 自动应答（已配置时）或人工输入。
 
-既有只读白名单（含敏感路径拒绝清单）、灾难 `confirmDestructive`、进程级只读
+既有只读执行门（含 SFTP 敏感路径拒绝清单）、灾难 `confirmDestructive`、进程级只读
 开关先于路由判定生效，`runInTerminal` 不放宽任何安全门。
 
 ## 告警 → 排查（工作台入口）
@@ -395,9 +396,9 @@ confirm fail-closed 与 scope fail-closed（含 list 在作用域下可用）。
 MCP 工具 `ssh_alert_triage` 已随 #203 工具瘦身移出 MCP 面（分类逻辑保留在
 sidecar `ssh/alert/triage` 方法）。告警分诊的组合用法保留在工作台工具栏
 「告警排查」（Siren 图标）弹窗：粘贴告警文本 → 分析 → 逐条发送到当前终端 /
-全部复制；建议命令仍全部命中只读命令白名单，agent 侧如需同类动作，可直接用
-`ssh_exec` 执行 uptime / free / df / journalctl 等巡检命令（门禁照常，超过
-~10s 的改用 `ssh_run_bg`）。
+全部复制；建议命令仅用于**可写连接**（只读连接上 `ssh_exec` 一律拒绝），
+只读巡检请改用 `sftp_list_dir` / `sftp_stat` / `sftp_read_file`；可写连接上
+门禁照常，超过 ~10s 的改用 `ssh_run_bg`）。
 
 ## MCP 工具命名与语义
 
