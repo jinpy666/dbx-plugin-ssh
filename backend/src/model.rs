@@ -1157,7 +1157,11 @@ mod tests {
         assert_eq!(from_host.note, "Host note");
 
         // 空/空白/非字符串一律折叠为空串，绝不影响连接解析。
-        for note in [serde_json::json!(""), serde_json::json!("   "), serde_json::json!(null)] {
+        for note in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::json!(null),
+        ] {
             let blank = StoredConnection::from_lifecycle_params(&serde_json::json!({
                 "connection": {
                     "id": "blank-note",
