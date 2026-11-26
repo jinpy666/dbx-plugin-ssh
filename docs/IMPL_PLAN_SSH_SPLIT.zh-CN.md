@@ -152,6 +152,21 @@ cargo test --locked --manifest-path backend/Cargo.toml -- --list | grep -c ': te
 - 验证：通用验收 + `cargo test` 中 `settings/profiles` 用例；`mcp.rs` 对 `sftp_client_config`/`RawSftpClient` 的 import 不改。
 - 行数：约 1,901；根约 12,028。
 
+#### B2 执行记录（B2a 已落地，B2b 待人审）
+
+B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
+
+- **B2a（已完成）**：`sftp_session` / `sftp_ops` / `monitor` / `sftp_helpers` 四块，`ssh.rs` 13,929 → **12,829**，四个新文件分别 234 / 465 / 135 / 289 行（均 <600）。测试名集合与 `#[test]` 计数（1,384）前后一致，clippy/check/全量测试/结构护栏全绿。
+- **B2b（未做，需人审）**：`settings.rs`（`settings_get/set`、`profiles_*`、`quick_commands_*`、`highlight_rules_*`、`sync_*`、`refresh_bound_sessions`）读写 sudo 密码与 TOTP，按 AGENTS.md 属 secret binding，必须人工评审后单独执行；B2a 已确认这些符号仍全部留在 `ssh.rs`。
+
+与本文原始估计的偏差（后续批次请以符号为准，行号只当锚点）：
+
+1. **行号区间普遍偏 ±5~10 行**：多数区间起点落在文档注释上一行、终点落进下一个条目的文档。B2a 实际搬移：sftp_session `4429-4658`、sftp_ops `5445-5904`、monitor `5906-6036`。
+2. **`sftp_helpers` 区间不连续**：`13343-13566` 与 `13858-13919` 才是 SFTP/权限/错误相关代码；中间 `13568-13857`（约 290 行）是终端/提示符工具（`directory_tracking_marker`、`decode_stream_text`、`prompt_tail_len`、`detect_remote_shell` 等），属 B3/终端批次，留在原地。这是 B2 实际落在 12,829 而非 12,546 的原因。
+3. **可见性不能照抄计划**：`classify_raw_kind` 原为 `pub(crate)`，写成 `pub use` 会触发 E0364；B2a 改为 `pub(crate) use`，保持原可见性。同理，被父模块/测试模块调用的子模块内部项需提升为 `pub(super)`（`raw_read_chunk_cached`、`cached_metrics_snapshot`、`store_metrics_snapshot`、若干 helper）。
+4. **符号名以代码为准**：计划写的 `cached_metrics_store` 实际是 `store_metrics_snapshot`。
+5. 白名单随每批收紧：`ssh.rs` 由 18,457 → 13,929（B1）→ **12,829**（B2a），用 `scripts/refresh_structure_allowlist.mjs --write` 机械刷新，禁止手写行数。
+
 ### B3 传输原语与共享状态（中等偏高，耦合最大）
 
 - 新建（均 `<600`）：
