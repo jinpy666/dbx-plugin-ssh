@@ -39,10 +39,22 @@ node scripts/mock_host_registry_check.mjs
 # （首次命中/二次抖动即漂移），甚至经 ensure_app_bridge 的 open -a 兜底拉起
 # DBX。钉到一次性空目录（与 CI 无运行 DBX 同态），启动命令置 no-op。
 # macOS 沙箱下 portable-pty 用例并发跑会互相干扰（pty 分配失败/超时抖动，
-# 表现为随机失败）。默认串行；CI 等稳定环境可用 BACKEND_TEST_THREADS 放开。
-DBX_APP_DATA_DIR="$DBX_PLUGIN_DATA_DIR" DBX_APP_LAUNCH_CMD="true" \
-  cargo test --manifest-path backend/Cargo.toml \
-  -- --test-threads="${BACKEND_TEST_THREADS:-1}"
+# 表现为随机失败）。因此仅 Darwin 默认串行；Linux 等平台保持并行，避免全量
+# 跑无谓变慢。BACKEND_TEST_THREADS 在任何平台都优先（显式设置即覆盖默认）。
+dbx_test_threads=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  dbx_test_threads="${BACKEND_TEST_THREADS:-1}"
+else
+  dbx_test_threads="${BACKEND_TEST_THREADS:-}"
+fi
+if [ -n "$dbx_test_threads" ]; then
+  DBX_APP_DATA_DIR="$DBX_PLUGIN_DATA_DIR" DBX_APP_LAUNCH_CMD="true" \
+    cargo test --manifest-path backend/Cargo.toml \
+    -- --test-threads="$dbx_test_threads"
+else
+  DBX_APP_DATA_DIR="$DBX_PLUGIN_DATA_DIR" DBX_APP_LAUNCH_CMD="true" \
+    cargo test --manifest-path backend/Cargo.toml
+fi
 
 echo "==> dead-code warning gate"
 # 未接线的功能会先以 dead_code 警告形态暴露（案例：remembered 审批 /
