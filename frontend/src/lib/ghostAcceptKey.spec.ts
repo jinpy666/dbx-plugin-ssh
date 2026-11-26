@@ -2,7 +2,7 @@
 // ghost 接受键单测（Warp 多键模型）：Tab 开关持久化 + 整段/逐词匹配矩阵。
 import { beforeEach, describe, expect, it } from "vitest";
 import { PLUGIN_STORE_KEYS } from "./pluginStore";
-import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, resolveCtrlFRoute, saveGhostTabAccept } from "./ghostAcceptKey";
+import { loadCtrlFPassthrough, loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, resolveCtrlFRoute, saveCtrlFPassthrough, saveGhostTabAccept } from "./ghostAcceptKey";
 
 const NO_MOD = { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
 
@@ -15,6 +15,24 @@ describe("ghostAcceptKey (Warp Autosuggestions 键位模型)", () => {
     // 宿主 storage 无列键方法，水合只拉白名单键：漏注册 = 写穿能落盘、
     // 重启永远读不回（开关每次启动静默重置）。
     expect(PLUGIN_STORE_KEYS).toContain("ssh-ghost-tab-accept");
+    expect(PLUGIN_STORE_KEYS).toContain("ssh-terminal-ctrl-f-passthrough");
+  });
+
+  it("Ctrl+F passthrough defaults off and round-trips (issue #332)", () => {
+    expect(loadCtrlFPassthrough()).toBe(false);
+    saveCtrlFPassthrough(true);
+    expect(loadCtrlFPassthrough()).toBe(true);
+    saveCtrlFPassthrough(false);
+    expect(loadCtrlFPassthrough()).toBe(false);
+  });
+
+  it("Ctrl+F passthrough removes Ctrl+F from full accept, keeps → and Ctrl+E (issue #332)", () => {
+    const passthrough = { ctrlFPassthrough: true };
+    expect(matchesGhostFullAccept("f", { ...NO_MOD, ctrlKey: true }, passthrough)).toBe(false);
+    expect(matchesGhostFullAccept("F", { ...NO_MOD, ctrlKey: true }, passthrough)).toBe(false);
+    expect(matchesGhostFullAccept("e", { ...NO_MOD, ctrlKey: true }, passthrough)).toBe(true);
+    expect(matchesGhostFullAccept("ArrowRight", NO_MOD, passthrough)).toBe(true);
+    expect(matchesGhostFullAccept("f", { ...NO_MOD, ctrlKey: true }, { ctrlFPassthrough: false })).toBe(true);
   });
 
   it("Tab accept defaults off and round-trips", () => {
@@ -72,5 +90,11 @@ describe("resolveCtrlFRoute (issue #108a，iTerm2 同位)", () => {
 
   it("keeps routing to search in the normal buffer when alternateActive is unset", () => {
     expect(resolveCtrlFRoute({ ghostVisible: false, transferBusy: false })).toBe("search");
+  });
+
+  it("always passes Ctrl+F through when the user sends it to the remote shell (issue #332)", () => {
+    expect(resolveCtrlFRoute({ ghostVisible: false, transferBusy: false, ctrlFPassthrough: true })).toBe("passthrough");
+    expect(resolveCtrlFRoute({ ghostVisible: true, transferBusy: false, ctrlFPassthrough: true })).toBe("passthrough");
+    expect(resolveCtrlFRoute({ ghostVisible: false, transferBusy: false, ctrlFPassthrough: false })).toBe("search");
   });
 });

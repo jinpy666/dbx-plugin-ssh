@@ -504,6 +504,8 @@ const props = defineProps<{
   toolbarVisibility: ToolbarVisibility;
   /** ghost 接受键（批 4e/反馈迭代）：权威态在 App，本组件只读 + 上抛改动。 */
   ghostTabAccept: boolean;
+  /** 「Ctrl+F 发送到远端 shell」（issue #332）：权威态在 App，本组件只读 + 上抛改动。 */
+  ctrlFPassthrough?: boolean;
   /** AI 助手设置（Warp AI 对齐批）：权威态在 App（pluginStore 单键 JSON），
    *  本组件只读 + 上抛增量；bridgeReady 决定能力缺失横幅。 */
   aiSettings: AiSettings;
@@ -616,6 +618,7 @@ const emit = defineEmits<{
   /** 历史显示条数（issue #192，组件自治持久化 pluginStore，App 收紧各桶）。 */
   (e: "update:commandHistoryLimit", value: number): void;
   (e: "update:ghostTabAccept", value: boolean): void;
+  (e: "update:ctrlFPassthrough", value: boolean): void;
   /** AI 助手设置增量（Warp AI 对齐批）：App 归一化 + pluginStore 持久化。 */
   (e: "update-ai-settings", patch: Partial<AiSettings>): void;
   /** 清空 AI 修复「不再询问」记忆位。 */
@@ -2595,7 +2598,14 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <span>{{ t("terminalGhost.tabAccept") }}</span>
             </label>
             <p class="muted settings-note">{{ t("terminalGhost.tabAcceptHint") }}</p>
-            <p class="muted settings-note">{{ t("terminalGhost.keysSummary") }}</p>
+            <p class="muted settings-note">{{ t(ctrlFPassthrough ? "terminalGhost.keysSummaryNoCtrlF" : "terminalGhost.keysSummary") }}</p>
+            <!-- Ctrl+F 归还远端（issue #332）：开 = Ctrl+F 不接受 ghost、不开
+                 终端搜索，一律透传；搜索走可配置热键。 -->
+            <label class="settings-field settings-switch-row">
+              <Switch :model-value="!!ctrlFPassthrough" size="sm" @update:model-value="emit('update:ctrlFPassthrough', Boolean($event))" />
+              <span>{{ t("terminalGhost.ctrlFPassthrough") }}</span>
+            </label>
+            <p class="muted settings-note">{{ t("terminalGhost.ctrlFPassthroughHint") }}</p>
             <!-- 历史面板功能开关（issue #169）：关闭后 ↑ 与 Ctrl+R 都归还
                  shell 原生历史/反向搜索，面板整体不可唤起。 -->
             <h3 class="settings-section-title">{{ t("historyPanelSettings.sectionTitle") }}</h3>

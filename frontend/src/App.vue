@@ -183,7 +183,7 @@ import {
 import { COMMAND_HISTORY_LIMIT, mergeShellHistory, parseShellHistoryText, persistableCommandHistoryBuckets, pushCommandHistory, sanitizeCommandHistoryBuckets, sanitizeCommandHistoryLimit, trimCommandHistoryBuckets } from "./lib/commandHistory";
 import { EnterLineTracker, acceptCommandWithContinuation, canCaptureEnterLine, echoConfirmsLine, extractDesyncedCommand, extractEchoedCommand } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
-import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, resolveCtrlFRoute, saveGhostTabAccept } from "./lib/ghostAcceptKey";
+import { loadCtrlFPassthrough, loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, resolveCtrlFRoute, saveCtrlFPassthrough, saveGhostTabAccept } from "./lib/ghostAcceptKey";
 import { isPasswordPromptLine, loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
 import { loadFlagHintEnabled, resolveFlagHint, saveFlagHintEnabled, shouldShowFlagHint, FLAG_HINTS, type FlagHint } from "./lib/flagHints";
 import { readWorkbenchUiMirror, writeWorkbenchUiMirror } from "./lib/workbenchUiMirror";
@@ -670,6 +670,14 @@ const ghostAcceptKeyLabel = computed(() => (ghostTabAccept.value ? "Tab" : "→"
 function setGhostTabAccept(value: boolean) {
   ghostTabAccept.value = value;
   saveGhostTabAccept(value);
+}
+// 「Ctrl+F 发送到远端 shell」（issue #332）：默认关（现状）；开启后 Ctrl+F
+// 不再整段接受 ghost、不再打开终端搜索，一律透传远端（readline
+// forward-char 等）。终端搜索仍走可配置热键（默认 Ctrl+Shift+F）。
+const ctrlFPassthrough = ref(loadCtrlFPassthrough());
+function setCtrlFPassthrough(value: boolean) {
+  ctrlFPassthrough.value = value;
+  saveCtrlFPassthrough(value);
 }
 
 // 存储迁移批 3：传输/下载/建议偏好消毒器已下沉 lib/preferencesMirror
@@ -2670,7 +2678,7 @@ function handleTerminalKey(event: KeyboardEvent) {
   if (
     ghostMatch.value &&
     !suggestionOpen.value &&
-    (matchesGhostFullAccept(event.key, event) || (ghostTabAccept.value && event.key === "Tab" && !completionOpen.value)) &&
+    (matchesGhostFullAccept(event.key, event, { ctrlFPassthrough: ctrlFPassthrough.value }) || (ghostTabAccept.value && event.key === "Tab" && !completionOpen.value)) &&
     !(event.ctrlKey && event.key === "Tab") &&
     !(commandRunning.value || terminalTransferBusy.value)
   ) {
@@ -2692,6 +2700,7 @@ function handleTerminalKey(event: KeyboardEvent) {
       ghostVisible: !!ghostMatch.value,
       transferBusy: terminalTransferBusy.value,
       alternateActive: terminal?.buffer.active.type === "alternate",
+      ctrlFPassthrough: ctrlFPassthrough.value,
     }) === "search"
   ) {
     openTerminalSearch();
@@ -11660,6 +11669,8 @@ function flagHintsSource(command: string): string {
       @update:command-history-limit="applyCommandHistoryLimit"
       :ghost-tab-accept="ghostTabAccept"
       @update:ghost-tab-accept="setGhostTabAccept"
+      :ctrl-f-passthrough="ctrlFPassthrough"
+      @update:ctrl-f-passthrough="setCtrlFPassthrough"
       :ai-settings="aiSettingsState"
       :ai-bridge-ready="aiBridgeReady"
       @update-ai-settings="updateAiSettings"
