@@ -911,6 +911,13 @@ pub struct SftpEntry {
     /// 不可还原，可在设置 → 传输切换文件名编码后重列。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lossy: bool,
+    /// 符号链接指向的目标类型（issue #330），取值 `directory`/`file`/
+    /// `other`（指向链接或无法判定）。仅 `kind == "symlink"` 的条目做一次
+    /// 跟随探测，探测失败或非链接条目字段省略。**只用于渲染与导航**：
+    /// delete/rename/递归判型永远按链接自身处理，绝不因本字段变成递归
+    /// 删除（见前端 `useSftpDelete`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_kind: Option<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]

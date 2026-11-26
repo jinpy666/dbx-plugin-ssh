@@ -1,5 +1,5 @@
-import type { SftpEntryKind, SftpColumn } from "../lib/sftpEntries";
-import { COLUMN_MIN_WIDTHS, COLUMN_WIDTH_MAX, NAME_COLUMN_MAX, NAME_COLUMN_MIN } from "../lib/sftpEntries";
+import type { SftpEntryKind, SftpEntryTargetKind, SftpColumn } from "../lib/sftpEntries";
+import { COLUMN_MIN_WIDTHS, COLUMN_WIDTH_MAX, NAME_COLUMN_MAX, NAME_COLUMN_MIN, sftpEntryIsDirectoryLike } from "../lib/sftpEntries";
 import type { SftpTypeFilter } from "../lib/sftpFileFilters";
 
 type SftpSortColumn = "name" | "size" | "modified";
@@ -10,7 +10,7 @@ import { sftpColumnTrack, sftpGridMinWidth, sftpNameTrack } from "../lib/sftpGri
 import { ArrowDown, ArrowUp, ArrowUpDown } from "@lucide/vue";
 
 // 列表条目的最小结构（App.vue 的 SftpEntry 为局部接口，按消费字段收敛）。
-type ListingEntry = { uri: string; name: string; kind: SftpEntryKind; size?: number; modifiedAt?: number; owner?: string; group?: string; permissions?: string; lossy?: boolean };
+type ListingEntry = { uri: string; name: string; kind: SftpEntryKind; targetKind?: SftpEntryTargetKind; size?: number; modifiedAt?: number; owner?: string; group?: string; permissions?: string; lossy?: boolean };
 
 /** SFTP 列表布局：排序（目录优先 + 名称/大小/时间）、搜索防抖过滤、
  * 类型/隐藏过滤联动、响应式 grid 列宽（比例分配 + 拖拽调整下限 + 持久化经
@@ -35,8 +35,11 @@ export function useSftpListLayout(options: {
 const sortedEntries = computed(() => {
   const direction = sort.value.direction === "asc" ? 1 : -1;
   return [...entries.value].sort((left, right) => {
-    if (left.kind === "directory" && right.kind !== "directory") return -1;
-    if (left.kind !== "directory" && right.kind === "directory") return 1;
+    // issue #330：目录符号链接与真目录一起排在前面（与文件夹图标一致）。
+    const leftDir = sftpEntryIsDirectoryLike(left.kind, left.targetKind);
+    const rightDir = sftpEntryIsDirectoryLike(right.kind, right.targetKind);
+    if (leftDir && !rightDir) return -1;
+    if (!leftDir && rightDir) return 1;
     let result = 0;
     if (sort.value.column === "size") result = (left.size ?? -1) - (right.size ?? -1);
     else if (sort.value.column === "modified") result = (left.modifiedAt ?? 0) - (right.modifiedAt ?? 0);

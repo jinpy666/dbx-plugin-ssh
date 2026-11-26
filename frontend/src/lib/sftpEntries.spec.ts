@@ -2,7 +2,7 @@
 // null/非数组整体收敛为空数组、null 行与无名/无 uri 行丢弃、缺 kind 降级
 // 为 file（渲染占位而非整表丢弃/比较器抛错）。
 import { describe, expect, it } from "vitest";
-import { formatSftpPermissions, parseSftpPermissionVisibility, sanitizeSftpEntries, sanitizeVisibleColumns, sftpEntryIconKind, sftpFileTypeName } from "./sftpEntries";
+import { formatSftpPermissions, parseSftpPermissionVisibility, sanitizeSftpEntries, sanitizeVisibleColumns, sftpEntryIconKind, sftpEntryIsDirectoryLike, sftpFileTypeName } from "./sftpEntries";
 
 describe("sanitizeSftpEntries", () => {
   it("returns an empty array for null / non-array payloads", () => {
@@ -183,5 +183,50 @@ describe("sftpEntryIconKind", () => {
     expect(sftpEntryIconKind(undefined)).toBe("file");
     expect(sftpEntryIconKind("")).toBe("file");
     expect(sftpEntryIconKind("weird-future-kind")).toBe("file");
+  });
+
+  // issue #330：目录符号链接 —— 图标升级为文件夹，且只有目标确认是目录
+  // 才允许；文件链接/未知目标保持链接文档图标（不回退成"文件"）。
+  it("renders a symlink whose target is a directory as a folder", () => {
+    expect(sftpEntryIconKind("symlink", "directory")).toBe("folder");
+    expect(sftpEntryIsDirectoryLike("symlink", "directory")).toBe(true);
+  });
+
+  it("keeps file/unknown-target symlinks on the link icon", () => {
+    expect(sftpEntryIconKind("symlink", "file")).toBe("link");
+    expect(sftpEntryIconKind("symlink", "other")).toBe("link");
+    expect(sftpEntryIconKind("symlink")).toBe("link");
+    expect(sftpEntryIsDirectoryLike("symlink", "file")).toBe(false);
+    expect(sftpEntryIsDirectoryLike("symlink", undefined)).toBe(false);
+  });
+
+  it("never promotes a plain file/other entry because of a stray targetKind", () => {
+    expect(sftpEntryIconKind("file", "directory")).toBe("file");
+    expect(sftpEntryIconKind("other", "directory")).toBe("file");
+    expect(sftpEntryIsDirectoryLike("file", "directory")).toBe(false);
+    expect(sftpEntryIconKind("directory")).toBe("folder");
+    expect(sftpEntryIsDirectoryLike("directory")).toBe(true);
+  });
+});
+
+// issue #330：targetKind 只接受 wire 词汇；其他值归一为缺省（旧 sidecar /
+// 未来扩展都不会让 UI 把任意链接当目录）。
+describe("sanitizeSftpEntries targetKind", () => {
+  it("keeps the known target kinds on symlink rows", () => {
+    const entries = sanitizeSftpEntries([
+      { name: "d", uri: "sftp:/d", kind: "symlink", targetKind: "directory" },
+      { name: "f", uri: "sftp:/f", kind: "symlink", targetKind: "file" },
+      { name: "o", uri: "sftp:/o", kind: "symlink", targetKind: "other" },
+    ]);
+    expect(entries.map((entry) => entry.targetKind)).toEqual(["directory", "file", "other"]);
+  });
+
+  it("drops unknown / missing target kinds", () => {
+    const entries = sanitizeSftpEntries([
+      { name: "weird", uri: "sftp:/weird", kind: "symlink", targetKind: "socket" },
+      { name: "missing", uri: "sftp:/missing", kind: "symlink" },
+    ]);
+    expect(entries[0].targetKind).toBeUndefined();
+    expect(entries[1].targetKind).toBeUndefined();
   });
 });

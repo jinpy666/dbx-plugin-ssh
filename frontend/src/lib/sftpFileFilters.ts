@@ -1,6 +1,10 @@
+import { sftpEntryIsDirectoryLike, type SftpEntryTargetKind } from "./sftpEntries";
+
 export interface SftpFilterableEntry {
   name: string;
   kind: "file" | "directory" | "symlink" | "other";
+  /** issue #330：symlink 目标类型（目录链接归入"文件夹"筛选）。 */
+  targetKind?: SftpEntryTargetKind;
 }
 
 export type SftpTypeFilter = "all" | "directory" | "file";
@@ -46,7 +50,7 @@ export function filterSftpEntries<T extends SftpFilterableEntry>(
   const query = search.trim().toLowerCase();
   return entries.filter((entry) => {
     if (!showHidden && isHiddenEntry(entry.name)) return false;
-    if (type === "directory" && entry.kind !== "directory") return false;
+    if (type === "directory" && !sftpEntryIsDirectoryLike(entry.kind, entry.targetKind)) return false;
     if (type === "file" && entry.kind !== "file") return false;
     if (query && !entry.name.toLowerCase().includes(query)) return false;
     return true;

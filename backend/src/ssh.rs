@@ -5499,7 +5499,8 @@ impl SshRuntime {
             .read_dir(path.to_string())
             .await
             .map_err(sftp_error)?;
-        Ok(entries
+        let mut result: Vec<SftpEntry> = entries
+            .into_iter()
             .map(|entry| {
                 let metadata = entry.metadata();
                 let kind = classify_entry_kind(entry.file_type());
@@ -5530,9 +5531,20 @@ impl SshRuntime {
                     content_type: content_type_for_path(&entry.path()),
                     owner,
                     group,
+                    target_kind: None,
                 }
             })
-            .collect())
+            .collect();
+        // issue #330：只有 symlink 条目做一次跟随探测（STAT 由服务器跟随
+        // 链接，返回目标自身类型）；普通文件/目录零额外 RTT。
+        for (index, probe_path) in symlink_probe_paths(&result) {
+            let probe = sftp.lock().await.metadata(probe_path).await;
+            if let Ok(metadata) = probe {
+                result[index].target_kind =
+                    Some(link_target_kind(classify_entry_kind(metadata.file_type())));
+            }
+        }
+        Ok(result)
     }
 
     /// latin-1 路径：裸包客户端取原始字节。显示名 = latin-1 解码（忠实）；
@@ -5546,27 +5558,47 @@ impl SshRuntime {
     ) -> Result<Vec<SftpEntry>, String> {
         let mut client = self.raw_sftp_client(session_id).await?;
         let raw_entries = client.readdir(path.as_bytes()).await?;
-        Ok(raw_entries
+        let mut result: Vec<SftpEntry> = Vec::with_capacity(raw_entries.len());
+        let mut probes: Vec<(usize, Vec<u8>)> = Vec::new();
+        for entry in raw_entries
             .into_iter()
             .filter(|entry| entry.name.as_slice() != b"." && entry.name.as_slice() != b"..")
-            .map(|entry| {
-                let display = sftp_name::decode_display_name(&entry.name, encoding);
-                let wire_name = sftp_name::escape_wire(&entry.name);
-                let wire_path = sftp_name::join_wire_name(path, &wire_name);
-                SftpEntry {
-                    lossy: display.lossy,
-                    name: display.text,
-                    uri: sftp_uri(&wire_path),
-                    kind: classify_raw_kind(entry.attrs.permissions),
-                    size: entry.attrs.size,
-                    modified_at: entry.attrs.mtime.map(u64::from),
-                    permissions: entry.attrs.permissions.map(format_permissions),
-                    content_type: content_type_for_path(&wire_path),
-                    owner: None,
-                    group: None,
-                }
-            })
-            .collect())
+        {
+            let display = sftp_name::decode_display_name(&entry.name, encoding);
+            let wire_name = sftp_name::escape_wire(&entry.name);
+            let wire_path = sftp_name::join_wire_name(path, &wire_name);
+            let kind = classify_raw_kind(entry.attrs.permissions);
+            if kind == "symlink" {
+                // 探测路径与 READDIR 同一字节口径（父路径 + 原始名字），
+                // 不经过 wire 转义，否则含非 ASCII 字节的链接名探测不到。
+                probes.push((
+                    result.len(),
+                    sftp_name::join_raw_path(path.as_bytes(), &entry.name),
+                ));
+            }
+            result.push(SftpEntry {
+                lossy: display.lossy,
+                name: display.text,
+                uri: sftp_uri(&wire_path),
+                kind,
+                size: entry.attrs.size,
+                modified_at: entry.attrs.mtime.map(u64::from),
+                permissions: entry.attrs.permissions.map(format_permissions),
+                content_type: content_type_for_path(&wire_path),
+                owner: None,
+                group: None,
+                target_kind: None,
+            });
+        }
+        // issue #330：仅 symlink 条目各付一次 STAT（服务器跟随链接），
+        // 普通文件/目录零额外往返。
+        for (index, raw_path) in probes {
+            if let Ok(attrs) = client.stat(&raw_path).await {
+                result[index].target_kind =
+                    Some(link_target_kind(classify_raw_kind(attrs.permissions)));
+            }
+        }
+        Ok(result)
     }
 
     /// 打开一条独立 sftp 子系统通道并跑裸包客户端（严格串行请求/响应）。
@@ -13382,6 +13414,40 @@ pub(crate) fn classify_raw_kind(permissions: Option<u32>) -> &'static str {
     }
 }
 
+/// 跟随符号链接后的目标类型词汇（issue #330）：`sftp/list` 条目可选字段
+/// `targetKind` 只取 `directory`/`file`/`other`。
+///
+/// 输入是**跟随链接后**的 kind（高层 `FileType` 或裸包 permissions 判型）：
+/// - `directory` / `file` 原样透传，UI 据此给目录链接换文件夹图标、双击
+///   进入目标目录；
+/// - `symlink`（服务器 STAT 未跟随，链路异常）与一切未知值归为 `other`，
+///   绝不把"再指向一个链接"误当成目录。
+///
+/// 该字段仅用于渲染/导航；delete/rename 永远按链接自身处理。
+fn link_target_kind(followed_kind: &str) -> &'static str {
+    match followed_kind {
+        "directory" => "directory",
+        "file" => "file",
+        _ => "other",
+    }
+}
+
+/// 需要探测目标类型的列表条目：仅 `kind == "symlink"`，返回 `(下标, 探测
+/// 路径)`，路径取条目 URI 的 `sftp:` 之后部分（高层客户端按服务器声明
+/// 跟随链接）。URI 解析失败的条目跳过（保持字段缺省），不阻断整个列表。
+fn symlink_probe_paths(entries: &[SftpEntry]) -> Vec<(usize, String)> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.kind == "symlink")
+        .filter_map(|(index, entry)| {
+            path_from_sftp_uri(&entry.uri)
+                .ok()
+                .map(|path| (index, path))
+        })
+        .collect()
+}
+
 fn content_type_for_path(path: &str) -> Option<String> {
     let extension = path.rsplit('.').next()?.to_ascii_lowercase();
     let content_type = match extension.as_str() {
@@ -14468,6 +14534,76 @@ lrwxrwxrwx  1 root root   11 1720000004 link -> notes.txt
         // Missing/unusable type bits (no PERMISSIONS flag, or permissions
         // without S_IFMT bits) must degrade to a file icon, never a folder.
         assert_eq!(classify_entry_kind(FileType::Other), "file");
+    }
+
+    #[test]
+    fn link_target_kind_only_promotes_directory_and_file() {
+        // issue #330：跟随链接后的类型进入 wire 词汇。
+        assert_eq!(link_target_kind("directory"), "directory");
+        assert_eq!(link_target_kind("file"), "file");
+        // A server that reports the link itself (STAT not following) or any
+        // unknown type must never masquerade as a navigable directory.
+        assert_eq!(link_target_kind("symlink"), "other");
+        assert_eq!(link_target_kind("other"), "other");
+        assert_eq!(link_target_kind(""), "other");
+    }
+
+    #[test]
+    fn symlink_probe_paths_only_cover_symlink_entries() {
+        let entry = |name: &str, kind: &'static str, uri: String| SftpEntry {
+            name: name.to_string(),
+            uri,
+            kind,
+            size: None,
+            modified_at: None,
+            permissions: None,
+            content_type: None,
+            owner: None,
+            group: None,
+            lossy: false,
+            target_kind: None,
+        };
+        let entries = vec![
+            entry("dir", "directory", sftp_uri("/home/u/dir")),
+            entry("link-dir", "symlink", sftp_uri("/home/u/link-dir")),
+            entry("file.txt", "file", sftp_uri("/home/u/file.txt")),
+            entry("link-file", "symlink", sftp_uri("/home/u/link-file")),
+            // Non-`sftp:` URI is skipped instead of aborting the listing.
+            entry("broken", "symlink", "file:///tmp/broken".to_string()),
+        ];
+        let probes = symlink_probe_paths(&entries);
+        assert_eq!(
+            probes,
+            vec![
+                (1, "/home/u/link-dir".to_string()),
+                (3, "/home/u/link-file".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sftp_entry_serializes_target_kind_only_when_known() {
+        let mut entry = SftpEntry {
+            name: "link".to_string(),
+            uri: sftp_uri("/home/u/link"),
+            kind: "symlink",
+            size: None,
+            modified_at: None,
+            permissions: None,
+            content_type: None,
+            owner: None,
+            group: None,
+            lossy: false,
+            target_kind: None,
+        };
+        let absent = serde_json::to_value(&entry).expect("serialize");
+        assert!(absent.get("targetKind").is_none(), "{absent}");
+        entry.target_kind = Some("directory");
+        let present = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(
+            present.get("targetKind").and_then(|v| v.as_str()),
+            Some("directory")
+        );
     }
 
     #[test]

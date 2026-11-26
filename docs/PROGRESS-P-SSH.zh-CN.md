@@ -4723,3 +4723,47 @@ SFTP 写族 / `ssh_remove_known_host` 原有写门不变。
 `cargo test` 1374 全绿；`scripts/smoke_mcp.py` 全绿（read-only server gate
 覆盖 exec 进程替换/参数形态与 terminal 回车拒绝，破坏性确认无法覆盖）。
 七语 N/A（无前端 UI 文案，MCP 描述为英文契约文本）。
+
+## SFTP 面板目录符号链接显示与双击进入（2026-11-26，#330）
+
+**问题**（[issue #330](https://github.com/jinpy666/dbx-plugin-ssh/issues/330)）：
+SFTP 面板把目录符号链接当普通文件显示（链接文档图标），双击不进入目标
+目录——`sftp/list` 的 `kind` 只表达"链接自身"，UI 无从得知目标类型。
+
+**修复**：
+- **后端（`sftp/list`）**：新增可选字段 `targetKind`
+  （`directory`/`file`/`other`，camelCase）。仅对 `kind == "symlink"` 的
+  条目各付一次跟随探测——高层车道 `metadata`（STAT）、latin-1 裸包车道
+  `stat`（FXP_STAT，探测路径与 READDIR 同为"父路径字节 + 原始名字"，不经
+  wire 转义）；普通文件/目录零额外 RTT。探测失败/断链/服务器未跟随 →
+  字段省略（旧行为不变）。`kind` 仍是链接自身，**delete/rename/递归判型
+  不因 `targetKind` 改变**，链接永远按链接删除。
+- **前端**：`frontend/src/lib/sftpEntries.ts` 新增纯函数
+  `sftpEntryIsDirectoryLike(kind, targetKind)`（"可按目录进入"的唯一裁决点，
+  仅用于图标/导航/排序/筛选）；`sftpEntryIconKind` 对目录链接返回
+  `folder`，文件链接/未知目标仍是 `link`。`openEntry`（双击/回车/右键
+  "打开"）、类型列文案、目录优先排序、文件夹筛选统一走该判定；地址栏
+  保留链接路径，进入后由目录列表自然跟随。
+- `sudo` 列表（`ls -l` 文本车道）不探测目标，字段缺省，保持链接图标
+  （登记为残余风险）。
+
+**测试**：
+- 后端：`cargo test --bin dbx-plugin-ssh` 1377 全绿；新增
+  `link_target_kind_only_promotes_directory_and_file`、
+  `symlink_probe_paths_only_cover_symlink_entries`、
+  `sftp_entry_serializes_target_kind_only_when_known`。
+- 前端：`vitest run` 2367 全绿（新增 targetKind 容错/图标/筛选/双击导航
+  用例）；`vue-tsc --noEmit` 0 错。
+- Smoke：`scripts/smoke_fs_test.py` 对真实 OpenSSH 容器
+  **PASS 109 / SKIP 0 / FAIL 0**（69.4s）。新增
+  `sftp/list symlink targetKind (#330)`：`link-dir → targetKind=directory`、
+  `link-file → targetKind=file`、普通条目无该字段；latin-1 链接用例追加
+  `targetKind=file` 断言，覆盖裸包 FXP_STAT 车道。
+
+**七语**：无新增用户可见文案（复用 `openFolder` / `sftpFilter.folders`
+等既有 key）。
+
+**残余风险**：`sudo` 提权列表不探测链接目标（`ls -l` 文本无跟随信息，
+需额外 `stat` RTT，暂不做）；一个目录内大量符号链接会各付一次探测 RTT
+（只读、串行；只在链接条目上发生）；服务器 STAT 不跟随链接（少见非
+标准实现）时归为 `other`，仍显示链接图标。

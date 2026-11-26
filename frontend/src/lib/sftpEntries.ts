@@ -9,10 +9,17 @@
  */
 export type SftpEntryKind = "file" | "directory" | "symlink" | "other";
 
+/** 符号链接目标类型（issue #330）：sidecar 仅对 `kind === "symlink"` 的
+ * 条目做一次跟随探测，成功时回传；缺省表示未知（旧 sidecar、探测失败或
+ * 断链），此时一切行为维持旧语义（链接图标、双击不进入）。 */
+export type SftpEntryTargetKind = "directory" | "file" | "other";
+
 export interface SftpSanitizedEntry {
   name: string;
   uri: string;
   kind: SftpEntryKind;
+  /** 仅 symlink 条目可能带；缺省即未知。 */
+  targetKind?: SftpEntryTargetKind;
   size?: number;
   modifiedAt?: number;
   permissions?: string;
@@ -26,12 +33,28 @@ export interface SftpSanitizedEntry {
 }
 
 const KNOWN_KINDS: readonly SftpEntryKind[] = ["file", "directory", "symlink", "other"];
+const KNOWN_TARGET_KINDS: readonly SftpEntryTargetKind[] = ["directory", "file", "other"];
 
-/** kind → 图标类别（issue #36）：只有 `directory` 才允许显示文件夹图标；
- * symlink 渲染为链接文档；`other`/未知（含旧 sidecar 的容错输入）一律按
- * 普通文件渲染，保证无扩展名/普通文件永远不会出现文件夹图标。 */
-export function sftpEntryIconKind(kind: string | undefined): "folder" | "file" | "link" {
-  if (kind === "directory") return "folder";
+/** 条目是否可按目录进入（issue #330）：真目录，或"目标确实是目录"的符号
+ * 链接。**只用于渲染与导航**——删除/重命名/递归判定必须继续用
+ * `kind === "directory"`（`useSftpDelete`），否则删除链接会变成递归删目标。 */
+export function sftpEntryIsDirectoryLike(
+  kind: string | undefined,
+  targetKind?: string | undefined,
+): boolean {
+  if (kind === "directory") return true;
+  return kind === "symlink" && targetKind === "directory";
+}
+
+/** kind → 图标类别（issue #36）：只有"可进入的目录"才允许显示文件夹图标；
+ * 目录符号链接（目标为目录，issue #330）同样显示文件夹；普通 symlink 渲染
+ * 为链接文档；`other`/未知（含旧 sidecar 的容错输入）一律按普通文件渲染，
+ * 保证无扩展名/普通文件永远不会出现文件夹图标。 */
+export function sftpEntryIconKind(
+  kind: string | undefined,
+  targetKind?: string | undefined,
+): "folder" | "file" | "link" {
+  if (sftpEntryIsDirectoryLike(kind, targetKind)) return "folder";
   if (kind === "symlink") return "link";
   return "file";
 }
@@ -121,11 +144,13 @@ export function sanitizeSftpEntries(value: unknown): SftpSanitizedEntry[] {
     if (typeof record.name !== "string" || !record.name) continue;
     if (typeof record.uri !== "string" || !record.uri) continue;
     const kind = KNOWN_KINDS.find((candidate) => candidate === record.kind) ?? "file";
+    const targetKind = KNOWN_TARGET_KINDS.find((candidate) => candidate === record.targetKind);
     entries.push({
       ...(record as Omit<SftpSanitizedEntry, "kind">),
       name: record.name,
       uri: record.uri,
       kind,
+      targetKind,
       size: typeof record.size === "number" ? record.size : undefined,
       modifiedAt: typeof record.modifiedAt === "number" ? record.modifiedAt : undefined,
       permissions: typeof record.permissions === "string" ? record.permissions : undefined,
