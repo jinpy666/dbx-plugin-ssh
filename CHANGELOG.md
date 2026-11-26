@@ -4,6 +4,12 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.17-beta.1] — 2026-11-26
+
+### 安全
+- **只读连接禁止命令执行与终端注入（P0）**：`ssh_exec` 与 `ssh_terminal_input` 在只读连接上直接拒绝，不再依赖"只读命令白名单"。该白名单对 shell 解析不 sound——进程替换（`cat <(rm -rf /tmp/x)`）、输入重定向，以及形似只读但带写参数的动词（`hostname <名>`、`date -s`、`uniq IN OUT`、`git log --output=FILE`、`file -C`、`ss -K`、`journalctl --flush`）都能穿透；`ssh_terminal_input` 的"纯控制字符"门也挡不住一个 `\r` 回车执行 PTY 里已有的输入。只读连接现为 inspection-only，巡检改用 `sftp_list_dir` / `sftp_stat` / `sftp_read_file`；`confirmDestructive` 不能覆盖只读，`ssh_multi_exec` 继续逐目标拒绝只读连接。
+  **Read-only connections now refuse command execution and terminal injection (P0).** `ssh_exec` and `ssh_terminal_input` are rejected outright instead of relying on the read-only command whitelist, which is not sound against shell parsing: process substitution (`cat <(rm -rf /tmp/x)`), input redirection, and read-looking verbs with mutating arguments (`hostname NEW`, `date -s`, `uniq IN OUT`, `git log --output=FILE`, `file -C`, `ss -K`, `journalctl --flush`) all slipped through, while a single `\r` could run whatever the live PTY already held. Read-only connections are inspection-only now; use `sftp_list_dir` / `sftp_stat` / `sftp_read_file`. `confirmDestructive` cannot override read-only, and `ssh_multi_exec` keeps refusing each read-only target.
+
 ## [0.7.16] — 2026-11-26
 
 - **0.7.16 正式版**。汇总 beta.1～beta.2：MCP 内联拨号支持出站代理——新增 `socksProxy`（SOCKS5）/ `httpProxy`（HTTP CONNECT）工具参数（可带用户名密码认证、互斥、与 `jumpHosts` 跳板链兼容），AI 直连只允许代理出网的机器不再失败，引用已保存连接仍由宿主 runtime 隧道端点接管（#324）；「下载到…」按连接记忆上次落点——手动选过的目录下次弹窗预填、目录选择器直接从该处打开，不再从「此电脑」根页重新导航，「设为默认地址」全局默认与其并行不冲突（#303 反馈）。
