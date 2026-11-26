@@ -978,7 +978,7 @@ const commandHistoryMeta = computed<Record<string, import("./lib/historyPanel").
     historyMetaBuckets.value = { ...historyMetaBuckets.value, [historyScope.value]: next };
   },
 });
-// 快速命令：用户自定义片段（≤20 条），全局存储在插件数据目录（sidecar），
+// 快速命令：用户自定义片段（≤200 条），全局存储在插件数据目录（sidecar），
 // 所有连接/工作台共享；状态与 PTY 写入语义收口在 composables/useQuickCommands。
 const {
   quickCommands,
