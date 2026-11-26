@@ -72,6 +72,10 @@ mod vnc_session;
 mod x11;
 mod zmodem_detect;
 
+// 结构守卫（仅测试构建）：文件体积预算 + 冻结白名单，阻止代码库继续长成单体。
+#[cfg(test)]
+mod structure_tests;
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
