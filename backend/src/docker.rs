@@ -26,6 +26,9 @@ mod engine;
 mod files;
 #[cfg(test)]
 mod files_tests;
+mod files_write;
+#[cfg(test)]
+mod files_write_tests;
 mod local;
 mod logs_batch;
 mod logs_stream;
@@ -43,6 +46,7 @@ mod tests;
 
 pub use engine::*;
 pub use files::*;
+pub use files_write::*;
 pub use local::*;
 pub use logs_batch::*;
 pub use logs_stream::*;

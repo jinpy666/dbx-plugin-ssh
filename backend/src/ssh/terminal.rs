@@ -410,6 +410,13 @@ impl SshRuntime {
     /// connections. Minimal read-only query only — no other behavior of
     /// this module changes.
     pub async fn completion_session_read_only(&self, session_id: &str) -> Result<bool, String> {
+        self.session_read_only(session_id).await
+    }
+
+    /// Session-level read-only flag. Docker's write/delete gate uses this so
+    /// the pure decision (`docker::mutation_access`) stays unit-testable
+    /// without a live SSH transport; semantics match `ensure_writable`.
+    pub async fn session_read_only(&self, session_id: &str) -> Result<bool, String> {
         Ok(self.session(session_id).await?.read_only)
     }
 }

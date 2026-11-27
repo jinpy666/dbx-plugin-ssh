@@ -340,6 +340,193 @@ pub fn files_read(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result
     docker::files_read_payload(output, &path, max_bytes)
 }
 
+// —— B6 容器文件写/删（破坏性）：先审计意图，再执行 ————————————
+
+/// `docker/files/write`：base64 解码后 ≤64 KiB，同目录临时文件 + `mv`
+/// 原子覆盖；只读连接拒绝（§5.4），审计行只含路径与字节数（§5.8）。
+pub fn files_write(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value, String> {
+    let engine = docker::parse_engine(params)?;
+    let target = docker::parse_target(params)?;
+    let container_id = required_string(params, "containerId")?;
+    docker::validate_container_id(container_id)?;
+    let path = docker::validate_mutation_path(required_string(params, "path")?)?;
+    let (data_base64, bytes) = docker::parse_write_data(params)?;
+    let overwrite = docker::parse_overwrite(params)?;
+    let temp_path = docker::write_temp_path(&path)?;
+    let command = docker::files_write_command(&engine, container_id, &path, bytes);
+    if target == docker::DockerTarget::Local {
+        audit_action_intent(&ssh.data_dir(), &command);
+        let started = std::time::Instant::now();
+        return match runtime.block_on(docker::collect_files_write_local(
+            &engine,
+            container_id,
+            &path,
+            &data_base64,
+            overwrite,
+            &temp_path,
+        )) {
+            Ok(payload) => Ok(payload),
+            Err(error) => {
+                audit_action_failure(
+                    &ssh.data_dir(),
+                    &command,
+                    &error,
+                    started.elapsed().as_millis() as u64,
+                );
+                Err(error)
+            }
+        };
+    }
+    let session_id = required_string(params, "sessionId")?;
+    // 只读连接直接拒绝：写容器内文件是破坏性动作。与 `ensure_writable`
+    // 同查询同文案，但把判定收敛到可离线单测的 `docker::mutation_access`。
+    let read_only = runtime.block_on(ssh.session_read_only(session_id))?;
+    docker::mutation_access(read_only)?;
+    let script = docker::files_write_script(
+        &engine,
+        container_id,
+        &path,
+        &data_base64,
+        overwrite,
+        &temp_path,
+    )?;
+    audit_action_intent(&ssh.data_dir(), &command);
+    let started = std::time::Instant::now();
+    let response = match runtime.block_on(ssh.exec(
+        session_id,
+        None,
+        &script,
+        false,
+        Some(docker::FILES_WRITE_TIMEOUT.as_secs()),
+    )) {
+        Ok(response) => response,
+        Err(error) => {
+            audit_action_failure(
+                &ssh.data_dir(),
+                &command,
+                &error,
+                started.elapsed().as_millis() as u64,
+            );
+            return Err(error);
+        }
+    };
+    let output = response
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let failure = response
+        .get("exitCode")
+        .and_then(Value::as_i64)
+        .filter(|code| *code != 0)
+        .map(|code| {
+            format!(
+                "docker/files/write failed (exit {code}): {}",
+                docker::output_snippet(output)
+            )
+        });
+    let result = match failure {
+        Some(error) => Err(error),
+        None => docker::files_write_payload(output, &path),
+    };
+    if let Err(error) = &result {
+        audit_action_failure(
+            &ssh.data_dir(),
+            &command,
+            error,
+            started.elapsed().as_millis() as u64,
+        );
+    }
+    result
+}
+
+/// `docker/files/delete`：非递归只删普通文件/链接，目录报错；递归拒绝
+/// 容器根与 `/proc`、`/sys`、`/dev` 挂载点；本机删除要求 `confirm: true`。
+pub fn files_delete(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value, String> {
+    let engine = docker::parse_engine(params)?;
+    let target = docker::parse_target(params)?;
+    let container_id = required_string(params, "containerId")?;
+    docker::validate_container_id(container_id)?;
+    let recursive = docker::parse_recursive(params)?;
+    let path = docker::validate_delete_path(required_string(params, "path")?, recursive)?;
+    let command = docker::files_delete_command(&engine, container_id, &path);
+    if target == docker::DockerTarget::Local {
+        if !docker::parse_confirm(params)? {
+            return Err("docker/files/delete on the local host requires confirm: true".to_string());
+        }
+        audit_action_intent(&ssh.data_dir(), &command);
+        let started = std::time::Instant::now();
+        return match runtime.block_on(docker::collect_files_delete_local(
+            &engine,
+            container_id,
+            &path,
+            recursive,
+        )) {
+            Ok(payload) => Ok(payload),
+            Err(error) => {
+                audit_action_failure(
+                    &ssh.data_dir(),
+                    &command,
+                    &error,
+                    started.elapsed().as_millis() as u64,
+                );
+                Err(error)
+            }
+        };
+    }
+    let session_id = required_string(params, "sessionId")?;
+    // 只读连接直接拒绝：删除容器内文件是破坏性动作（同 `ensure_writable`）。
+    let read_only = runtime.block_on(ssh.session_read_only(session_id))?;
+    docker::mutation_access(read_only)?;
+    let script = docker::files_delete_script(&engine, container_id, &path, recursive)?;
+    audit_action_intent(&ssh.data_dir(), &command);
+    let started = std::time::Instant::now();
+    let response = match runtime.block_on(ssh.exec(
+        session_id,
+        None,
+        &script,
+        false,
+        Some(docker::FILES_DELETE_TIMEOUT.as_secs()),
+    )) {
+        Ok(response) => response,
+        Err(error) => {
+            audit_action_failure(
+                &ssh.data_dir(),
+                &command,
+                &error,
+                started.elapsed().as_millis() as u64,
+            );
+            return Err(error);
+        }
+    };
+    let output = response
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let failure = response
+        .get("exitCode")
+        .and_then(Value::as_i64)
+        .filter(|code| *code != 0)
+        .map(|code| {
+            format!(
+                "docker/files/delete failed (exit {code}): {}",
+                docker::output_snippet(output)
+            )
+        });
+    let result = match failure {
+        Some(error) => Err(error),
+        None => docker::files_delete_payload(output, &path),
+    };
+    if let Err(error) = &result {
+        audit_action_failure(
+            &ssh.data_dir(),
+            &command,
+            error,
+            started.elapsed().as_millis() as u64,
+        );
+    }
+    result
+}
+
 pub fn action(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value, String> {
     let container_id = required_string(params, "containerId")?;
     docker::validate_container_id(container_id)?;

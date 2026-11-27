@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
   DOCKER_FILES_MAX_ENTRIES,
+  DOCKER_FILES_WRITE_MAX_BYTES,
+  confirmDockerMutation,
   decodeBase64Bytes,
   decodeFileText,
+  encodeFileText,
   formatFileSize,
+  initialDockerMutation,
   isHiddenDockerName,
   joinDockerPath,
   normalizeDockerFilePath,
   parentDockerPath,
   parseDockerFileContent,
   parseDockerFilesListing,
+  requestDockerDelete,
+  requestDockerWrite,
+  settleDockerMutation,
   sortFileEntries,
+  utf8ByteLength,
   type DockerFileEntry,
 } from "./dockerFiles";
 
@@ -130,5 +138,92 @@ describe("dockerFiles base64 decoding", () => {
 
   it("decodes UTF-8 multibyte content", () => {
     expect(decodeFileText(decodeBase64Bytes("5L2g5aW9"))).toBe("你好");
+  });
+});
+
+describe("dockerFiles write encoding", () => {
+  it("encodes UTF-8 text and counts decoded bytes", () => {
+    expect(encodeFileText("hello")).toBe("aGVsbG8=");
+    expect(encodeFileText("你好")).toBe("5L2g5aW9");
+    expect(utf8ByteLength("你好")).toBe(6);
+    expect(utf8ByteLength("hello")).toBe(5);
+    expect(DOCKER_FILES_WRITE_MAX_BYTES).toBe(65536);
+  });
+
+  it("round-trips through the preview decoder", () => {
+    const text = "line1\nline2\n";
+    expect(decodeFileText(decodeBase64Bytes(encodeFileText(text)))).toBe(text);
+  });
+});
+
+describe("dockerFiles mutation confirmation state machine", () => {
+  it("writes a new file without asking", () => {
+    const step = requestDockerWrite(initialDockerMutation(), "/tmp/new.txt", false);
+    expect(step.prompt).toBeNull();
+    expect(step.request).toEqual({
+      kind: "write",
+      path: "/tmp/new.txt",
+      overwrite: false,
+      recursive: false,
+    });
+    expect(step.state.busy).toBe(true);
+  });
+
+  it("asks before overwriting an existing file and applies overwrite on confirm", () => {
+    const asked = requestDockerWrite(initialDockerMutation(), "/tmp/old.txt", true);
+    expect(asked.request).toBeNull();
+    expect(asked.prompt?.overwrite).toBe(true);
+    expect(asked.state.pending).toEqual(asked.prompt);
+
+    const confirmed = confirmDockerMutation(asked.state, true);
+    expect(confirmed.request).toEqual({
+      kind: "write",
+      path: "/tmp/old.txt",
+      overwrite: true,
+      recursive: false,
+    });
+    expect(confirmed.state.busy).toBe(true);
+    expect(confirmed.prompt).toBeNull();
+  });
+
+  it("cancels a pending overwrite without executing", () => {
+    const asked = requestDockerWrite(initialDockerMutation(), "/tmp/old.txt", true);
+    const cancelled = confirmDockerMutation(asked.state, false);
+    expect(cancelled.request).toBeNull();
+    expect(cancelled.state).toEqual({ pending: null, busy: false });
+  });
+
+  it("always confirms deletes and keeps the recursive flag", () => {
+    const file = requestDockerDelete(initialDockerMutation(), "/tmp/a.txt", false);
+    expect(file.request).toBeNull();
+    expect(file.prompt).toEqual({
+      kind: "delete",
+      path: "/tmp/a.txt",
+      overwrite: false,
+      recursive: false,
+    });
+    expect(confirmDockerMutation(file.state, true).request?.recursive).toBe(false);
+
+    const folder = requestDockerDelete(initialDockerMutation(), "/tmp/tree", true);
+    expect(folder.prompt?.recursive).toBe(true);
+    expect(confirmDockerMutation(folder.state, true).request).toEqual({
+      kind: "delete",
+      path: "/tmp/tree",
+      overwrite: false,
+      recursive: true,
+    });
+  });
+
+  it("ignores new requests while busy or while a prompt is pending", () => {
+    const busy = requestDockerWrite(initialDockerMutation(), "/tmp/new.txt", false).state;
+    expect(requestDockerWrite(busy, "/tmp/other.txt", false).request).toBeNull();
+    expect(requestDockerDelete(busy, "/tmp/a.txt", false).prompt).toBeNull();
+
+    const pending = requestDockerWrite(initialDockerMutation(), "/tmp/old.txt", true).state;
+    expect(requestDockerDelete(pending, "/tmp/a.txt", false).prompt).toBeNull();
+  });
+
+  it("settles back to idle after an RPC", () => {
+    expect(settleDockerMutation().state).toEqual({ pending: null, busy: false });
   });
 });
