@@ -368,7 +368,7 @@ Docker 侧对应：**帧解码/缺口判定**放 `lib/dockerTerminalFrames.ts`�
 |---|---|---|
 | B1 | 已完成 | `docker.rs` 1,676 → 根 72 + `engine 167 / scripts 224 / parse 259 / local 263 / rpc 328 / tests 672`；命令字面量 109/109 一致；registry 188 |
 | B2 | 已完成 | 新增 `docker/stats.rs` 579（11 个纯函数单测）；`parse` 259→266、`rpc` 328→403、根 72→75、`main.rs` +1 字面量臂；前端 `dockerStats.ts` 224 + spec 186、`useDockerStats.ts` 165、`DockerStatsBar.vue` 78、`mockDockerFixtures.ts` 156；总测试 1,396 |
-| B3 | 已完成 | 新增 `logs_batch.rs` 263 + `logs_stream.rs` 462 + `streams.rs` 287；`rpc` 403→487、根 75→81、`tests.rs` 672→1,112；前端 `dockerLogStream.ts` 90 + spec 98、`useDockerLogStream.ts` 198、`DockerLogsDrawer.vue` 154→327；总测试 1,409；`stop_connection` 已实现但**尚未**接到 `disconnect_connection`（等 B6a 把该函数搬进 `lifecycle.rs` 再接） |
+| B3 | 已完成 | 新增 `logs_batch.rs` 263 + `logs_stream.rs` 462 + `streams.rs` 287；`rpc` 403→487、根 75→81、`tests.rs` 672→1,112；前端 `dockerLogStream.ts` 90 + spec 98、`useDockerLogStream.ts` 198、`DockerLogsDrawer.vue` 154→327；总测试 1,409；`stop_connection` 已接线到 `main.rs` 的 `connection/disconnect` 臂（`SshRuntime` 拿不到 `Plugin` 的注册表，故接线点在分发层而非 `disconnect_connection` 内部） |
 | B4 | 进行中 | — |
 | B5 | 未开始 | — |
 | B6 | 未开始 | — |
