@@ -1042,6 +1042,46 @@ async fn logs_stream_registry_caps_concurrency_at_eight_with_a_readable_error() 
     assert_eq!(registry.active_count(), 0);
 }
 
+/// 自然结束的流不会自己回注册表：达到上限时必须先回收已结束的槽位，
+/// 否则「容器重启 → 流结束」重复 8 次就把面板永久锁死（stop 只在关抽屉时发）。
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_stream_registry_reclaims_finished_slots_at_the_cap() {
+    let registry =
+        StreamRegistry::with_limits_and_grace(StreamLimits::default(), Duration::from_millis(30));
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    for index in 0..MAX_ACTIVE_STREAMS {
+        registry
+            .start(
+                stream_request(&format!("short-{index}"), "printf 'x\\n'"),
+                sink.clone(),
+            )
+            .await
+            .expect("start a short-lived stream");
+    }
+    // 刻意不发 stop：条目留在注册表是既有语义，只能由上限边界的惰性回收处理。
+    let mut started = None;
+    for _ in 0..200 {
+        match registry
+            .start(stream_request("after-cap", "printf 'y\\n'"), sink.clone())
+            .await
+        {
+            Ok(value) => {
+                started = Some(value);
+                break;
+            }
+            Err(error) => {
+                assert!(error.contains("limit reached"), "unexpected error: {error}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    assert!(
+        started.is_some(),
+        "finished slots must be reclaimed instead of permanently exhausting the cap"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn logs_stream_falls_back_to_chunk_events_when_binary_is_unsupported() {

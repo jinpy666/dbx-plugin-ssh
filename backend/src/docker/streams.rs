@@ -74,6 +74,35 @@ struct RegistryState {
     by_connection: HashMap<String, HashSet<String>>,
 }
 
+/// 回收任务已结束的条目（任务自然退出后不会自己回注册表）。
+///
+/// 只在上限边界调用：未到上限时保持「自然结束后条目留到 stop」的既有语义，
+/// 让墓碑仍能拦住迟到的同 id start。`join` 尚未写入的条目视为未结束。
+fn prune_finished(state: &mut RegistryState) {
+    let finished: Vec<String> = state
+        .streams
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .join
+                .lock()
+                .map(|join| join.as_ref().is_some_and(|task| task.is_finished()))
+                .unwrap_or(false)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in finished {
+        if let Some(entry) = state.streams.remove(&id) {
+            if let Some(ids) = state.by_connection.get_mut(&entry.connection_id) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    state.by_connection.remove(&entry.connection_id);
+                }
+            }
+        }
+    }
+}
+
 /// 日志流注册表：进程内状态，随 sidecar 生命周期结束，不持久化。
 pub struct StreamRegistry {
     state: Mutex<RegistryState>,
@@ -163,6 +192,13 @@ impl StreamRegistry {
         }
         if state.streams.contains_key(&stream_id) {
             return Err(format!("docker log stream '{stream_id}' is already active"));
+        }
+        if state.streams.len() >= MAX_ACTIVE_STREAMS {
+            // 自然结束（exited/ttl/error）的任务只发 `end` 就退出，不会自己回到
+            // 注册表；抽屉一直开着时前端通常也不会补一次 stop。只在上限边界惰性
+            // 回收已结束的条目，避免 8 次「容器重启 → 流结束」把上限永久耗尽；
+            // 未到上限时语义不变（条目留到 stop，便于墓碑防迟到 start）。
+            prune_finished(&mut state);
         }
         if state.streams.len() >= MAX_ACTIVE_STREAMS {
             return Err(format!(
