@@ -45,13 +45,13 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 3. **sidecar 也可脱离宿主运行**：`dbx-plugin-ssh --mcp` 以 MCP stdio 模式直接服务
    AI 客户端（`backend/src/mcp.rs`、`app_bridge.rs`、`proxy.rs`），此时没有 webview。
 
-## 2. 后端模块（`backend/src`，82 个 `.rs`，100,165 行）
+## 2. 后端模块（`backend/src`，138 个 `.rs`，103,862 行）
 
 ### 2.1 入口、分发与模型
 
 | 模块（行数） | 职责（一句话） | 关键入口 | 依赖 |
 | --- | --- | --- | --- |
-| `main.rs` (3,636) | RPC 分发、二进制通道路由、事件发射、插件生命周期 | `impl PluginHandler for Plugin`；206 臂 / 209 名方法表；`ssh/terminal/in/{id}` 等二进制前缀 | 几乎所有模块 |
+| `main.rs` (3,392) | RPC 分发、二进制通道路由、事件发射、插件生命周期 | `impl PluginHandler for Plugin`；`mock_host_registry_check.mjs` 校验 193 名方法（含别名）；`ssh/terminal/in/{id}`、`docker/logs/out/{id}` 等二进制前缀 | 几乎所有模块 |
 | `model.rs` (3,429) | 连接/任务参数模型、字段校验与钳制、跳板链解析 | `ConnectionConfig`、`JumpHost`、`clamp_terminal_keepalive` | serde、`keys` |
 | `preferences.rs` (1,651) | 工作台偏好白名单读写（`preferences.json`） | `local/preferences/get` / `local/preferences/set` 的存储面 | `model` |
 | `app_bridge.rs` (403) | 独立 MCP 模式连接 DBX app 的本地 TCP 桥 | `--mcp` 模式客户端 | std::net |
@@ -61,7 +61,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 
 | 模块（行数） | 职责 | 关键入口 | 依赖 |
 | --- | --- | --- | --- |
-| `ssh.rs` (18,457) | SSH 拨号/认证/known_hosts、连接注册表与会话池、PTY I/O 与回放、端口映射、SFTP 与传输引擎 | `SshRuntime::{open_session, attach_session, write_terminal, replay_terminal, resize_terminal, batch_terminal_input, forward_start, forward_stop, sftp_*}` | russh、`keys`、`host_key`、`sftp_raw`、`sftp_ext`、`exec`、`forward`、`transfer_*` |
+| `ssh.rs` (256) + `ssh/` 子树（43 文件，18,415 行） | SSH 拨号/认证/known_hosts、连接注册表与会话池、PTY I/O 与回放、端口映射、SFTP 与传输引擎；根只留 `SshRuntime` 定义、`set_directory_tracking`、模块声明与再导出（见 §2.2.1） | `SshRuntime::{open_session, attach_session, write_terminal, replay_terminal, resize_terminal, batch_terminal_input, forward_start, forward_stop, sftp_*}` | russh、`keys`、`host_key`、`sftp_raw`、`sftp_ext`、`exec`、`forward`、`transfer_*` |
 | `keys.rs` (706) | 本机私钥发现、OpenSSH/PEM/PPK 头校验、口令探测 | `keys/discover` | ssh-key |
 | `host_key.rs` (548) | 主机密钥指纹、known_hosts 判定 | `ssh/host-key/resolve`、`ssh/knownHosts/*` | ssh-key |
 | `ssh_algorithms.rs` | 握手算法集合（现代默认在前，旧算法尾附） | `SshRuntime` 握手配置 | russh |
@@ -92,6 +92,22 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `transfer_schedule.rs` (526) | 传输模型/压缩策略的纯计算（当前 `auto` 恒选 direct） | `decide` | — |
 | `file_watch.rs` (1,344) | 外部编辑器 watcher 与保存回写 | `watch/start\|stop\|stop-all\|upload` | notify |
 | `local_fs.rs` (755)、`local_downloads.rs` (614)、`local_editors.rs` (869) | 本机文件浏览、下载落盘、编辑器发现/打开 | `local/fs/browse\|drives\|exists`、`local/saveFile`、`local/reveal`、`local/open`、`local/editors/list`、`local/open-with` | std::fs |
+
+#### 2.2.1 `ssh/` 子树（43 文件，18,415 行）
+
+生产文件全部在 600 行预算内；例外只有两个「单函数冻结」文件（`open_session.rs` 883、`upload_finish.rs` 661）
+与测试文件（`tests.rs` 4,475、`channel_error_tests.rs` 25），三者在 `structure_tests.rs` 的允许清单里登记。
+纯搬移批次逐符号校验过（函数体/签名/文档注释零改动，只允许 `pub(super)` 最小提升），字面量多重集前后一致。
+
+| 分组 | 文件（行数） |
+| --- | --- |
+| 拨号与认证 | `ssh_client` 415（`SshClient` + handler）、`auth` 578（自动/密码/键盘交互）、`auth_key` 346（私钥文本规范化）、`auth_dial` 248、`probe` 232、`host_key_support` 90、`keepalive` 104 |
+| 会话与终端 | `open_session` 883（单函数）、`lifecycle` 199、`terminal` 412、`terminal_stream` 439、`port_forward` 381、`prompt` 388、`state` 461、`transport` 73、`leases` 75、`endpoint` 65 |
+| 执行、审批与配置 | `exec_methods` 371、`approval` 329、`agent_auth` 193、`sudo_support` 247、`settings` 527 |
+| 上传与传输登记 | `upload` 408、`upload_finish` 661（单函数）、`upload_compress` 229、`upload_meta` 167、`transfer_registry` 498、`transfer_paths` 203 |
+| 下载 | `download_sudo` 186、`download_lzpack` 538、`download_start` 294、`download_prep` 458、`tree_download` 570、`tree_chunk` 320、`download_chunk` 373、`download_complete` 450、`tree_fs` 380 |
+| SFTP 与监控 | `sftp_session` 234、`sftp_ops` 466、`sftp_helpers` 289、`monitor` 135 |
+| 测试 | `tests` 4,475、`channel_error_tests` 25 |
 
 ### 2.4 非 SSH 会话
 
@@ -229,9 +245,9 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 
 | 文件 | 行数 | 当前混合的职责（代码可验证） |
 | --- | --- | --- |
-| `backend/src/ssh.rs` | **18,457** | ① SSH 拨号/认证/主机密钥；② 连接注册表 + 共享 transport 租约 + 会话/回放；③ 终端 I/O、resize、batch input、attach；④ `-L/-R/-D` 端口映射生命周期；⑤ SFTP CRUD 与上传/下载/续传/压缩管线；⑥ metrics/recording/settings 的会话侧接线 |
-| `frontend/src/App.vue` | **12,560** | ① 工作台外壳（工具条、会话菜单、dock、布局持久化）；② xterm 生命周期与输入路由（搜索、zmodem/trzsz、ghost、高亮装饰）；③ SFTP 浏览 + 预览/编辑 + 传输队列/批量栏；④ 各面板（设置/OTP/导入/Docker/会话信息/告警/审计）的挂载与事件分发 |
-| `frontend/src/lib/i18n.ts` | **10,449** | ① 7 个 locale 的全部文案数据（`en`/`es`/`it`/`ja`/`pt-BR`/`zh-CN`/`zh-TW`）；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`） |
+| `backend/src/ssh/open_session.rs`、`ssh/upload_finish.rs` | **883 / 661** | 各是一个不可再拆的单函数：`open_session`（拨号 → 认证挑战 → 会话登记）与 `finish_upload`（续传收尾 → sudo 提交 → 压缩推送）。原先 18,457 行的 `ssh.rs` 已拆成根 256 + 43 个子模块，这两处是拆分后仅存的两个超预算生产文件 |
+| `frontend/src/App.vue` | **12,551** | ① 工作台外壳（工具条、会话菜单、dock、布局持久化）；② xterm 生命周期与输入路由（搜索、zmodem/trzsz、ghost、高亮装饰）；③ SFTP 浏览 + 预览/编辑 + 传输队列/批量栏；④ 各面板（设置/OTP/导入/Docker/会话信息/告警/审计）的挂载与事件分发 |
+| `frontend/src/lib/i18n.ts` | **10,631** | ① 7 个 locale 的全部文案数据（`en`/`es`/`it`/`ja`/`pt-BR`/`zh-CN`/`zh-TW`）；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`） |
 | `backend/src/mcp.rs` | 9,266 | ① MCP stdio 传输与初始化；② 16 个工具的 schema 目录；③ `mcp/call` 分派与工具实现（exec/SFTP/known_hosts）；④ 桥模式与独立模式的差异处理 |
 | `frontend/src/components/SettingsDialog.vue` | 2,876 | 13 个设置分类的全部表单、校验、加载/保存与局部状态机集中在单文件 |
 | `backend/src/exec.rs` | 4,777 | ① 普通远程 exec 与取消；② Quick Sudo 编排（密码注入、提示词应答、保活）；③ 进程列表与终止；④ metrics/docker/completion 复用的执行底座 |
@@ -260,8 +276,10 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 这些偏差直接影响「读文档改代码」的准确性，列出以免踩坑：
 
 1. **分发方法数**：`docs/FEATURE_PARITY.zh-CN.md` 写「184 臂 / 185 名」（2026-09-26
-   收口值）；当前 `backend/src/main.rs` 实测 **206 臂 / 209 名**（3 个臂是别名合并：
-   `vnc/write`、`rdp/write`、`connection/challenge/resolve`）。
+   收口值）；按附录命令实测当前 `backend/src/main.rs` 为 **211 臂 / 214 名**（含
+   `vnc/write`、`rdp/write`、`connection/challenge/resolve` 这类别名合并）；
+   `mock_host_registry_check.mjs` 按「方法名」口径报告 **193** 名（别名归并、且不含
+   只在二进制/事件面出现的前缀），两者口径不同，不要互相换算。
 2. **MCP 工具数**：`README.md` 写「31 个 MCP 工具」；`docs/PROTOCOL.zh-CN.md` 写
    「16 个」并提到「外部精简面 12 个」；当前 manifest `io.dbx.ssh.mcp` 与
    `mcp.rs` 的 `tool_definitions()` 都是 **16 个**，且 16 个都声明了 `access`。
@@ -300,17 +318,17 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 
 ```bash
 $ wc -l backend/src/ssh.rs frontend/src/App.vue frontend/src/lib/i18n.ts
-   18457 backend/src/ssh.rs
-   12560 frontend/src/App.vue
-   10449 frontend/src/lib/i18n.ts
-   41466 total
+     256 backend/src/ssh.rs
+   12551 frontend/src/App.vue
+   10631 frontend/src/lib/i18n.ts
+   33438 total
 
 $ find backend/src -name '*.rs' | xargs wc -l | tail -1
-  100165 total
+  103862 total
 $ find backend/src -name '*.rs' | wc -l
-      82
+     138
 $ find frontend/src -type f | wc -l
-     559
+     574
 
 $ python3 - <<'PY'
 import re
