@@ -37,10 +37,6 @@ const LINE_ALLOWLIST: Record<string, number> = {
   "./lib/completion/fig/figCompletionSource.ts": 742,
   "./composables/useTransferQueue.ts": 654,
   "./components/PreviewPane.vue": 643,
-  // 浏览 + 预览/编辑 + 覆盖/删除确认挤在同一个工作台页签：模板 113、样式 205、
-  // 逻辑 295。确认条已外抽（DockerFilesConfirmBar）；下一刀应把预览编辑器拆成
-  // 子组件，在那之前按允许清单冻结在 613，不再增长。
-  "./components/DockerFilesPane.vue": 613,
   "./composables/useMonitorPanel.ts": 605,
 };
 

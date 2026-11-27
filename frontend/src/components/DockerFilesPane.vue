@@ -3,7 +3,8 @@
 // 删除确认。路径安全、容器 id 门、固定脚本 + 位置参数、只读连接拒绝、64 KiB
 // 写入上限与审计都在 sidecar；这里只做展示层归一、确认状态机与错误呈现。
 import { computed, ref, watch } from "vue";
-import { ArrowUp, File, Folder, Link2, Loader2, RefreshCw, Save, Trash2 } from "@lucide/vue";
+import { ArrowUp, File, Folder, Link2, RefreshCw, Trash2 } from "@lucide/vue";
+import DockerFilePreview from "./DockerFilePreview.vue";
 import DockerFilesConfirmBar from "./DockerFilesConfirmBar.vue";
 import {
   DOCKER_FILES_DEFAULT_MAX_BYTES,
@@ -364,44 +365,21 @@ watch(
         </li>
       </ul>
 
-      <section class="docker-files-preview" :aria-label="props.t('docker.filesPreview')">
-        <p v-if="!selected" class="docker-files-hint">{{ props.t("docker.filesSelectFile") }}</p>
-        <p v-else-if="readLoading" class="docker-files-hint"><Loader2 class="spin" /> {{ props.t("docker.filesLoading") }}</p>
-        <p v-else-if="readError" class="docker-files-error">{{ props.t("docker.filesReadFailed") }} {{ readError }}</p>
-        <template v-else-if="content">
-          <div class="docker-files-preview-head">
-            <strong class="mono">{{ selected.name }}</strong>
-            <span>{{ formatFileSize(content.size) }}</span>
-            <button
-              v-if="canEdit"
-              type="button"
-              class="docker-files-save"
-              :disabled="saving || !draftDirty || draftBytes > DOCKER_FILES_WRITE_MAX_BYTES"
-              @click="saveDraft"
-            >
-              <Save /> {{ props.t("docker.filesSave") }}
-            </button>
-          </div>
-          <p v-if="previewTruncated" class="docker-files-hint">
-            {{ props.t("docker.filesPreviewTruncated", { size: formatFileSize(content.size), limit: formatFileSize(DOCKER_FILES_DEFAULT_MAX_BYTES) }) }}
-          </p>
-          <p v-else-if="!canEdit" class="docker-files-hint">
-            {{ props.t("docker.filesSaveTooLarge", { limit: formatFileSize(DOCKER_FILES_WRITE_MAX_BYTES) }) }}
-          </p>
-          <p v-if="canEdit && draftBytes > DOCKER_FILES_WRITE_MAX_BYTES" class="docker-files-error">
-            {{ props.t("docker.filesSaveTooLarge", { limit: formatFileSize(DOCKER_FILES_WRITE_MAX_BYTES) }) }}
-          </p>
-          <textarea
-            v-if="canEdit"
-            v-model="draft"
-            class="docker-files-editor mono"
-            spellcheck="false"
-            :aria-label="props.t('docker.filesSave')"
-          />
-          <pre v-else-if="previewText !== null" class="docker-files-text mono">{{ previewText }}</pre>
-          <p v-else class="docker-files-hint">{{ props.t("docker.filesBinary") }}</p>
-        </template>
-      </section>
+      <DockerFilePreview
+        v-model:draft="draft"
+        :t="props.t"
+        :entry="selected"
+        :content="content"
+        :loading="readLoading"
+        :error="readError"
+        :can-edit="canEdit"
+        :preview-text="previewText"
+        :preview-truncated="previewTruncated"
+        :dirty="draftDirty"
+        :too-large="draftBytes > DOCKER_FILES_WRITE_MAX_BYTES"
+        :saving="saving"
+        @save="saveDraft"
+      />
     </div>
   </div>
 </template>
@@ -529,63 +507,6 @@ watch(
 .docker-files-size {
   min-width: 4.5rem;
   text-align: right;
-}
-.docker-files-preview {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: auto;
-  padding: 0.5rem;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
-  border-radius: 0.35rem;
-}
-.docker-files-preview-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.5rem;
-  margin-bottom: 0.35rem;
-  font-size: 0.8rem;
-}
-.docker-files-text {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 0.78rem;
-  line-height: 1.4;
-}
-.docker-files-editor {
-  flex: 1;
-  min-height: 12rem;
-  width: 100%;
-  box-sizing: border-box;
-  resize: vertical;
-  padding: 0.35rem;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
-  border-radius: 0.3rem;
-  background: transparent;
-  color: inherit;
-  font-size: 0.78rem;
-  line-height: 1.4;
-}
-.docker-files-save {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.2rem 0.5rem;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
-  border-radius: 0.3rem;
-  background: transparent;
-  color: inherit;
-  font-size: 0.78rem;
-  cursor: pointer;
-}
-.docker-files-save:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.docker-files-save svg {
-  width: 0.9rem;
-  height: 0.9rem;
 }
 .docker-files-hint {
   margin: 0;
