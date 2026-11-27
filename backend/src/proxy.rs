@@ -100,9 +100,9 @@ impl ProxyConfig {
             (None, None) => Ok(None),
             (Some(socks), None) => Self::from_mcp_value(ProxyKind::Socks5, socks).map(Some),
             (None, Some(http)) => Self::from_mcp_value(ProxyKind::HttpConnect, http).map(Some),
-            (Some(_), Some(_)) => Err(
-                "socksProxy and httpProxy are mutually exclusive; pass exactly one".to_string(),
-            ),
+            (Some(_), Some(_)) => {
+                Err("socksProxy and httpProxy are mutually exclusive; pass exactly one".to_string())
+            }
         }
     }
 
@@ -140,11 +140,15 @@ impl ProxyConfig {
                         })
                 }
                 ProxyKind::HttpConnect => {
-                    let mut stream = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
-                        .await
-                        .map_err(|error| {
-                            format!("HTTP proxy {}:{} unreachable: {error}", self.host, self.port)
-                        })?;
+                    let mut stream =
+                        tokio::net::TcpStream::connect((self.host.as_str(), self.port))
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "HTTP proxy {}:{} unreachable: {error}",
+                                    self.host, self.port
+                                )
+                            })?;
                     use tokio::io::AsyncWriteExt;
                     let request = http_connect_request(
                         target_host,
@@ -155,7 +159,10 @@ impl ProxyConfig {
                         .write_all(request.as_bytes())
                         .await
                         .map_err(|error| {
-                            format!("HTTP proxy {}:{} request failed: {error}", self.host, self.port)
+                            format!(
+                                "HTTP proxy {}:{} request failed: {error}",
+                                self.host, self.port
+                            )
                         })?;
                     let response = read_http_response(&mut stream).await?;
                     parse_http_connect_response(&response)?;
@@ -171,9 +178,7 @@ impl ProxyConfig {
 
 /// 读到 HTTP 响应头终结符（`\r\n\r\n`）为止，供 CONNECT 握手解析；
 /// 8 KiB 封顶，防止异常代理把连接当数据泵。
-async fn read_http_response(
-    stream: &mut tokio::net::TcpStream,
-) -> Result<Vec<u8>, String> {
+async fn read_http_response(stream: &mut tokio::net::TcpStream) -> Result<Vec<u8>, String> {
     use tokio::io::AsyncReadExt;
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -187,7 +192,9 @@ async fn read_http_response(
         }
         buffer.extend_from_slice(&chunk[..read]);
         if buffer.len() > 8 * 1024 {
-            return Err("HTTP proxy response exceeds 8 KiB without a header terminator".to_string());
+            return Err(
+                "HTTP proxy response exceeds 8 KiB without a header terminator".to_string(),
+            );
         }
         if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
             return Ok(buffer);
@@ -324,10 +331,9 @@ mod tests {
 
     #[test]
     fn http_connect_response_rejects_failures() {
-        let refused = parse_http_connect_response(
-            b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
-        )
-        .unwrap_err();
+        let refused =
+            parse_http_connect_response(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                .unwrap_err();
         assert!(refused.contains("407"));
         assert!(parse_http_connect_response(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").is_err());
         assert!(parse_http_connect_response(b"not http at all\r\n\r\n").is_err());
