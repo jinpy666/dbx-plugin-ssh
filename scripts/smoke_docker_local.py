@@ -13,7 +13,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 import re
 import struct
 import sys
@@ -128,6 +130,64 @@ def main() -> int:
                     assert entry["size"] == 0, entry
             print(f"docker/files/list target=local ok: {len(entries)} entries, "
                   f"truncated={files['truncated']}")
+
+        # 2c) local container file write/read/delete (B6): round-trip inside the
+        # already running container's /tmp. Nothing is created/started/stopped
+        # at the container level; a distroless container without sh/base64 is
+        # skipped. The delete runs in `finally` so a failed assertion cannot
+        # leave the smoke file behind.
+        smoke_name = f"dbx-smoke-{os.getpid()}.txt"
+        smoke_path = f"/tmp/{smoke_name}"
+        smoke_payload = b"dbx docker files smoke\n"
+        smoke_b64 = base64.b64encode(smoke_payload).decode("ascii")
+        wrote = False
+        try:
+            written = client.request(
+                "docker/files/write",
+                {
+                    "target": "local",
+                    "containerId": running["id"],
+                    "path": smoke_path,
+                    "dataBase64": smoke_b64,
+                },
+                timeout=40,
+            )
+            wrote = True
+            assert written.get("path") == smoke_path, written
+            assert written.get("size") == len(smoke_payload), written
+            assert written.get("overwritten") is False, written
+            read_back = client.request(
+                "docker/files/read",
+                {"target": "local", "containerId": running["id"], "path": smoke_path},
+                timeout=40,
+            )
+            assert read_back.get("path") == smoke_path, read_back
+            decoded = base64.b64decode(read_back.get("dataBase64", ""))
+            assert decoded == smoke_payload, (decoded, smoke_payload)
+            print(f"docker/files/write+read target=local ok: {len(decoded)} bytes round-trip")
+        except Exception as error:  # noqa: BLE001 - capability probe, not a test gate
+            if wrote:
+                raise
+            print(f"docker/files/write skipped (container lacks sh/base64?): {error}")
+        finally:
+            try:
+                deleted = client.request(
+                    "docker/files/delete",
+                    {
+                        "target": "local",
+                        "containerId": running["id"],
+                        "path": smoke_path,
+                        "confirm": True,
+                    },
+                    timeout=40,
+                )
+            except Exception as error:  # noqa: BLE001 - delete is best-effort cleanup
+                print(f"docker/files/delete skipped: {error}")
+            else:
+                if wrote:
+                    assert deleted.get("removed") is True, deleted
+                    assert deleted.get("path") == smoke_path, deleted
+                    print("docker/files/delete target=local ok")
 
         # 3) local action: `start` on a running container is idempotent and
         # state-preserving (no destructive verb in smoke).
