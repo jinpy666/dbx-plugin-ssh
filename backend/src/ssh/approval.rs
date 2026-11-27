@@ -1,5 +1,14 @@
 use super::*;
 
+/// Default wait for an agent approval decision, clamped to the 10-300
+/// seconds band (the same shape as the exec timeout clamps).
+const AGENT_APPROVAL_DEFAULT_SECS: u64 = 120;
+const AGENT_APPROVAL_MIN_SECS: u64 = 10;
+const AGENT_APPROVAL_MAX_SECS: u64 = 300;
+/// Fixed wait for the MCP confirm permission gate (IMPL_PLAN §1.3: 120s,
+/// clamped 10–300 by design for any future configurability).
+const MCP_CONFIRM_TIMEOUT_SECS: u64 = 120;
+
 impl SshRuntime {
     /// Pure builder for the MCP confirm challenge payload (IMPL_PLAN §1.3):
     /// the shared `ssh/agent/prompt` event with `kind: "mcp-confirm"` and

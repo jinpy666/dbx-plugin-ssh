@@ -47,14 +47,6 @@ const LINE_ALLOWLIST: &[(&str, usize)] = &[
     ("rdp/session.rs", 1024),
     ("x11.rs", 1024),
     ("sudo_profiles.rs", 968),
-    ("ssh.rs", 955),
-    // 纯搬移的结果，总量未增、只是换了位置：
-    //   B1：内联测试 → ssh/tests.rs（4,470）
-    //   B2a：SFTP/monitor 助手 → ssh/{sftp_session,sftp_ops,sftp_helpers,monitor}.rs
-    //   B3：传输原语与共享状态 → ssh/{prompt,transport,leases,state,endpoint}.rs
-    // 条目随每批搬移收紧（18,457 → 13,929 → 12,829 → 11,787），阻止 ssh.rs 再长回去；
-    // ssh/tests.rs 是测试文件，按测试预算（1,200）登记。
-    ("ssh/tests.rs", 4475),
     ("ssh/open_session.rs", 883),
     ("audit_log.rs", 869),
     ("local_editors.rs", 869),
@@ -64,6 +56,14 @@ const LINE_ALLOWLIST: &[(&str, usize)] = &[
     ("transfer_compress.rs", 832),
     ("alert_triage.rs", 801),
     ("session_recording.rs", 794),
+    ("ssh.rs", 756),
+    // 纯搬移的结果，总量未增、只是换了位置：
+    //   B1：内联测试 → ssh/tests.rs（4,470）
+    //   B2a：SFTP/monitor 助手 → ssh/{sftp_session,sftp_ops,sftp_helpers,monitor}.rs
+    //   B3：传输原语与共享状态 → ssh/{prompt,transport,leases,state,endpoint}.rs
+    // 条目随每批搬移收紧（18,457 → 13,929 → 12,829 → 11,787），阻止 ssh.rs 再长回去；
+    // ssh/tests.rs 是测试文件，按测试预算（1,200）登记。
+    ("ssh/tests.rs", 4475),
     ("local_fs.rs", 755),
     ("sftp_copy.rs", 716),
     ("keys.rs", 706),
