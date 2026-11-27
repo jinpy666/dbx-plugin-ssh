@@ -154,3 +154,96 @@ export function mockDockerStatsPayload(
   });
   return { available: true, needsSudo: false, sampledAt, stats };
 }
+
+// —— B4 容器文件（只读 list/read）—————————————————————————
+
+const FILES_TREE: Record<string, Array<{ name: string; kind: "file" | "dir" | "link" | "other"; size: number }>> = {
+  "/": [
+    { name: "etc", kind: "dir", size: 0 },
+    { name: "var", kind: "dir", size: 0 },
+    { name: "home", kind: "dir", size: 0 },
+    { name: "tmp", kind: "dir", size: 0 },
+    { name: "app.log", kind: "file", size: 24_576 },
+    { name: "current", kind: "link", size: 0 },
+    { name: ".dockerenv", kind: "file", size: 0 },
+  ],
+  "/etc": [
+    { name: "nginx", kind: "dir", size: 0 },
+    { name: "hostname", kind: "file", size: 12 },
+    { name: "os-release", kind: "file", size: 384 },
+  ],
+  "/etc/nginx": [{ name: "nginx.conf", kind: "file", size: 1_482 }],
+  "/var": [
+    { name: "log", kind: "dir", size: 0 },
+    { name: "lib", kind: "dir", size: 0 },
+  ],
+  "/var/log": [
+    { name: "nginx", kind: "dir", size: 0 },
+    { name: "messages", kind: "file", size: 92_132 },
+  ],
+  "/home": [{ name: "user", kind: "dir", size: 0 }],
+  "/home/user": [
+    { name: "server.js", kind: "file", size: 2_048 },
+    { name: ".env", kind: "file", size: 64 },
+  ],
+};
+
+function normalizeFilesPath(raw: unknown): string {
+  const value = String(raw ?? "").trim();
+  if (!value || !value.startsWith("/")) {
+    throw new Error(`Invalid path '${value}': expected an absolute container path`);
+  }
+  if (/[\u0000-\u001f\u007f]/.test(value) || value.includes("..") || value.startsWith("//")) {
+    throw new Error(`Invalid path '${value}': rejected by the path gate`);
+  }
+  return value.length > 1 ? value.replace(/\/+$/, "") || "/" : value;
+}
+
+function requireFileContainer(params: Record<string, unknown>): string {
+  const containerId = String(params.containerId ?? "");
+  if (!CONTAINER_ID_RE.test(containerId)) {
+    throw new Error(`Invalid containerId '${containerId}': expected 12-64 lowercase hex characters`);
+  }
+  return containerId;
+}
+
+/** `docker/files/list` 的 mock 响应（最多 500 条，size 仅普通文件）。 */
+export function mockDockerFilesListing(params: Record<string, unknown>): Record<string, unknown> {
+  requireFileContainer(params);
+  const path = normalizeFilesPath(params.path);
+  const showHidden = params.showHidden === true;
+  const entries = (FILES_TREE[path] ?? [])
+    .filter((entry) => showHidden || !entry.name.startsWith("."))
+    .map((entry) => ({
+      name: entry.name,
+      path: path === "/" ? `/${entry.name}` : `${path}/${entry.name}`,
+      kind: entry.kind,
+      size: entry.kind === "file" ? entry.size : 0,
+    }));
+  return { path, entries, truncated: false };
+}
+
+const SAMPLE_FILE_TEXT = "hello from the container fixture\n";
+
+/** `docker/files/read` 的 mock 响应；路径不存在时像 sidecar 一样报错。 */
+export function mockDockerFileRead(params: Record<string, unknown>): Record<string, unknown> {
+  requireFileContainer(params);
+  const path = normalizeFilesPath(params.path);
+  const parent = path.slice(0, path.lastIndexOf("/")) || "/";
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const entry = (FILES_TREE[parent] ?? []).find((item) => item.name === name);
+  if (!entry || entry.kind !== "file") {
+    throw new Error("docker/files/read: not a regular file");
+  }
+  const maxBytes = Number(params.maxBytes ?? 1024 * 1024);
+  const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.min(maxBytes, 8 * 1024 * 1024) : 1024 * 1024;
+  const bytes = new TextEncoder().encode(SAMPLE_FILE_TEXT);
+  const shown = bytes.slice(0, Math.min(bytes.length, limit));
+  const base64 = typeof btoa === "function" ? btoa(String.fromCharCode(...shown)) : "";
+  return {
+    path,
+    dataBase64: base64,
+    size: bytes.length,
+    truncated: bytes.length > shown.length,
+  };
+}

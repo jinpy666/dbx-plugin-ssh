@@ -12,6 +12,7 @@ import { computed, onMounted, onScopeDispose, onUnmounted, ref, watch } from "vu
 import {
   Check,
   ChevronDown,
+  FolderOpen,
   Loader2,
   Play,
   RefreshCw,
@@ -28,6 +29,7 @@ import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import DockerLogsDrawer from "./DockerLogsDrawer.vue";
 import DockerStatsBar from "./DockerStatsBar.vue";
+import DockerWorkbench from "./DockerWorkbench.vue";
 import { useDockerStats } from "../composables/useDockerStats";
 import { normalizeBatchTargets } from "../lib/batchSend";
 import {
@@ -416,6 +418,16 @@ function menuOpenLogs(container: DockerContainer): void {
   openLogs(container);
 }
 
+// —— 容器文件工作台（B4 只读：list/read）——————————————
+const filesOpen = ref(false);
+const filesTarget = ref<DockerContainer | null>(null);
+
+function menuOpenFiles(container: DockerContainer): void {
+  rowMenu.close();
+  filesTarget.value = container;
+  filesOpen.value = true;
+}
+
 function menuOpenInTerminal(container: DockerContainer): void {
   rowMenu.close();
   openInTerminal(container);
@@ -650,6 +662,9 @@ const running = (container: DockerContainer): boolean => container.state === "ru
                   <button type="button" class="docker-row-menu-item" @click="menuOpenLogs(container)">
                     <ScrollText />{{ props.t("docker.actionLogs") }}
                   </button>
+                  <button type="button" class="docker-row-menu-item" @click="menuOpenFiles(container)">
+                    <FolderOpen />{{ props.t("docker.actionFiles") }}
+                  </button>
                   <button v-if="mode === 'ssh'" type="button" class="docker-row-menu-item" @click="menuOpenInTerminal(container)">
                     <Terminal />{{ props.t("docker.actionTerminal") }}
                   </button>
@@ -685,6 +700,8 @@ const running = (container: DockerContainer): boolean => container.state === "ru
         </div>
       </DialogContent>
     </Dialog>
+    <!-- 容器文件工作台（B4，只读） -->
+    <DockerWorkbench v-model:open="filesOpen" :t="props.t" :target="filesTarget" :params="dockerParams" />
     <!-- Logs 抽屉（B1 外抽，状态仍在本组件） -->
     <DockerLogsDrawer
       :t="props.t"

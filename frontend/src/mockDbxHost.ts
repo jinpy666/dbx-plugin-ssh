@@ -4,7 +4,7 @@ const appearanceListeners = new Set<(appearance: DbxPluginAppearance) => void>()
 const contextListeners = new Set<(context: Record<string, unknown>) => void>();
 
 import { pluginStore } from "./lib/pluginStore";
-import { mockDockerStatsPayload } from "./mockDockerFixtures";
+import { mockDockerFileRead, mockDockerFilesListing, mockDockerStatsPayload } from "./mockDockerFixtures";
 
 const fixtureParams = new URLSearchParams(location.search);
 // ?render=dom 强制关闭终端 WebGL 加速（pluginStore 偏好，见 lib/pluginStore.ts）：
@@ -1080,6 +1080,13 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   // B2 容器指标：形状与降级叙事镜像 sidecar；夹具在 mockDockerFixtures.ts。
   else if (method === "docker/stats") {
     result = mockDockerStatsPayload((params || {}) as Record<string, unknown>, fixtureParams.get("docker"));
+  }
+  // B4 容器文件（只读）：夹具在 mockDockerFixtures.ts，形状镜像 sidecar。
+  else if (method === "docker/files/list") {
+    result = mockDockerFilesListing((params || {}) as Record<string, unknown>);
+  }
+  else if (method === "docker/files/read") {
+    result = mockDockerFileRead((params || {}) as Record<string, unknown>);
   }
   else if (method === "sftp/createDirectory" || method === "sudo/mkdir") result = mockWriteEntry(String((params as Record<string, unknown>)?.path || ""), mockDir(String((params as Record<string, unknown>)?.path || "/").split("/").pop() || "folder"));
   else if (method === "sftp/touch") result = mockWriteEntry(String((params as Record<string, unknown>)?.path || ""), mockFile(String((params as Record<string, unknown>)?.path || "").split("/").pop() || "file.txt", 0));

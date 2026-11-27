@@ -23,6 +23,9 @@ use std::time::Duration;
 use serde_json::Value;
 
 mod engine;
+mod files;
+#[cfg(test)]
+mod files_tests;
 mod local;
 mod logs_batch;
 mod logs_stream;
@@ -35,6 +38,7 @@ pub mod streams;
 mod tests;
 
 pub use engine::*;
+pub use files::*;
 pub use local::*;
 pub use logs_batch::*;
 pub use logs_stream::*;
