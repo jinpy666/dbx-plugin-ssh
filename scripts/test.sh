@@ -34,6 +34,9 @@ node scripts/connection-forms/verify.mjs
 # 方法注册四路比对（backend 分派 ↔ mock 桩 ↔ 前端 invoke ↔ PROTOCOL 文档）：
 # 分派臂/桩/调用点三方不一致是硬门禁，文档滞后 report-only。
 node scripts/mock_host_registry_check.mjs
+# 结构白名单与文件树一致性：只读文件树，秒级失败。放在编译前，避免白名单
+# 过期要等整条链路（前端安装 + 后端编译）跑完才由 structure 测试报出来。
+node scripts/refresh_structure_allowlist.mjs --check
 # 单测密闭：宿主桥端口读 DBX_APP_DATA_DIR/mcp-bridge-port，未设时回落真实
 # app 数据目录——开发机上 DBX 运行中会让 read_only 稳定性等用例读到真实连接
 # （首次命中/二次抖动即漂移），甚至经 ensure_app_bridge 的 open -a 兜底拉起
