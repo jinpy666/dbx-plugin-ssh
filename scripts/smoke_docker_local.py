@@ -19,6 +19,7 @@ import os
 import re
 import struct
 import sys
+import time
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from sidecar_client import SidecarClient  # noqa: E402
@@ -221,12 +222,20 @@ def main() -> int:
             assert started.get("streamId") == stream_id, started
             assert started.get("binaryInput") is True, started
             try:
-                # Any benign request drains pending framed output.
-                client.request("docker/list", {"target": "local"}, timeout=30)
-                frames = [
-                    frame for frame in client.binary_frames
-                    if frame[0] == f"docker/logs/out/{stream_id}"
-                ]
+                # 子进程是异步的：start 返回后立刻数帧会把正常运行中的流误判成
+                # 「安静容器」（`docker logs -f` 还没吐出第一行）。给一个 2s 窗口，
+                # 期间用无害请求反复泵管道。
+                deadline = time.monotonic() + 2.0
+                frames: list = []
+                while True:
+                    client.request("docker/list", {"target": "local"}, timeout=30)
+                    frames = [
+                        frame for frame in client.binary_frames
+                        if frame[0] == f"docker/logs/out/{stream_id}"
+                    ]
+                    if frames or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.2)
             finally:
                 stopped = client.request(
                     "docker/logs/stream/stop", {"streamId": stream_id}, timeout=30
@@ -239,7 +248,12 @@ def main() -> int:
             if frames:
                 assert len(frames[0][1]) >= 9, frames[0]
                 assert frames[0][1][0] in (0, 1, 2), frames[0][1][:9]
-                print(f"docker/logs/stream ok: start → {len(frames)} frame(s) → stop")
+                # 帧头 9 字节（1B 流标签 + 8B 序号），其后是原始日志字节。
+                body = b"".join(payload[9:] for _, payload in frames)
+                print(
+                    f"docker/logs/stream ok: start → {len(frames)} frame(s), "
+                    f"{len(body)} bytes → stop"
+                )
             else:
                 print("docker/logs/stream shape ok: start → no frames (quiet container) → stop")
 
