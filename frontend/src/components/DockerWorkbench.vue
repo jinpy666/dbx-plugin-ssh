@@ -1,25 +1,39 @@
 <script setup lang="ts">
-// Docker 容器工作台（B4）：Tabs 壳，先只挂「文件」页；容器终端/指标后续批次
-// 在同一壳内追加，不改变面板入口。文件页只读（list/read）。
+// Docker 容器工作台（B4 文件页 + B5 终端页）：同一 Dialog 壳内两个 tab。
+// 入口不新增：DockerPanel 的「在终端打开」与文件菜单都打开这里。
+import { ref, watch } from "vue";
 import { X } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import DockerFilesPane from "./DockerFilesPane.vue";
+import DockerTerminalPane from "./DockerTerminalPane.vue";
 
 interface WorkbenchTarget {
   id: string;
   name?: string;
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   t: (key: string, values?: Record<string, string | number>) => string;
   open: boolean;
   target: WorkbenchTarget | null;
   params: () => Record<string, unknown>;
-}>();
+  initialTab?: "files" | "terminal";
+}>(), { initialTab: "files" });
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
 }>();
+
+const tab = ref<"files" | "terminal">(props.initialTab);
+
+watch(
+  () => [props.open, props.initialTab, props.target?.id],
+  () => {
+    if (!props.open) return;
+    tab.value = props.initialTab;
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -34,12 +48,34 @@ const emit = defineEmits<{
         </button>
       </div>
       <div class="docker-workbench-tabs" role="tablist">
-        <button type="button" class="docker-workbench-tab" role="tab" aria-selected="true">
+        <button
+          type="button"
+          class="docker-workbench-tab"
+          role="tab"
+          :aria-selected="tab === 'files'"
+          @click="tab = 'files'"
+        >
           {{ props.t("docker.filesTabFiles") }}
+        </button>
+        <button
+          type="button"
+          class="docker-workbench-tab"
+          role="tab"
+          :aria-selected="tab === 'terminal'"
+          @click="tab = 'terminal'"
+        >
+          {{ props.t("docker.terminalTabTerminal") }}
         </button>
       </div>
       <div v-if="props.target" class="docker-workbench-body">
-        <DockerFilesPane :t="props.t" :target="props.target" :params="props.params" />
+        <DockerFilesPane v-if="tab === 'files'" :t="props.t" :target="props.target" :params="props.params" />
+        <DockerTerminalPane
+          v-else
+          :t="props.t"
+          :target="props.target"
+          :params="props.params"
+          :active="props.open && tab === 'terminal'"
+        />
       </div>
     </DialogContent>
   </Dialog>
