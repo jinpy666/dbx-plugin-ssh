@@ -285,14 +285,27 @@ SOCKS5 CONNECT（BIND/UDP ASSOCIATE 拒绝）；本地监听通配 `*` 被拒绝
 
 ### Docker 面板
 
-- 容器列表（名称/镜像/状态/端口）、日志查看、启动/停止/重启/终止/删除。
+- 容器列表（名称/镜像/状态/端口）、一次性日志、启动/停止/重启/终止/删除。
+- **实时指标**：`docker/stats` 一次批量采样 CPU/内存/网络/块设备/PID（1–50 个容器），
+  只读；速率由 sidecar 用同一采样键做差分（窗口 <250ms 记 0），旧 payload 缺速率时
+  前端用上一帧自算。CLI 缺失或 daemon 不可达时返回 `available:false`，不报错。
+- **日志跟随**：抽屉内 `docker logs -f`，走二进制帧（stdout/stderr 分流），
+  64 KiB / 100 ms 任一到达即 flush，回压时阻塞读循环、不丢行；单 sidecar 最多 8 条，
+  30 分钟或 20 MiB 先到者自动停并回收子进程；桥接不支持二进制时降级为 16 KiB JSON chunk。
+- **容器文件**：工作台「文件」页签浏览目录（最多 500 条，NUL 分隔 + 文件名 base64）与
+  预览文件（缺省 1 MiB，上限 8 MiB）。只读操作，权限等同 `docker exec`，不做 chroot 语义。
+- **容器终端**：工作台「终端」页签直接 `docker exec -it` 起 PTY；输入带 8 字节序号、
+  2 MiB 回放环形、resize 钳 2..500 / 2..300。只读连接直接拒绝；需要提权时**绝不**把
+  sudo 密码注入 PTY（无预热时间戳报错，有预热只用 `sudo -n`）；打开前写审计意图行。
 - 引擎可选 docker 或 podman，可配 CLI 名、unix socket 或 TCP 端点；支持本机与
   远端两种目标。
 - 动作走固定白名单 + 容器 id 校验，执行前写审计；远端只读连接直接拒绝；
   需要提权时复用 Quick Sudo 管线，密码不进命令行。
 
 **限制**：不调用 Docker daemon API，只驱动目标机上的 CLI；目标机没有 docker/podman
-时面板不可用；Windows 主机走 cmd 回退采集，字段可能少于 Linux。
+时面板不可用；Windows 主机走 cmd 回退采集，字段可能少于 Linux。文件面要求容器内有
+POSIX `sh`、`base64`、`wc`、`head`、`tr`（distroless 容器不可用）；文件写上限 64 KiB；
+日志流与容器终端各最多 8 条并发。
 
 ### 会话录制
 
