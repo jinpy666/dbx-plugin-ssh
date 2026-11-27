@@ -690,7 +690,7 @@ const SETTINGS_CATEGORIES = [
   { id: "hotkeys", labelKey: "settingsNav.hotkeys" },
   { id: "sudo", labelKey: "settingsNav.sudo" },
   { id: "agent", labelKey: "agentTerminalSection" },
-  { id: "transfer", labelKey: "downloadSettings.title" },
+  { id: "transfer", labelKey: "settingsNav.transfer" },
   { id: "security", labelKey: "settingsNav.security" },
   { id: "mcp", labelKey: "mcpLimits.title" },
 ] as const;
@@ -2166,6 +2166,24 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </label>
             <p class="muted settings-note">{{ t("downloadSettings.conflictHint") }}</p>
             <p class="muted settings-note">{{ t("downloadSettings.hint") }}</p>
+            <!-- 上传设置（issue #337 第 2 条）：上传相关项独立成组，不再混在
+                 「下载设置」标题下；上传并发 + 远端同名策略搬出编辑器组之后。 -->
+            <h3 class="settings-section-title">{{ t("uploadSettings.title") }}</h3>
+            <label class="settings-field">
+              <span>{{ t("transferCfg.concurrency") }}</span>
+              <input v-model="transferConcurrencyDraft" type="number" min="1" max="10" step="1" @change="transferConcurrencyDraft = String(Math.min(10, Math.max(1, Number.parseInt(transferConcurrencyDraft, 10) || 3)))" />
+            </label>
+            <p class="muted settings-note">{{ t("transferCfg.concurrencyHint") }}</p>
+            <label class="settings-field">
+              <span>{{ t("transferCfg.duplicatePolicy") }}</span>
+              <Select :model-value="transferDuplicateDraft" @update:model-value="(v) => (transferDuplicateDraft = String(v) as TransferDuplicatePolicy)">
+                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="policy in TRANSFER_DUPLICATE_POLICIES" :key="policy" :value="policy">{{ t(`transferCfg.policy.${policy}`) }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </label>
+            <p class="muted settings-note">{{ t("transferCfg.duplicatePolicyHint") }}</p>
             <h3 class="settings-section-title">{{ t("fileBrowse.title") }}</h3>
             <label v-for="action in SFTP_DOUBLE_CLICK_ACTIONS" :key="action" class="settings-field settings-radio-row">
               <input v-model="sftpDoubleClickDraft" type="radio" name="sftp-double-click-action" :value="action" />
@@ -2219,22 +2237,6 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
               <span class="muted mono truncate">{{ editor.command }}</span>
               <button type="button" class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="removeCustomEditor(editor.id)"><Trash2 /></button>
             </div>
-            <h3 class="settings-section-title">{{ t("transferCfg.title") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.concurrency") }}</span>
-              <input v-model="transferConcurrencyDraft" type="number" min="1" max="10" step="1" @change="transferConcurrencyDraft = String(Math.min(10, Math.max(1, Number.parseInt(transferConcurrencyDraft, 10) || 3)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.concurrencyHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.duplicatePolicy") }}</span>
-              <Select :model-value="transferDuplicateDraft" @update:model-value="(v) => (transferDuplicateDraft = String(v) as TransferDuplicatePolicy)">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="policy in TRANSFER_DUPLICATE_POLICIES" :key="policy" :value="policy">{{ t(`transferCfg.policy.${policy}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.duplicatePolicyHint") }}</p>
             <h3 class="settings-section-title">{{ t("transferCfg.pipelineTitle") }}</h3>
             <label class="settings-field">
               <span>{{ t("transferCfg.maxActive") }}</span>
@@ -2721,6 +2723,7 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             <h3 class="settings-section-title">{{ t("terminalHotkeys.sectionTitle") }}</h3>
             <p class="muted settings-note">{{ t("terminalHotkeys.hint") }}</p>
             <TerminalHotkeyEditor :bindings="terminalHotkeys" :apple-platform="applePlatform" :t="t" @update="updateHotkeys" />
+            <p class="muted settings-note">{{ t("settingsHotkeys.sftpNote") }}</p>
             </div>
 
           <div v-show="settingsCategory === 'security'" class="settings-pane">

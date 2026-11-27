@@ -334,7 +334,7 @@ import { fileIcon, fileIconClass } from "./lib/fileIcons";
 import {
   folderUploadPercent,
 } from "./lib/folderUpload";
-import { decideFileRowAction } from "./lib/fileRowKeydown";
+import { decideFileRowAction, decideSftpPaneAction } from "./lib/fileRowKeydown";
 import { createCrossSurfaceStorageReader, subscribeStorageEvents } from "./lib/appearanceSync";
 import { attachWebglRenderer, loadWebglEnabled, persistWebglEnabled, syncWebglRenderer, type WebglRecoveryOptions, type WebglRendererLike } from "./lib/terminalWebgl";
 import {
@@ -7667,6 +7667,22 @@ function onFileRowKeydown(event: KeyboardEvent, entry: SftpEntry) {
   else deleteTarget.value = entry;
 }
 
+// #337-3：SFTP 面板级快捷键——行级 F2/Delete 只在行持有焦点时生效，这里补齐
+// 面板空白/工具栏按钮焦点下的常用键。输入控件（路径栏/搜索/重命名框）内不
+// 接管：那些场景的 Delete/F2 是文本编辑；行级处理器对已接管按键
+// stopPropagation，冒泡不会到这里重复触发。
+function onSftpPaneKeydown(event: KeyboardEvent) {
+  const target = event.target;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
+  if (target instanceof HTMLElement && (target.isContentEditable || target.closest("[contenteditable='true']"))) return;
+  const action = decideSftpPaneAction(event.key, canWrite.value, selectedEntries.value.length);
+  if (!action) return;
+  event.preventDefault();
+  if (action === "rename") beginRename(selectedEntries.value[0]!);
+  else if (action === "delete-single") deleteTarget.value = selectedEntries.value[0]!;
+  else batchDeleteOpen.value = true;
+}
+
 
 
 // 外部编辑回传：watch 确认状态机/上传串行链收口在 composables/useExternalEdits。
@@ -10957,7 +10973,7 @@ function flagHintsSource(command: string): string {
         @keydown="onDividerKeydown($event, nudgeSplitDivider)"
       />
 
-      <section v-if="sftpPaneOpen && !isRdpConnection && !localUiMode" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave="onSftpDragLeave" @drop.prevent="onDrop">
+      <section v-if="sftpPaneOpen && !isRdpConnection && !localUiMode" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @keydown="onSftpPaneKeydown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave="onSftpDragLeave" @drop.prevent="onDrop">
         <div class="path-toolbar">
           <button class="icon-button" :title="t('parentFolder')" :aria-label="t('parentFolder')" :disabled="currentPath === '/'" @click="goParent"><ArrowUp /></button>
           <button class="icon-button icon-amber" :title="t('home')" :aria-label="t('home')" :disabled="!connected" @click="loadHome"><Home /></button>
