@@ -45,13 +45,13 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 3. **sidecar 也可脱离宿主运行**：`dbx-plugin-ssh --mcp` 以 MCP stdio 模式直接服务
    AI 客户端（`backend/src/mcp.rs`、`app_bridge.rs`、`proxy.rs`），此时没有 webview。
 
-## 2. 后端模块（`backend/src`，138 个 `.rs`，103,862 行）
+## 2. 后端模块（`backend/src`，144 个 `.rs`，106,432 行）
 
 ### 2.1 入口、分发与模型
 
 | 模块（行数） | 职责（一句话） | 关键入口 | 依赖 |
 | --- | --- | --- | --- |
-| `main.rs` (3,392) | RPC 分发、二进制通道路由、事件发射、插件生命周期 | `impl PluginHandler for Plugin`；`mock_host_registry_check.mjs` 校验 193 名方法（含别名）；`ssh/terminal/in/{id}`、`docker/logs/out/{id}` 等二进制前缀 | 几乎所有模块 |
+| `main.rs` (3,404) | RPC 分发、二进制通道路由、事件发射、插件生命周期 | `impl PluginHandler for Plugin`；`mock_host_registry_check.mjs` 校验 199 名方法（含别名）；`ssh/terminal/in/{id}`、`docker/logs/out/{id}` 等二进制前缀 | 几乎所有模块 |
 | `model.rs` (3,429) | 连接/任务参数模型、字段校验与钳制、跳板链解析 | `ConnectionConfig`、`JumpHost`、`clamp_terminal_keepalive` | serde、`keys` |
 | `preferences.rs` (1,651) | 工作台偏好白名单读写（`preferences.json`） | `local/preferences/get` / `local/preferences/set` 的存储面 | `model` |
 | `app_bridge.rs` (403) | 独立 MCP 模式连接 DBX app 的本地 TCP 桥 | `--mcp` 模式客户端 | std::net |
@@ -129,7 +129,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `metrics.rs` (1,476) | 一次性服务器指标（Linux `/proc` + macOS sysctl 回退） | `ssh/metrics` | `exec.rs` |
 | `metrics_gpu.rs` (836) | NVIDIA GPU / Ascend NPU 概览，并入 `ssh/metrics` | `ssh/metrics` 的 `gpu`/`npu` 键 | 远端 CLI |
 | `metrics_history.rs` | 指标趋势 JSONL | `ssh/metrics/history` | 文件存储 |
-| `docker/` 模块树（root 85；engine 167 / scripts 224 / parse 266 / local 263 / stats 579 / files 472 + files_tests 304 / log 流：logs_batch 268 + logs_stream 443 + streams 287 / rpc 570 / tests 1,112） | Docker/Podman 面板（CLI + `sh -s`/cmd 脚本，动作白名单；stats 为只读批量采样，脚本体常量 + id 位置参数；files/list、files/read 为只读容器文件面，路径经 §5.3 校验后只作 argv；日志流为 `logs -f` + 64 KiB/100 ms 聚合 + TTL/墓碑/子进程回收）；`rpc.rs` 承接原 `main.rs` 的分派臂实现，`main.rs` 只留字面量臂（`mock_host_registry_check.mjs` 只扫 `main.rs`） | `docker/list`、`docker/logs`、`docker/action`、`docker/stats`、`docker/files/list`、`docker/files/read`、`docker/logs/stream/start`、`docker/logs/stream/stop` | `exec.rs`、`audit_log`、`model.rs`（TerminalFrame） |
+| `docker/` 模块树（root 94；engine 167 / scripts 224 / parse 266 / local 263 / rpc 881 / stats 579 / logs_batch 263 + logs_stream 462 + streams 326 / files 472 + files_write 485 / terminal 308 + terminal_io 396 + terminal_registry 390 / tests 1,112 + files_tests 307 + files_write_tests 411 + terminal_tests 224） | Docker/Podman 面板（CLI + `sh -s`/cmd 脚本，动作白名单；stats 只读批量采样；files 只读浏览/预览与原子写/删除；日志流 `logs -f` + 64 KiB/100 ms 聚合 + TTL/墓碑/子进程回收；容器终端 `exec -it` PTY，密码永不进 PTY）；脚本体恒为常量、id/路径只作位置参数；`rpc.rs` 承接原 `main.rs` 的分派臂实现，`main.rs` 只留字面量臂（`mock_host_registry_check.mjs` 只扫 `main.rs`） | `docker/list`、`docker/logs`、`docker/action`、`docker/stats`、`docker/logs/stream/start\|stop`、`docker/files/list\|read\|write\|delete`、`docker/terminal/open\|close\|resize\|replay` | `exec.rs`、`audit_log`、`model.rs`（TerminalFrame） |
 | `audit_log.rs` (869) | 追加式执行审计 `audit-log.jsonl` | `ssh/audit/list`、`ssh/audit/clear` | 文件存储 |
 | `alert_triage.rs` (801) | 告警归一化 + 关键词分类 + 只读诊断命令（无 LLM） | `ssh/alert/triage` | `metrics` 脚本 |
 | `session_recording.rs` (794) | 会话输出录制为 asciicast v2 `.cast` | `ssh/recording/start\|stop\|list\|get\|delete\|clear\|search\|reveal`；`local/recording/*` | 文件存储 |
@@ -246,8 +246,8 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | 文件 | 行数 | 当前混合的职责（代码可验证） |
 | --- | --- | --- |
 | `backend/src/ssh/open_session.rs`、`ssh/upload_finish.rs` | **883 / 661** | 各是一个不可再拆的单函数：`open_session`（拨号 → 认证挑战 → 会话登记）与 `finish_upload`（续传收尾 → sudo 提交 → 压缩推送）。原先 18,457 行的 `ssh.rs` 已拆成根 256 + 43 个子模块，这两处是拆分后仅存的两个超预算生产文件 |
-| `frontend/src/App.vue` | **12,551** | ① 工作台外壳（工具条、会话菜单、dock、布局持久化）；② xterm 生命周期与输入路由（搜索、zmodem/trzsz、ghost、高亮装饰）；③ SFTP 浏览 + 预览/编辑 + 传输队列/批量栏；④ 各面板（设置/OTP/导入/Docker/会话信息/告警/审计）的挂载与事件分发 |
-| `frontend/src/lib/i18n.ts` | **10,631** | ① 7 个 locale 的全部文案数据（`en`/`es`/`it`/`ja`/`pt-BR`/`zh-CN`/`zh-TW`）；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`） |
+| `frontend/src/App.vue` | **12,543** | ① 工作台外壳（工具条、会话菜单、dock、布局持久化）；② xterm 生命周期与输入路由（搜索、zmodem/trzsz、ghost、高亮装饰）；③ SFTP 浏览 + 预览/编辑 + 传输队列/批量栏；④ 各面板（设置/OTP/导入/Docker/会话信息/告警/审计）的挂载与事件分发 |
+| `frontend/src/lib/i18n.ts` | **10,764** | ① 7 个 locale 的全部文案数据（`en`/`es`/`it`/`ja`/`pt-BR`/`zh-CN`/`zh-TW`）；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`） |
 | `backend/src/mcp.rs` | 9,266 | ① MCP stdio 传输与初始化；② 16 个工具的 schema 目录；③ `mcp/call` 分派与工具实现（exec/SFTP/known_hosts）；④ 桥模式与独立模式的差异处理 |
 | `frontend/src/components/SettingsDialog.vue` | 2,876 | 13 个设置分类的全部表单、校验、加载/保存与局部状态机集中在单文件 |
 | `backend/src/exec.rs` | 4,777 | ① 普通远程 exec 与取消；② Quick Sudo 编排（密码注入、提示词应答、保活）；③ 进程列表与终止；④ metrics/docker/completion 复用的执行底座 |
@@ -319,16 +319,16 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 ```bash
 $ wc -l backend/src/ssh.rs frontend/src/App.vue frontend/src/lib/i18n.ts
      256 backend/src/ssh.rs
-   12551 frontend/src/App.vue
-   10631 frontend/src/lib/i18n.ts
-   33438 total
+   12543 frontend/src/App.vue
+   10764 frontend/src/lib/i18n.ts
+   33563 total
 
 $ find backend/src -name '*.rs' | xargs wc -l | tail -1
-  103862 total
+  106432 total
 $ find backend/src -name '*.rs' | wc -l
-     138
+     144
 $ find frontend/src -type f | wc -l
-     574
+     579
 
 $ python3 - <<'PY'
 import re
