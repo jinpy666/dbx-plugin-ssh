@@ -396,9 +396,11 @@ describe("SettingsDialog 文件浏览（双击行为）", () => {
 });
 
 describe("SettingsDialog Ctrl+F 发送到远端（issue #332）", () => {
+  // Switch 行内第一个 span 是 SwitchThumb 的内部节点（空文本），不能套用
+  // input 行的 `querySelector("span")` 单 span 取文本，需全量扫描行内 span。
   const ctrlFRow = () =>
     [...document.body.querySelectorAll<HTMLLabelElement>(".settings-field.settings-switch-row")]
-      .find((el) => (el.querySelector("span")?.textContent ?? "").trim() === t("terminalGhost.ctrlFPassthrough"));
+      .find((el) => [...el.querySelectorAll("span")].some((s) => (s.textContent ?? "").trim() === t("terminalGhost.ctrlFPassthrough")));
 
   it("回显 prop 并在切换时上抛 update:ctrlFPassthrough", async () => {
     installInvoke(null);
