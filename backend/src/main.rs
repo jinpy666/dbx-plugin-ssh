@@ -565,6 +565,10 @@ impl Plugin {
                 self.ssh.drop_local_target(connection_id);
                 self.runtime
                     .block_on(self.ssh.disconnect_connection(connection_id))?;
+                // 该连接下的容器日志流随连接一起回收（注册表按 connectionId
+                // 建索引）；不接线的话只能等 30 分钟 / 20 MiB 的 TTL 兜底。
+                self.runtime
+                    .block_on(self.docker_streams.stop_connection(connection_id));
                 self.runtime
                     .block_on(self.telnet.close_connection(connection_id));
                 self.runtime

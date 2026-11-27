@@ -290,7 +290,6 @@ impl StreamRegistry {
     }
 
     /// 连接级批量回收（§5.6 的统一清理点）：返回停止的流数量。
-    #[allow(dead_code)]
     pub async fn stop_connection(&self, connection_id: &str) -> usize {
         let ids: Vec<String> = {
             let state = self.lock_state();
