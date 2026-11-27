@@ -568,3 +568,127 @@ pub fn logs_stream_stop(
     let stream_id = required_string(params, "streamId")?;
     runtime.block_on(registry.stop(stream_id))
 }
+
+/// `docker/terminal/open`（B5）：只读连接拒绝；`needsSudo` 无预热拒绝；
+/// 审计意图行先落账；返回后输出走 `docker/terminal/out/{id}`。
+///
+/// `needsSudo` 由前端把 `docker/list` 的只读探针结果带过来（不是授权依据，
+/// 只是省一次往返的提示）；真正的授权判定仍在 sidecar：只读门 + sudo 预热
+/// 注册表 + 固定脚本/位置参数。
+pub fn terminal_open(
+    ssh: &SshRuntime,
+    runtime: &Runtime,
+    emitter: &PluginEmitter,
+    params: &Value,
+) -> Result<Value, String> {
+    let engine = docker::parse_engine(params)?;
+    let target = docker::parse_target(params)?;
+    let container_id = required_string(params, "containerId")?.to_string();
+    docker::validate_container_id(&container_id)?;
+    let shell = docker::TerminalShell::parse(params.get("shell").and_then(Value::as_str))?;
+    let cols = params.get("cols").and_then(Value::as_u64);
+    let rows = params.get("rows").and_then(Value::as_u64);
+    let (cols, rows) = docker::clamp_terminal_size(cols, rows);
+    let requested_terminal_id = params
+        .get("requestedTerminalId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let after_sequence = optional_u64(params, "afterSequence", 0);
+    let needs_sudo = params
+        .get("needsSudo")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (connection_id, source) = match target {
+        docker::DockerTarget::Local => {
+            // 本机没有「只读连接」语义，但也不注入 sudo 密码：容器 CLI 权限
+            // 不足时直接给出可读提示（用户可自行把账号加入 docker 组）。
+            docker::terminal_access(false, needs_sudo, false)?;
+            let program = docker::find_local_cli(&engine.cli).ok_or_else(|| {
+                format!(
+                    "Container CLI '{}' was not found on this machine",
+                    engine.cli
+                )
+            })?;
+            (
+                "local".to_string(),
+                docker::TerminalSource::Local {
+                    program,
+                    args: docker::terminal_local_args(&container_id, shell),
+                    endpoint: engine.endpoint.clone(),
+                },
+            )
+        }
+        docker::DockerTarget::Ssh => {
+            let session_id = required_string(params, "sessionId")?;
+            // 只读连接直接拒绝（容器终端可写容器内文件、可改状态）。
+            runtime.block_on(ssh.ensure_writable(session_id))?;
+            let connection_id = runtime
+                .block_on(ssh.connection_id_for_session(session_id))
+                .ok_or("SSH session was not found or expired")?;
+            let warm = ssh.has_warm_sudo(&connection_id);
+            let plan = docker::terminal_access(false, needs_sudo, warm)?;
+            let handle = runtime
+                .block_on(ssh.live_handle_for_connection(&connection_id))
+                .ok_or_else(|| format!("no live SSH session for connection '{connection_id}'"))?;
+            let command = docker::terminal_ssh_command(
+                &engine,
+                &container_id,
+                shell,
+                plan == docker::SudoPlan::NonInteractive,
+            );
+            (
+                connection_id,
+                docker::TerminalSource::Ssh { handle, command },
+            )
+        }
+    };
+
+    // 授权/引擎校验通过后、真正建 PTY 前写审计意图行；命令文本不含键入字节。
+    audit_action_intent(
+        &ssh.data_dir(),
+        &docker::terminal_audit_command(&engine, &container_id, shell),
+    );
+    let sink: Arc<dyn docker::StreamSink> = Arc::new(emitter.clone());
+    runtime.block_on(docker::TerminalRegistry::global().open(
+        docker::TerminalOpenRequest {
+            connection_id,
+            container_id,
+            shell,
+            cols,
+            rows,
+            requested_terminal_id,
+            after_sequence,
+            source,
+        },
+        sink,
+    ))
+}
+
+/// `docker/terminal/close`：幂等；先 `end` 再拆，未知 id 返回 success。
+pub fn terminal_close(
+    runtime: &Runtime,
+    emitter: &PluginEmitter,
+    params: &Value,
+) -> Result<Value, String> {
+    let terminal_id = required_string(params, "terminalId")?;
+    let sink: Arc<dyn docker::StreamSink> = Arc::new(emitter.clone());
+    runtime.block_on(docker::TerminalRegistry::global().close(terminal_id, sink.as_ref()))
+}
+
+/// `docker/terminal/resize`：会话内 resize（cols/rows 同 open 钳制）。
+pub fn terminal_resize(runtime: &Runtime, params: &Value) -> Result<Value, String> {
+    let terminal_id = required_string(params, "terminalId")?;
+    let cols = params.get("cols").and_then(Value::as_u64);
+    let rows = params.get("rows").and_then(Value::as_u64);
+    let (cols, rows) = docker::clamp_terminal_size(cols, rows);
+    runtime.block_on(docker::TerminalRegistry::global().resize(terminal_id, cols, rows))?;
+    Ok(json!({ "success": true }))
+}
+
+/// `docker/terminal/replay`：与 `serial/replay` 同构，帧直接补发到输出通道。
+pub fn terminal_replay(emitter: &PluginEmitter, params: &Value) -> Result<Value, String> {
+    let terminal_id = required_string(params, "terminalId")?;
+    let after_sequence = optional_u64(params, "afterSequence", 0);
+    let sink: Arc<dyn docker::StreamSink> = Arc::new(emitter.clone());
+    docker::TerminalRegistry::global().replay(terminal_id, after_sequence, sink.as_ref())
+}

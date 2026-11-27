@@ -376,7 +376,10 @@ impl SshRuntime {
 
     pub(crate) async fn ensure_writable(&self, session_id: &str) -> Result<(), String> {
         if self.session(session_id).await?.read_only {
-            Err("SFTP write operation is disabled by the read-only connection setting".to_string())
+            Err(
+                "Write/terminal operation is disabled by the read-only connection setting"
+                    .to_string(),
+            )
         } else {
             Ok(())
         }

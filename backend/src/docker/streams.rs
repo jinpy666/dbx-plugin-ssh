@@ -302,6 +302,10 @@ impl StreamRegistry {
         for id in &ids {
             let _ = self.stop(id).await;
         }
+        // 同一清理点回收容器终端（B5）：终端注册表是进程级单例。
+        super::terminal::TerminalRegistry::global()
+            .stop_connection(connection_id)
+            .await;
         ids.len()
     }
 

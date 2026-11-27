@@ -1501,6 +1501,12 @@ impl Plugin {
             "docker/logs/stream/stop" => {
                 docker::rpc::logs_stream_stop(&self.runtime, &self.docker_streams, &params)
             }
+            "docker/terminal/open" => {
+                docker::rpc::terminal_open(&self.ssh, &self.runtime, emitter, &params)
+            }
+            "docker/terminal/close" => docker::rpc::terminal_close(&self.runtime, emitter, &params),
+            "docker/terminal/resize" => docker::rpc::terminal_resize(&self.runtime, &params),
+            "docker/terminal/replay" => docker::rpc::terminal_replay(emitter, &params),
             "ssh/processes/list" => {
                 let session_id = required_string(&params, "sessionId")?;
                 self.runtime.block_on(self.ssh.processes_list(session_id))
@@ -2321,6 +2327,10 @@ impl PluginHandler for Plugin {
         data: Vec<u8>,
         emitter: &PluginEmitter,
     ) -> Result<(), PluginError> {
+        if channel.starts_with("docker/terminal/in/") {
+            return docker::terminal::handle_input(channel, &data, emitter)
+                .map_err(to_plugin_error);
+        }
         if let Some(session_id) = channel.strip_prefix("ssh/terminal/in/") {
             TERMINAL_INPUT_FRAMES_RECEIVED.fetch_add(1, Ordering::Relaxed);
             let (sequence, payload) = match decode_sequenced_input(&data) {
@@ -2499,7 +2509,7 @@ impl file_watch::EventPublisher for WatchEventPublisher {
 /// Terminal binary input frames carry an 8-byte BE sequence ahead of the
 /// keystrokes; the sequence is only echoed in the inputAck event for the
 /// workbench's bookkeeping — ordering comes from the SDK's per-channel lane.
-fn decode_sequenced_input(data: &[u8]) -> Result<(u64, Vec<u8>), String> {
+pub(crate) fn decode_sequenced_input(data: &[u8]) -> Result<(u64, Vec<u8>), String> {
     if data.len() < 8 {
         return Err("terminal input is missing its sequence".to_string());
     }
