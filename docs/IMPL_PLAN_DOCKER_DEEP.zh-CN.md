@@ -373,6 +373,8 @@ Docker 侧对应：**帧解码/缺口判定**放 `lib/dockerTerminalFrames.ts`�
 | B5 | 已完成 | 新增 `docker/terminal.rs` 308 + `terminal_registry.rs` 390 + `terminal_io.rs` 396 + `terminal_tests.rs` 224；`rpc.rs` +124、`main.rs` +4 字面量臂 +1 输入前缀分支、`docker/streams.rs` 连接清理点接入终端注册表；`ssh/terminal.rs` 文案中性化 + `ssh/keepalive.rs` `has_warm_sudo` 只读访问器；前端 `dockerTerminalFrames.ts` 107 + spec、`useDockerTerminal.ts` 254 + spec、`DockerTerminalPane.vue` 257、`DockerWorkbench.vue` 终端 tab、`DockerPanel.vue` 改开工作台（删除旧 window 事件）；后端 1,431 测试全绿 |
 | B6 | 已完成 | 新增 `docker/files_write.rs` 485 + `files_write_tests.rs` 411；`rpc.rs` 694→881；原子写（同目录唯一临时名 + `trap` 清理 + `mv -f`）、`overwrite:false` 默认拒绝、递归删除精确拒绝 `/`/`/proc`/`/sys`/`/dev`、本机删除要 `confirm:true`、审计意图行不含文件内容；前端 `dockerFiles.ts` 290、`DockerFilesPane.vue` 613（按允许清单冻结）、`DockerFilesConfirmBar.vue` 72；后端 1,451 测试全绿 |
 
+**实机验证（2026-11-27，本机 docker 29.8.2）**：用一个 `--rm` 的 `alpine:3.22` 临时容器运行 `scripts/smoke_docker_local.py`，逐项通过——`docker/list`（46 容器）、`docker/stats`（采样 1 条）、`docker/logs`（35 字节）、`docker/logs/stream`（1 帧 / 70 字节，帧头流标签 0）、`docker/files/list`（17 条）、`files/write+read`（23 字节往返一致）、`files/delete`、`action start`（幂等）、`docker/terminal`（open → 4 帧含 `ok` → close → `end{reason:"closed"}` 且重复 close 幂等）。验证后容器已 `rm -f`，无残留；`docker ps` 回到 0 个运行中容器。
+
 B3 落地时补的两处实现细节（协议不变）：
 
 1. **聚合必须有**：主通道是二进制帧，不存在 UTF-8 切断，但一次 pipe read 一个事件会让桥接事件率失控；`ChunkBatcher` 64 KiB / 100 ms 任一 flush，单 fragment 不切分，`end` 前 flush 残余（附录 C.1）。
