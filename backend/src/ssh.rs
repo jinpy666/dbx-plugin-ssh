@@ -61,11 +61,13 @@ use crate::transfer_multistream;
 use crate::transfer_throttle::Throttle;
 use crate::triggers;
 
+mod endpoint;
 mod monitor;
 mod sftp_helpers;
 mod sftp_ops;
 mod sftp_session;
 
+use endpoint::*;
 use sftp_helpers::*;
 pub(crate) use sftp_helpers::{
     classify_raw_kind, format_permissions, lookup_owner_group_names, sftp_client_config,
@@ -1888,25 +1890,6 @@ fn cached_metrics_payload(snapshot: &Value, collected_at: u64) -> Value {
     payload
 }
 
-/// Read-only connection display info resolved from the connections registry
-/// for a session row. Empty host/user means the connection is no longer
-/// registered (sidecar restarted after the workbench attached).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectionEndpoint {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-}
-
-impl ConnectionEndpoint {
-    pub fn fallback() -> Self {
-        Self {
-            host: String::new(),
-            port: 22,
-            username: String::new(),
-        }
-    }
-}
 
 /// One row of `ssh/sessions/list`. Pure so tests can exercise the payload
 /// shape without a live SSH connection.
@@ -1966,50 +1949,6 @@ fn compare_history_rows(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-/// Execution transport for the scheduler task provider: either the live
-/// session's shared authenticated handle (borrowed lifetime of the session)
-/// or a dedicated headless dial (owned; disconnected on release).
-pub(crate) enum TaskTransport {
-    Session {
-        handle: Arc<Handle<SshClient>>,
-    },
-    Dedicated {
-        handle: Handle<SshClient>,
-        jumps: Vec<Handle<SshClient>>,
-    },
-}
-
-impl TaskTransport {
-    pub(crate) fn handle(&self) -> &Handle<SshClient> {
-        match self {
-            Self::Session { handle } => handle,
-            Self::Dedicated { handle, .. } => handle,
-        }
-    }
-
-    /// Tears down a dedicated dial (jump chain included). Session-borrowed
-    /// transports are left alone — the workbench owns their lifecycle.
-    pub(crate) async fn release(self) {
-        if let Self::Dedicated { handle, jumps } = self {
-            let _ = handle
-                .disconnect(
-                    Disconnect::ByApplication,
-                    "DBX scheduled task finished",
-                    "English",
-                )
-                .await;
-            for jump in jumps {
-                let _ = jump
-                    .disconnect(
-                        Disconnect::ByApplication,
-                        "DBX scheduled task jump closed",
-                        "English",
-                    )
-                    .await;
-            }
-        }
-    }
-}
 
 pub struct SshRuntime {
     connections: RwLock<HashMap<String, StoredConnection>>,
