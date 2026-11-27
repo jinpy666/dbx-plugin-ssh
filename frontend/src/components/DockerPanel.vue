@@ -25,8 +25,8 @@ import {
 } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
+import DockerLogsDrawer from "./DockerLogsDrawer.vue";
 import { normalizeBatchTargets } from "../lib/batchSend";
 import {
   dockerEngineParams,
@@ -90,7 +90,6 @@ const POLL_MAX_FAILURES = 3;
 const LIST_TIMEOUT_MS = 20_000;
 const LOGS_TIMEOUT_MS = 35_000;
 const ACTION_TIMEOUT_MS = 70_000;
-const TAIL_OPTIONS = ["100", "200", "500", "1000", "2000"] as const;
 
 function dockerListPayload(raw: unknown): { available: boolean; needsSudo: boolean; containers: DockerContainer[] } {
   const record = (raw ?? {}) as Record<string, unknown>;
@@ -676,41 +675,20 @@ const running = (container: DockerContainer): boolean => container.state === "ru
       </DialogContent>
     </Dialog>
 
-    <!-- Logs 抽屉 -->
-    <Dialog :open="logsOpen" @update:open="(open: boolean) => { logsOpen = open; }">
-      <DialogContent class="docker-dialog docker-logs-dialog" @escape-key-down.prevent>
-        <div class="docker-dialog-header">
-          <DialogTitle>
-            {{ logsTarget ? props.t("docker.logsTitle", { name: logsTarget.name || logsTarget.id.slice(0, 12) }) : "" }}
-          </DialogTitle>
-          <button type="button" class="icon-button" :title="props.t('docker.close')" :aria-label="props.t('docker.close')" @click="logsOpen = false"><X /></button>
-        </div>
-        <div class="docker-logs-bar">
-          <label class="docker-tail-label">
-            <span>{{ props.t("docker.logsTail") }}</span>
-            <Select
-              :model-value="logsTail"
-              @update:model-value="(value: unknown) => { logsTail = String(value); void loadLogs(); }"
-            >
-              <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="option in TAIL_OPTIONS" :key="option" :value="option">{{ option }}</SelectItem>
-              </SelectContent>
-            </Select>
-          </label>
-          <button type="button" class="icon-button" :title="props.t('docker.logsRefresh')" :aria-label="props.t('docker.logsRefresh')" @click="loadLogs">
-            <Loader2 v-if="logsBusy" class="spinning" />
-            <RefreshCw v-else />
-          </button>
-        </div>
-        <p v-if="logsError" class="docker-hint docker-hint-error">{{ props.t("docker.logsLoadFailed", { error: logsError }) }}</p>
-        <div v-if="logsMeta" class="docker-logs-meta mono">
-          {{ logsMeta.image }} · {{ logsMeta.status }}<template v-if="logsMeta.health"> · {{ logsMeta.health }}</template>
-        </div>
-        <pre v-if="logsText" class="docker-logs-pre mono">{{ logsText }}</pre>
-        <p v-else-if="!logsBusy && !logsError" class="docker-empty">{{ props.t("docker.logsEmpty") }}</p>
-      </DialogContent>
-    </Dialog>
+    <!-- Logs 抽屉（B1 外抽，状态仍在本组件） -->
+    <DockerLogsDrawer
+      :t="props.t"
+      :open="logsOpen"
+      :target="logsTarget"
+      :text="logsText"
+      :meta="logsMeta"
+      :busy="logsBusy"
+      :error="logsError"
+      :tail="logsTail"
+      @update:open="(open: boolean) => { logsOpen = open; }"
+      @update:tail="(value: string) => { logsTail = value; void loadLogs(); }"
+      @refresh="loadLogs"
+    />
   </div>
 </template>
 
@@ -1047,11 +1025,6 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   max-width: 460px;
 }
 
-.docker-logs-dialog {
-  max-width: 820px;
-  width: min(820px, 90vw);
-}
-
 .docker-dialog-header {
   display: flex;
   align-items: center;
@@ -1092,37 +1065,6 @@ const running = (container: DockerContainer): boolean => container.state === "ru
 .docker-secondary-button:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-.docker-logs-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.docker-tail-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-
-.docker-logs-meta {
-  font-size: 11px;
-  opacity: 0.65;
-}
-
-.docker-logs-pre {
-  margin: 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(128, 128, 128, 0.1);
-  max-height: 50vh;
-  overflow: auto;
-  font-size: 11px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 .spinning {
