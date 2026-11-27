@@ -1476,11 +1476,11 @@ impl Plugin {
                 let connection_id = required_string(&params, "connectionId")?;
                 self.runtime.block_on(self.monitors.details(connection_id))
             }
-            // Docker 管理面板（docker/*）：分派体在 docker/rpc.rs，这里保留
-            // 字面量方法名供 scripts/mock_host_registry_check.mjs 扫描。
+            // Docker 面板（docker/*）分派体在 docker/rpc.rs，字面量名供 mock 注册表脚本扫描。
             "docker/list" => docker::rpc::list(&self.ssh, &self.runtime, &params),
             "docker/logs" => docker::rpc::logs(&self.ssh, &self.runtime, &params),
             "docker/action" => docker::rpc::action(&self.ssh, &self.runtime, &params),
+            "docker/stats" => docker::rpc::stats(&self.ssh, &self.runtime, &params),
             "ssh/processes/list" => {
                 let session_id = required_string(&params, "sessionId")?;
                 self.runtime.block_on(self.ssh.processes_list(session_id))

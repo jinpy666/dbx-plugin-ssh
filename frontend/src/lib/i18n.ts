@@ -51,6 +51,8 @@ export const messages = {
     docker: {
       title: "Docker",
       refresh: "Refresh",
+      statsTitle: "Resource usage",
+      statsUnavailable: "Live stats unavailable",
       pollStopped: "Auto refresh stopped after repeated failures. Press refresh to retry.",
       listFailed: "Could not load the container list.",
       actionFailed: "Action failed: {error}",
@@ -702,6 +704,8 @@ export const messages = {
     docker: {
       title: "Docker",
       refresh: "Actualizar",
+      statsTitle: "Uso de recursos",
+      statsUnavailable: "Métricas en vivo no disponibles",
       pollStopped: "La actualización automática se detuvo tras fallos repetidos. Pulsa actualizar para reintentar.",
       listFailed: "No se pudo cargar la lista de contenedores.",
       actionFailed: "La acción falló: {error}",
@@ -1344,6 +1348,8 @@ export const messages = {
     docker: {
       title: "Docker",
       refresh: "Aggiorna",
+      statsTitle: "Utilizzo risorse",
+      statsUnavailable: "Metriche live non disponibili",
       pollStopped: "Aggiornamento automatico interrotto dopo ripetuti errori. Premi aggiorna per riprovare.",
       listFailed: "Impossibile caricare l'elenco dei contenitori.",
       actionFailed: "Azione non riuscita: {error}",
@@ -1986,6 +1992,8 @@ export const messages = {
     docker: {
       title: "Docker",
       refresh: "更新",
+      statsTitle: "リソース使用量",
+      statsUnavailable: "ライブ統計を取得できません",
       pollStopped: "連続して失敗したため自動更新を停止しました。更新を押して再試行してください。",
       listFailed: "コンテナ一覧を読み込めませんでした。",
       actionFailed: "操作に失敗しました：{error}",
@@ -2628,6 +2636,8 @@ export const messages = {
     docker: {
       title: "Docker",
       refresh: "Atualizar",
+      statsTitle: "Uso de recursos",
+      statsUnavailable: "Estatísticas ao vivo indisponíveis",
       pollStopped: "A atualização automática parou após falhas repetidas. Pressione atualizar para tentar novamente.",
       listFailed: "Não foi possível carregar a lista de contêineres.",
       actionFailed: "A ação falhou: {error}",
@@ -3270,6 +3280,8 @@ export const messages = {
     docker: {
       title: "Docker",
       refresh: "刷新",
+      statsTitle: "资源占用",
+      statsUnavailable: "实时指标不可用",
       pollStopped: "连续失败已停止自动刷新，点刷新重试。",
       listFailed: "容器列表加载失败。",
       actionFailed: "操作失败：{error}",
@@ -3921,6 +3933,8 @@ export const messages = {
     docker: {
       title: "Docker",
       refresh: "重新整理",
+      statsTitle: "資源佔用",
+      statsUnavailable: "即時指標無法使用",
       pollStopped: "連續失敗已停止自動重新整理，點重新整理重試。",
       listFailed: "容器清單載入失敗。",
       actionFailed: "操作失敗：{error}",

@@ -27,6 +27,8 @@ import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import DockerLogsDrawer from "./DockerLogsDrawer.vue";
+import DockerStatsBar from "./DockerStatsBar.vue";
+import { useDockerStats } from "../composables/useDockerStats";
 import { normalizeBatchTargets } from "../lib/batchSend";
 import {
   dockerEngineParams,
@@ -321,6 +323,13 @@ onMounted(() => {
 
 onUnmounted(stopPolling);
 
+// —— B2 容器指标（只读，3s 轮询；页面隐藏即停）——————————————————
+const { snapshot: statsSnapshot, error: statsError } = useDockerStats({
+  params: dockerParams,
+  containerIds: () => containers.value.filter((c) => c.state === "running").map((c) => c.id),
+  enabled: () => available.value === true,
+});
+
 // —— 生命周期动作（kill/rm 先确认）———————————————————————
 const busyContainerId = ref("");
 const actionError = ref("");
@@ -553,6 +562,8 @@ const running = (container: DockerContainer): boolean => container.state === "ru
     <p v-if="actionError" class="docker-hint docker-hint-error" :title="actionError">
       {{ props.t("docker.actionFailed", { error: actionError }) }}
     </p>
+
+    <DockerStatsBar v-if="available === true" :t="props.t" :snapshot="statsSnapshot" :error="statsError" />
 
     <!-- 加载中 -->
     <p v-if="loading && available === null" class="docker-empty"><Loader2 class="spinning" />{{ props.t("docker.loading") }}</p>

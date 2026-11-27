@@ -22,7 +22,7 @@ pub struct ContainerRow {
 /// everything after the start marker is returned). Exact whole-line
 /// equality on both ends; the sentinel names are unusual enough that a
 /// container log echoing them stays a documented corner case.
-fn marker_section<'a>(output: &'a str, start: &str, end: Option<&str>) -> &'a str {
+pub(super) fn marker_section<'a>(output: &'a str, start: &str, end: Option<&str>) -> &'a str {
     let mut cursor = 0usize;
     let mut begin: Option<usize> = None;
     for line in output.split_inclusive('\n') {
@@ -49,10 +49,12 @@ pub struct Probe {
     pub daemon_ok: bool,
 }
 
-/// Parses the `DBXDOCKER_PROBE` section (two self-describing lines).
-pub fn parse_probe(output: &str) -> Probe {
+/// Parses the `DBXDOCKER_PROBE` section (two self-describing lines). The
+/// section ends at the caller's marker: `docker/list` uses `DBXDOCKER_PS`,
+/// `docker/stats` uses `DBXDOCKER_STATS`.
+pub fn parse_probe_before(output: &str, end_marker: &str) -> Probe {
     let mut probe = Probe::default();
-    for line in marker_section(output, "DBXDOCKER_PROBE", Some("DBXDOCKER_PS")).lines() {
+    for line in marker_section(output, "DBXDOCKER_PROBE", Some(end_marker)).lines() {
         match line.trim() {
             "docker-found" => probe.docker_found = true,
             "daemon-ok" => probe.daemon_ok = true,
@@ -60,6 +62,11 @@ pub fn parse_probe(output: &str) -> Probe {
         }
     }
     probe
+}
+
+/// `docker/list`'s probe verdict (section ends at `DBXDOCKER_PS`).
+pub fn parse_probe(output: &str) -> Probe {
+    parse_probe_before(output, "DBXDOCKER_PS")
 }
 
 /// Parses the tab-separated `docker ps` section. Malformed rows (wrong

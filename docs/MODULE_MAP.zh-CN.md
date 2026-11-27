@@ -113,7 +113,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `metrics.rs` (1,476) | 一次性服务器指标（Linux `/proc` + macOS sysctl 回退） | `ssh/metrics` | `exec.rs` |
 | `metrics_gpu.rs` (836) | NVIDIA GPU / Ascend NPU 概览，并入 `ssh/metrics` | `ssh/metrics` 的 `gpu`/`npu` 键 | 远端 CLI |
 | `metrics_history.rs` | 指标趋势 JSONL | `ssh/metrics/history` | 文件存储 |
-| `docker/` 模块树（root 72；engine 167 / scripts 224 / parse 259 / local 263 / rpc 328 / tests 672） | Docker/Podman 面板（CLI + `sh -s`/cmd 脚本，动作白名单）；`rpc.rs` 承接原 `main.rs` 的分派臂实现，`main.rs` 只留字面量臂（`mock_host_registry_check.mjs` 只扫 `main.rs`） | `docker/list`、`docker/logs`、`docker/action` | `exec.rs`、`audit_log` |
+| `docker/` 模块树（root 75；engine 167 / scripts 224 / parse 266 / local 263 / stats 579 / rpc 403 / tests 672） | Docker/Podman 面板（CLI + `sh -s`/cmd 脚本，动作白名单；stats 为只读批量采样，脚本体常量 + id 位置参数）；`rpc.rs` 承接原 `main.rs` 的分派臂实现，`main.rs` 只留字面量臂（`mock_host_registry_check.mjs` 只扫 `main.rs`） | `docker/list`、`docker/logs`、`docker/action`、`docker/stats` | `exec.rs`、`audit_log` |
 | `audit_log.rs` (869) | 追加式执行审计 `audit-log.jsonl` | `ssh/audit/list`、`ssh/audit/clear` | 文件存储 |
 | `alert_triage.rs` (801) | 告警归一化 + 关键词分类 + 只读诊断命令（无 LLM） | `ssh/alert/triage` | `metrics` 脚本 |
 | `session_recording.rs` (794) | 会话输出录制为 asciicast v2 `.cast` | `ssh/recording/start\|stop\|list\|get\|delete\|clear\|search\|reveal`；`local/recording/*` | 文件存储 |
@@ -160,7 +160,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | 组件 | 职责 | 关键行为 |
 | --- | --- | --- |
 | `SettingsDialog.vue` (2,876) | 13 个设置分类：appearance / scheme / terminal / suggestions / highlight / commands / ai / hotkeys / sudo / agent / transfer / security / mcp | 会话级分类（sudo/agent）对本地终端隐藏 |
-| `DockerPanel.vue` (1,079) + `DockerLogsDrawer.vue` (154) + `composables/useDockerOpenInTerminal.ts` (32) | 容器列表、启停/重启/删除、引擎设置（docker/podman、socket/host）；日志抽屉与「在终端打开」已外抽，抽屉只接 props/emits | 也可作为指标面板的 docker tab 内容 |
+| `DockerPanel.vue` (1,090) + `DockerLogsDrawer.vue` (154) + `DockerStatsBar.vue` (78) + `lib/dockerStats.ts` (224) + `composables/useDockerStats.ts` (165) + `composables/useDockerOpenInTerminal.ts` (32) | 容器列表、启停/重启/删除、引擎设置（docker/podman、socket/host）、运行中容器的 CPU/内存/网络/IO/PIDs 指标条（3s 只读轮询，隐藏即停）；日志抽屉与「在终端打开」已外抽，抽屉只接 props/emits | 也可作为指标面板的 docker tab 内容 |
 | `MonitorPanel.vue` (791) | 多主机监控卡片、分组、过滤（all/live/issues）、隐私模式 | 独立工作台；分组依赖宿主 `listConnections` 的 `groupId` |
 | `MetricsPanel.vue` (490) | 单机会话指标：概览/进程/磁盘/网络/docker | 5s 刷新，GPU/NPU 卡片 |
 | `PreviewPane.vue` (643) | SFTP 文件预览与编辑 | 文本 CodeMirror、图片、Office/PDF/媒体走 file-viewer |
@@ -285,7 +285,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | 传输队列/续传/压缩 | `frontend/src/composables/useTransferQueue.ts`、`useUploadChain.ts`、`lib/transferSpeed.ts` | `backend/src/transfer_*.rs`、`lzpack.rs`、`sftp/download/next` 协议 |
 | Quick Sudo / sudo 文件操作 | `backend/src/exec.rs`、`sudo_fs.rs`、`sudo_profiles.rs` | `frontend/src/App.vue` 的 `sudoMode`、`ssh/settings/*`、`triggers.rs` |
 | 端口映射 / 代理 | `backend/src/forward.rs`、`tunnel_menu.rs`、`proxy.rs` | `frontend/src/TunnelManager.vue`、`components/PortForwardDialog.vue`、`lib/portForward.ts` |
-| Docker 面板 | `backend/src/docker/*.rs`（`rpc.rs` 是分派臂实现）→ `frontend/src/components/DockerPanel.vue` + `DockerLogsDrawer.vue` | `lib/dockerEngine.ts`、`lib/dockerActions.ts`、`composables/useDockerOpenInTerminal.ts`、`audit_log` |
+| Docker 面板 | `backend/src/docker/*.rs`（`rpc.rs` 是分派臂实现）→ `frontend/src/components/DockerPanel.vue` + `DockerLogsDrawer.vue` + `DockerStatsBar.vue` | `lib/dockerEngine.ts`、`lib/dockerActions.ts`、`lib/dockerStats.ts`、`composables/useDockerStats.ts`、`composables/useDockerOpenInTerminal.ts`、`audit_log` |
 | 监控 / 指标 | `backend/src/monitor.rs`、`metrics*.rs` → `useMonitorPanel.ts`、`useMetricsPanel.ts` | 宿主 `listConnections` 的 `groupId`（缺失即平铺）、Linux-only 分支 |
 | MCP 工具 | `backend/src/mcp.rs` 的 `tool_definitions()` → `mcp_safety.rs` → manifest `mcp.tools` | 尺寸预算单测、`docs/MCP.zh-CN.md`、`docs/MCP_USAGE.zh-CN.md` |
 | AI 助手/智能体 | `frontend/src/lib/ai*.ts`、`backend/src/agent_terminal.rs` | manifest `host.ai` 权限、`agent_approvals.rs`、宿主 `capabilities.ai` |
