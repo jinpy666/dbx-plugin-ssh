@@ -62,6 +62,7 @@ use crate::transfer_throttle::Throttle;
 use crate::triggers;
 
 mod endpoint;
+mod leases;
 mod monitor;
 mod sftp_helpers;
 mod sftp_ops;
@@ -69,6 +70,7 @@ mod sftp_session;
 mod transport;
 
 use endpoint::*;
+use leases::*;
 use sftp_helpers::*;
 pub use transport::RemoteForwardTable;
 pub(crate) use transport::ReplayBuffer;
@@ -1291,79 +1293,6 @@ impl DirectoryHandshakeFilter {
 }
 
 
-/// Explicit users of one authenticated SSH transport: every registered
-/// session owns one use, and a copied session reserves one before its first
-/// await. That pending reservation closes the open/close race where the last
-/// old session could otherwise tear down a jump chain while the new PTY was
-/// still being created.
-struct TransportLeaseCounter(AtomicUsize);
-
-/// `#[allow(deprecated)]`: the newest stable renamed `fetch_update` to
-/// `try_update` (cosmetic; semantics unchanged). Calling the new name would
-/// hard-break every older rustc (including the 1.88 floor), so keep the old
-/// name until the toolchain floor moves past the renaming release.
-#[allow(deprecated)]
-impl TransportLeaseCounter {
-    fn new() -> Self {
-        Self(AtomicUsize::new(1))
-    }
-
-    fn retain(&self) {
-        self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                value.checked_add(1)
-            })
-            .expect("SSH transport lease count overflow");
-    }
-
-    /// Returns true when the released use was the final one.
-    fn release(&self) -> bool {
-        self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                value.checked_sub(1)
-            })
-            .expect("SSH transport lease released more than once")
-            == 1
-    }
-
-    #[cfg(test)]
-    fn count(&self) -> usize {
-        self.0.load(Ordering::Acquire)
-    }
-}
-
-struct SharedTransportLease {
-    uses: TransportLeaseCounter,
-    jump_chain: Vec<Arc<Handle<SshClient>>>,
-}
-
-impl SharedTransportLease {
-    fn new(jump_chain: Vec<Arc<Handle<SshClient>>>) -> Self {
-        Self {
-            uses: TransportLeaseCounter::new(),
-            jump_chain,
-        }
-    }
-
-    fn retain(&self) {
-        self.uses.retain();
-    }
-
-    async fn release(&self) {
-        if !self.uses.release() {
-            return;
-        }
-        for jump in &self.jump_chain {
-            let _ = jump
-                .disconnect(
-                    Disconnect::ByApplication,
-                    "DBX SSH session closed",
-                    "English",
-                )
-                .await;
-        }
-    }
-}
 
 /// `workbench_id` is kept with the session so attach can only restore the
 /// session that belongs to the same workbench. A different workbench must open
