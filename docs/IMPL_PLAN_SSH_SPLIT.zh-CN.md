@@ -152,12 +152,15 @@ cargo test --locked --manifest-path backend/Cargo.toml -- --list | grep -c ': te
 - 验证：通用验收 + `cargo test` 中 `settings/profiles` 用例；`mcp.rs` 对 `sftp_client_config`/`RawSftpClient` 的 import 不改。
 - 行数：约 1,901；根约 12,028。
 
-#### B2 执行记录（B2a 已落地，B2b 待人审）
+#### B2 执行记录（B2a / B2b 均已落地，B2b 待人审）
 
 B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
 
 - **B2a（已完成）**：`sftp_session` / `sftp_ops` / `monitor` / `sftp_helpers` 四块，`ssh.rs` 13,929 → **12,829**，四个新文件分别 234 / 465 / 135 / 289 行（均 <600）。测试名集合与 `#[test]` 计数（1,384）前后一致，clippy/check/全量测试/结构护栏全绿。
-- **B2b（未做，需人审）**：`settings.rs`（`settings_get/set`、`profiles_*`、`quick_commands_*`、`highlight_rules_*`、`sync_*`、`refresh_bound_sessions`）读写 sudo 密码与 TOTP，按 AGENTS.md 属 secret binding，必须人工评审后单独执行；B2a 已确认这些符号仍全部留在 `ssh.rs`。
+- **B2b（已完成，待人审）**：新建 `ssh/settings.rs` **527 行**，`ssh.rs` 11,787 → **11,264**（删 523 行函数体 + 1 行接缝空行，加 1 行 `mod settings;`）。搬移 16 个符号：`settings_get`、`settings_set`、`profiles_list/reveal/options/save/delete`、`quick_commands_list/save/delete`、`highlight_rules_list/save/delete`、`sync_auto_sudo`、`sync_triggers`、`refresh_bound_sessions`；基线实际区间 `ssh.rs:4184-4706`（文档注释起，至 `refresh_bound_sessions` 收尾 `}`）。纯搬移：函数体/签名/文档注释零改动，逐符号与基线规范化比较（仅归一 `pub(super) ` 前缀）逐字符相同。
+  - 可见性调整（仅 3 处，均最小提升）：`sync_auto_sudo`、`sync_triggers` 私有 `fn` → `pub(super)`（`ssh.rs` 调用点 1126-1127、1461-1462）；`refresh_bound_sessions` 私有 `async fn` → `pub(super) async fn`（模块内 `settings_set`/`profiles_save`/`profiles_delete` 调用）。其余 13 个 `pub` 方法对外可见性完全保持，`main.rs`/`mcp.rs` 调用点零改动。
+  - 验证：`check --all-targets` / `clippy --all-targets -D warnings` / 全量测试 1,384 通过（`--test-threads=1`）/ 测试名集合 diff 为空 / `mock_host_registry_check.mjs` PASS / 结构护栏 `--write` + `--check` 通过 / `fmt --check` 无新增失败（基线 7 处不变，`ssh.rs:2237` 因插入 `mod` 挪到 2238）。
+  - 该文件读写 sudo 密码与 TOTP，按 AGENTS.md 属 **secret binding**，仍需人工评审后方可合并。
 
 与本文原始估计的偏差（后续批次请以符号为准，行号只当锚点）：
 
@@ -166,6 +169,7 @@ B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
 3. **可见性不能照抄计划**：`classify_raw_kind` 原为 `pub(crate)`，写成 `pub use` 会触发 E0364；B2a 改为 `pub(crate) use`，保持原可见性。同理，被父模块/测试模块调用的子模块内部项需提升为 `pub(super)`（`raw_read_chunk_cached`、`cached_metrics_snapshot`、`store_metrics_snapshot`、若干 helper）。
 4. **符号名以代码为准**：计划写的 `cached_metrics_store` 实际是 `store_metrics_snapshot`。
 5. 白名单随每批收紧：`ssh.rs` 由 18,457 → 13,929（B1）→ **12,829**（B2a），用 `scripts/refresh_structure_allowlist.mjs --write` 机械刷新，禁止手写行数。
+6. **B2b 区段与符号清单对不上**：计划的 `ssh.rs:6045-6562`（518 行）不含 `quick_commands_*` / `highlight_rules_*` 两个条目，且估计的起止把相邻条目切成两段。实测 16 个符号是**一段连续代码**（`ssh.rs:4184-4706`，523 行），条目之间没有需要单独搬运的私有 helper，因此整段搬运、未做任何拼接。另：`mod settings;` 受 rustfmt `reorder_modules` 约束，必须排在 `mod sftp_helpers;` 之前（不是按加入顺序放在 `mod sftp_session;` 之后），否则 `cargo fmt --check` 新增失败。
 
 ### B3 传输原语与共享状态（中等偏高，耦合最大）
 

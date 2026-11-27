@@ -23,7 +23,7 @@ const MAX_TEST_LINES: usize = 1_200;
 
 /// 迁移期白名单：相对 `backend/src` 的路径 → 当前允许的行数。
 const LINE_ALLOWLIST: &[(&str, usize)] = &[
-    ("ssh.rs", 11787),
+    ("ssh.rs", 11264),
     // 纯搬移的结果，总量未增、只是换了位置：
     //   B1：内联测试 → ssh/tests.rs（4,470）
     //   B2a：SFTP/monitor 助手 → ssh/{sftp_session,sftp_ops,sftp_helpers,monitor}.rs
