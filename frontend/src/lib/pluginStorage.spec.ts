@@ -60,6 +60,8 @@ describe("ssh pluginStore wiring", () => {
         "ssh-terminal-ghost-suggest",
         // 「Tab 接受建议」开关 + 建议黑名单（ghost/suggestions 批次）。
         "ssh-ghost-tab-accept",
+        // 「Ctrl+F 发送到远端 shell」开关（issue #332，默认关）。
+        "ssh-terminal-ctrl-f-passthrough",
         "ssh-suggestion-blocklist",
         // 历史面板功能开关（issue #169，SettingsDialog 自治读写，默认开）。
         "ssh-history-panel-enabled",

@@ -7,6 +7,9 @@
 //   Tab key behavior）：开启后 Tab 在 ghost 在场且无菜单时接受整段；补全
 //   菜单开着时 Tab 仍归菜单（结构化候选优先）。这是与远端 shell Tab 补全的
 //   显式取舍，默认关闭。
+// - 「Ctrl+F 发送到远端 shell」为可选开关（issue #332，默认关）：开启后
+//   Ctrl+F 不再是整段接受键，也不再打开终端搜索，一律透传远端（readline
+//   forward-char 等）；→ / Ctrl+E 接受与 Ctrl+Shift+F 搜索热键不受影响。
 // 匹配为纯函数供 App 的按键分支调用；开关存 pluginStore。
 
 import { pluginStore } from "./pluginStore";
@@ -29,6 +32,24 @@ export function saveGhostTabAccept(value: boolean) {
   }
 }
 
+const CTRL_F_PASSTHROUGH_STORE = "ssh-terminal-ctrl-f-passthrough";
+
+export function loadCtrlFPassthrough(): boolean {
+  try {
+    return pluginStore.getItem(CTRL_F_PASSTHROUGH_STORE) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveCtrlFPassthrough(value: boolean) {
+  try {
+    pluginStore.setItem(CTRL_F_PASSTHROUGH_STORE, value ? "1" : "0");
+  } catch {
+    // 持久化失败不阻断：本次会话内存态仍生效。
+  }
+}
+
 export interface GhostKeyModifiers {
   ctrlKey: boolean;
   metaKey: boolean;
@@ -38,13 +59,15 @@ export interface GhostKeyModifiers {
 
 /** 整段接受命中（纯函数）：裸 →（零修饰）/ Ctrl+F / Ctrl+E（Ctrl 系不含
  *  Shift·Meta·Alt——Cmd 系留给宿主，Shift 组合留给逐词）。仅在有 ghost 时
- *  调用，因此不会抢远端 readline 的同名键。 */
-export function matchesGhostFullAccept(eventKey: string, modifiers: GhostKeyModifiers): boolean {
+ *  调用，因此不会抢远端 readline 的同名键。ctrlFPassthrough 开启时 Ctrl+F
+ *  退出接受键集合（issue #332），只剩 → / Ctrl+E。 */
+export function matchesGhostFullAccept(eventKey: string, modifiers: GhostKeyModifiers, options: { ctrlFPassthrough?: boolean } = {}): boolean {
   const { ctrlKey, metaKey, altKey, shiftKey } = modifiers;
   if (eventKey === "ArrowRight") return !ctrlKey && !metaKey && !altKey && !shiftKey;
   if (ctrlKey && !metaKey && !altKey && !shiftKey) {
     const key = eventKey.toLowerCase();
-    return key === "f" || key === "e";
+    if (key === "f") return !options.ctrlFPassthrough;
+    return key === "e";
   }
   return false;
 }
@@ -63,12 +86,12 @@ export function matchesGhostWordAccept(eventKey: string, modifiers: GhostKeyModi
 // 与 resolveTerminalInputRoute 同判）→ 一律放行不打断协议协商；alternate
 // 屏（vim 的 Ctrl+F 是向前翻页、less/tmux copy-mode 同理，#108 反馈三）
 // → 放行远端，本地搜索交给可配置热键（默认 Ctrl+Shift+F）全场景兜底；
-// 其余 → 打开终端搜索。裸 → 与 Ctrl+E 不参与本判定（始终是接受键，行为
-// 不变）。
+// 其余 → 打开终端搜索。用户开启「Ctrl+F 发送到远端 shell」（issue #332）
+// 时一律放行远端。裸 → 与 Ctrl+E 不参与本判定（始终是接受键，行为不变）。
 
 export type CtrlFRoute = "ghost-accept" | "search" | "passthrough";
 
-export function resolveCtrlFRoute(options: { ghostVisible: boolean; transferBusy: boolean; alternateActive?: boolean }): CtrlFRoute {
-  if (options.transferBusy || options.alternateActive) return "passthrough";
+export function resolveCtrlFRoute(options: { ghostVisible: boolean; transferBusy: boolean; alternateActive?: boolean; ctrlFPassthrough?: boolean }): CtrlFRoute {
+  if (options.ctrlFPassthrough || options.transferBusy || options.alternateActive) return "passthrough";
   return options.ghostVisible ? "ghost-accept" : "search";
 }
