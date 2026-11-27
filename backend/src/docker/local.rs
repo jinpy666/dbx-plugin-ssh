@@ -94,7 +94,7 @@ pub fn find_local_cli(cli: &str) -> Option<std::path::PathBuf> {
 /// by `timeout`. Exit code -1 covers signal deaths like the remote parse path.
 /// A configured endpoint rides the engine's own env var (`DOCKER_HOST` /
 /// `CONTAINER_HOST`) on the spawned process — never argv, never a shell.
-async fn run_local(
+pub(super) async fn run_local(
     cli: &Path,
     args: &[&str],
     timeout: Duration,

@@ -14,6 +14,7 @@
 //! B1 拆分（纯搬移，无行为/协议变化）：`engine`（CLI 与 daemon 端点解析）·
 //! `scripts`（远端采集/动作脚本文本、id 门、动作白名单）· `parse`
 //! （marker/probe/ps/inspect/logs 纯解析）· `local`（本机 CLI 直连）·
+//! `stats`（`docker stats` 只读指标：单位/百分比/速率差分纯函数 + 采集）·
 //! `rpc`（从 `main.rs` 搬来的分派体）· `tests`。对外路径 `crate::docker::X`
 //! 保持不变。
 
@@ -26,6 +27,7 @@ mod local;
 mod parse;
 pub mod rpc;
 mod scripts;
+mod stats;
 #[cfg(test)]
 mod tests;
 
@@ -33,6 +35,7 @@ pub use engine::*;
 pub use local::*;
 pub use parse::*;
 pub use scripts::*;
+pub use stats::*;
 /// Wait cap for the container list collector (one `docker ps` round-trip).
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Wait cap for `docker logs --tail N`; tailing is bounded by `--tail`.

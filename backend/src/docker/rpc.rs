@@ -180,6 +180,81 @@ pub fn logs(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value
     Ok(docker::logs_payload(&output))
 }
 
+/// `docker/stats`（B2，只读）：一次 `stats --no-stream` 批量采样。
+/// 容器 id 先逐项过门（`parse_container_ids`），远端命令是常量脚本体 +
+/// 位置参数；daemon 权限失败时与 `docker/list` 同形回落 Quick Sudo，
+/// 提权失败/白名单拒绝都退回原 payload（保留 `needsSudo` 提示）。
+/// 速率差分在返回前统一应用一次，避免重试路径把缓存写两遍。
+pub fn stats(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value, String> {
+    let engine = docker::parse_engine(params)?;
+    let target = docker::parse_target(params)?;
+    let container_ids = docker::parse_container_ids(params)?;
+    let session_id = if target == docker::DockerTarget::Local {
+        None
+    } else {
+        Some(required_string(params, "sessionId")?)
+    };
+    let cache_key = docker::stats_cache_key(target, &engine, session_id);
+    let mut payload = match session_id {
+        None => runtime.block_on(docker::collect_stats_local(&engine, &container_ids))?,
+        Some(session_id) => remote_stats(ssh, runtime, &engine, &container_ids, session_id)?,
+    };
+    docker::apply_payload_rates(&cache_key, &mut payload);
+    Ok(payload)
+}
+
+fn remote_stats(
+    ssh: &SshRuntime,
+    runtime: &Runtime,
+    engine: &docker::EngineConfig,
+    container_ids: &[String],
+    session_id: &str,
+) -> Result<Value, String> {
+    let script = docker::stats_script(engine, container_ids)?;
+    let response = runtime.block_on(ssh.exec(
+        session_id,
+        None,
+        &script,
+        false,
+        Some(docker::STATS_TIMEOUT.as_secs()),
+    ))?;
+    let output = response
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let payload = docker::stats_payload(&output);
+    if payload["needsSudo"] != true {
+        return Ok(payload);
+    }
+    // 与 list 同一回落：脚本体走 argv（密码只走 stdin），id 仍作
+    // 位置参数；只读连接/白名单拒绝/提权失败都保留原 payload。
+    let body = docker::stats_body(engine);
+    let Ok(sudo_body) = runtime.block_on(ssh.ensure_sudo_allowed(session_id, &body)) else {
+        return Ok(payload);
+    };
+    let Ok(sudo_script) = docker::stats_script_for_body(&sudo_body, container_ids) else {
+        return Ok(payload);
+    };
+    if let Ok(sudo_response) = runtime.block_on(ssh.exec(
+        session_id,
+        None,
+        &sudo_script,
+        true,
+        Some(docker::STATS_TIMEOUT.as_secs()),
+    )) {
+        let sudo_output = sudo_response
+            .get("output")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let sudo_payload = docker::stats_payload(sudo_output);
+        if sudo_payload["available"] == true {
+            return Ok(sudo_payload);
+        }
+    }
+    Ok(payload)
+}
+
 pub fn action(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value, String> {
     let container_id = required_string(params, "containerId")?;
     docker::validate_container_id(container_id)?;

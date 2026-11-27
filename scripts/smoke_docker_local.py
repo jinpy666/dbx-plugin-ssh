@@ -2,9 +2,9 @@
 """Workbench-plane smoke for the docker family `target:"local"` plane.
 
 Drives the sidecar over the stdio-framed protocol (sidecar_client.py) and
-exercises the local-daemon path end to end: list → logs → idempotent start
-action → input validation. Offline-safe: a box without docker still passes
-the shape assertions (list degrades to available:false).
+exercises the local-daemon path end to end: list → stats → logs → idempotent
+start action → input validation. Offline-safe: a box without docker still passes
+the shape assertions (list/stats degrade to available:false).
 
 Usage:
     python3 scripts/smoke_docker_local.py [--binary path/to/dbx-plugin-ssh]
@@ -55,6 +55,34 @@ def main() -> int:
             running = next((c for c in rows if c.get("state") == "running"), None)
             print(f"row shape ok ({len(rows)} rows)")
 
+        # 1b) local stats (B2, read-only): always shape-asserted. A box without
+        # a docker daemon returns available:false with the same document. Prefer
+        # a running container; otherwise sample an existing stopped one (docker
+        # reports zeros for explicitly named stopped containers on newer CLIs) —
+        # never create/start/stop anything.
+        probe = running or (listed["containers"][0] if listed["containers"] else None)
+        probe_id = probe["id"] if probe else "0" * 12
+        stats = client.request(
+            "docker/stats",
+            {"target": "local", "containerIds": [probe_id]},
+            timeout=45,
+        )
+        assert isinstance(stats.get("available"), bool), stats
+        assert isinstance(stats.get("needsSudo"), bool), stats
+        assert isinstance(stats.get("sampledAt"), int), stats
+        assert isinstance(stats.get("stats"), list), stats
+        if stats["available"] and stats["stats"]:
+            sample = stats["stats"][0]
+            for key in ("containerId", "name", "cpuPercent", "memBytes", "memLimitBytes",
+                        "memPercent", "netRxBytes", "netTxBytes", "netRxRate",
+                        "netTxRate", "blockReadBytes", "blockWriteBytes", "pids"):
+                assert key in sample, f"missing stats field {key}: {sample}"
+            print(f"docker/stats target=local ok: {len(stats['stats'])} sample(s), "
+                  f"cpu={sample['cpuPercent']}%, mem={sample['memBytes']}B")
+        else:
+            print(f"docker/stats target=local shape ok: available={stats['available']}, "
+                  f"needsSudo={stats['needsSudo']}")
+
         if running is None:
             print("no reachable local daemon — skipping logs/action (shape-only pass)")
             return 0
@@ -86,6 +114,8 @@ def main() -> int:
         for method, params, expect in (
             ("docker/list", {"target": "bogus"}, "Unsupported docker target"),
             ("docker/action", {"target": "local", "containerId": "web-nginx", "action": "stop"},
+             "Invalid containerId"),
+            ("docker/stats", {"target": "local", "containerIds": ["web-nginx"]},
              "Invalid containerId"),
         ):
             try:
