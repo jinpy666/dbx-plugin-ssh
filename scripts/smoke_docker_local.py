@@ -99,6 +99,34 @@ def main() -> int:
         print(f"docker/logs target=local ok: {len(logs['logs'])} bytes from "
               f"{(logs.get('container') or {}).get('name', running['name'])}")
 
+        # 2b) local container files (B4, read-only): list "/" and assert the
+        # documented shape. Distroless containers without sh/base64 are skipped
+        # rather than treated as a regression; nothing is created or modified.
+        try:
+            files = client.request(
+                "docker/files/list",
+                {"target": "local", "containerId": running["id"], "path": "/"},
+                timeout=40,
+            )
+        except Exception as error:  # noqa: BLE001 - capability probe, not a test gate
+            print(f"docker/files/list skipped (container lacks sh/base64?): {error}")
+        else:
+            assert files.get("path") == "/", files
+            entries = files.get("entries")
+            assert isinstance(entries, list), files
+            assert len(entries) <= 500, files
+            assert isinstance(files.get("truncated"), bool), files
+            for entry in entries:
+                for key in ("name", "path", "kind", "size"):
+                    assert key in entry, f"missing files field {key}: {entry}"
+                assert entry["path"].startswith("/"), entry
+                assert entry["kind"] in ("file", "dir", "link", "other"), entry
+                assert isinstance(entry["size"], int) and entry["size"] >= 0, entry
+                if entry["kind"] != "file":
+                    assert entry["size"] == 0, entry
+            print(f"docker/files/list target=local ok: {len(entries)} entries, "
+                  f"truncated={files['truncated']}")
+
         # 3) local action: `start` on a running container is idempotent and
         # state-preserving (no destructive verb in smoke).
         action = client.request(

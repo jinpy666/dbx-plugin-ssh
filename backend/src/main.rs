@@ -1485,6 +1485,8 @@ impl Plugin {
             "docker/logs" => docker::rpc::logs(&self.ssh, &self.runtime, &params),
             "docker/action" => docker::rpc::action(&self.ssh, &self.runtime, &params),
             "docker/stats" => docker::rpc::stats(&self.ssh, &self.runtime, &params),
+            "docker/files/list" => docker::rpc::files_list(&self.ssh, &self.runtime, &params),
+            "docker/files/read" => docker::rpc::files_read(&self.ssh, &self.runtime, &params),
             "docker/logs/stream/start" => docker::rpc::logs_stream_start(
                 &self.ssh,
                 &self.runtime,

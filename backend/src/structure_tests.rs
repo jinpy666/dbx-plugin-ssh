@@ -35,7 +35,7 @@ const LINE_ALLOWLIST: &[(&str, usize)] = &[
     ("exec.rs", 4777),
     ("connection_import.rs", 4545),
     ("model.rs", 3429),
-    ("main.rs", 3386),
+    ("main.rs", 3388),
     ("local_terminal.rs", 2826),
     ("task_provider.rs", 2709),
     ("triggers.rs", 2229),

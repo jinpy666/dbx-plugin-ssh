@@ -257,6 +257,89 @@ fn remote_stats(
     Ok(payload)
 }
 
+// —— B4 容器文件（只读：list/read）——————————————————————
+
+/// `docker/files/list`：列容器内一个目录（最多 500 条）。只读连接放行。
+pub fn files_list(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value, String> {
+    let engine = docker::parse_engine(params)?;
+    let target = docker::parse_target(params)?;
+    let container_id = required_string(params, "containerId")?;
+    docker::validate_container_id(container_id)?;
+    let path = docker::normalize_container_path(required_string(params, "path")?)?;
+    let show_hidden = docker::parse_show_hidden(params);
+    if target == docker::DockerTarget::Local {
+        return runtime.block_on(docker::collect_files_list_local(
+            &engine,
+            container_id,
+            &path,
+            show_hidden,
+        ));
+    }
+    let session_id = required_string(params, "sessionId")?;
+    let script = docker::files_list_script(&engine, container_id, &path, show_hidden)?;
+    let response = runtime.block_on(ssh.exec(
+        session_id,
+        None,
+        &script,
+        false,
+        Some(docker::FILES_LIST_TIMEOUT.as_secs()),
+    ))?;
+    let output = response
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(code) = response.get("exitCode").and_then(Value::as_i64) {
+        if code != 0 {
+            return Err(format!(
+                "docker/files/list failed (exit {code}): {}",
+                docker::output_snippet(output)
+            ));
+        }
+    }
+    docker::files_list_payload(output, &path)
+}
+
+/// `docker/files/read`：读容器内一个普通文件（缺省 1 MiB，上限 8 MiB）。
+/// 只读连接放行；不写文件，也不引入 sudo 提权面。
+pub fn files_read(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value, String> {
+    let engine = docker::parse_engine(params)?;
+    let target = docker::parse_target(params)?;
+    let container_id = required_string(params, "containerId")?;
+    docker::validate_container_id(container_id)?;
+    let path = docker::normalize_container_path(required_string(params, "path")?)?;
+    let max_bytes = docker::parse_max_bytes(params)?;
+    if target == docker::DockerTarget::Local {
+        return runtime.block_on(docker::collect_files_read_local(
+            &engine,
+            container_id,
+            &path,
+            max_bytes,
+        ));
+    }
+    let session_id = required_string(params, "sessionId")?;
+    let script = docker::files_read_script(&engine, container_id, &path, max_bytes)?;
+    let response = runtime.block_on(ssh.exec(
+        session_id,
+        None,
+        &script,
+        false,
+        Some(docker::FILES_READ_TIMEOUT.as_secs()),
+    ))?;
+    let output = response
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(code) = response.get("exitCode").and_then(Value::as_i64) {
+        if code != 0 {
+            return Err(format!(
+                "docker/files/read failed (exit {code}): {}",
+                docker::output_snippet(output)
+            ));
+        }
+    }
+    docker::files_read_payload(output, &path, max_bytes)
+}
+
 pub fn action(ssh: &SshRuntime, runtime: &Runtime, params: &Value) -> Result<Value, String> {
     let container_id = required_string(params, "containerId")?;
     docker::validate_container_id(container_id)?;
