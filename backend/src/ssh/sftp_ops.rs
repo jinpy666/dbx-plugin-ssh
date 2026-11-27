@@ -1,4 +1,5 @@
 use super::sftp_helpers::{content_type_for_path, enrich_owner_names};
+use super::transfer_paths::{commit_remote_file, remote_transfer_paths};
 use super::*;
 
 impl SshRuntime {

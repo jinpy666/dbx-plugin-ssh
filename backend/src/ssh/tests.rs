@@ -1,3 +1,5 @@
+use super::transfer_paths::{commit_plan, preserved_target_permissions};
+use super::upload_meta::{read_upload_meta, resumable_uploads_from, write_upload_meta};
 use super::*;
 use russh::{cipher, kex, mac};
 
