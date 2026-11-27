@@ -359,6 +359,36 @@ B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
   4. `host_key_check_response`、`host_key_unreachable_response`、`HOST_KEY_CHALLENGE_WAIT`、`DIRECTORY_HANDSHAKE_LIMIT/TIMEOUT`、`find_bytes` 等不在 6b 清单内，保留根，由子模块经 `use super::*` 使用。
   5. 根 `ssh.rs` 为 3,524 行，未低于 600，故允许清单条目保留，未做计划中可选的 `ssh/prelude.rs` 抽取。
 
+#### B6a 执行记录（已完成，待人审）
+
+基线 `a6cde2ee`（`ssh.rs` 3,524 行，B6b 后的当前形态）。计划中的 `ssh.rs:NNNN` 锚点是 18,457 行版本的老坐标，本批一律按符号定位；下表为实测 1-based 区间（按「条目间空行归后一个条目」的规则，区间可能以空行开头）：
+
+| 新文件 | 基线实际区间 | 搬移条目 | 文件行数 |
+|---|---|---|---|
+| `ssh/lifecycle.rs` | `681-875`（195） | `new`、`data_dir`、`has_connection`、`store_connection`、`sweep_reconnect_residue`、`disconnect_connection` | 199 |
+| `ssh/open_session.rs` | `876-1755`（880，**允许清单**） | `open_session`（单函数，未拆分） | 883 |
+| `ssh/probe.rs` | `1756-1986`（231） | `test_connection`、`check_host_key`、`connect_authenticated` | 234 |
+| `ssh/auth_dial.rs` | `1987-2231`（245） | `dial_and_authenticate`、`known_hosts_path`、`with_auto_trust_keys`、`connect_headless` | 248 |
+| `ssh/port_forward.rs` | `2232-2609`（378） | `remote_table_for`、`forward_list`、`forward_start`、`forward_stop`、`monitor_forward_transport`、`teardown_forward`、`close_forward_transport`、`stop_session_forwards` | 381 |
+| `ssh/terminal.rs` | `2610-2772`、`2786-3031`（409） | `close_session`、`close_session_with_reason`、`list_sessions`、`resize_terminal`、`write_terminal`、`batch_input_payload`、`dedupe_session_ids`、`batch_input_row`、`batch_terminal_input`、`replay_terminal`、`pick_attach_target`、`attach_session`、`close_workbench`、`session`、`ensure_writable`、`live_handle_for_connection`、`completion_session_read_only` | 412 |
+
+- 留在根：`impl SshRuntime` 仅剩 `set_directory_tracking`（`2774-2785`，不在 6a 清单内），其通过 `pub(super) session` 访问终端会话。
+- 行数：`ssh.rs` 3,524 → **1,191**（搬出 2,338 行，新增 6 行 `mod`）。六个新文件合计 2,357 行。`scripts/refresh_structure_allowlist.mjs --write` 自动把 `ssh.rs` 收紧到 1,191 并登记 `ssh/open_session.rs 883`（41 条，未手写数字）；`--check` 通过。
+- 可见性调整（仅私有 → `pub(super)`，`pub`/`pub(crate)` 一律保持原样）：
+  - `auth_dial.rs`：`dial_and_authenticate`（`probe::connect_authenticated` 调用）。
+  - `port_forward.rs`：`remote_table_for`（`open_session` 调用）、`teardown_forward` 与 `close_forward_transport`（`lifecycle::disconnect_connection` 调用）。
+  - `terminal.rs`：`session`（`approval`/`exec_methods`/`sftp_session`/`download_start`/`tree_download`/`settings`/`monitor`/`sftp_helpers` 等兄弟模块、根 `set_directory_tracking`）；`close_session_with_reason`（`lifecycle::disconnect_connection`）；`batch_input_payload`/`dedupe_session_ids`/`batch_input_row`/`pick_attach_target`（`ssh/tests.rs`）。
+  - 共 10 处；`close_session`、`ensure_writable`、`with_auto_trust_keys` 等其余符号可见性零调整。
+- 保真自检（`/tmp/movecheck/verify_move.py`，逐文件全符号）：`lifecycle` 6 个全 `same`；`open_session` `same`；`probe` 3 个全 `same`；`auth_dial` 3 `same` + `dial_and_authenticate` `visibility`；`port_forward` 5 `same` + `remote_table_for`/`teardown_forward`/`close_forward_transport` `visibility`；`terminal` 11 `same` + 6 `visibility`。除可见性前缀外无任何文本差异（本批未出现 rustfmt 折行）。
+- 命令面自检：`/tmp/movecheck/compare_literals.py --base a6cde2ee` → `identical literal multiset`（23,845 个，distinct 8,949；文件 126 → 132，无 REMOVED/ADDED）。
+- 验证：`cargo fmt --manifest-path backend/Cargo.toml --check` 仍为基线 7 处（`proxy.rs` ×6 + 原 `ssh.rs` ×1 随 `test_connection` 平移到 `probe.rs`，同一 hunk，无新增）；`cargo clippy --all-targets -- -D warnings` 通过；`cargo test -- --test-threads=1` **1,409 passed**；`cargo test -- --list` 测试名集合 diff 为空（1,409）；`node scripts/mock_host_registry_check.mjs` PASS；允许清单 `--check` 通过。
+- 红线确认：`disconnect_connection` 的函数体逐字未动（`stop_sudo_keepalive` 等清理顺序不变），未新增任何 docker 流清理调用；`open_session` 认证/挑战/重连逻辑、`known_hosts` 写入策略、`ensure_writable` 错误文案、终端写序号语义、`forward_*` 监听/拆除逻辑均原样。
+- 偏差：
+  1. 除清单符号外，按「同族私有 helper」一并搬移 `port_forward::close_forward_transport` 与 `terminal::{batch_input_payload, dedupe_session_ids, batch_input_row, pick_attach_target}`（均为 grep 确认的调用方只在搬移集合内/`ssh/tests.rs` 的纯 helper），保证新文件可独立编译。
+  2. `set_directory_tracking` 不在 6a 清单，保留根。
+  3. 根 `ssh.rs` 为 1,191 行，仍 >600，故允许清单条目保留；计划中可选的 `ssh/prelude.rs` 抽取不在本批范围，未执行。
+  4. 外部调用点（`main.rs`、`mcp.rs`、`sftp_ext.rs`、`local_terminal.rs`、`forward.rs` 等）零改动。
+
 ### 批次顺序理由
 
 B1 纯测试 → B2 自包含 SFTP 面（验证拆分流程；含 sudo profile secret binding，人审）→ B3 中央状态/传输（耦合最大但无凭证/执行）→ B4 上传（sudo exec）→ B5 下载（sudo/tar exec、路径安全）→ B6 认证/主机密钥/执行/审批（最高风险，最后集中人审）。前 5 批不改变外部协议与 `main.rs` 分派；B6 也不改变，只搬移。
