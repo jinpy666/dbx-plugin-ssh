@@ -389,6 +389,34 @@ B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
   3. 根 `ssh.rs` 为 1,191 行，仍 >600，故允许清单条目保留；计划中可选的 `ssh/prelude.rs` 抽取不在本批范围，未执行。
   4. 外部调用点（`main.rs`、`mcp.rs`、`sftp_ext.rs`、`local_terminal.rs`、`forward.rs` 等）零改动。
 
+#### B7 执行记录（已完成）
+
+基线 `40f899db`（`ssh.rs` 1,191 行，B6a 之后的形态）。本批只做第二章「后续」里的第一件事：把根 `ssh.rs` 剩余的自由函数/常量/类型按主题搬进 `ssh/` 子模块，使根落到 600 行预算内，并让允许清单工具自动删除 `("ssh.rs", 1191)` 条目。
+
+| 新文件 | 基线实际区间 | 搬移条目 | 文件行数 |
+|---|---|---|---|
+| `ssh/sudo_support.rs` | `130-370`（241） | `sudo_auth_for`、`otp_bound_as_totp_secret`、`ssh_client_config`、`dial_error_message`、`resolved_sudo_auth`、`login_sudo_auth`、`credential_placeholders`、`resolve_password_command`、`resolve_passphrase_command`、`effective_sudo_profile`、`DialTarget` + `impl DialTarget` | 247 |
+| `ssh/agent_auth.rs` | `701-891`（191） | `AgentAuthOutcome`、`AGENT_IDENTITY_MAX_ATTEMPTS`、`AgentPlan`、`plan_agent_identity_attempt`、`authenticate_agent` | 193 |
+| `ssh/host_key_support.rs` | `397-399`、`401-418`、`420-480`（82） | `HOST_KEY_CHALLENGE_WAIT`、`host_key_check_response`、`host_key_unreachable_response`、`HOST_FALLBACK_CONNECT_TIMEOUT_SECS`、`test_dial_budget_secs`、`next_test_budget`、`test_timeout_message` | 90 |
+| `ssh/terminal_stream.rs` | `374-381`、`383-386`、`482-610`、`893-1181`（430） | `REMOTE_SHELL_DETECTION_TIMEOUT`、`PROMPT_TAIL_SETTLE`、`PROMPT_TAIL_LIMIT`、`NO_TERMINAL_SESSION_MESSAGE`、`TerminalCommand`、`enqueue_terminal_input`、`select_primary_session`、`TERMINAL_KEEPALIVE_INPUT`、`RemoteShell`、`session_info_payload`、`compare_history_rows`、`directory_tracking_marker`、`decode_stream_text`、`REMOTE_EXIT_REASON`、`REMOTE_KILLED_REASON`、`remote_channel_closed_reason`、`remote_channel_exit_reason`、`terminal_disconnect_state`、`session_disconnected_event`、`ends_with_prompt_tail`、`should_flush_pending_hook`、`prompt_tail_len`、`strip_trailing_prompt`、`directory_tracking_script`、`interactive_shell_session`、`valid_requested_session_id`、`SPAWN_COMMAND_MAX_BYTES`、`normalized_spawn_command`、`spawn_exec_payload`、`detect_remote_shell`、`remote_shell_or_timeout`、`detect_remote_shell_inner`、`classify_remote_shell`、`find_bytes` | 439 |
+| `ssh/approval.rs`（既有文件） | `388-395`（8） | `AGENT_APPROVAL_DEFAULT_SECS`、`AGENT_APPROVAL_MIN_SECS`、`AGENT_APPROVAL_MAX_SECS`、`MCP_CONFIRM_TIMEOUT_SECS` | 320 → 329 |
+| `ssh/ssh_client.rs`（既有文件） | `372-373`（2） | `DIRECTORY_HANDSHAKE_LIMIT`、`DIRECTORY_HANDSHAKE_TIMEOUT` | 412 → 415 |
+
+- 常量按唯一消费者落位：审批/确认超时只在 `approval.rs` 使用，目录握手上限/超时只在 `DirectoryHandshakeFilter`（`ssh_client.rs`）使用，故没有放进 `host_key_support.rs`。
+- 行数：`ssh.rs` 1,191 → **256**（净减 935 行）；四个新文件合计 969 行，`ssh/approval.rs` 320 → 329、`ssh/ssh_client.rs` 412 → 415。`node scripts/refresh_structure_allowlist.mjs --write` 在三批中分别把条目收紧到 `955`、`756`、`676`，最终一步输出 `stale (文件已回到预算内，删除条目): ssh.rs 256 <= 600（允许 676）` 并自动删除 `("ssh.rs", 1191)`；`--check` 通过（40 条，`ssh/tests.rs 4475` 仍在测试预算内登记）。全流程无手写行数。
+- 留在根：`SshRuntime` 结构体、`PendingChallenge`、`impl SshRuntime { set_directory_tracking }`、`plugin_error`、全部 `mod` 声明、`mod tests` / `mod channel_error_tests`。
+- 可见性（只做最小调整；`pub`、`pub(crate)` 一律不降级）：
+  - 私有 → `pub(super)`：`ssh_client_config`、`dial_error_message`、`resolve_password_command`、`resolve_passphrase_command`、`DialTarget` 及其 `through_jump`（`auth_dial.rs`/`probe.rs`/`open_session.rs`/`port_forward.rs`/`auth_key.rs`/`tests.rs` 使用）；`AgentAuthOutcome`、`AGENT_IDENTITY_MAX_ATTEMPTS`、`AgentPlan`、`plan_agent_identity_attempt`、`authenticate_agent`（`auth.rs`/`auth_dial.rs`/`tests.rs`）；`HOST_KEY_CHALLENGE_WAIT`、`host_key_check_response`、`host_key_unreachable_response`、`test_dial_budget_secs`、`next_test_budget`、`test_timeout_message`（`probe.rs`/`prompt.rs`/`ssh_client.rs`/`tests.rs`）；`terminal_stream.rs` 中除下列私有项外的 30 个条目（`open_session.rs`/`terminal.rs`/`exec_methods.rs`/`state.rs`/`sftp_session.rs`/`transfer_registry.rs`/`ssh_client.rs`/`tests.rs`）。
+  - 保持私有（调用方都在本文件内）：`sudo_auth_for`、`otp_bound_as_totp_secret`、`credential_placeholders`、`REMOTE_EXIT_REASON`、`remote_shell_or_timeout`、`detect_remote_shell_inner`、`classify_remote_shell`、`HOST_FALLBACK_CONNECT_TIMEOUT_SECS`，以及两个既有文件里的 6 个常量。
+  - 再导出（外部路径零变化）：根新增 `pub(crate) use sudo_support::{effective_sudo_profile, login_sudo_auth, resolved_sudo_auth};` 与 `pub(crate) use terminal_stream::NO_TERMINAL_SESSION_MESSAGE;`；`crate::ssh::resolved_sudo_auth`、`crate::ssh::effective_sudo_profile`（`mcp.rs`）与 `crate::ssh::NO_TERMINAL_SESSION_MESSAGE`（`mcp.rs`、`ssh/exec_methods.rs`）保持可用。
+  - 供子模块经 `use super::*` 取用的根侧显式 `use`（不是 glob，避免 B4 记录的“glob 不跨层”问题）：`agent_auth`、`host_key_support`、`sudo_support`、`terminal_stream` 四个模块的条目；其中仅测试使用的 `plan_agent_identity_attempt`/`AgentPlan`/`AGENT_IDENTITY_MAX_ATTEMPTS`、`prompt_tail_len`/`PROMPT_TAIL_LIMIT`/`SPAWN_COMMAND_MAX_BYTES` 用 `#[cfg(test)] use`，否则 bin target 会触发 `unused_imports`。
+- 验证：`cargo fmt --check` 仍为基线 7 处（`proxy.rs` ×6 + `probe.rs` ×1，无新增）；`cargo clippy --all-targets -- -D warnings` 通过；`cargo test -- --test-threads=1` 1,409 passed，`--list` 名称集合与基线 diff 为空；`scripts/mock_host_registry_check.mjs` PASS；`refresh_structure_allowlist.mjs --check` 通过。
+- 保真：`verify_move.py` 逐文件核对 63 个符号，除 3 处纯 rustfmt 折行（`host_key_check_response`、`should_flush_pending_hook`、`DialTarget::through_jump`）外全部 `same`/`visibility`。`compare_literals.py`：23,846 → 23,845，唯一差异是工具删除的允许清单条目字符串 `"ssh.rs"`（不是命令/消息面）。
+- 偏差：
+  1. 提交粒度为 4 个 commit（Quick Sudo / Agent+常量 / 主机密钥 / 终端流+收尾），而非“1-2 文件一个”；根 `ssh.rs` 的 `mod`/`use` 重接使中途状态无法只搬单个文件而保持可编译，故每个 commit 都是可编译且通过允许清单的完整状态。
+  2. 目录握手两个常量落在 `ssh_client.rs`、审批四个常量落在 `ssh/approval.rs`（消费者的自然位置），没有集中到 `host_key_support.rs`。
+  3. 未改任何函数体/签名/文档注释/字段顺序/命令字符串；外部调用点（`main.rs`、`mcp.rs`、`sftp_ext.rs`、`forward.rs`、`local_terminal.rs`、`task_provider.rs` 等）零改动。
+
 ### 批次顺序理由
 
 B1 纯测试 → B2 自包含 SFTP 面（验证拆分流程；含 sudo profile secret binding，人审）→ B3 中央状态/传输（耦合最大但无凭证/执行）→ B4 上传（sudo exec）→ B5 下载（sudo/tar exec、路径安全）→ B6 认证/主机密钥/执行/审批（最高风险，最后集中人审）。前 5 批不改变外部协议与 `main.rs` 分派；B6 也不改变，只搬移。

@@ -356,6 +356,9 @@ impl client::Handler for HostKeyProbe {
     }
 }
 
+const DIRECTORY_HANDSHAKE_LIMIT: usize = 64 * 1024;
+const DIRECTORY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+
 #[derive(Default)]
 pub(super) struct DirectoryHandshakeFilter {
     marker: Option<Vec<u8>>,
