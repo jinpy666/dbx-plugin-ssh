@@ -181,6 +181,23 @@ B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
 - 验证：通用验收；重点 `cargo check` 全 target，确认无 `private field` 错误；`forward.rs`/`local_terminal.rs`/`telnet_session.rs`/`serial_session.rs` 不改 import。
 - 行数：约 1,111；根约 10,917。
 
+#### B3 执行记录（已完成）
+
+实际落地：`ssh.rs` 12,829 → **11,787**，五个新文件 prompt 388 / transport 73 / leases 75 / state 461 / endpoint 65（均 <600）。测试名集合与 `#[test]` 计数（1,384）不变，`check --all-targets` / `clippy -D warnings` / 全量测试 / 结构护栏全绿；`forward.rs`、`local_terminal.rs`、`telnet_session.rs`、`serial_session.rs`、`mcp.rs`、`sftp_ext.rs`、`main.rs` **零改动**。
+
+与计划的偏差（B4–B6 请沿用同样的处理方式）：
+
+1. **预计数字偏低**：计划按 `endpoint` 区间 119 行估算，但该区间含 `session_info_payload` 与传输排序约 56 行，不属于目标符号；按符号搬移实际 63 行。最终 11,787 而非 10,917。
+2. **可见性必须按编译器错误逐条放宽**，且只放宽到 `pub(super)`：
+   - `ReplayBuffer` 字段 → `pub(super)`（根 `ssh.rs` 与 `ssh/tests.rs` 直接读字段，触发 E0616）
+   - `TransportLeaseCounter` / `SharedTransportLease` 的结构体、字段与方法（含 `async fn release`）→ `pub(super)`（E0616/E0624）
+   - `PromptBroker::request` / `request_keyboard_interactive_answer` → `pub(super)`（根调用，E0624；提前处理避免二次改）
+   - `state.rs` 按计划全量 `pub(super)`，并额外纳入 `sudo_upload_staging_name`、`sudo_commit_body`、`SUDO_UPLOAD_*`、`upload_progress_payload`（根与测试有调用点）
+3. **对外可见性一律保持原样**：`PromptDecision` `pub`、`ReplayBuffer` `pub(crate)`、`RemoteForwardTable` 为 `pub type`、`upload_cancel_error` `pub(crate)`、`HostPromptGateway`/`TaskTransport` `pub(crate)`、`ConnectionEndpoint` `pub`。
+4. `transport.rs` 不需要私有 `use transport::*;`：两个符号都显式再导出，加 glob 反而被 clippy 判为未使用。
+5. rustfmt 因 `pub(super)` 让 `MultistreamState::stream_handle` 超 100 列而换行、并调整了根 import 排序——`fmt --check` 仍只剩基线那 7 处。
+
+
 ### B4 上传管线与传输登记（高风险）
 
 - 新建：
