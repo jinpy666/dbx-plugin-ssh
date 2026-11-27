@@ -328,6 +328,37 @@ B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
 - 验证：通用验收 + 全量 `cargo test`（认证/主机密钥/审批/执行用例为重点）；人工 diff 认证错误串、审批超时、审计字段；不引入真实凭证。
 - 行数：约 4,813；根约 415（40 个子模块各约 1 行 `mod` + 1 行再导出，合计约 80 行，最终约 495，仍 <600）。
 
+#### B6b 执行记录（已完成，待人审）
+
+基线 `b2bec10a`（`ssh.rs` 5,611 行）。按符号原样搬移 6b 清单；6a 尚未执行，`lifecycle`/`open_session`/`probe`/`auth_dial`/`port_forward`/`terminal` 全部符号仍在根，本批未触碰。新文件均以 `use super::*;` 引入根作用域，`SshRuntime` 方法在各自文件内用独立 `impl SshRuntime` 块承载（同 B2a/B3/B4 写法）：
+
+| 新文件 | 基线实际区间（1-based，含文档注释/属性） | 搬移条目 | 文件行数 |
+|---|---|---|---|
+| `ssh/ssh_client.rs` | `376-423`、`429-668`、`670-679`、`681-687`、`770-805`、`879-932`（395） | `DialDeadline`（+impl）、`SshClient`（+`client::Handler` impl）、`HostKeyVerdict`、`host_key_verdict`、`HostKeyProbe`（+`client::Handler` impl）、`DirectoryHandshakeFilter`（+impl） | 412 |
+| `ssh/exec_methods.rs` | `3419-3785`（367） | `agent_mode_get`、`exec`、`cancel_exec`、`exec_response`、`agent_terminal_mode`、`set_agent_terminal_mode`、`agent_exec_guard`、`exec_in_terminal` | 371 |
+| `ssh/approval.rs` | `3787-4102`（316） | `mcp_confirm_challenge_payload`、`request_mcp_confirm`、`request_agent_approval`、`resolve_agent_challenge`、`audit_approval` | 320 |
+| `ssh/keepalive.rs` | `4104-4202`（99） | `keepalive_registration_plan`、`register_sudo_keepalive`、`stop_sudo_keepalive` | 104 |
+| `ssh/auth.rs` | `4205-4776`（572） | `flow_mode_name`、`method_offered`、`advertised_methods`、`reconcile_advertised`、`advertisement_rejection_message`、`auth_partial_success`、`AUTO_AUTH_ORDER`、`auto_stage_skip`、`AutoAuthAttempt`、`auto_auth_attempt`、`auto_auth_skip`、`merge_auto_auth_attempt`、`auto_auth_failure_message`、`authenticate_auto`、`authenticate_password_or_interactive`、`try_password`、`KEYBOARD_INTERACTIVE_MAX_ROUNDS`、`challenge_display_text`、`keyboard_interactive_guidance`、`keyboard_interactive_manual_challenge`、`authenticate_keyboard_interactive` | 578 |
+| `ssh/auth_key.rs` | `4778–5119`（342） | `authenticate_private_key_result`、`resolve_private_key_text`、`normalize_private_key_text`、`strip_invisible_paste_artifacts`、`is_pem_base64_char`、`looks_like_marker_line`、`normalize_pem_marker_line`、`looks_like_public_key`、`has_html_escaped_entities`、`private_key_decode_failure`、`expand_private_key_path` | 346 |
+
+- 行数：`ssh.rs` 5,611 → **3,524**（搬出条目 2,091 行，扣除 4 行条目间空行与 impl 尾部空行，新增 13 行 `mod`/`use`/再导出）；六个新文件合计 2,131 行。`ssh/tests.rs` 4,472 → 4,475 与 `ssh.rs 3,524` 由 `scripts/refresh_structure_allowlist.mjs --write` 自动登记（未手写数字）。
+- 可见性调整（最小提升，`pub` 一律不降级；逐符号核对见保真自检）：
+  - `ssh_client.rs`：`DialDeadline`、`HostKeyVerdict`、`HostKeyProbe`（含 4 个字段）、`DirectoryHandshakeFilter`、`host_key_verdict`、`DialDeadline::{start,remaining}`、`DirectoryHandshakeFilter::{begin,filter,flush_if_timed_out,take_failed}` → `pub(super)`（根 `open_session`/`dial_and_authenticate`/`check_host_key`/`ssh/tests.rs` 仍调用）；`SshClient` 12 个字段 → `pub(super)`（唯一构造点在根 `dial_and_authenticate`）。`SshClient` 本体保持 `pub`，字段对外仍不可见。
+  - `exec_methods.rs`：`set_agent_terminal_mode` → `pub(super)`（`ssh/settings.rs` 与 `ssh/tests.rs`）。
+  - `keepalive.rs`：`keepalive_registration_plan`、`register_sudo_keepalive`、`stop_sudo_keepalive` → `pub(super)`（tests、`ssh::exec_methods` 兄弟模块、根 `disconnect_connection`/`open_session`）。
+  - `auth.rs`：除仅文件内使用的 `flow_mode_name` 外全部 `pub(super)`（根拨号流程、`ssh/settings.rs`、tests）；`AutoAuthAttempt` 及 3 个字段 `pub(super)`；`AUTO_AUTH_ORDER`、`KEYBOARD_INTERACTIVE_MAX_ROUNDS` `pub(super)`。
+  - `auth_key.rs`：`authenticate_private_key_result`、`resolve_private_key_text`、`normalize_private_key_text`、`looks_like_public_key` → `pub(super)`；`private_key_decode_failure` 保持 `pub(crate)`。
+- 再导出/显式导入：根 `pub use ssh_client::SshClient;`（7 个外部文件零改动）；根 `pub(crate) use auth_key::private_key_decode_failure;`（保持 `keys.rs:50` 的 `crate::ssh::private_key_decode_failure` 路径）；根显式 `use auth::{advertised_methods, auth_partial_success, authenticate_auto, authenticate_keyboard_interactive, authenticate_password_or_interactive, flow_mode_name, method_offered};`、`use auth_key::authenticate_private_key_result;`、`use ssh_client::{DialDeadline, DirectoryHandshakeFilter, HostKeyProbe, HostKeyVerdict};`。`ssh/tests.rs` 增加 `use super::auth::*;`、`use super::auth_key::*;`、`use super::ssh_client::*;`（B4 结论：glob 导入不跨层透传，测试直接从定义模块导入）。
+- 保真自检（`/tmp/movecheck/verify_move.py` + 同一规则的 struct/enum/const 对比）：`ssh_client` 6 个函数全部 `same`/`visibility`；`exec_methods` 7 `same` + `set_agent_terminal_mode` `visibility`；`approval` 5 全部 `same`；`keepalive` 3 全部 `visibility`；`auth` 16 `visibility` + `merge_auto_auth_attempt` 纯 rustfmt 折行；`auth_key` 4 `visibility` + `resolve_private_key_text` 纯 rustfmt 折行；类型/常量全部 `visibility`，`AUTO_AUTH_ORDER` 另加纯 rustfmt 折行。三处折行均为加可见性前缀后签名/常量超 100 列所致，语句、字面量与语义不变。
+- 命令面自检：`/tmp/movecheck/compare_literals.py --base b2bec10a` → `identical literal multiset`（23,683 个，distinct 8,874；无 REMOVED/ADDED，命令、错误串、PEM 规范化文本、审批载荷字段全部一致）。
+- 验证：`cargo fmt --check` 仅基线 7 处（`proxy.rs` ×6 + `ssh.rs` ×1，无新增）；`cargo clippy --all-targets -- -D warnings` 通过；`cargo test -- --test-threads=1` 1,396 passed；`cargo test -- --list` 测试名集合 diff 为空；`node scripts/mock_host_registry_check.mjs` PASS；`refresh_structure_allowlist.mjs --write/--check` 通过。
+- 偏差：
+  1. 6a 未执行，`ssh.rs` 仍保留 `lifecycle`/`open_session`/`probe`/`auth_dial`/`port_forward`/`terminal` 全部符号；本批只搬 6b，未触碰 6a 符号。
+  2. Agent 认证（`AgentAuthOutcome`、`AgentPlan`、`AGENT_IDENTITY_MAX_ATTEMPTS`、`plan_agent_identity_attempt`、`authenticate_agent`）不在本批任务符号清单内，保留在根；`auth.rs` 经根作用域调用，未搬移。
+  3. 未创建 `ssh/private_key.rs` / `ssh/agent_auth.rs`：私钥符号并入 `auth_key.rs`（346 行，仍 <600），agent 符号留根（见上一条）。
+  4. `host_key_check_response`、`host_key_unreachable_response`、`HOST_KEY_CHALLENGE_WAIT`、`DIRECTORY_HANDSHAKE_LIMIT/TIMEOUT`、`find_bytes` 等不在 6b 清单内，保留根，由子模块经 `use super::*` 使用。
+  5. 根 `ssh.rs` 为 3,524 行，未低于 600，故允许清单条目保留，未做计划中可选的 `ssh/prelude.rs` 抽取。
+
 ### 批次顺序理由
 
 B1 纯测试 → B2 自包含 SFTP 面（验证拆分流程；含 sudo profile secret binding，人审）→ B3 中央状态/传输（耦合最大但无凭证/执行）→ B4 上传（sudo exec）→ B5 下载（sudo/tar exec、路径安全）→ B6 认证/主机密钥/执行/审批（最高风险，最后集中人审）。前 5 批不改变外部协议与 `main.rs` 分派；B6 也不改变，只搬移。
