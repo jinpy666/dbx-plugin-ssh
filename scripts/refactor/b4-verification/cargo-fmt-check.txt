@@ -1,0 +1,9 @@
+# cargo fmt --check (run in backend/, exit 1 by design: 7 pre-existing diffs, unchanged by B4)
+# baseline: proxy.rs x6 + ssh.rs (was 2238, now 2247 after the 8-line mod/use insert)
+Diff in src/proxy.rs:100:
+Diff in src/proxy.rs:140:
+Diff in src/proxy.rs:155:
+Diff in src/proxy.rs:171:
+Diff in src/proxy.rs:187:
+Diff in src/proxy.rs:324:
+Diff in src/ssh.rs:2247:

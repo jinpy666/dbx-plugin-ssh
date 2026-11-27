@@ -1,0 +1,40 @@
+baseline ssh.rs: 1459 string literals, 2 sudo_exec/Command::new/ssh2:: lines
+OK   start_upload                     literals  30==30  cmdlines 0==0
+OK   decide_transfer_compression      literals   2==2   cmdlines 0==0
+OK   probe_remote_compress_tools      literals   6==6   cmdlines 0==0
+OK   open_resume_spool                literals   9==9   cmdlines 0==0
+OK   upload_session_id                literals   1==1   cmdlines 0==0
+OK   resumable_uploads                literals   2==2   cmdlines 0==0
+OK   append_upload                    literals  15==15  cmdlines 0==0
+OK   finish_upload                    literals  66==66  cmdlines 0==0
+OK   commit_sudo_upload               literals   5==5   cmdlines 2==2
+OK   compress_upload_spool            literals   7==7   cmdlines 0==0
+OK   push_compressed_stream           literals   6==6   cmdlines 0==0
+OK   transfer_list                    literals  21==21  cmdlines 0==0
+OK   transfer_status                  literals  31==31  cmdlines 0==0
+OK   transfer_history_query           literals   0==0   cmdlines 0==0
+OK   clear_transfer_history           literals   1==1   cmdlines 0==0
+OK   build_transfer_history           literals   7==7   cmdlines 0==0
+OK   live_transfer_rows               literals  33==33  cmdlines 0==0
+OK   record_transfer                  literals   2==2   cmdlines 0==0
+OK   record_transfer_start            literals  11==11  cmdlines 0==0
+OK   persist_transfer_record          literals   1==1   cmdlines 0==0
+OK   session_connection_id            literals   0==0   cmdlines 0==0
+OK   transfer_depth_limit             literals   0==0   cmdlines 0==0
+OK   active_transfer_count            literals   3==3   cmdlines 0==0
+OK   cleanup_session_transfers        literals  28==28  cmdlines 0==0
+OK   read_upload_meta                 literals   0==0   cmdlines 0==0
+OK   write_upload_meta                literals   4==4   cmdlines 0==0
+OK   remove_upload_meta               literals   1==1   cmdlines 0==0
+OK   sweep_stale_transfer_temps       literals   9==9   cmdlines 0==0
+OK   resumable_uploads_from           literals  15==15  cmdlines 0==0
+OK   copy_dir_recursive               literals   0==0   cmdlines 0==0
+OK   UPLOAD_SPOOL_RETENTION           literals   0==0   cmdlines 0==0
+OK   remote_transfer_paths            literals   8==8   cmdlines 0==0
+OK   preserved_target_permissions     literals   0==0   cmdlines 0==0
+OK   apply_preserved_permissions      literals   1==1   cmdlines 0==0
+OK   CommitPlan                       literals   0==0   cmdlines 0==0
+OK   commit_plan                      literals   0==0   cmdlines 0==0
+OK   commit_remote_file               literals   1==1   cmdlines 0==0
+OK   remaining ssh.rs                 literals 1133==1133 cmdlines 0==0
+RESULT: PASS

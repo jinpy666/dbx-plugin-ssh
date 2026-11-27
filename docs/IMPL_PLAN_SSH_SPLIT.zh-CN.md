@@ -200,6 +200,7 @@ B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
 3. **对外可见性一律保持原样**：`PromptDecision` `pub`、`ReplayBuffer` `pub(crate)`、`RemoteForwardTable` 为 `pub type`、`upload_cancel_error` `pub(crate)`、`HostPromptGateway`/`TaskTransport` `pub(crate)`、`ConnectionEndpoint` `pub`。
 4. `transport.rs` 不需要私有 `use transport::*;`：两个符号都显式再导出，加 glob 反而被 clippy 判为未使用。
 5. rustfmt 因 `pub(super)` 让 `MultistreamState::stream_handle` 超 100 列而换行、并调整了根 import 排序——`fmt --check` 仍只剩基线那 7 处。
+6. （B4 补记，B5/B6 务必照做）**`use super::*` 不会把上层模块 glob 导入的私有名字再传一层**：把自由函数搬进子模块后，只要根用 `use module::*;` 引入，`ssh/tests.rs` 等更深一层模块仍会报 `cannot find function`。可行做法只有两种——在根/调用方写**显式** `use module::{a, b};`（显式绑定可跨 glob 传递），或让调用方直接 `use super::module::item;`。方法（`impl SshRuntime`）不受影响：`pub(super)` 对根及其所有后代都可见。
 
 
 ### B4 上传管线与传输登记（高风险）
@@ -216,6 +217,43 @@ B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
 - 风险：**高**。`commit_sudo_upload` 调 `crate::sudo_fs::sudo_exec`（`ssh.rs:7645-7658`），`finish_upload` 含 sudo 提交/压缩路径；**触及 command execution，需要人审**。
 - 验证：通用验收 + 上传/断点续传/压缩相关 `cargo test`；`git diff` 确认无 `sudo_exec`/命令字符串变化。
 - 行数：约 2,162；根约 8,755。
+
+#### B4 执行记录（已完成，待人审）
+
+基线 `24468407`（`ssh.rs` 11,264 行）。按符号搬移 37 个条目（36 个计划符号 + 1 个随 `sweep_stale_transfer_temps` 一并搬走的常量），六个新文件均以 `use super::*;` + 独立 `impl SshRuntime` 块承载（同 B2a/B3 写法）：
+
+| 新文件 | 基线实际区间（1-based，含文档注释/属性） | 搬移条目 | 文件行数 |
+|---|---|---|---|
+| `ssh/upload.rs` | `4185-4587`（403） | `start_upload`、`decide_transfer_compression`、`probe_remote_compress_tools`、`open_resume_spool`、`upload_session_id`、`resumable_uploads`、`append_upload` | 408 |
+| `ssh/upload_finish.rs` | `4589-5243`（655） | `finish_upload`（单函数，未拆） | 661 |
+| `ssh/upload_compress.rs` | `5245-5469`（225） | `commit_sudo_upload`、`compress_upload_spool`、`push_compressed_stream` | 229 |
+| `ssh/transfer_registry.rs` | `8623-9115`（493） | `transfer_list/status/history_query`、`clear_transfer_history`、`build_transfer_history`、`live_transfer_rows`、`record_transfer*`、`persist_transfer_record`、`session_connection_id`、`transfer_depth_limit`、`active_transfer_count`、`cleanup_session_transfers` | 498 |
+| `ssh/upload_meta.rs` | `10601-10765`（165） | `read/write/remove_upload_meta`、`sweep_stale_transfer_temps`、`resumable_uploads_from`、`copy_dir_recursive`（+ `UPLOAD_SPOOL_RETENTION`） | 167 |
+| `ssh/transfer_paths.rs` | `10767-10964`（198） | `remote_transfer_paths`、`preserved_target_permissions`、`apply_preserved_permissions`、`CommitPlan`、`commit_plan`、`commit_remote_file` | 203 |
+
+- 行数：`ssh.rs` 11,264 → **9,128**（删 2,145 行 = 2,139 行条目 + 5 行条目间空行 + 1 行 impl 尾部空行，加 9 行 `mod`/`use`/再导出）；六个新文件 2,166 行。`upload_finish.rs` 661 行、`ssh/tests.rs` 4,472 行由 `scripts/refresh_structure_allowlist.mjs --write` 自动登记（未手写数字）。
+- 可见性调整（25 处，全部为最小提升，`pub` 一律不降级）：
+  - `upload.rs`：`decide_transfer_compression`、`open_resume_spool` → `pub(super)`。
+  - `upload_compress.rs`：`commit_sudo_upload`、`compress_upload_spool`、`push_compressed_stream` → `pub(super)`（调用点在 `ssh::upload_finish`，兄弟模块）。
+  - `transfer_registry.rs`：`build_transfer_history`、`record_transfer`、`record_transfer_start`、`session_connection_id`、`transfer_depth_limit`、`active_transfer_count`、`cleanup_session_transfers` → `pub(super)`；`live_transfer_rows`、`persist_transfer_record` 仅模块内调用，保持私有。
+  - `upload_meta.rs`：六个函数全部 → `pub(super)`；`UPLOAD_SPOOL_RETENTION` 保持私有。
+  - `transfer_paths.rs`：`remote_transfer_paths`、`preserved_target_permissions`、`commit_plan`、`commit_remote_file` → `pub(super)`；`CommitPlan` 与其两个字段 `backup_rename`/`permissions` → `pub(super)`（`ssh/tests.rs` 直接读字段）；`apply_preserved_permissions` 保持 `pub(crate)`。
+  - 保持原样：`start_upload`/`finish_upload`/`upload_session_id`/`resumable_uploads`/`append_upload`/`transfer_list`/`transfer_status`/`transfer_history_query`/`clear_transfer_history` 均 `pub`；`probe_remote_compress_tools` 只被同文件的 `decide_transfer_compression` 调用，保持私有。
+- 再导出与 `use`（编译器驱动的必要管道，`main.rs`/`mcp.rs`/`sftp_ext.rs` 调用点零改动）：
+  - 根新增 `pub(crate) use transfer_paths::apply_preserved_permissions;`（`sftp_ext.rs` 从 `crate::ssh` 导入）；`mcp.rs` 实际无该符号调用点（计划里写的一并适用不成立）。
+  - 根新增 `use transfer_paths::remote_transfer_paths;`、`use upload_meta::{copy_dir_recursive, remove_upload_meta, sweep_stale_transfer_temps};`（根自身有调用点）。子模块间的自由函数不能经 `use super::*` 传递（glob 导入不再被上层 glob 再导出），故由调用方显式导入：`ssh/upload.rs`（3 个 meta 助手）、`ssh/upload_finish.rs`（`commit_remote_file`/`remote_transfer_paths`/`remove_upload_meta`）、`ssh/transfer_registry.rs`（`remove_upload_meta`）、`ssh/sftp_ops.rs`（`commit_remote_file`/`remote_transfer_paths`，+1 行）、`ssh/tests.rs`（+2 行）。
+  - `mod` 与 `use` 按 rustfmt 字母序插入；每个子模块仍以 `use super::*;` 取根作用域（需要兄弟模块自由函数时，在其上方再加 1-3 行显式 `use super::<mod>::{..};`）。
+- 保真：`python3 scripts/refactor/b4_verify_move.py fidelity` → 36/37 条目在仅归一 `pub(super) `/`pub(crate) ` 前缀后逐字符相同；唯一差异是 `remote_transfer_paths` 的签名被 rustfmt 换行（`pub(super) ` 使单行 104 列，另加参数尾逗号），token 流完全一致，属可见性调整的必然排版结果。
+- 命令面：`python3 scripts/refactor/b4_verify_move.py surface` → 37 个条目的**全部**字符串字面量（顺序、内容）与 `sudo_exec`/`Command::new`/`ssh2::` 行逐条相同（`commit_sudo_upload` 的 2 条 `crate::sudo_fs::sudo_exec` 均在搬移条目内），根剩余部分 1,133 个字面量与基线一致，零差异。
+- 自检脚本与原始输出留在仓库：`scripts/refactor/b4_verify_move.py`（`fidelity` / `surface` 两个子命令，`--base` 可换基线）；输出 `scripts/refactor/b4-verification/{fidelity,command-surface,cargo-fmt-check,validation}.txt`。
+- 验证：`cargo check --all-targets` 干净；`cargo clippy --all-targets -- -D warnings` 通过；全量测试 `--test-threads=1` 1,384 通过（测试名集合 diff 为空、`#[test]` 计数 1,384 不变）；`node scripts/mock_host_registry_check.mjs` PASS；`node scripts/refresh_structure_allowlist.mjs --check` PASS；`cargo fmt --check` 仍只剩基线 7 处（`proxy.rs` ×6、`ssh.rs` 原 2,238 现 2,247）。
+- 与 B4 计划估计的偏差：
+  1. 行号锚点整体偏移（符号位置才是准绳）：`upload` 计划 6,563-6,973 → 实际 4,185-4,587；`transfer_registry` 11,000-11,494 → 8,623-9,115；`upload_meta` 12,980-13,143 → 10,601-10,765；`transfer_paths` 13,144-13,359 → 10,767-10,964。
+  2. 根实际 9,128 而非约 8,755；`upload_finish.rs` 661 而非 654（函数体 655 + `use super::*;`/空行/`impl` 两行 + 2 行兄弟模块导入）。
+  3. `UPLOAD_SPOOL_RETENTION` 不在计划的符号表内，但只服务 `sweep_stale_transfer_temps`、且被其文档注释引用，随函数一并搬移（否则根出现死常量），已在 `upload_meta.rs` 登记。
+  4. `remote_transfer_paths` 签名被 rustfmt 折成多行（见上）。
+  5. `ssh/tests.rs` 与 `ssh/sftp_ops.rs` 各增 1-2 行导入（glob 不跨层传递自由函数），计划未列出。
+  6. 计划称 `apply_preserved_permissions` 被 `sftp_ext.rs`/`mcp.rs` 使用；实际只有 `sftp_ext.rs`。
 
 ### B5 下载管线（高风险）
 

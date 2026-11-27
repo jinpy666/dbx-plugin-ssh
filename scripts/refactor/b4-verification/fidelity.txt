@@ -1,0 +1,47 @@
+== upload.rs            items= 7 expected= 7 extra=[] missing=[]
+   OK     start_upload                      189 lines
+   OK     decide_transfer_compression        47 lines
+   OK     probe_remote_compress_tools        39 lines
+   OK     open_resume_spool                  29 lines
+   OK     upload_session_id                  10 lines
+   OK     resumable_uploads                  14 lines
+   OK     append_upload                      69 lines
+== upload_finish.rs     items= 1 expected= 1 extra=[] missing=[]
+   OK     finish_upload                     655 lines
+== upload_compress.rs   items= 3 expected= 3 extra=[] missing=[]
+   OK     commit_sudo_upload                 35 lines
+   OK     compress_upload_spool             104 lines
+   OK     push_compressed_stream             84 lines
+== transfer_registry.rs items=13 expected=13 extra=[] missing=[]
+   OK     transfer_list                      75 lines
+   OK     transfer_status                   106 lines
+   OK     transfer_history_query             18 lines
+   OK     clear_transfer_history              7 lines
+   OK     build_transfer_history             50 lines
+   OK     live_transfer_rows                 50 lines
+   OK     record_transfer                    16 lines
+   OK     record_transfer_start              25 lines
+   OK     persist_transfer_record             8 lines
+   OK     session_connection_id              10 lines
+   OK     transfer_depth_limit                9 lines
+   OK     active_transfer_count              24 lines
+   OK     cleanup_session_transfers          83 lines
+== upload_meta.rs       items= 7 expected= 7 extra=[] missing=[]
+   OK     read_upload_meta                    6 lines
+   OK     write_upload_meta                  15 lines
+   OK     remove_upload_meta                  4 lines
+   OK     sweep_stale_transfer_temps         54 lines
+   OK     resumable_uploads_from             58 lines
+   OK     copy_dir_recursive                 17 lines
+   OK     UPLOAD_SPOOL_RETENTION              5 lines
+== transfer_paths.rs    items= 6 expected= 6 extra=[] missing=[]
+   REFLOW remote_transfer_paths              47 -> 50 lines (same tokens, rustfmt re-wrap + trailing comma)
+   OK     preserved_target_permissions       14 lines
+   OK     apply_preserved_permissions        26 lines
+   OK     CommitPlan                         11 lines
+   OK     commit_plan                         6 lines
+   OK     commit_remote_file                 89 lines
+
+fidelity: 36/37 items character-identical after visibility normalization
+fidelity: whitespace-only reflows (accepted): remote_transfer_paths
+RESULT: PASS
