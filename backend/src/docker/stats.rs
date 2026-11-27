@@ -332,6 +332,9 @@ pub fn apply_rates(cache_key: &str, samples: &mut [StatSample], now: Instant) {
         cache.clear();
     }
     let previous = cache.entry(cache_key.to_string()).or_default();
+    // 新表只保留本次样本：长会话里容器反复创建/销毁不会让 key 内的
+    // 记录无界增长（上限 = 单次请求的 50 个容器）。
+    let mut next: BTreeMap<String, CachedTotals> = BTreeMap::new();
     for sample in samples.iter_mut() {
         match previous.get(&sample.container_id) {
             Some(prev) => {
@@ -344,7 +347,7 @@ pub fn apply_rates(cache_key: &str, samples: &mut [StatSample], now: Instant) {
                 sample.net_tx_rate = 0;
             }
         }
-        previous.insert(
+        next.insert(
             sample.container_id.clone(),
             CachedTotals {
                 rx: sample.net_rx_bytes,
@@ -353,6 +356,7 @@ pub fn apply_rates(cache_key: &str, samples: &mut [StatSample], now: Instant) {
             },
         );
     }
+    *previous = next;
 }
 
 /// 对响应体里的 `stats` 应用速率差分（RPC 收口处调用一次，避免重试路径
@@ -540,6 +544,21 @@ mod tests {
         assert!(script.contains("\"$@\""), "{script}");
         assert!(!stats_body(&engine).contains("3f2a1b4c5d6e"));
         assert!(stats_script(&engine, &["3f2a1b4c5d6e'; rm -rf /".to_string()]).is_err());
+    }
+
+    #[test]
+    fn rate_cache_keeps_only_the_current_sample_set() {
+        let start = Instant::now();
+        let mut first = parse_stats_section(sample_line());
+        apply_rates("bounded-key", &mut first, start);
+        let mut second = parse_stats_section(
+            "aabbccddeeff\tother\t0.00%\t0B / 0B\t0.00%\t0B / 0B\t0B / 0B\t0\n",
+        );
+        apply_rates("bounded-key", &mut second, start + Duration::from_secs(3));
+        let cache = stats_cache().lock().expect("rate cache");
+        let entry = cache.get("bounded-key").expect("cache key");
+        assert_eq!(entry.len(), 1, "stale container ids must be pruned");
+        assert!(entry.contains_key("aabbccddeeff"));
     }
 
     #[test]

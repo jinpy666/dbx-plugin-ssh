@@ -113,7 +113,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `metrics.rs` (1,476) | 一次性服务器指标（Linux `/proc` + macOS sysctl 回退） | `ssh/metrics` | `exec.rs` |
 | `metrics_gpu.rs` (836) | NVIDIA GPU / Ascend NPU 概览，并入 `ssh/metrics` | `ssh/metrics` 的 `gpu`/`npu` 键 | 远端 CLI |
 | `metrics_history.rs` | 指标趋势 JSONL | `ssh/metrics/history` | 文件存储 |
-| `docker/` 模块树（root 75；engine 167 / scripts 224 / parse 266 / local 263 / stats 560 / rpc 403 / tests 672） | Docker/Podman 面板（CLI + `sh -s`/cmd 脚本，动作白名单；stats 为只读批量采样，脚本体常量 + id 位置参数）；`rpc.rs` 承接原 `main.rs` 的分派臂实现，`main.rs` 只留字面量臂（`mock_host_registry_check.mjs` 只扫 `main.rs`） | `docker/list`、`docker/logs`、`docker/action`、`docker/stats` | `exec.rs`、`audit_log` |
+| `docker/` 模块树（root 75；engine 167 / scripts 224 / parse 266 / local 263 / stats 579 / rpc 403 / tests 672） | Docker/Podman 面板（CLI + `sh -s`/cmd 脚本，动作白名单；stats 为只读批量采样，脚本体常量 + id 位置参数）；`rpc.rs` 承接原 `main.rs` 的分派臂实现，`main.rs` 只留字面量臂（`mock_host_registry_check.mjs` 只扫 `main.rs`） | `docker/list`、`docker/logs`、`docker/action`、`docker/stats` | `exec.rs`、`audit_log` |
 | `audit_log.rs` (869) | 追加式执行审计 `audit-log.jsonl` | `ssh/audit/list`、`ssh/audit/clear` | 文件存储 |
 | `alert_triage.rs` (801) | 告警归一化 + 关键词分类 + 只读诊断命令（无 LLM） | `ssh/alert/triage` | `metrics` 脚本 |
 | `session_recording.rs` (794) | 会话输出录制为 asciicast v2 `.cast` | `ssh/recording/start\|stop\|list\|get\|delete\|clear\|search\|reveal`；`local/recording/*` | 文件存储 |
