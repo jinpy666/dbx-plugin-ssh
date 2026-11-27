@@ -314,7 +314,7 @@ fn marker_body<'a>(output: &'a str, begin: &str, end: &str) -> Option<&'a str> {
     Some(&output[start..start + length])
 }
 
-fn marker_message(output: &str, marker: &str) -> Option<String> {
+pub(super) fn marker_message(output: &str, marker: &str) -> Option<String> {
     let start = output.find(marker)? + marker.len();
     let rest = &output[start..];
     let end = rest.find('\0').unwrap_or(rest.len());
@@ -418,7 +418,7 @@ pub fn files_read_payload(output: &str, path: &str, max_bytes: u64) -> Result<Va
 
 // —— 本机采集（argv 直呼，无 shell）——————————————————————
 
-fn missing_cli_error(engine: &EngineConfig) -> String {
+pub(super) fn missing_cli_error(engine: &EngineConfig) -> String {
     format!(
         "container CLI '{}' was not found on this machine",
         engine.cli
