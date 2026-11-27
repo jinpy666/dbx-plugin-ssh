@@ -15,7 +15,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import MonitorCard, { GROUP_COLOR_PALETTE, groupColorIndex } from "./MonitorCard.vue";
 import { workbenchMessage } from "../lib/i18n";
 import { pluginStore } from "../lib/pluginStore";
-import { useMonitorPanel, type MonitorConnectionRow } from "../composables/useMonitorPanel";
+import { useMonitorPanel } from "../composables/useMonitorPanel";
+import type { MonitorConnectionRow } from "../lib/monitorProtocol";
 
 defineProps<{ context: Record<string, unknown> }>();
 

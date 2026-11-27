@@ -1,7 +1,8 @@
 # 模块地图与边界
 
 本文回答三个问题：**代码分成哪些模块、每个模块负责什么、改一处会牵动哪里**。
-所有数字都在 base `f5052f8` 的工作树上用 `wc -l` / `grep` 实测（复核命令见
+所有数字都在集成分支（2026-11-27，`integration/remotex-learnings`）的工作树上用
+`wc -l` / `grep` 实测（复核命令见
 [附录](#附录复核命令)），不是估算。RPC 方法名以
 [PROTOCOL.zh-CN.md](PROTOCOL.zh-CN.md) 为准；能力对标与「是否已实现」以
 [FEATURE_PARITY.zh-CN.md](FEATURE_PARITY.zh-CN.md) 和代码为准。
@@ -159,17 +160,17 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 
 | 模块（产物行数） | 职责 | 关键入口 | 依赖 |
 | --- | --- | --- | --- |
-| `App.vue` (12,560) | 工作台根组件：工具条/会话菜单/布局、xterm 生命周期与加固、SFTP 与传输编排、跨面板状态 | 全部 RPC 调用点；挂载各 dialog/panel | `composables`、`lib`、`components`、`rdp` |
+| `App.vue` (12,543) | 工作台根组件：工具条/会话菜单/布局、xterm 生命周期与加固、SFTP 与传输编排、跨面板状态 | 全部 RPC 调用点；挂载各 dialog/panel | `composables`、`lib`、`components`、`rdp` |
 | `main.ts` (140) | 启动：`pluginStore` 水合 → 装主题桥 → 按 contribution 挂 3 个根之一 | `dbx-plugin-init` 事件、`host.context` | `shared/frontend/themeSync`、`lib/pluginContext` |
 | `TunnelManager.vue` (78) | 端口映射工作台根（同时服务 `presentation: "dialog"` 的右键入口） | `ssh/forward/*` | `components/ui/dialog` |
-| `components/`（43 个 `.vue`；13,786 行） | 面板与对话框（设置、SFTP 预览、Docker、监控、OTP、导入、搜索…） | 见 §3.1 | `lib`、`composables`、`ui` |
-| `components/ui/`（10 组，1,111 行） | reka-ui/shadcn 风格基础原语（dialog/select/table/tabs…） | — | reka-ui |
-| `composables/`（44 个，11,387 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
-| `lib/`（166 个生产 `.ts`，29,022 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
+| `components/`（50 个 `.vue`；15,294 行） | 面板与对话框（设置、SFTP 预览、Docker、监控、OTP、导入、搜索…） | 见 §3.1 | `lib`、`composables`、`ui` |
+| `components/ui/`（10 组，1,165 行） | reka-ui/shadcn 风格基础原语（dialog/select/table/tabs…） | — | reka-ui |
+| `composables/`（47 个，11,934 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
+| `lib/`（172 个生产 `.ts`，30,166 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
 | `lib/completion/`（子目录，2,734 行） | 结构化补全（fig 语料、parser、worker、host 客户端） | `CompletionController`、`lib/completion/host/hostClient.ts` | `completion/execute` RPC |
-| `rdp/`（1,318 行） | RDP 画布、帧解码、会话与工作台 | `useRdpSession`、`useRdpWorkbench`、`rdpFrame`、`RdpSurface` | `lib`、`components` |
+| `rdp/`（1,598 行） | RDP 画布、帧解码、会话与工作台 | `useRdpSession`、`useRdpWorkbench`、`rdpFrame`、`RdpSurface` | `lib`、`components` |
 | `styles/tailwind.css` (64) | Tailwind v4 入口（`style.css` 1,619 行为主题与组件样式） | — | tailwind |
-| `mockDbxHost.ts` (2,191) | 浏览器/vitest 的宿主 + RPC mock（契约镜像） | `mockDbxHost.spec.ts` | 全部 RPC 契约 |
+| `mockDbxHost.ts` (2,333) | 浏览器/vitest 的宿主 + RPC mock（契约镜像） | `mockDbxHost.spec.ts` | 全部 RPC 契约 |
 
 ### 3.1 主要组件
 

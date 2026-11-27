@@ -8,10 +8,8 @@ import {
   MONITOR_GROUPS_KEY,
   MONITOR_PRIVACY_KEY,
   MONITOR_WATCHED_KEY,
-  type MonitorHistoryEntry,
-  type MonitorSample,
-  type MonitorSnapshot,
 } from "../composables/useMonitorPanel";
+import type { MonitorHistoryEntry, MonitorSample, MonitorSnapshot } from "../lib/monitorProtocol";
 import { pluginStore } from "../lib/pluginStore";
 
 // 监控面板组件单测（计划 §4-B5）：假 api（stub window.dbxPlugin）+ 真

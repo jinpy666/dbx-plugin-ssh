@@ -30,14 +30,13 @@ const LINE_ALLOWLIST: Record<string, number> = {
   "./mockDbxHost.ts": 2333,
   "./components/DockerPanel.vue": 1084,
   "./components/OtpPanel.vue": 822,
-  "./components/MonitorPanel.vue": 791,
+  "./components/MonitorPanel.vue": 792,
   "./composables/useCommandSuggestions.ts": 784,
   "./composables/useUploadChain.ts": 773,
   "./composables/useRecording.ts": 749,
   "./lib/completion/fig/figCompletionSource.ts": 742,
   "./composables/useTransferQueue.ts": 654,
   "./components/PreviewPane.vue": 643,
-  "./composables/useMonitorPanel.ts": 605,
 };
 
 /**
