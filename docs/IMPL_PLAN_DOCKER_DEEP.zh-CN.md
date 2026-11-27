@@ -362,6 +362,22 @@ Docker 侧对应：**帧解码/缺口判定**放 `lib/dockerTerminalFrames.ts`�
 
 **批次顺序理由**：B1 先把预算与搬运做干净（否则后面每批都被结构守卫拦）；B2/B3 是只读、无新授权面，先交付用户可见价值并验证流注册表；B4 引入「固定脚本 + 位置参数」这一新执行范式，先用只读文件把范式与测试打牢；B5 才上 PTY（最高风险）；B6 最后做破坏性写删。B4 与 B6 拆开是为了让「只读脚本注入面」单独人审一次。
 
+### 6.1 执行记录（2026-11-27）
+
+| 批次 | 状态 | 实测（行数 / 测试 / 备注） |
+|---|---|---|
+| B1 | 已完成 | `docker.rs` 1,676 → 根 72 + `engine 167 / scripts 224 / parse 259 / local 263 / rpc 328 / tests 672`；命令字面量 109/109 一致；registry 188 |
+| B2 | 已完成 | 新增 `docker/stats.rs` 579（11 个纯函数单测）；`parse` 259→266、`rpc` 328→403、根 72→75、`main.rs` +1 字面量臂；前端 `dockerStats.ts` 224 + spec 186、`useDockerStats.ts` 165、`DockerStatsBar.vue` 78、`mockDockerFixtures.ts` 156；总测试 1,396 |
+| B3 | 已完成 | 新增 `logs_batch.rs` 263 + `logs_stream.rs` 462 + `streams.rs` 287；`rpc` 403→487、根 75→81、`tests.rs` 672→1,112；前端 `dockerLogStream.ts` 90 + spec 98、`useDockerLogStream.ts` 198、`DockerLogsDrawer.vue` 154→327；总测试 1,409；`stop_connection` 已实现但**尚未**接到 `disconnect_connection`（等 B6a 把该函数搬进 `lifecycle.rs` 再接） |
+| B4 | 进行中 | — |
+| B5 | 未开始 | — |
+| B6 | 未开始 | — |
+
+B3 落地时补的两处实现细节（协议不变）：
+
+1. **聚合必须有**：主通道是二进制帧，不存在 UTF-8 切断，但一次 pipe read 一个事件会让桥接事件率失控；`ChunkBatcher` 64 KiB / 100 ms 任一 flush，单 fragment 不切分，`end` 前 flush 残余（附录 C.1）。
+2. **已结束的流不会自己回注册表**：任务自然结束（`exited`/`ttl`/`error`）只发 `end` 就退出，前端只在关抽屉时发 `stop`；抽屉长开 + 容器反复重启会把 8 条上限永久占满。因此 `register` 在**上限边界**惰性回收 `JoinHandle::is_finished()` 的条目（未到上限时语义不变，条目留到 `stop` 以便墓碑拦住迟到的同 id start），并有用例 `logs_stream_registry_reclaims_finished_slots_at_the_cap`。
+
 ## 7. 测试策略
 
 | 层 | 内容 | 说明 |
