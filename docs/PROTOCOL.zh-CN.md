@@ -134,7 +134,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `serial/ports/list` | 本机串口清单（连接弹窗端口下拉数据源）：`{ports: [path], portDetails: [{path, description}]}`，按路径排序；枚举失败回落空清单，USB/PCI/Bluetooth 描述尽力标注 |
 | `serial/start`、`serial/write`、`serial/close` | 串口会话生命周期（回放见「串口终端回放」、写回压见「写序列化与回压」节）：`start {workbenchId, portName, baudRate(50–4000000，越界报错不静默钳制), dataBits?, parity?, stopBits?, flowControl?(缺省 none), backspaceMode?}` → `{sessionId, port, baudRate, binaryInput: true}`（binaryInput 为旧前端 JSON 兼容探测位），线路参数校验失败即 start 报错（绝不静默降级），开端口为阻塞 syscall 走 spawn_blocking；`write {sessionId, dataBase64(≤64KiB)}` → `{success: true}`——JSON 兜底车道（主路径 `serial/terminal/in` 二进制通道），Backspace 改写后进专用写线程队列，超限/队满整包丢弃并发 `serial/input/dropped`（不报错）、会话死亡报错；`close {sessionId}` → `{success: true}`，摘除会话并唤醒写线程退出 |
 | `local/wallpaper/get`、`local/wallpaper/set`、`local/wallpaper/clear` | 工作台背景图（桌面形态）：`get` 返回 `{dataUrl: "data:image/<png|jpeg|webp>;base64,…"}`，无背景时返回 `{}`；`set` 接受 `{imageBase64}`，≤8 MiB 且仅 png/jpeg/webp 魔数，原子落盘 `<plugin_data_dir>/wallpaper`，返回与 `get` 相同的 data URL 载荷；`clear` 幂等删除，返回 `{}` |
-| `docker/list`、`docker/logs`、`docker/action`、`docker/stats`、`docker/files/list`、`docker/files/read`、`docker/logs/stream/start`、`docker/logs/stream/stop` | Docker 管理面板（参数 `target`/`cli`/`socket`/`host` 与全部语义见「Docker 管理面板」节）：list 探针+七列容器清单，`needsSudo` 且配置 Quick Sudo 时自动提权重采（只读连接/白名单拒绝一律退回原 payload 不报错）；logs `tail` 钳 10–2000（缺省 200）、容器消失降级 `container: null`；action 动词白名单 `start/stop/restart/kill/rm`、`containerId` 限 12–64 位小写十六进制、执行前写审计、kill/rm 走确认门、只读连接直接拒绝；stats 对 1–50 个容器批量只读采样 CPU/内存/网络/块 IO/PIDs，CLI 或 daemon 不可用时 `available:false` 降级；files/list、files/read 只读浏览容器内目录与普通文件（最多 500 条 / 单次读取 1–8 MiB，只读连接放行） |
+| `docker/list`、`docker/logs`、`docker/action`、`docker/stats`、`docker/files/list`、`docker/files/read`、`docker/logs/stream/start`、`docker/logs/stream/stop`、`docker/terminal/open`、`docker/terminal/close`、`docker/terminal/resize`、`docker/terminal/replay` | Docker 管理面板（参数 `target`/`cli`/`socket`/`host` 与全部语义见「Docker 管理面板」节）：list 探针+七列容器清单，`needsSudo` 且配置 Quick Sudo 时自动提权重采（只读连接/白名单拒绝一律退回原 payload 不报错）；logs `tail` 钳 10–2000（缺省 200）、容器消失降级 `container: null`；action 动词白名单 `start/stop/restart/kill/rm`、`containerId` 限 12–64 位小写十六进制、执行前写审计、kill/rm 走确认门、只读连接直接拒绝；stats 对 1–50 个容器批量只读采样 CPU/内存/网络/块 IO/PIDs，CLI 或 daemon 不可用时 `available:false` 降级；files/list、files/read 只读浏览容器内目录与普通文件（最多 500 条 / 单次读取 1–8 MiB，只读连接放行） |
 | `telnet/list`、`vnc/list`、`rdp/list`、`serial/list` | 活跃非 SSH 会话清单（均含 `sessionId`、`workbenchId`、逻辑端点和创建时间；Telnet/VNC saved connection 会额外带 `connectionId`、`runtimeHost`、`runtimePort`）。工作台重建只按相同 `workbenchId` 回附，绝不按连接抢占另一标签页会话。 |
 | `telnet/replay`、`serial/replay`、`vnc/replay`、`rdp/replay` | Webview 重建回附的输出恢复：Telnet/Serial 重发序号制终端帧；VNC 重发当前完整 framebuffer；RDP 重发一张有明确内存预算的完整合成 framebuffer，绝不重放不能独立恢复画面的增量 patch 序列。 |
 | `telnet/start`、`telnet/write`、`telnet/resize`、`telnet/close` | Telnet 会话生命周期（明文协议，逻辑/拨号端点分工见「生命周期与状态隔离」节，二进制通道见「二进制通道」节）：`start {workbenchId, host, port?(23), connectionId?, runtimeHost?, runtimePort?, enterMode?("crlf"\|"cr"\|"lf"), backspaceMode?("del"\|"ctrl_h"), cols?(120), rows?(32), autoLogin?}` → `{sessionId, host, port}`——实际拨号只用 runtime 端点（缺省回落逻辑端点），`autoLogin` 为 expect `rules`（tssh/JSON 文法，同 `triggers/validate`）或 NyaTerm 式 `declarative`（提示词正则+凭据+成功/失败判定+重试预算）二选一，配置非法即 start 报错、凭据 Debug 全程脱敏。请求未带 `autoLogin` 且 `connectionId` 命中连接表单暂存密码（`connection/connect` 生命周期投递的 `connection.password`，见「非 SSH 连接凭据暂存」）时，sidecar 以内置默认提示词正则合成 `declarative` 自动登录——表单存了密码即自动登录的用户意图；弹窗路径显式携带 `autoLogin` 时以请求为准；`write {sessionId, dataBase64(≤64KiB)}` → `{success: true}`——JSON 兜底（主路径 `telnet/terminal/in`），死会话报 `Telnet session was not found or expired`；`resize {sessionId, cols, rows}` 钳 1..=65535 后经泵发 NAWS；`close {sessionId}` → `{success: true}` |
@@ -704,12 +704,38 @@ MCP 面同名工具已随 #203 瘦身移出——容器巡检/生命周期走 `s
 - **生命周期边界**：并发上限 8/sidecar（第 9 个返回可读错误，不排队）；TTL 30 分钟或 20 MiB 输出先到者结束；`stop` 幂等，未知 id 也返回成功，并真正关闭通道/回收子进程（取消后宽限 2s，仍存活则 SIGKILL）。关闭后 30s 内同一 `requestedStreamId` 的迟到 start 被墓碑拒绝（返回错误，不复活旧流）。
 - **回压**：桥接写入阻塞时 sidecar 读循环整体阻塞（本机管道泵走有界队列，OS 管道随即填满），不丢任何日志行；桥接报错（webview 关闭）立即停流并回收，不重试。
 
+### 容器终端（docker/terminal/open、docker/terminal/close、docker/terminal/resize、docker/terminal/replay）
+
+交互式 `docker exec -it`（B5）。通用参数同上（`target` / `sessionId` / `cli` / `socket` / `host`）：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `containerId` | string | 是 | 12–64 位小写十六进制；先过 id 门，再作为固定脚本的位置参数 |
+| `shell` | string | 否 | `auto`（缺省）`bash` `zsh` `fish` `ash` `sh`；其他值直接拒绝 |
+| `cols` / `rows` | number | 否 | 初始 PTY 尺寸，钳制到 2–500 / 2–300（缺省 80×24） |
+| `requestedTerminalId` | string | 否 | 前端预生成 id（`[A-Za-z0-9._-]{1,128}`），让前端在 RPC 返回前先订阅输出通道 |
+| `afterSequence` | number | 否 | open 返回的 replay 只含该序号之后的帧（缺省 0） |
+| `needsSudo` | bool | 否 | 只读探针结果（`docker/list`/`docker/stats` 的 `needsSudo`），用于省一次失败往返；不是授权依据 |
+
+- `open` 返回 `{terminalId, containerId, shell, cols, rows, sequence, replay: [{sequence, dataBase64}]}`。`sequence` 是当前输出尾序号；`replay` 是按 `afterSequence` 过滤后的补发帧。
+- `close` 幂等，未知 id 返回 `{success:true}`；先发 `docker/terminal/end {reason:"closed"}` 再拆会话/回收子进程。
+- `resize` 走会话内 resize（`{terminalId, cols, rows}` → `{success:true}`），尺寸同样钳制。
+- `replay` 与 `serial/replay` 同构：`{terminalId, afterSequence}` → `{frameCount, firstAvailableSequence, tailSequence, complete}`；帧同时补发到 `docker/terminal/out/{terminalId}`。`complete:false` 表示环形缓冲已覆盖请求起点，前端应清屏后以补发帧重建。
+- **授权**：`target:"ssh"` 时只读连接直接拒绝（文案与 `ensure_writable` 同族）；`target:"local"` 无连接语义，不做该门。`needsSudo:true` 时**绝不**把 sudo 密码注入 PTY：无预热时间戳直接返回可读错误（加入 docker 组或先在连接上执行一次 sudo）；有预热（`has_warm_sudo`）时命令前缀只允许 `sudo -n`（非交互），失败原样上抛。
+- **审计**：open 前写意图行，命令文本为 `<cli> exec -it <id> <shell>`，**不含任何键入字节**（键入只走二进制通道，不落审计）。
+- **命令注入面**：远端固定脚本 `sh -c '<常量>' sh <cli> <id> <shell>`，cli/id/shell 全部只作 `$1..$3` 并 `shell_quote`；本机面 argv 直呼 `<cli> exec -it <id> <shell>`（无 shell）。auto 的 shell 探测脚本是常量，按 bash→zsh→fish→ash→sh 顺序 `exec`。
+- **资源边界**：并发上限 8/sidecar（**独立配额**，与日志流的 8 条互不挤占；第 9 个返回可读错误，不排队）；空闲 30 分钟（无输入/输出）回收；replay 2 MiB 环形（`TERMINAL_REPLAY_LIMIT`）；关闭后 30s 内同一 terminalId 的迟到 open 被墓碑拒绝。
+- **通道**：`docker/terminal/in/{terminalId}` 为 8 字节大端序号 + 原始键（复用 `decode_sequenced_input`，序号仅回显不排序）；`docker/terminal/out/{terminalId}` 为 9 字节 `TerminalFrame`（流 `0`=stdout、`1`=stderr，当前不发状态帧）。
+- **事件**：`docker/terminal/inputAck {terminalId, sequence}`（仅审计，无重传）；`docker/terminal/error {terminalId, error}`（通道建立后的运行期错误/写失败）；`docker/terminal/end {terminalId, reason: "exited"|"closed"|"error", exitCode?}`（唯一终态，重复 close 不再发）。参数/权限错误在 open 返回前直接作为 RPC 错误，不发事件。
+
 ## 二进制通道
 
 - `ssh/terminal/in/{sessionId}`：原始终端输入。
 - `ssh/terminal/out/{sessionId}`：首字节为流类型，随后为大端 `u64` 单调序号，再后为终端数据。
 - `local/terminal/in/{sessionId}`：本地终端输入，与 `ssh/terminal/in` 同形（8 字节大端序号 + 数据）；确认事件为 `local/terminal/inputAck`，死会话镜像 `local/terminal/error`。
 - `local/terminal/out/{sessionId}`：本地终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + u64 序号）；stdout/stderr 在 PTY 内合流，数据帧恒为流 0。
+- `docker/terminal/in/{terminalId}`：容器终端输入，8 字节大端序号 + 原始键（无流标签）；成功确认 `docker/terminal/inputAck {terminalId, sequence}`，死会话/写失败镜像 `docker/terminal/error` 并返回 RPC 错误。
+- `docker/terminal/out/{terminalId}`：容器终端输出，9 字节 `TerminalFrame`（流 `0`=stdout、`1`=stderr + 大端 u64 序号 + 数据）；输出在 PTY 内合流，`docker/terminal/out/` 必须在 `ssh/terminal/out/` 之前路由。
 - `docker/logs/out/{streamId}`：Docker 日志流输出，9 字节 `TerminalFrame`（流标签 `0`=容器 stdout、`1`=容器 stderr、`2`=状态 + 大端 `u64` 序号 + 数据）；与 `ssh/terminal/out` 同帧格式但**保留 stderr 分流**，每批一帧（64 KiB / 100 ms 聚合），详见「容器日志流」小节。
 - `serial/terminal/out/{sessionId}`：串口终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + u64 序号），数据帧恒为 Stdout 流（读线程逐读递增序号）。
 - `telnet/terminal/out/{sessionId}`：Telnet 终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + 大端 u64 单调序号 + 数据）；回附经 `telnet/replay` 按序号重发。

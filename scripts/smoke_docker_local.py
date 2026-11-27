@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import struct
 import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
@@ -84,7 +86,7 @@ def main() -> int:
                   f"needsSudo={stats['needsSudo']}")
 
         if running is None:
-            print("no reachable local daemon — skipping logs/action (shape-only pass)")
+            print("no running local container — skipping logs/action/terminal (shape-only pass)")
             return 0
 
         # 2) local logs: inspect summary + log tail.
@@ -180,6 +182,66 @@ def main() -> int:
                 print(f"docker/logs/stream ok: start → {len(frames)} frame(s) → stop")
             else:
                 print("docker/logs/stream shape ok: start → no frames (quiet container) → stop")
+
+        # 3c) container terminal (B5): open → type `echo ok` → close. Uses the
+        # already running container only; no container is created/started/
+        # stopped/deleted. Distroless containers (no shell) or a daemon the
+        # user cannot exec into skip with a printed reason.
+        terminal_id = "smoke-terminal"
+        opened = None
+        try:
+            opened = client.request(
+                "docker/terminal/open",
+                {
+                    "target": "local",
+                    "containerId": running["id"],
+                    "shell": "sh",
+                    "cols": 80,
+                    "rows": 24,
+                    "requestedTerminalId": terminal_id,
+                },
+                timeout=30,
+            )
+            assert opened.get("terminalId") == terminal_id, opened
+            assert opened.get("containerId") == running["id"], opened
+            assert opened.get("shell") == "sh", opened
+            assert opened.get("cols") == 80 and opened.get("rows") == 24, opened
+            assert isinstance(opened.get("sequence"), int), opened
+            assert isinstance(opened.get("replay"), list), opened
+            client.send_binary(
+                f"docker/terminal/in/{terminal_id}",
+                struct.pack(">Q", 1) + b"echo ok\r",
+            )
+            # Ack proves the sidecar accepted the 8-byte sequenced frame; the
+            # short dummy wait pumps the echoed/executed output frames.
+            client.wait_event("docker/terminal/inputAck", timeout=5)
+            client.wait_event("docker/terminal/not-an-event", timeout=0.6)
+            channel = f"docker/terminal/out/{terminal_id}"
+            frames = [frame for frame in client.binary_frames if frame[0] == channel]
+            text = ""
+            for _, payload in frames:
+                assert len(payload) >= 9, payload[:9]
+                text += payload[9:].decode("utf-8", "replace")
+            plain = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+            lines = [line.strip() for line in plain.replace("\r", "\n").split("\n")]
+            assert "ok" in lines, f"expected `ok` output, got {plain!r}"
+            print(f"docker/terminal ok: open → {len(frames)} frame(s) containing `ok` → close")
+        except Exception as error:  # noqa: BLE001 - capability probe
+            print(f"docker/terminal skipped (container lacks a shell / exec permission?): {error}")
+        finally:
+            if opened is not None:
+                closed = client.request(
+                    "docker/terminal/close", {"terminalId": terminal_id}, timeout=20
+                )
+                assert closed.get("success") is True, closed
+                end = client.wait_event("docker/terminal/end", timeout=5)
+                assert end is not None, "missing docker/terminal/end after close"
+                assert end.get("params", {}).get("reason") == "closed", end
+                again = client.request(
+                    "docker/terminal/close", {"terminalId": terminal_id}, timeout=20
+                )
+                assert again.get("success") is True, again
+                print("docker/terminal close ok: end{reason:closed} → idempotent success")
 
         # 4) validation: unknown target and non-hex container names are
         # refused before any process is spawned.

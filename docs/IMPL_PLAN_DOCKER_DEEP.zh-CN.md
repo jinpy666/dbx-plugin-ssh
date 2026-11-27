@@ -370,7 +370,7 @@ Docker 侧对应：**帧解码/缺口判定**放 `lib/dockerTerminalFrames.ts`�
 | B2 | 已完成 | 新增 `docker/stats.rs` 579（11 个纯函数单测）；`parse` 259→266、`rpc` 328→403、根 72→75、`main.rs` +1 字面量臂；前端 `dockerStats.ts` 224 + spec 186、`useDockerStats.ts` 165、`DockerStatsBar.vue` 78、`mockDockerFixtures.ts` 156；总测试 1,396 |
 | B3 | 已完成 | 新增 `logs_batch.rs` 263 + `logs_stream.rs` 462 + `streams.rs` 287；`rpc` 403→487、根 75→81、`tests.rs` 672→1,112；前端 `dockerLogStream.ts` 90 + spec 98、`useDockerLogStream.ts` 198、`DockerLogsDrawer.vue` 154→327；总测试 1,409；`stop_connection` 已接线到 `main.rs` 的 `connection/disconnect` 臂（`SshRuntime` 拿不到 `Plugin` 的注册表，故接线点在分发层而非 `disconnect_connection` 内部） |
 | B4 | 进行中 | — |
-| B5 | 未开始 | — |
+| B5 | 已完成 | 新增 `docker/terminal.rs` 308 + `terminal_registry.rs` 387 + `terminal_io.rs` 386 + `terminal_tests.rs` 223；`rpc.rs` +124、`main.rs` +4 字面量臂 +1 输入前缀分支、`docker/streams.rs` 连接清理点接入终端注册表；`ssh/terminal.rs` 文案中性化 + `ssh/keepalive.rs` `has_warm_sudo` 只读访问器；前端 `dockerTerminalFrames.ts` 107 + spec、`useDockerTerminal.ts` 254 + spec、`DockerTerminalPane.vue` 256、`DockerWorkbench.vue` 终端 tab、`DockerPanel.vue` 改开工作台（删除旧 window 事件）；后端 1,431 测试全绿 |
 | B6 | 未开始 | — |
 
 B3 落地时补的两处实现细节（协议不变）：
