@@ -1154,6 +1154,21 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   else if (method === "docker/files/read") {
     result = mockDockerFileRead((params || {}) as Record<string, unknown>);
   }
+  else if (method === "docker/files/write") {
+    const input = (params || {}) as Record<string, unknown>;
+    const encoded = typeof input.dataBase64 === "string" ? input.dataBase64 : "";
+    const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+    const size = Math.max(0, Math.floor((encoded.length * 3) / 4) - padding);
+    result = {
+      path: String(input.path || ""),
+      size,
+      overwritten: input.overwrite === true,
+    };
+  }
+  else if (method === "docker/files/delete") {
+    const input = (params || {}) as Record<string, unknown>;
+    result = { path: String(input.path || ""), removed: true };
+  }
   else if (method === "sftp/createDirectory" || method === "sudo/mkdir") result = mockWriteEntry(String((params as Record<string, unknown>)?.path || ""), mockDir(String((params as Record<string, unknown>)?.path || "/").split("/").pop() || "folder"));
   else if (method === "sftp/touch") result = mockWriteEntry(String((params as Record<string, unknown>)?.path || ""), mockFile(String((params as Record<string, unknown>)?.path || "").split("/").pop() || "file.txt", 0));
   // 撞名探测（上传 auto-rename 策略）：mock 文件树不做重名裁决，恒按

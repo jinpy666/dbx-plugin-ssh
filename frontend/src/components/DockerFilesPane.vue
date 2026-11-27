@@ -1,22 +1,32 @@
 <script setup lang="ts">
-// Docker 容器文件面板（B4，只读）：目录浏览 + 文本预览。
-// 两个 RPC 都只读（`docker/files/list` / `docker/files/read`），没有写/删入口。
-// 路径安全校验、容器 id 门、固定脚本 + 位置参数都在 sidecar；这里只做
-// 展示层归一与错误呈现。
+// Docker 容器文件面板（B4 只读 + B6 写/删）：目录浏览、文本预览/编辑保存、
+// 删除确认。路径安全、容器 id 门、固定脚本 + 位置参数、只读连接拒绝、64 KiB
+// 写入上限与审计都在 sidecar；这里只做展示层归一、确认状态机与错误呈现。
 import { computed, ref, watch } from "vue";
-import { ArrowUp, File, Folder, Link2, Loader2, RefreshCw } from "@lucide/vue";
+import { ArrowUp, File, Folder, Link2, Loader2, RefreshCw, Save, Trash2 } from "@lucide/vue";
+import DockerFilesConfirmBar from "./DockerFilesConfirmBar.vue";
 import {
   DOCKER_FILES_DEFAULT_MAX_BYTES,
+  DOCKER_FILES_WRITE_MAX_BYTES,
+  confirmDockerMutation,
   decodeBase64Bytes,
   decodeFileText,
+  encodeFileText,
   formatFileSize,
+  initialDockerMutation,
   isHiddenDockerName,
   parentDockerPath,
   parseDockerFileContent,
   parseDockerFilesListing,
+  requestDockerDelete,
+  requestDockerWrite,
+  settleDockerMutation,
+  utf8ByteLength,
   type DockerFileContent,
   type DockerFileEntry,
   type DockerFilesListing,
+  type DockerMutationRequest,
+  type DockerMutationState,
 } from "../lib/dockerFiles";
 
 interface FilesTarget {
@@ -42,6 +52,12 @@ const content = ref<DockerFileContent | null>(null);
 const readLoading = ref(false);
 const readError = ref("");
 
+const draft = ref("");
+const saving = ref(false);
+const mutation = ref<DockerMutationState>(initialDockerMutation());
+const mutationError = ref("");
+const notice = ref("");
+
 const visibleEntries = computed(() =>
   (listing.value?.entries ?? []).filter((entry) => showHidden.value || !isHiddenDockerName(entry.name)),
 );
@@ -51,7 +67,38 @@ const previewText = computed(() => {
   return decodeFileText(decodeBase64Bytes(content.value.dataBase64));
 });
 
+/** 可编辑全文（预览只取前 200k 字符；保存必须拿到完整内容）。 */
+const editableText = computed(() => {
+  if (!content.value) return null;
+  return decodeFileText(decodeBase64Bytes(content.value.dataBase64), 8 * 1024 * 1024);
+});
+
 const previewTruncated = computed(() => Boolean(content.value?.truncated));
+
+const canEdit = computed(() => {
+  if (!content.value || previewTruncated.value) return false;
+  if (content.value.size > DOCKER_FILES_WRITE_MAX_BYTES) return false;
+  return editableText.value !== null;
+});
+
+const draftBytes = computed(() => utf8ByteLength(draft.value));
+const draftDirty = computed(() => editableText.value !== null && draft.value !== editableText.value);
+const isLocalTarget = computed(() => props.params().target === "local");
+
+const promptText = computed(() => {
+  const pending = mutation.value.pending;
+  if (!pending) return "";
+  if (pending.kind === "write") {
+    return props.t("docker.filesOverwriteConfirm", { path: pending.path });
+  }
+  return pending.recursive
+    ? props.t("docker.filesDeleteRecursiveConfirm", { path: pending.path })
+    : props.t("docker.filesDeleteConfirm", { path: pending.path });
+});
+
+watch(editableText, (value) => {
+  draft.value = value ?? "";
+});
 
 function baseParams(extra: Record<string, unknown>): Record<string, unknown> {
   return { ...props.params(), containerId: props.target.id, ...extra };
@@ -71,6 +118,12 @@ function kindLabel(entry: DockerFileEntry): string {
     other: "docker.filesKindOther",
   };
   return props.t(keys[entry.kind]);
+}
+
+function clearTransient(): void {
+  mutationError.value = "";
+  notice.value = "";
+  mutation.value = settleDockerMutation().state;
 }
 
 async function load(nextPath: string): Promise<void> {
@@ -93,19 +146,13 @@ async function load(nextPath: string): Promise<void> {
   }
 }
 
-async function openEntry(entry: DockerFileEntry): Promise<void> {
-  if (entry.kind === "dir") {
-    selected.value = null;
-    content.value = null;
-    readError.value = "";
-    await load(entry.path);
-    return;
-  }
-  if (entry.kind !== "file") return;
+async function readFile(entry: DockerFileEntry): Promise<void> {
   selected.value = entry;
   content.value = null;
   readError.value = "";
+  draft.value = "";
   readLoading.value = true;
+  clearTransient();
   try {
     const payload = await window.dbxPlugin.invoke<unknown>(
       "docker/files/read",
@@ -120,6 +167,20 @@ async function openEntry(entry: DockerFileEntry): Promise<void> {
   }
 }
 
+async function openEntry(entry: DockerFileEntry): Promise<void> {
+  if (entry.kind === "dir") {
+    selected.value = null;
+    content.value = null;
+    readError.value = "";
+    draft.value = "";
+    clearTransient();
+    await load(entry.path);
+    return;
+  }
+  if (entry.kind !== "file") return;
+  await readFile(entry);
+}
+
 function goUp(): void {
   void load(parentDockerPath(path.value));
 }
@@ -132,6 +193,91 @@ function toggleHidden(): void {
   void load(path.value);
 }
 
+/** 保存草稿：已存在（刚读过）→ 先弹覆盖确认；确认后走 `executeMutation`。 */
+function saveDraft(): void {
+  if (!selected.value || saving.value || !canEdit.value || !draftDirty.value) return;
+  if (draftBytes.value > DOCKER_FILES_WRITE_MAX_BYTES) {
+    mutationError.value = props.t("docker.filesSaveTooLarge", {
+      limit: formatFileSize(DOCKER_FILES_WRITE_MAX_BYTES),
+    });
+    return;
+  }
+  const step = requestDockerWrite(mutation.value, selected.value.path, true);
+  mutation.value = step.state;
+  mutationError.value = "";
+  notice.value = "";
+  if (step.request) void executeMutation(step.request);
+}
+
+/** 删除入口：文件与目录都二次确认；目录带 recursive。 */
+function deleteEntry(entry: DockerFileEntry): void {
+  if (saving.value) return;
+  const step = requestDockerDelete(mutation.value, entry.path, entry.kind === "dir");
+  mutation.value = step.state;
+  mutationError.value = "";
+  notice.value = "";
+}
+
+function confirmMutation(): void {
+  const step = confirmDockerMutation(mutation.value, true);
+  mutation.value = step.state;
+  if (step.request) void executeMutation(step.request);
+}
+
+function cancelMutation(): void {
+  mutation.value = confirmDockerMutation(mutation.value, false).state;
+}
+
+async function executeMutation(request: DockerMutationRequest): Promise<void> {
+  saving.value = true;
+  mutationError.value = "";
+  try {
+    if (request.kind === "write") {
+      const bytes = utf8ByteLength(draft.value);
+      if (bytes > DOCKER_FILES_WRITE_MAX_BYTES) {
+        throw new Error(props.t("docker.filesSaveTooLarge", {
+          limit: formatFileSize(DOCKER_FILES_WRITE_MAX_BYTES),
+        }));
+      }
+      await window.dbxPlugin.invoke<unknown>(
+        "docker/files/write",
+        baseParams({
+          path: request.path,
+          dataBase64: encodeFileText(draft.value),
+          overwrite: request.overwrite,
+        }),
+        { timeoutMs: 60_000 },
+      );
+      await load(path.value);
+      const entry = selected.value;
+      if (entry && entry.path === request.path) await readFile(entry);
+      notice.value = props.t("docker.filesSaved");
+    } else {
+      await window.dbxPlugin.invoke<unknown>(
+        "docker/files/delete",
+        baseParams({
+          path: request.path,
+          recursive: request.recursive,
+          ...(isLocalTarget.value ? { confirm: true } : {}),
+        }),
+        { timeoutMs: 60_000 },
+      );
+      notice.value = props.t("docker.filesDeleted");
+      const current = selected.value;
+      if (current && (current.path === request.path || current.path.startsWith(`${request.path}/`))) {
+        selected.value = null;
+        content.value = null;
+      }
+      await load(path.value);
+    }
+  } catch (cause) {
+    mutationError.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    saving.value = false;
+    mutation.value = settleDockerMutation().state;
+  }
+}
+
 watch(
   () => props.target.id,
   (id) => {
@@ -139,6 +285,8 @@ watch(
     path.value = "/";
     selected.value = null;
     content.value = null;
+    draft.value = "";
+    clearTransient();
     void load("/");
   },
   { immediate: true },
@@ -172,21 +320,47 @@ watch(
     <p v-else-if="visibleEntries.length === 0" class="docker-files-hint">{{ props.t("docker.filesEmpty") }}</p>
     <p v-if="listing?.truncated" class="docker-files-hint">{{ props.t("docker.filesTruncated", { count: 500 }) }}</p>
 
+    <DockerFilesConfirmBar
+      v-if="mutation.pending"
+      :message="promptText"
+      :confirm-label="props.t('docker.filesConfirm')"
+      :cancel-label="props.t('docker.filesCancel')"
+      :busy="saving"
+      @confirm="confirmMutation"
+      @cancel="cancelMutation"
+    />
+    <p v-if="mutationError" class="docker-files-error">{{ props.t("docker.filesMutationFailed") }} {{ mutationError }}</p>
+    <p v-else-if="notice" class="docker-files-hint">{{ notice }}</p>
+
     <div class="docker-files-body">
       <ul v-if="visibleEntries.length > 0" class="docker-files-list">
         <li v-for="entry in visibleEntries" :key="entry.path">
-          <button
-            type="button"
+          <div
             class="docker-files-row"
             :class="{ 'docker-files-row--active': selected?.path === entry.path }"
-            :disabled="entry.kind === 'link' || entry.kind === 'other'"
-            @click="openEntry(entry)"
           >
-            <component :is="iconFor(entry)" class="docker-files-icon-kind" />
-            <span class="docker-files-name">{{ entry.name }}</span>
-            <span class="docker-files-kind">{{ kindLabel(entry) }}</span>
-            <span class="docker-files-size mono">{{ entry.kind === "file" ? formatFileSize(entry.size) : "—" }}</span>
-          </button>
+            <button
+              type="button"
+              class="docker-files-open"
+              :disabled="entry.kind === 'link' || entry.kind === 'other'"
+              @click="openEntry(entry)"
+            >
+              <component :is="iconFor(entry)" class="docker-files-icon-kind" />
+              <span class="docker-files-name">{{ entry.name }}</span>
+              <span class="docker-files-kind">{{ kindLabel(entry) }}</span>
+              <span class="docker-files-size mono">{{ entry.kind === "file" ? formatFileSize(entry.size) : "—" }}</span>
+            </button>
+            <button
+              type="button"
+              class="docker-files-icon docker-files-delete"
+              :title="props.t('docker.filesDelete')"
+              :aria-label="props.t('docker.filesDelete')"
+              :disabled="saving"
+              @click="deleteEntry(entry)"
+            >
+              <Trash2 />
+            </button>
+          </div>
         </li>
       </ul>
 
@@ -198,11 +372,33 @@ watch(
           <div class="docker-files-preview-head">
             <strong class="mono">{{ selected.name }}</strong>
             <span>{{ formatFileSize(content.size) }}</span>
+            <button
+              v-if="canEdit"
+              type="button"
+              class="docker-files-save"
+              :disabled="saving || !draftDirty || draftBytes > DOCKER_FILES_WRITE_MAX_BYTES"
+              @click="saveDraft"
+            >
+              <Save /> {{ props.t("docker.filesSave") }}
+            </button>
           </div>
           <p v-if="previewTruncated" class="docker-files-hint">
             {{ props.t("docker.filesPreviewTruncated", { size: formatFileSize(content.size), limit: formatFileSize(DOCKER_FILES_DEFAULT_MAX_BYTES) }) }}
           </p>
-          <pre v-if="previewText !== null" class="docker-files-text mono">{{ previewText }}</pre>
+          <p v-else-if="!canEdit" class="docker-files-hint">
+            {{ props.t("docker.filesSaveTooLarge", { limit: formatFileSize(DOCKER_FILES_WRITE_MAX_BYTES) }) }}
+          </p>
+          <p v-if="canEdit && draftBytes > DOCKER_FILES_WRITE_MAX_BYTES" class="docker-files-error">
+            {{ props.t("docker.filesSaveTooLarge", { limit: formatFileSize(DOCKER_FILES_WRITE_MAX_BYTES) }) }}
+          </p>
+          <textarea
+            v-if="canEdit"
+            v-model="draft"
+            class="docker-files-editor mono"
+            spellcheck="false"
+            :aria-label="props.t('docker.filesSave')"
+          />
+          <pre v-else-if="previewText !== null" class="docker-files-text mono">{{ previewText }}</pre>
           <p v-else class="docker-files-hint">{{ props.t("docker.filesBinary") }}</p>
         </template>
       </section>
@@ -278,22 +474,40 @@ watch(
 .docker-files-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.25rem;
   width: 100%;
-  padding: 0.3rem 0.45rem;
+  padding: 0.2rem 0.35rem;
+  border: 0;
+  color: inherit;
+  text-align: left;
+}
+.docker-files-row:hover,
+.docker-files-row--active {
+  background: rgba(128, 128, 128, 0.14);
+}
+.docker-files-open {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.1rem;
   border: 0;
   background: transparent;
   color: inherit;
   text-align: left;
   cursor: pointer;
 }
-.docker-files-row:hover:not(:disabled),
-.docker-files-row--active {
-  background: rgba(128, 128, 128, 0.14);
-}
-.docker-files-row:disabled {
+.docker-files-open:disabled {
   opacity: 0.65;
   cursor: default;
+}
+.docker-files-delete {
+  flex: none;
+  opacity: 0.55;
+}
+.docker-files-row:hover .docker-files-delete {
+  opacity: 1;
 }
 .docker-files-icon-kind {
   width: 0.9rem;
@@ -338,6 +552,40 @@ watch(
   word-break: break-word;
   font-size: 0.78rem;
   line-height: 1.4;
+}
+.docker-files-editor {
+  flex: 1;
+  min-height: 12rem;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 0.35rem;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+.docker-files-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.docker-files-save:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.docker-files-save svg {
+  width: 0.9rem;
+  height: 0.9rem;
 }
 .docker-files-hint {
   margin: 0;

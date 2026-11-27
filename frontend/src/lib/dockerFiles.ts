@@ -180,3 +180,111 @@ export function decodeFileText(bytes: Uint8Array, maxChars = 200_000): string | 
     return null;
   }
 }
+
+/** 与 sidecar `FILES_WRITE_MAX_BYTES` 同值（解码后 64 KiB）。 */
+export const DOCKER_FILES_WRITE_MAX_BYTES = 64 * 1024;
+
+/** UTF-8 文本 → 标准 base64（保存预览编辑器用）。 */
+export function encodeFileText(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/** UTF-8 字节数（保存前对照 64 KiB 上限，不依赖 base64 长度）。 */
+export function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+// —— 覆盖 / 递归删除确认状态机（B6）——————————————————————
+//
+// 纯状态机：组件只负责把 `request` 变成 RPC、把 `prompt` 渲染成确认条。
+// 规则：
+// - 写：目标不存在直接执行；已存在先弹「覆盖」确认，确认后才带
+//   `overwrite: true`。
+// - 删：无论文件还是目录都二次确认（破坏性），目录带 `recursive: true`。
+// - `busy` 期间的新请求一律忽略，避免双击提交两次写/删。
+
+export interface DockerMutationRequest {
+  kind: "write" | "delete";
+  path: string;
+  overwrite: boolean;
+  recursive: boolean;
+}
+
+export interface DockerMutationState {
+  pending: DockerMutationRequest | null;
+  busy: boolean;
+}
+
+export interface DockerMutationStep {
+  state: DockerMutationState;
+  /** 立即执行的请求（无需再确认）。 */
+  request: DockerMutationRequest | null;
+  /** 需要用户确认的请求（渲染确认条，确认后走 `confirmDockerMutation`）。 */
+  prompt: DockerMutationRequest | null;
+}
+
+export function initialDockerMutation(): DockerMutationState {
+  return { pending: null, busy: false };
+}
+
+const idle: DockerMutationStep = {
+  state: { pending: null, busy: false },
+  request: null,
+  prompt: null,
+};
+
+function ignored(state: DockerMutationState): DockerMutationStep {
+  return { state, request: null, prompt: null };
+}
+
+/** 保存草稿：已存在 → 覆盖确认；不存在 → 直接写。 */
+export function requestDockerWrite(
+  state: DockerMutationState,
+  path: string,
+  exists: boolean,
+): DockerMutationStep {
+  if (state.busy || state.pending) return ignored(state);
+  if (!exists) {
+    return {
+      state: { pending: null, busy: true },
+      request: { kind: "write", path, overwrite: false, recursive: false },
+      prompt: null,
+    };
+  }
+  const prompt: DockerMutationRequest = { kind: "write", path, overwrite: true, recursive: false };
+  return { state: { pending: prompt, busy: false }, request: null, prompt };
+}
+
+/** 删除：一律二次确认；目录同时带递归标记。 */
+export function requestDockerDelete(
+  state: DockerMutationState,
+  path: string,
+  recursive: boolean,
+): DockerMutationStep {
+  if (state.busy || state.pending) return ignored(state);
+  const prompt: DockerMutationRequest = { kind: "delete", path, overwrite: false, recursive };
+  return { state: { pending: prompt, busy: false }, request: null, prompt };
+}
+
+/** 确认/取消当前确认条；确认后返回可执行请求并置 busy。 */
+export function confirmDockerMutation(
+  state: DockerMutationState,
+  accepted: boolean,
+): DockerMutationStep {
+  if (!state.pending) return { state, request: null, prompt: null };
+  if (!accepted) return idle;
+  return {
+    state: { pending: null, busy: true },
+    request: state.pending,
+    prompt: null,
+  };
+}
+
+/** RPC 结束后回到空闲态（成功或失败都调用）。 */
+export function settleDockerMutation(): DockerMutationStep {
+  return idle;
+}
+
