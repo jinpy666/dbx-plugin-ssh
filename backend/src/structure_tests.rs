@@ -26,6 +26,13 @@ const LINE_ALLOWLIST: &[(&str, usize)] = &[
     ("mcp.rs", 9266),
     ("exec.rs", 4777),
     ("connection_import.rs", 4545),
+    // 纯搬移的结果，总量未增、只是换了位置：
+    //   B1：内联测试 → ssh/tests.rs（4,470）
+    //   B2a：SFTP/monitor 助手 → ssh/{sftp_session,sftp_ops,sftp_helpers,monitor}.rs
+    //   B3：传输原语与共享状态 → ssh/{prompt,transport,leases,state,endpoint}.rs
+    // 条目随每批搬移收紧（18,457 → 13,929 → 12,829 → 11,787），阻止 ssh.rs 再长回去；
+    // ssh/tests.rs 是测试文件，按测试预算（1,200）登记。
+    ("ssh/tests.rs", 4475),
     ("model.rs", 3429),
     ("main.rs", 3390),
     ("local_terminal.rs", 2826),
@@ -59,14 +66,6 @@ const LINE_ALLOWLIST: &[(&str, usize)] = &[
     ("local_fs.rs", 755),
     ("sftp_copy.rs", 716),
     ("keys.rs", 706),
-    ("ssh.rs", 676),
-    // 纯搬移的结果，总量未增、只是换了位置：
-    //   B1：内联测试 → ssh/tests.rs（4,470）
-    //   B2a：SFTP/monitor 助手 → ssh/{sftp_session,sftp_ops,sftp_helpers,monitor}.rs
-    //   B3：传输原语与共享状态 → ssh/{prompt,transport,leases,state,endpoint}.rs
-    // 条目随每批搬移收紧（18,457 → 13,929 → 12,829 → 11,787），阻止 ssh.rs 再长回去；
-    // ssh/tests.rs 是测试文件，按测试预算（1,200）登记。
-    ("ssh/tests.rs", 4475),
     ("lzpack.rs", 674),
     ("ssh/upload_finish.rs", 661),
     ("local_downloads.rs", 614),
