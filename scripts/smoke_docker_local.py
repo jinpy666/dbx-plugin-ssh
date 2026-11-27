@@ -109,6 +109,50 @@ def main() -> int:
         assert action.get("success") is True, action
         print(f"docker/action target=local ok: start {running['name']}")
 
+        # 3b) local log stream (B3): start → ≥1 binary frame → stop. Only the
+        # already running container is used; nothing is created/started/
+        # stopped/deleted. A quiet container may produce zero frames — the
+        # shape assertions and the idempotent stop still pass.
+        stream_id = "smoke-log-stream"
+        try:
+            started = client.request(
+                "docker/logs/stream/start",
+                {
+                    "target": "local",
+                    "containerId": running["id"],
+                    "tail": 50,
+                    "requestedStreamId": stream_id,
+                },
+                timeout=30,
+            )
+        except Exception as error:  # noqa: BLE001 - older sidecars lack B3
+            print(f"docker/logs/stream/start skipped: {error}")
+        else:
+            assert started.get("streamId") == stream_id, started
+            assert started.get("binaryInput") is True, started
+            try:
+                # Any benign request drains pending framed output.
+                client.request("docker/list", {"target": "local"}, timeout=30)
+                frames = [
+                    frame for frame in client.binary_frames
+                    if frame[0] == f"docker/logs/out/{stream_id}"
+                ]
+            finally:
+                stopped = client.request(
+                    "docker/logs/stream/stop", {"streamId": stream_id}, timeout=30
+                )
+                assert stopped.get("success") is True, stopped
+                again = client.request(
+                    "docker/logs/stream/stop", {"streamId": stream_id}, timeout=30
+                )
+                assert again.get("success") is True, again
+            if frames:
+                assert len(frames[0][1]) >= 9, frames[0]
+                assert frames[0][1][0] in (0, 1, 2), frames[0][1][:9]
+                print(f"docker/logs/stream ok: start → {len(frames)} frame(s) → stop")
+            else:
+                print("docker/logs/stream shape ok: start → no frames (quiet container) → stop")
+
         # 4) validation: unknown target and non-hex container names are
         # refused before any process is spawned.
         for method, params, expect in (

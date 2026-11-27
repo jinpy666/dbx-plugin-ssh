@@ -685,7 +685,6 @@ const running = (container: DockerContainer): boolean => container.state === "ru
         </div>
       </DialogContent>
     </Dialog>
-
     <!-- Logs 抽屉（B1 外抽，状态仍在本组件） -->
     <DockerLogsDrawer
       :t="props.t"
@@ -696,6 +695,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
       :busy="logsBusy"
       :error="logsError"
       :tail="logsTail"
+      :stream-base="dockerParams()"
       @update:open="(open: boolean) => { logsOpen = open; }"
       @update:tail="(value: string) => { logsTail = value; void loadLogs(); }"
       @refresh="loadLogs"

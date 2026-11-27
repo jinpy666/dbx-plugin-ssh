@@ -862,6 +862,9 @@ let mockForwardSeq = 1;
 // per-task 相位计数器推进（每次 snapshot +1），浏览器走查每轮轮询都能看到
 // 曲线前移；数值用确定性正弦叠加（无 Math.random），快照可复现。
 const mockMonitorTasks = new Map<string, { state: string; since: number; phase: number }>();
+// B3 日志流夹具：streamId → 定时器（3 帧后 end；stop 提前清理）。
+const mockDockerLogTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+let mockDockerLogSeq = 0;
 const monUnsupported = fixtureParams.get("mon") === "unsupported";
 const MONITOR_POINTS_DEFAULT = 120; // Lane A SNAPSHOT_DEFAULT_POINTS（monitor.rs）。
 const MONITOR_POINTS_MAX = 720; // Lane A FAST_RING_CAP：快照点数上限（12min @ 1s）。
@@ -993,6 +996,38 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   // 形状。?docker=off 模拟「CLI 未安装」（available:false），?docker=sudo 模拟
   // found-but-denied（needsSudo:true）；默认返回容器表。cli 参数仅做白名单
   // 校验回显（真实端点归一在 sidecar），供引擎设置联动走查。
+  else if (method === "docker/logs/stream/start") {
+    // B3 日志流：返回能力位后按 3 帧 → end 的节奏推二进制帧，走查抽屉的
+    // 跟随/结束态；stop 立即清定时器并补一条 stopped 终态。
+    const input = params as Record<string, unknown>;
+    const containerId = String(input.containerId || "");
+    if (!/^[0-9a-f]{12,64}$/.test(containerId)) throw new Error(`Invalid containerId '${containerId}': expected 12-64 lowercase hex characters`);
+    const streamId = typeof input.requestedStreamId === "string" && input.requestedStreamId ? input.requestedStreamId : `mock-log-${mockDockerLogSeq++}`;
+    const channel = `docker/logs/out/${streamId}`;
+    const lines = ["[mock] nginx ready on :80", "[mock] upstream 612ms (slow)", "[mock] GET /health 200"];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    lines.forEach((line, index) => {
+      timers.push(setTimeout(() => {
+        for (const listener of binaryListeners) listener({ channel, data: terminalFrame(index + 1, `${line}\n`) });
+      }, 40 * (index + 1)));
+    });
+    timers.push(setTimeout(() => {
+      mockDockerLogTimers.delete(streamId);
+      for (const listener of eventListeners) listener({ method: "docker/logs/end", params: { streamId, reason: "exited", exitCode: 0 } });
+    }, 40 * (lines.length + 1)));
+    mockDockerLogTimers.set(streamId, timers);
+    result = { streamId, containerId, tail: Math.min(2000, Math.max(10, Number(input.tail) || 200)), binaryInput: true, startedAt: Date.now() };
+  }
+  else if (method === "docker/logs/stream/stop") {
+    const streamId = String((params as Record<string, unknown>)?.streamId || "");
+    const timers = mockDockerLogTimers.get(streamId);
+    if (timers) {
+      timers.forEach((timer) => clearTimeout(timer));
+      mockDockerLogTimers.delete(streamId);
+      for (const listener of eventListeners) listener({ method: "docker/logs/end", params: { streamId, reason: "stopped" } });
+    }
+    result = { success: true };
+  }
   else if (method === "docker/list") {
     const mode = fixtureParams.get("docker");
     if (mode === "off") result = { available: false, needsSudo: false, containers: [] };

@@ -16,7 +16,9 @@
 //! 换成参数（`ssh` / `runtime`）。
 
 use std::path::Path;
+use std::sync::Arc;
 
+use dbx_plugin_sdk::PluginEmitter;
 use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 
@@ -400,4 +402,86 @@ pub fn audit_action_failure(data_dir: &Path, command: &str, error: &str, duratio
         Some(error),
         duration_ms,
     );
+}
+
+/// `docker/logs/stream/start`（B3，只读）：固定脚本 + 位置参数启动
+/// `docker logs -f`，注册后立即返回；输出走二进制通道
+/// `docker/logs/out/{streamId}`，终态发 `docker/logs/end`。
+///
+/// 只读连接照 §5.4 放行（日志是只读采集），不再走 `ensure_writable`；
+/// 也不走 Quick Sudo（提权只影响一次性采集，follow 流不新增密码注入面）。
+pub fn logs_stream_start(
+    ssh: &SshRuntime,
+    runtime: &Runtime,
+    registry: &docker::StreamRegistry,
+    emitter: &PluginEmitter,
+    params: &Value,
+) -> Result<Value, String> {
+    let engine = docker::parse_engine(params)?;
+    let target = docker::parse_target(params)?;
+    let container_id = required_string(params, "containerId")?.to_string();
+    docker::validate_container_id(&container_id)?;
+    let tail = docker::clamp_tail(optional_u64(params, "tail", docker::TAIL_DEFAULT));
+    let timestamps = params
+        .get("timestamps")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let requested_stream_id = params
+        .get("requestedStreamId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    let (connection_id, source) = match target {
+        docker::DockerTarget::Local => {
+            let program = docker::find_local_cli(&engine.cli).ok_or_else(|| {
+                format!(
+                    "Container CLI '{}' was not found on this machine",
+                    engine.cli
+                )
+            })?;
+            let args = docker::logs_stream_args(&container_id, tail, timestamps);
+            (
+                "local".to_string(),
+                docker::StreamSource::Local {
+                    program,
+                    args,
+                    endpoint: engine.endpoint.clone(),
+                },
+            )
+        }
+        docker::DockerTarget::Ssh => {
+            let session_id = required_string(params, "sessionId")?;
+            let connection_id = runtime
+                .block_on(ssh.connection_id_for_session(session_id))
+                .ok_or("SSH session was not found or expired")?;
+            let handle = runtime
+                .block_on(ssh.live_handle_for_connection(&connection_id))
+                .ok_or_else(|| format!("no live SSH session for connection '{connection_id}'"))?;
+            let script = docker::logs_stream_script(&engine, &container_id, tail, timestamps)?;
+            (connection_id, docker::StreamSource::Ssh { handle, script })
+        }
+    };
+
+    let sink: Arc<dyn docker::StreamSink> = Arc::new(emitter.clone());
+    runtime.block_on(registry.start(
+        docker::StreamRequest {
+            connection_id,
+            container_id,
+            requested_stream_id,
+            tail,
+            timestamps,
+            source,
+        },
+        sink,
+    ))
+}
+
+/// `docker/logs/stream/stop`（B3）：幂等；未知 id 也返回成功。
+pub fn logs_stream_stop(
+    runtime: &Runtime,
+    registry: &docker::StreamRegistry,
+    params: &Value,
+) -> Result<Value, String> {
+    let stream_id = required_string(params, "streamId")?;
+    runtime.block_on(registry.stop(stream_id))
 }
