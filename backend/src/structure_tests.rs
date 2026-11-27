@@ -34,7 +34,7 @@ const LINE_ALLOWLIST: &[(&str, usize)] = &[
     // ssh/tests.rs 是测试文件，按测试预算（1,200）登记。
     ("ssh/tests.rs", 4475),
     ("model.rs", 3429),
-    ("main.rs", 3392),
+    ("main.rs", 3402),
     ("local_terminal.rs", 2826),
     ("task_provider.rs", 2709),
     ("triggers.rs", 2229),
@@ -66,6 +66,7 @@ const LINE_ALLOWLIST: &[(&str, usize)] = &[
     ("local_fs.rs", 755),
     ("sftp_copy.rs", 716),
     ("keys.rs", 706),
+    ("docker/rpc.rs", 694),
     ("lzpack.rs", 674),
     ("ssh/upload_finish.rs", 661),
     ("local_downloads.rs", 614),

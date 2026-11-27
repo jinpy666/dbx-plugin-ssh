@@ -25,6 +25,15 @@ impl SshRuntime {
         }
     }
 
+    /// 只读访问器：该连接是否已有存活的 sudo 时间戳预热循环。容器终端
+    /// （B5）用它决定能否以 `sudo -n` 前缀打开 PTY——绝不注入 sudo 密码。
+    pub fn has_warm_sudo(&self, connection_id: &str) -> bool {
+        self.sudo_keepalive
+            .lock()
+            .map(|keepalive| keepalive.contains_key(connection_id))
+            .unwrap_or(false)
+    }
+
     pub(super) fn register_sudo_keepalive(
         &self,
         connection_id: &str,

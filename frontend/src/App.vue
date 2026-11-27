@@ -118,6 +118,7 @@ import {
   type TerminalSearchOptions,
 } from "./lib/terminalInteraction";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
+import { dockerTerminalChannelId } from "./lib/dockerTerminalFrames";
 import { createOutputGate } from "./lib/terminalBackpressure";
 import { createGhostSelectionGuard } from "./lib/terminalGhostSelectionGuard";
 import { createTerminalInputQueue, terminalInputChannel, TerminalInputTimeoutError } from "./lib/terminalInputQueue";
@@ -269,7 +270,6 @@ import {
 import { transferPausable } from "./lib/transferResume";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
-import { useDockerOpenInTerminal } from "./composables/useDockerOpenInTerminal";
 import { useSessionReconnect } from "./composables/useSessionReconnect";
 import { usePluginEvents } from "./composables/usePluginEvents";
 import { useRdpSession } from "./rdp/useRdpSession";
@@ -4193,6 +4193,9 @@ const {
 });
 
 function handleBinary(event: DbxPluginBinaryEvent) {
+  // 容器终端输出由 DockerTerminalPane 的组合式自行订阅；主工作台绝不能把
+  // docker/terminal/out/* 落进下面的 ssh 分支（会污染 SSH sequence 状态）。
+  if (dockerTerminalChannelId(event.channel) !== null) return;
   if (event.channel.startsWith("local/terminal/out/")) {
     const localId = event.channel.slice("local/terminal/out/".length);
     if (!localSession.value || localId !== localSession.value.sessionId) return;
@@ -6152,15 +6155,6 @@ function handleActionLinkActivate(match: ActionLinkMatch, event: MouseEvent) {
   sendTerminalBytes(new TextEncoder().encode(match.command));
   terminal?.focus();
 }
-
-// ---- Docker 面板「在终端打开」（M3 遗留 6；处理器在 composables）----
-const handleDockerOpenInTerminal = useDockerOpenInTerminal({
-  hasTerminalSession: () =>
-    Boolean(localSession.value ?? session.value ?? serialSession.value ?? telnetSession.value),
-  terminal: () => terminal,
-  replaceLine: (command) => replaceTerminalLineWith(command, false),
-  notifyNoSession: () => showNotice(t("docker.terminalNeedSession")),
-});
 
 function showActionLinkHintAt(match: ActionLinkMatch, event: MouseEvent) {
   const host = terminalHost.value;
@@ -9297,7 +9291,6 @@ onMounted(() => {
   document.addEventListener("focusout", onTooltipFocusOut);
   document.addEventListener("pointerdown", hideTooltip, true);
   document.addEventListener("wheel", hideTooltip, true);
-  window.addEventListener("dbx:docker-open-in-terminal", handleDockerOpenInTerminal);
   window.addEventListener("dragleave", resetDragHighlightOnWindowLeave);
   hostFontObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
   void hydrateQuickCommands();
@@ -9313,7 +9306,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   disposed = true;
   splitPane.disposeAll();
-  window.removeEventListener("dbx:docker-open-in-terminal", handleDockerOpenInTerminal);
   window.removeEventListener("dragleave", resetDragHighlightOnWindowLeave);
   document.removeEventListener("mouseover", onTooltipOver);
   document.removeEventListener("mouseout", onTooltipOut);

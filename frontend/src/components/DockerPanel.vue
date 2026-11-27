@@ -5,12 +5,11 @@
 // 只读采集走 docker/list；动作走 docker/action（后端负责白名单、容器 id 门、
 // 只读连接拒绝、执行前审计与 Quick Sudo 回落）。会话 id 由面板自行从
 // ssh/sessions/list 解析（最近的存活会话）——SideNavPanel 容器不透传 session。
-// 「在终端打开」（M3 遗留 6）：面板不直接写 PTY，改为 emit 语义的 window 自定义
-// 事件（SideNavPanel 不透传事件且不在本次改动范围），由 App.vue 走「填入输入行
-// 不回车」通道——命令落到 shell 输入行原地，用户确认后再回车执行。
+// 「在终端打开」（B5）：直接打开容器工作台的终端 tab（PTY 在 sidecar 内建立，
+// 键入走 docker/terminal/in，输出走 docker/terminal/out）。不再向主终端输入行
+// 填命令，也不再派发 dbx:docker-open-in-terminal window 事件。
 import { computed, onMounted, onScopeDispose, onUnmounted, ref, watch } from "vue";
 import {
-  Check,
   ChevronDown,
   FolderOpen,
   Loader2,
@@ -121,13 +120,6 @@ function dockerListPayload(raw: unknown): { available: boolean; needsSudo: boole
   };
 }
 
-/** 「在终端打开」命令：先检测可用 shell，再 exec；非零退出不触发其他 shell。
- *  CLI 跟随引擎设置（podman 等自定义命令同样可进终端 exec）。 */
-function dockerExecCommand(containerId: string): string {
-  const cli = engineSettings.value.cli || "docker";
-  return `${cli} exec -it ${containerId} sh -lc 'for shell in bash zsh fish ash; do if command -v "$shell" >/dev/null 2>&1; then exec "$shell"; fi; done; exec sh'`;
-}
-
 /** 状态徽标 class：已知状态着色，未知状态走中性灰。 */
 function dockerStateClass(state: string): string {
   const known = ["running", "exited", "paused", "created", "restarting", "dead", "removing"];
@@ -222,7 +214,12 @@ function dockerParams(extra: Record<string, unknown> = {}): Record<string, unkno
     mode.value === "local"
       ? { target: "local" as const, ...extra }
       : { sessionId: sessionId.value, ...extra };
-  return { ...base, ...dockerEngineParams(engineSettings.value) };
+  // needsSudo 是只读探针结果；容器终端据此决定是否要求 sudo 预热（不是授权依据）。
+  return {
+    ...base,
+    ...dockerEngineParams(engineSettings.value),
+    ...(needsSudo.value ? { needsSudo: true } : {}),
+  };
 }
 
 // —— 列表 + 轮询（10s；3 连败停轮询，弱化空态）——————————————
@@ -418,19 +415,23 @@ function menuOpenLogs(container: DockerContainer): void {
   openLogs(container);
 }
 
-// —— 容器文件工作台（B4 只读：list/read）——————————————
+// —— 容器工作台（B4 文件只读 + B5 终端）——————————————
 const filesOpen = ref(false);
 const filesTarget = ref<DockerContainer | null>(null);
+const workbenchTab = ref<"files" | "terminal">("files");
 
 function menuOpenFiles(container: DockerContainer): void {
   rowMenu.close();
   filesTarget.value = container;
+  workbenchTab.value = "files";
   filesOpen.value = true;
 }
 
 function menuOpenInTerminal(container: DockerContainer): void {
   rowMenu.close();
-  openInTerminal(container);
+  filesTarget.value = container;
+  workbenchTab.value = "terminal";
+  filesOpen.value = true;
 }
 
 // —— Logs 抽屉 ———————————————————————————————————————
@@ -471,29 +472,6 @@ async function loadLogs(): Promise<void> {
     logsBusy.value = false;
   }
 }
-
-// —— 「在终端打开」（window 事件 → App.vue 填入输入行，不回车）——————————
-// 事件名与 App.vue 的监听保持一致；detail 只带命令字符串。无终端会话时由
-// App.vue 侧 toast 提示先连接（面板无法感知终端状态）。
-const DOCKER_OPEN_IN_TERMINAL_EVENT = "dbx:docker-open-in-terminal";
-
-const fillRequestedId = ref("");
-let fillReset: ReturnType<typeof setTimeout> | undefined;
-
-function openInTerminal(container: DockerContainer): void {
-  window.dispatchEvent(
-    new CustomEvent(DOCKER_OPEN_IN_TERMINAL_EVENT, { detail: { command: dockerExecCommand(container.id) } }),
-  );
-  fillRequestedId.value = container.id;
-  if (fillReset) clearTimeout(fillReset);
-  fillReset = setTimeout(() => {
-    fillRequestedId.value = "";
-  }, 2000);
-}
-
-onUnmounted(() => {
-  if (fillReset) clearTimeout(fillReset);
-});
 
 const running = (container: DockerContainer): boolean => container.state === "running";
 </script>
@@ -631,8 +609,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
                     @pointerleave="rowMenu.leaveToClose()"
                     @click="rowMenu.toggle(container.id)"
                   >
-                    <Check v-if="fillRequestedId === container.id" />
-                    <ChevronDown v-else />
+                    <ChevronDown />
                   </button>
                 </PopoverAnchor>
                 <PopoverContent
@@ -665,7 +642,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
                   <button type="button" class="docker-row-menu-item" @click="menuOpenFiles(container)">
                     <FolderOpen />{{ props.t("docker.actionFiles") }}
                   </button>
-                  <button v-if="mode === 'ssh'" type="button" class="docker-row-menu-item" @click="menuOpenInTerminal(container)">
+                  <button type="button" class="docker-row-menu-item" :disabled="!running(container) || rowBusy(container)" @click="menuOpenInTerminal(container)">
                     <Terminal />{{ props.t("docker.actionTerminal") }}
                   </button>
                 </PopoverContent>
@@ -674,7 +651,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
           </TableRow>
         </TableBody>
       </Table>
-      <p v-if="mode === 'ssh'" class="docker-hint">{{ props.t("docker.terminalHint") }}</p>
+      <p class="docker-hint">{{ props.t("docker.terminalHint") }}</p>
     </div>
 
     <!-- kill/rm 强制确认 -->
@@ -701,7 +678,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
       </DialogContent>
     </Dialog>
     <!-- 容器文件工作台（B4，只读） -->
-    <DockerWorkbench v-model:open="filesOpen" :t="props.t" :target="filesTarget" :params="dockerParams" />
+    <DockerWorkbench v-model:open="filesOpen" :t="props.t" :target="filesTarget" :params="dockerParams" :initial-tab="workbenchTab" />
     <!-- Logs 抽屉（B1 外抽，状态仍在本组件） -->
     <DockerLogsDrawer
       :t="props.t"

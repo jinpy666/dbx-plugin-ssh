@@ -34,6 +34,10 @@ pub mod rpc;
 mod scripts;
 mod stats;
 pub mod streams;
+pub mod terminal;
+mod terminal_io;
+#[cfg(test)]
+mod terminal_tests;
 #[cfg(test)]
 mod tests;
 
@@ -46,6 +50,7 @@ pub use parse::*;
 pub use scripts::*;
 pub use stats::*;
 pub use streams::*;
+pub use terminal::*;
 /// Wait cap for the container list collector (one `docker ps` round-trip).
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Wait cap for `docker logs --tail N`; tailing is bounded by `--tail`.
