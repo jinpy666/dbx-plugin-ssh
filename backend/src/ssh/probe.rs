@@ -118,15 +118,13 @@ impl SshRuntime {
                         .await
                         .map_err(|error| error.to_string())
                 }
-                None => {
-                    client::connect(
-                        config,
-                        (connection.runtime_host.as_str(), connection.runtime_port),
-                        probe,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())
-                }
+                None => client::connect(
+                    config,
+                    (connection.runtime_host.as_str(), connection.runtime_port),
+                    probe,
+                )
+                .await
+                .map_err(|error| error.to_string()),
             }
         };
         let failure = match tokio::time::timeout(timeout, connect).await {
