@@ -1,11 +1,13 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::local::unavailable_payload;
 use super::parse::legacy_state_from_status;
 use super::rpc::{audit_action_failure, audit_action_intent};
 use crate::audit_log;
+use crate::model::TerminalStream;
 
 use super::*;
 
@@ -669,4 +671,402 @@ fn local_marker_assembly_feeds_the_shared_parsers() {
             .len(),
         0
     );
+}
+
+// —— B3 日志流：聚合 / UTF-8 / TTL / 子进程回收 / 注册表 ————————————
+
+#[cfg(unix)]
+fn logs_source(script: &str) -> StreamSource {
+    StreamSource::Local {
+        program: std::path::PathBuf::from("/bin/sh"),
+        args: vec!["-c".to_string(), script.to_string()],
+        endpoint: None,
+    }
+}
+
+#[cfg(unix)]
+fn stream_request(owner: &str, script: &str) -> StreamRequest {
+    StreamRequest {
+        connection_id: "conn-1".to_string(),
+        container_id: "d4a7c9f1e2b3".to_string(),
+        requested_stream_id: Some(owner.to_string()),
+        tail: 200,
+        timestamps: false,
+        source: logs_source(script),
+    }
+}
+
+#[derive(Default)]
+struct RecordingSink {
+    frames: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+    events: std::sync::Mutex<Vec<(String, Value)>>,
+}
+
+impl StreamSink for RecordingSink {
+    fn binary(&self, channel: &str, data: &[u8]) -> Result<(), String> {
+        self.frames
+            .lock()
+            .unwrap()
+            .push((channel.to_string(), data.to_vec()));
+        Ok(())
+    }
+
+    fn event(&self, method: &str, params: Value) -> Result<(), String> {
+        self.events
+            .lock()
+            .unwrap()
+            .push((method.to_string(), params));
+        Ok(())
+    }
+}
+
+impl RecordingSink {
+    fn frame_count(&self) -> usize {
+        self.frames.lock().unwrap().len()
+    }
+
+    fn events_named(&self, method: &str) -> Vec<Value> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == method)
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+}
+
+/// 二进制通道不可用的降级 sink：first binary call fails the way the SDK
+/// does on non-framed transports, then chunk events are recorded.
+#[derive(Default)]
+struct ChunkOnlySink {
+    chunks: std::sync::Mutex<Vec<String>>,
+    events: std::sync::Mutex<Vec<(String, Value)>>,
+}
+
+impl StreamSink for ChunkOnlySink {
+    fn binary(&self, _channel: &str, _data: &[u8]) -> Result<(), String> {
+        Err("Binary messages require framed transport".to_string())
+    }
+
+    fn event(&self, method: &str, params: Value) -> Result<(), String> {
+        if method == "docker/logs/chunk" {
+            if let Some(text) = params.get("text").and_then(Value::as_str) {
+                self.chunks.lock().unwrap().push(text.to_string());
+            }
+        }
+        self.events
+            .lock()
+            .unwrap()
+            .push((method.to_string(), params));
+        Ok(())
+    }
+}
+
+#[test]
+fn logs_batcher_preserves_multibyte_utf8_crlf_and_long_single_fragments() {
+    let mut batcher = ChunkBatcher::new(MAX_BATCH_BYTES, BATCH_INTERVAL);
+    let t0 = Instant::now();
+    // 多字节字符跨两次 read（"你" = E4 BD A0）与 \r\n 原样保留。
+    assert!(batcher
+        .push(TerminalStream::Stdout, &[0xE4, 0xBD], t0)
+        .is_empty());
+    assert!(batcher
+        .push(TerminalStream::Stdout, &[0xA0, b'\r', b'\n'], t0)
+        .is_empty());
+    let batch = batcher.flush().expect("pending batch");
+    assert_eq!(batch.stream, TerminalStream::Stdout);
+    assert_eq!(std::str::from_utf8(&batch.data).unwrap(), "你\r\n");
+
+    // 超长单行：单个 fragment 绝不切分（帧可以超过 64 KiB）。
+    let long = vec![b'x'; MAX_BATCH_BYTES + 6 * 1024];
+    let ready = batcher.push(TerminalStream::Stdout, &long, t0);
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].data.len(), long.len());
+
+    // 流切换先 flush 旧流，帧内不混 stdout/stderr。
+    assert!(batcher.push(TerminalStream::Stdout, b"out", t0).is_empty());
+    let ready = batcher.push(TerminalStream::Stderr, b"err", t0);
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].stream, TerminalStream::Stdout);
+    assert_eq!(ready[0].data, b"out");
+    let tail = batcher.flush().expect("stderr batch");
+    assert_eq!(tail.stream, TerminalStream::Stderr);
+    assert_eq!(tail.data, b"err");
+}
+
+#[test]
+fn logs_batcher_flushes_on_byte_or_time_threshold() {
+    let mut batcher = ChunkBatcher::new(8, Duration::from_millis(100));
+    let t0 = Instant::now();
+    assert!(batcher.push(TerminalStream::Stdout, b"abc", t0).is_empty());
+    assert!(batcher.poll(t0 + Duration::from_millis(99)).is_none());
+    let timed = batcher
+        .poll(t0 + Duration::from_millis(100))
+        .expect("time flush");
+    assert_eq!(timed.data, b"abc");
+
+    let t1 = t0 + Duration::from_millis(200);
+    let ready = batcher.push(TerminalStream::Stdout, b"01234567", t1);
+    assert_eq!(ready.len(), 1, "byte cap flushes immediately");
+    assert_eq!(ready[0].data, b"01234567");
+    assert!(batcher.flush().is_none());
+}
+
+#[test]
+fn logs_utf8_encoder_keeps_split_characters_until_the_next_push() {
+    let mut encoder = Utf8ChunkEncoder::new(4);
+    assert!(encoder.push(&[0xE4, 0xBD]).is_empty());
+    assert_eq!(encoder.push(&[0xA0]), vec!["你".to_string()]);
+
+    // 非法字节按 lossy 覆盖，不阻塞后续输出。
+    let lossy = encoder.push(b"a\xFFb");
+    assert_eq!(lossy.concat(), "a\u{FFFD}b");
+
+    // 流结束时残留的半个字符按 lossy 收尾（不丢内容）。
+    let mut tail = Utf8ChunkEncoder::new(64);
+    assert!(tail.push(&[0xE4, 0xBD]).is_empty());
+    assert_eq!(tail.finish().unwrap(), "\u{FFFD}");
+}
+
+#[test]
+fn logs_ttl_limits_are_byte_or_time_whichever_comes_first() {
+    let defaults = StreamLimits::default();
+    assert!(!ttl_exceeded(Duration::from_secs(60), 1024, defaults));
+    assert!(ttl_exceeded(Duration::from_secs(30 * 60), 0, defaults));
+    assert!(ttl_exceeded(
+        Duration::from_secs(1),
+        STREAM_MAX_BYTES,
+        defaults
+    ));
+    let small = StreamLimits {
+        max_bytes: 4,
+        max_duration: Duration::from_millis(10),
+    };
+    assert!(!ttl_exceeded(Duration::from_millis(5), 3, small));
+    assert!(ttl_exceeded(Duration::from_millis(5), 4, small));
+    assert!(ttl_exceeded(Duration::from_millis(10), 0, small));
+}
+
+#[test]
+fn logs_stream_script_keeps_the_id_out_of_the_body_and_quotes_it_as_argv() {
+    let engine = EngineConfig::default();
+    let id = "d4a7c9f1e2b3a1c0d4e5f6a7b8c9d0e1";
+    let body = logs_stream_body(&engine, 200, true);
+    assert!(!body.contains(id));
+    assert!(body.contains("-- \"$1\""));
+    assert!(body.contains("--timestamps"));
+    let script = logs_stream_script(&engine, id, 5000, false).unwrap();
+    // tail 被钳到 2000；id 只作为 shell_quote 后的位置参数出现。
+    assert!(script.contains("--tail 2000"));
+    assert!(script.contains(&format!("'{}'", id)));
+    assert!(logs_stream_script(&engine, "web-nginx", 200, false).is_err());
+    // 本机 argv 同样是独立参数，无 shell 拼接。
+    let args = logs_stream_args(id, 10, true);
+    assert_eq!(args.last().unwrap(), id);
+    assert!(args.contains(&"--timestamps".to_string()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_child_sigkills_a_sigterm_ignoring_child_after_grace() {
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .args(["-c", "trap '' TERM; sleep 5"])
+        .spawn()
+        .expect("spawn stubborn child");
+    let started = Instant::now();
+    stop_child(&mut child, Duration::from_millis(80)).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(70),
+        "grace must elapse before SIGKILL"
+    );
+    assert!(
+        matches!(child.try_wait(), Ok(Some(_))),
+        "child must be reaped by stop_child"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_stream_registry_stop_is_idempotent_and_unknown_ids_succeed() {
+    let registry =
+        StreamRegistry::with_limits_and_grace(StreamLimits::default(), Duration::from_millis(50));
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    let started = registry
+        .start(stream_request("stop-idem", "printf 'a\\n'; sleep 30"), sink)
+        .await
+        .expect("start");
+    let id = started["streamId"].as_str().unwrap().to_string();
+    assert_eq!(id, "stop-idem");
+    assert_eq!(registry.active_count(), 1);
+
+    assert_eq!(registry.stop(&id).await.unwrap()["success"], true);
+    assert_eq!(registry.stop(&id).await.unwrap()["success"], true);
+    assert_eq!(
+        registry.stop("never-started").await.unwrap()["success"],
+        true
+    );
+    assert_eq!(registry.active_count(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_stream_registry_ttl_ends_the_stream_and_flushes_the_tail() {
+    let registry = StreamRegistry::with_limits_and_grace(
+        StreamLimits {
+            max_bytes: 3,
+            max_duration: Duration::from_secs(60),
+        },
+        Duration::from_millis(50),
+    );
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    registry
+        .start(
+            stream_request("ttl-small", "printf 'abcdef\\n'; sleep 30"),
+            sink.clone(),
+        )
+        .await
+        .expect("start");
+    for _ in 0..80 {
+        if !sink.events_named("docker/logs/end").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let ends = sink.events_named("docker/logs/end");
+    assert_eq!(ends.len(), 1, "end must fire exactly once: {ends:?}");
+    assert_eq!(ends[0]["reason"], "ttl");
+    assert!(sink.frame_count() >= 1, "tail batch must flush before end");
+    assert_eq!(registry.active_count(), 1, "entry stays until stop");
+    registry.stop("ttl-small").await.unwrap();
+    assert_eq!(registry.active_count(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_stream_registry_survives_close_start_races_with_no_late_frames() {
+    let registry = std::sync::Arc::new(StreamRegistry::with_limits_and_grace(
+        StreamLimits::default(),
+        Duration::from_millis(30),
+    ));
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let registry = registry.clone();
+        let sink = sink.clone();
+        tasks.push(tokio::spawn(async move {
+            for _ in 0..4 {
+                let request = stream_request("race", "printf 'line\\n'; sleep 30");
+                match registry.start(request, sink.clone()).await {
+                    Ok(value) => {
+                        let id = value["streamId"].as_str().unwrap().to_string();
+                        let _ = registry.stop(&id).await;
+                    }
+                    Err(error) => {
+                        assert!(
+                            error.contains("closed") || error.contains("already active"),
+                            "unexpected start error: {error}"
+                        );
+                    }
+                }
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("race task");
+    }
+    for _ in 0..4 {
+        let _ = registry.stop("race").await;
+    }
+    assert_eq!(registry.active_count(), 0);
+    let before = sink.frame_count();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        sink.frame_count(),
+        before,
+        "a stopped stream must not emit late frames"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_stream_registry_rejects_a_late_start_after_close_until_the_tombstone_expires() {
+    let registry =
+        StreamRegistry::with_limits_and_grace(StreamLimits::default(), Duration::from_millis(30));
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    registry
+        .start(
+            stream_request("late", "printf 'x\\n'; sleep 30"),
+            sink.clone(),
+        )
+        .await
+        .expect("first start");
+    registry.stop("late").await.unwrap();
+    let error = registry
+        .start(stream_request("late", "printf 'y\\n'; sleep 30"), sink)
+        .await
+        .expect_err("late start must be refused by the tombstone");
+    assert!(error.contains("closed"), "unexpected error: {error}");
+    assert_eq!(registry.active_count(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_stream_registry_caps_concurrency_at_eight_with_a_readable_error() {
+    let registry =
+        StreamRegistry::with_limits_and_grace(StreamLimits::default(), Duration::from_millis(30));
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    let mut ids = Vec::new();
+    for index in 0..MAX_ACTIVE_STREAMS {
+        let value = registry
+            .start(
+                stream_request(&format!("cap-{index}"), "printf 'x\\n'; sleep 30"),
+                sink.clone(),
+            )
+            .await
+            .expect("start below the cap");
+        ids.push(value["streamId"].as_str().unwrap().to_string());
+    }
+    let error = registry
+        .start(
+            stream_request("cap-overflow", "printf 'x\\n'; sleep 30"),
+            sink,
+        )
+        .await
+        .expect_err("ninth stream must be refused");
+    assert!(error.contains("limit reached"), "unexpected error: {error}");
+    assert_eq!(registry.active_count(), MAX_ACTIVE_STREAMS);
+    for id in ids {
+        registry.stop(&id).await.unwrap();
+    }
+    assert_eq!(registry.active_count(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_stream_falls_back_to_chunk_events_when_binary_is_unsupported() {
+    let sink = std::sync::Arc::new(ChunkOnlySink::default());
+    let (_cancel, cancel_rx) = tokio::sync::watch::channel(false);
+    run_stream(
+        "fallback".to_string(),
+        logs_source("printf '\\344\\275\\240ok\\n'"),
+        cancel_rx,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        sink.clone(),
+        StreamLimits::default(),
+        Duration::from_millis(50),
+    )
+    .await;
+    let text = sink.chunks.lock().unwrap().concat();
+    assert_eq!(text, "你ok\n");
+    let ends = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(method, _)| method == "docker/logs/end")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].1["reason"], "exited");
 }

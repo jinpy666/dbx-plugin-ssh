@@ -117,6 +117,9 @@ struct Plugin {
     /// 监控面板常驻采集任务（monitor/* RPC 面）：每连接一对快慢 exec 通道
     /// + 环形缓冲，见 src/monitor.rs。
     monitors: monitor::MonitorRegistry,
+    /// 容器日志流注册表（docker/logs/stream/*）：并发上限、连接索引与关闭
+    /// 墓碑，见 src/docker/streams.rs。
+    docker_streams: docker::StreamRegistry,
 }
 
 impl Plugin {
@@ -149,6 +152,7 @@ impl Plugin {
             non_ssh_creds: non_ssh_credentials::NonSshCredentials::new(),
             tasks: Arc::new(task_provider::TaskProvider::new()),
             monitors: monitor::MonitorRegistry::new(),
+            docker_streams: docker::StreamRegistry::new(),
         })
     }
 
@@ -1481,6 +1485,16 @@ impl Plugin {
             "docker/logs" => docker::rpc::logs(&self.ssh, &self.runtime, &params),
             "docker/action" => docker::rpc::action(&self.ssh, &self.runtime, &params),
             "docker/stats" => docker::rpc::stats(&self.ssh, &self.runtime, &params),
+            "docker/logs/stream/start" => docker::rpc::logs_stream_start(
+                &self.ssh,
+                &self.runtime,
+                &self.docker_streams,
+                emitter,
+                &params,
+            ),
+            "docker/logs/stream/stop" => {
+                docker::rpc::logs_stream_stop(&self.runtime, &self.docker_streams, &params)
+            }
             "ssh/processes/list" => {
                 let session_id = required_string(&params, "sessionId")?;
                 self.runtime.block_on(self.ssh.processes_list(session_id))

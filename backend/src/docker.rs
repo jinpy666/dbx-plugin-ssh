@@ -24,18 +24,24 @@ use serde_json::Value;
 
 mod engine;
 mod local;
+mod logs_batch;
+mod logs_stream;
 mod parse;
 pub mod rpc;
 mod scripts;
 mod stats;
+pub mod streams;
 #[cfg(test)]
 mod tests;
 
 pub use engine::*;
 pub use local::*;
+pub use logs_batch::*;
+pub use logs_stream::*;
 pub use parse::*;
 pub use scripts::*;
 pub use stats::*;
+pub use streams::*;
 /// Wait cap for the container list collector (one `docker ps` round-trip).
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Wait cap for `docker logs --tail N`; tailing is bounded by `--tail`.
