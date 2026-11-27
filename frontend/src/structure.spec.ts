@@ -25,10 +25,10 @@ const MAX_SPEC_LINES = 1_200;
 /** 迁移期白名单：路径 → 当前允许的行数。 */
 const LINE_ALLOWLIST: Record<string, number> = {
   "./App.vue": 12551,
-  "./lib/i18n.ts": 10449,
+  "./lib/i18n.ts": 10463,
   "./components/SettingsDialog.vue": 2876,
-  "./mockDbxHost.ts": 2194,
-  "./components/DockerPanel.vue": 1079,
+  "./mockDbxHost.ts": 2199,
+  "./components/DockerPanel.vue": 1090,
   "./components/OtpPanel.vue": 822,
   "./components/MonitorPanel.vue": 791,
   "./composables/useCommandSuggestions.ts": 784,

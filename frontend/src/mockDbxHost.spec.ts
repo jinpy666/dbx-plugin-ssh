@@ -447,6 +447,33 @@ describe("mockDbxHost fixture", () => {
     await expect(plugin.invoke("docker/action", { containerId: listed.containers[0].id, action: "exec" })).rejects.toThrow(/Unsupported docker action/);
     const action = await plugin.invoke("docker/action", { containerId: "d4a7c9f1e2b3", action: "restart" }) as { success: boolean };
     expect(action.success).toBe(true);
+
+    // B2 容器指标：shape 与 sidecar 契约一致；未运行容器被跳过；id 门同口径。
+    const runningIds = (listed.containers as Array<{ id: string; state: string }>)
+      .filter((row) => row.state === "running")
+      .map((row) => row.id);
+    const stats = await plugin.invoke("docker/stats", { containerIds: runningIds }) as {
+      available: boolean;
+      needsSudo: boolean;
+      sampledAt: number;
+      stats: Array<Record<string, unknown>>;
+    };
+    expect(stats.available).toBe(true);
+    expect(stats.needsSudo).toBe(false);
+    expect(typeof stats.sampledAt).toBe("number");
+    expect(stats.stats).toHaveLength(runningIds.length);
+    for (const key of [
+      "containerId", "name", "cpuPercent", "memBytes", "memLimitBytes", "memPercent",
+      "netRxBytes", "netTxBytes", "netRxRate", "netTxRate",
+      "blockReadBytes", "blockWriteBytes", "pids",
+    ]) {
+      expect(key in stats.stats[0]).toBe(true);
+    }
+    // 非 running 的 db-postgres 不出现在 stats 里（CLI 行为一致）。
+    const exited = await plugin.invoke("docker/stats", { containerIds: ["1a2b3c4d5e6f"] }) as { available: boolean; stats: unknown[] };
+    expect(exited.available).toBe(true);
+    expect(exited.stats).toEqual([]);
+    await expect(plugin.invoke("docker/stats", { containerIds: ["web-nginx"] })).rejects.toThrow(/Invalid containerId/);
   });
 
   it("docker fixture knobs switch the probe narrative (off = missing CLI, sudo = denied socket)", async () => {
@@ -454,6 +481,11 @@ describe("mockDbxHost fixture", () => {
     expect(off).toEqual({ available: false, needsSudo: false, containers: [] });
     const sudo = await (await loadMock("?docker=sudo")).invoke("docker/list", {}) as { available: boolean; needsSudo: boolean; containers: unknown[] };
     expect(sudo).toEqual({ available: false, needsSudo: true, containers: [] });
+    // stats 沿用同一探针叙事：off/sudo 都是可用性降级而不是 RPC 错误。
+    const statsOff = await (await loadMock("?docker=off")).invoke("docker/stats", { containerIds: ["d4a7c9f1e2b3"] }) as Record<string, unknown>;
+    expect(statsOff).toMatchObject({ available: false, needsSudo: false, stats: [] });
+    const statsSudo = await (await loadMock("?docker=sudo")).invoke("docker/stats", { containerIds: ["d4a7c9f1e2b3"] }) as Record<string, unknown>;
+    expect(statsSudo).toMatchObject({ available: false, needsSudo: true, stats: [] });
     // off 叙事下动作直接失败（面板 actionFailed 错误态走查）。
     await expect((await loadMock("?docker=off")).invoke("docker/action", { containerId: "d4a7c9f1e2b3", action: "stop" })).rejects.toThrow(/docker CLI not found/);
   });
