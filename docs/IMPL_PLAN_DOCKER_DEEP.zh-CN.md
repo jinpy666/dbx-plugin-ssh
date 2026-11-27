@@ -512,3 +512,41 @@ $ git status --porcelain
 | 结构/迁移先例 | `docs/IMPL_PLAN_SSH_SPLIT.zh-CN.md:5-8` |
 | mock 注册表检查 | `scripts/mock_host_registry_check.mjs:1-12` |
 | 本机冒烟 | `scripts/smoke_docker_local.py:1-60` |
+
+## 附录 C 参考实现对照补充（2026-11-27，对照 `apolloqi123/dbx-plugin-remotex`）
+
+撰写本文时 `/tmp/remotex-probe` 已被系统清理，正文没有引用其代码；事后重新 clone 并对照，补三条**协议不变、但实现必须显式处理**的机制。下面引用的常量与函数名来自参考实现 `backend/src/features/docker/`，用来说明数量级与失败模式，不要求照搬其模块结构。
+
+### C.1 日志分块聚合（落到 B3）
+
+参考实现 `stream_batch.rs`：`MAX_BATCH_BYTES = 64 KiB`、`BATCH_INTERVAL = 100 ms`，任一到达即 flush；单个 fragment 不切分。其注释给出的理由是「否则一次 pipe read 一个事件，洪峰时每秒数百个事件」。它另带**增量 UTF-8 解码 carry**：多字节字符被批边界切断时，`from_utf8_lossy` 会产出 U+FFFD。
+
+我们的主通道是二进制帧（§2.2），不存在 UTF-8 切断问题，但**聚合仍然必需**，否则 host bridge 事件率同样失控：
+
+- `docker/logs_stream.rs` 内置纯函数 `ChunkBatcher`（64 KiB / 100 ms 起手，可在 `docker/tests.rs` 直接单测边界与 flush 时机）；
+- `docker/logs/out/{streamId}` 每批一帧，`docker/logs/end` 之前必须 flush 残余；
+- 仅当降级走 JSON `docker/logs/chunk`（§2.6）时，才需要参考实现的 UTF-8 carry，且必须与聚合在同一模块内保留跨批残余字节。
+
+### C.2 子进程必须可回收（落到 B3 / B5）
+
+参考实现用 `stop_runner(runner, stop_grace)`：先取消，超过 grace 再 SIGKILL；`supervised_follow_command` 在 HUP / TERM / stdin EOF / TTL watchdog 四处都回收子进程；并显式处理了「supervisor 自己被 SIGKILL、trap 跑不到」的路径——由 TTL 兜底。
+
+我们的 docker 侧会长出三类子进程：`logs -f`、`exec -it`（PTY）、files 脚本。统一要求：
+
+- 一个 supervisor 封装：`Child` + cancel watch + grace 后 `kill()`，开启 `kill_on_drop`；
+- TTL 独立于取消路径，作为最后兜底（trap 可能不执行）；
+- 测试必须包含「子进程忽略 SIGTERM，仍在 grace 后被 SIGKILL」，否则取消逻辑在容器内 `sh` 上会静默失效。
+
+### C.3 关闭与迟到事件的竞态（落到 B3 / B5）
+
+参考实现 `stream_registry.rs` 用 `closed_owners: HashMap<owner, Instant>` + `CLOSED_OWNER_TTL` 做**墓碑**：close 之后一段时间内同一 owner 的 start 直接被拒，避免「关闭后晚到的 open 把流复活」；并固定「先 registry 锁、后 closed 锁」的顺序防死锁，`cancel_owner` 只是快路径，真正的判重在注册时的墓碑检查。
+
+我们的对应设计：
+
+- `owner` 取 `sessionId` / `terminalId`，close 时写墓碑并带 TTL；
+- start 固定流程「查墓碑 → 查活跃 → 注册」，命中墓碑立即返回 `closed` 且不建流；
+- 墓碑过期用惰性 `retain`（在注册路径顺手做），不额外起定时任务；
+- 必须有并发单测：同一 owner 交替 close/start，最终只能存在 0 或 1 条流，且不会出现「已关闭仍 emit」。
+
+> 三条都不改变 §2 的协议与方法表，只影响 B3/B5 的实现细节与测试项；B1 不受影响。
+
