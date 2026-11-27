@@ -55,6 +55,10 @@ jobs:
       # 前端调用后端不存在的方法会在运行时静默落 "Method not found"，
       # 这里是唯一的机器看护点。
       - run: node scripts/mock_host_registry_check.mjs
+      # 结构白名单：条目值 = 冻结的超标行数，只许收缩。放在这里而不是等
+      # structure 测试，是因为 --check 只读文件树，秒级失败；否则要等前端
+      # 安装依赖、后端编译完才由 `structure.spec.ts` / `structure_tests.rs` 报。
+      - run: node scripts/refresh_structure_allowlist.mjs --check
 
   frontend:
     name: Frontend checks
