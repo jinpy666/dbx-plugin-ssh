@@ -272,6 +272,36 @@ B2 拆成两批执行，`settings.rs` 单列为 **B2b**：
 - 验证：通用验收 + 下载/树下载/lzpack/sudo 下载用例；额外检查 `raw_delete_tree` 等 `pub(crate)` 再导出；对 `download_*` 的路径拼接做一次 `grep` 复核。
 - 行数：约 3,527；根约 5,228。
 
+#### B5 执行记录（已完成，待人审）
+
+- 基线：`18882dc9`，`backend/src/ssh.rs` 9,128 行。实际按符号定位，9 个文件共搬出 3,527 行（含条目间空行），根降至 **5,611** 行。
+- 实测（基线坐标 → 新文件）：
+  - `ssh/download_sudo.rs` ← `ssh.rs:4194-4374`（181）：`build_download_sink`、`start_sudo_download`、`start_sudo_download_staged`；186 行。
+  - `ssh/download_lzpack.rs` ← `ssh.rs:4376-4908`（533）：`start_lzpack_download`、`prep_lzpack_download`；538 行。
+  - `ssh/download_start.rs` ← `ssh.rs:4910-5198`（289）：`start_download`；294 行。
+  - `ssh/download_prep.rs` ← `ssh.rs:5200-5652`（453）：`run_download_prep`、`prep_download_staging`、`pull_remote_gzip`、`cleanup_compressed_download`、`download_staged_chunk`；458 行。
+  - `ssh/tree_download.rs` ← `ssh.rs:5654-6214`（561）：`start_tree_download`、`run_tree_prep`、`prep_tree_staging`、`store_tree_state`；570 行。
+  - `ssh/tree_chunk.rs` ← `ssh.rs:6216-6529`（314）：`download_tree_chunk`；320 行。
+  - `ssh/download_chunk.rs` ← `ssh.rs:6531-6898`（368）：`download_chunk`、`clone_for_download_prefetch`、`read_plain_download_chunk`、`read_window_chunk`、`read_highlevel_chunk`、`cleanup_download_assets`；373 行。
+  - `ssh/download_complete.rs` ← `ssh.rs:6900-7344`（445）：`cancel_transfer`、`complete_download`、`complete_single_file_download`、`complete_tree_download`、`finalize_download_sink`、`finalize_staged_plain`、`finalize_tree_staging`；450 行。
+  - `ssh/tree_fs.rs` ← `ssh.rs:8455-8828`（374）：`publish_terminal`、`delete_directory_tree`、`scan_remote_tree`、`scan_remote_tree_walk`、`scan_tree_with_raw`、`raw_delete_path`、`raw_delete_tree`、`open_tree_sink`、`discard_tree_current`、`finalize_tree_current`；380 行。
+- 可见性调整（只加不降）：
+  - 方法 `pub(super)`（10）：`build_download_sink`、`start_lzpack_download`、`run_download_prep`、`pull_remote_gzip`、`cleanup_compressed_download`、`download_staged_chunk`、`store_tree_state`、`download_tree_chunk`、`cleanup_download_assets`、`finalize_download_sink`。
+  - 自由函数 `pub(super)`（8）：`publish_terminal`、`delete_directory_tree`、`scan_remote_tree`、`scan_tree_with_raw`、`raw_delete_path`、`open_tree_sink`、`discard_tree_current`、`finalize_tree_current`。
+  - 原样保留：`pub` 6 个（`start_sudo_download`、`start_download`、`start_tree_download`、`download_chunk`、`cancel_transfer`、`complete_download`）；`raw_delete_tree` 仍 `pub(crate)`；其余 14 个私有条目仅同文件调用，未改可见性。
+  - 新增 `use`：8 个方法文件加 `use super::state::{…}`（`DownloadSink`/`DownloadState`/`TreeDownloadState`/`DownloadPrep`/`PrepOutcome`/`MultistreamState`/`UploadPhase`，实测按文件最小集）；`tree_download.rs`/`tree_chunk.rs` 各加 `use super::tree_fs::{…}`；根加 `use tree_fs::{delete_directory_tree, publish_terminal, raw_delete_path};`（供根自身与 `sftp_ops.rs` 的 `use super::*` 使用）。
+- 保真：`/tmp/movecheck/verify_move.py` 逐符号比对，39 个条目中 21 个 `same`、16 个 `visibility`、2 个 `differs`；仅 `store_tree_state`、`open_tree_sink` 因 `pub(super) ` 使签名超 100 列被 rustfmt 折行，token 流一致。
+- 命令面：`/tmp/movecheck/compare_literals.py --base 18882dc9` → 字面量多重集 **完全一致**（23,683 → 23,683，distinct 8,874）；REMOVED/ADDED 均为空。
+- 验证：`cargo clippy --all-targets -- -D warnings` 通过；全量测试 `-- --test-threads=1` **1,396 passed**，测试名集合 diff 为空；`node scripts/mock_host_registry_check.mjs` PASS；`node scripts/refresh_structure_allowlist.mjs --check` PASS（`ssh.rs` 条目 9,128 → 5,611，新增文件均 <600 不入清单）；`cargo fmt --manifest-path backend/Cargo.toml --check` 仍只剩基线 7 处（`proxy.rs` ×6、`ssh.rs` 原 2,247 现 2,257）。
+- 与 B5 计划估计的偏差：
+  1. 行号锚点整体偏移（计划锚点是 18,457 行版本）：`download_sudo` 7,850-8,036 → 实际 4,194-4,374；`tree_fs` 12,603-12,979 → 8,455-8,828；其余同上表。
+  2. 根实际 5,611 而非约 5,228；9 个文件均低于 600 行预算，无需新增允许清单条目。
+  3. `tree_fs.rs` 的符号表追加 `scan_tree_with_raw`（`scan_remote_tree` 的扫描变体，与 `scan_remote_tree_walk` 同段），计划只写了 `scan_remote_tree*`。
+  4. 再次确认 B4 的 glob 提示：`state.rs` 的 `DownloadSink`/`DownloadState`/`TreeDownloadState`/`DownloadPrep`/`PrepOutcome` 等经根 `use state::*;` 引入，子模块 `use super::*` 取不到，必须显式 `use super::state::{…}`。
+  5. `store_tree_state`、`open_tree_sink` 签名被 rustfmt 折行（见上）；`tree_chunk.rs` 单元素 import 的花括号被 rustfmt 去掉。
+  6. 本批未改动 `main.rs`/`mcp.rs`/`sftp_ext.rs`/`transfer_compress.rs`/`sftp_ops.rs` 任何调用点；`sftp_ops.rs` 继续通过根绑定看到 `delete_directory_tree`/`raw_delete_path`。
+
+
 ### B6 认证/主机密钥/执行/审批收尾（最高风险，最后做）
 
 分两个 commit：
