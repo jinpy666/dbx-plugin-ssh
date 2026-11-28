@@ -4,6 +4,11 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.17] — 2026-11-28
+
+- **0.7.17 正式版**。汇总 beta.1～beta.2：只读连接禁止命令执行与终端注入（P0 安全加固——原只读命令白名单可被进程替换、重定向与带写参数的动词穿透，只读连接现为 inspection-only，巡检走 `sftp_list_dir` / `sftp_stat` / `sftp_read_file`）；SFTP 跨会话传输「发送到会话…」——右键把选中的文件/文件夹经前端中继泵到其他在线服务器，进度/取消/暂停全在传输面板，文件夹按 cp -r 语义整树中继、目标侧逐级建目录（#334）；修复撞名上传「自动重命名」策略**静默覆盖远端同名文件**的数据丢失 bug——`sftp/rename-unique` 探测极性在 10 月加固批次被改反，撞名烧满 999 次探测后失败、前端回落原名，慢链路上表现为任务长时间停在「等待中」（#337）；修复 sz 下载 ~10MB 文件进度走完无任何反馈——完成结算早于落盘保存，成功提示被静默跳过而文件其实已存盘（#336）；SFTP 面板快捷键 `F2` 重命名 / `Delete` 删除（面板空白焦点下也生效）+ 传输 tab 改叫「传输」、上传设置独立分组（#337）。
+  **0.7.17 stable.** Includes beta.1–beta.2: read-only connections now refuse command execution and terminal injection (P0 — the old read-only whitelist was unsound against process substitution, redirection, and read-looking verbs with mutating arguments; inspection belongs to `sftp_list_dir` / `sftp_stat` / `sftp_read_file`); cross-session transfer "Send to session…" relays selected files and folders to another live server with progress/cancel/pause in the transfer panel and cp -r semantics for whole-folder trees (#334); fixed a data-loss bug where same-name uploads silently overwrote the remote file under the default auto-rename policy — the rename-unique probe was inverted, burning 999 LSTAT probes per collision with minutes-long "queued" stalls on slow links (#337); fixed missing sz download completion feedback on ~10MB files, where the completion settled before the in-flight save and the notice was silently skipped even though the file did land on disk (#336); SFTP panel shortcuts F2 rename / Delete delete (also when no row is focused) with the transfer tab renamed "Transfer" and upload settings grouped separately (#337).
+
 ## [0.7.17-beta.2] — 2026-11-28
 
 ### 修复
