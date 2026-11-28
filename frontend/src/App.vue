@@ -7759,6 +7759,7 @@ const {
   waitForDownloadChunk: (taskId, offset) => waitForDownloadChunk(taskId, offset),
   waitForDownloadReady: (taskId, compression) => waitForDownloadReady(taskId, compression),
   loadTransferConcurrency,
+  joinRemote,
   pathFromUri,
   openTransferPanel: () => openTransferPanel(),
 });
@@ -11247,8 +11248,8 @@ function flagHintsSource(command: string): string {
                        不必翻转全局「使用默认地址」；仅文件——目录走递归树下载，
                        目标目录覆盖未接入树下载管线。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" @select="downloadEntry(fileMenu.entry, sudoMode && canWrite, false, true)"><FolderOpen />{{ t("downloadTo") }}</ContextMenuItem>
-                  <!-- 跨会话发送（issue #334 阶段 1）：单文件直达目标会话。 -->
-                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!connected || relayBusy" @select="openSendToSession([fileMenu.entry])"><Send />{{ t("sftpRelay.action") }}</ContextMenuItem>
+                  <!-- 跨会话发送（issue #334）：文件直达；文件夹按 cp -r 语义整树中继。 -->
+                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file' || fileMenu.entry.kind === 'directory'" :disabled="!connected || relayBusy" @select="openSendToSession([fileMenu.entry])"><Send />{{ t("sftpRelay.action") }}</ContextMenuItem>
                   <!-- ST10 显式压缩包模式（自研 lzpack，远端零依赖）：文件级入口。
                        压缩上传交付 <名>.dbxz；解压下载要求源是 .dbxz。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' && !sudoMode" :disabled="!canWrite" @select="chooseUploadLzpack()"><PackageOpen />{{ t("sftpLzpack.uploadAction") }}</ContextMenuItem>

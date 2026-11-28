@@ -27,18 +27,63 @@ export function relayTargetOptions(targets: readonly BatchSendTarget[], currentS
     .map((target) => ({ sessionId: target.sessionId, label: batchTargetLabel(target) }));
 }
 
-export interface RelayQueuePlan<T> {
+export interface RelaySelectionTriage<T> {
   files: T[];
-  /** 不可中继的条目数（文件夹/符号链接/特殊项）——阶段 1 仅支持普通文件。 */
+  dirs: T[];
+  /** 符号链接/特殊条目——不中继，完成提示说明。 */
   skipped: number;
 }
 
-/** 批次规划：只有普通文件可中继；目录/符号链接计入 skipped（完成提示说明）。
- * 泛型透传：调用方可在条目上携带 uri 等附加字段，原样保留。 */
-export function buildRelayQueue<T extends { kind: string }>(entries: readonly T[]): RelayQueuePlan<T> {
+/** 选中条目分诊（阶段 2 起文件夹可中继）：文件直进行、目录走树遍历、
+ * 其余（symlink 等）计入 skipped。泛型透传：uri 等附加字段原样保留。 */
+export function triageRelaySelection<T extends { kind: string }>(entries: readonly T[]): RelaySelectionTriage<T> {
   const files = entries.filter((entry) => entry.kind === "file");
+  const dirs = entries.filter((entry) => entry.kind === "directory");
   return {
     files: [...files],
-    skipped: entries.length - files.length,
+    dirs: [...dirs],
+    skipped: entries.length - files.length - dirs.length,
   };
+}
+
+export interface RelayWalkFile {
+  /** 目标侧相对目录（"" = 目标根目录）。 */
+  relDir: string;
+  name: string;
+  uri: string;
+}
+
+export interface RelayTreeOrder {
+  /** 目标侧需 ensure 的相对目录：去重、父先于子（父路径段是子路径段前缀，
+   * 按段数升序即拓扑序），段数相同按字典序稳定输出。 */
+  dirs: string[];
+  files: RelayWalkFile[];
+}
+
+/** 树遍历产物的纯整序：目录 ensure 顺序与文件队列确定化（遍历本身在
+ * composables/useSftpRelay，BFS 顺序随 RPC 完成序波动，这里收敛成确定序）。 */
+export function orderRelayTree(dirs: readonly string[], files: readonly RelayWalkFile[]): RelayTreeOrder {
+  const orderedDirs = [...new Set(dirs)];
+  orderedDirs.sort((a, b) => {
+    const depthA = a ? a.split("/").length : 0;
+    const depthB = b ? b.split("/").length : 0;
+    return depthA - depthB || (a < b ? -1 : a > b ? 1 : 0);
+  });
+  return { dirs: orderedDirs, files: files.map((file) => ({ ...file })) };
+}
+
+/** 目标根逐前缀拆分（mkdir 非递归兜底）：`/a/b/c` → `["/a", "/a/b", "/a/b/c"]`。
+ * 目标端 `sftp/createDirectory` 是单级 mkdir，用户输入多级新路径时逐级 ensure；
+ * 已存在的前缀会报错、由调用方静默放行。根目录与空串返回 []。 */
+export function relayTargetDirPrefixes(dir: string): string[] {
+  const trimmed = dir.trim() || "/";
+  if (trimmed === "/") return [];
+  const segments = trimmed.split("/").filter(Boolean);
+  const prefixes: string[] = [];
+  let current = "";
+  for (const segment of segments) {
+    current = `${current}/${segment}`;
+    prefixes.push(current);
+  }
+  return prefixes;
 }

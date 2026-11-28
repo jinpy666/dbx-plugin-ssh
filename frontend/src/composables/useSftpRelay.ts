@@ -1,12 +1,12 @@
 import { ref, type Ref } from "vue";
 import { runTransfers } from "../lib/transferQueue";
-import { buildRelayQueue, relayTargetOptions, type RelayTargetOption } from "../lib/sftpRelay";
+import { orderRelayTree, relayTargetDirPrefixes, relayTargetOptions, triageRelaySelection, type RelayWalkFile, type RelayTargetOption } from "../lib/sftpRelay";
 import type { BatchSendTarget } from "../lib/batchSend";
 import { pluginStore } from "../lib/pluginStore";
 
 /**
- * SFTP 跨会话传输（issue #334 阶段 1）：右键「发送到会话…」把当前面板选中
- * 的文件经前端中继泵到另一台在线服务器。
+ * SFTP 跨会话传输（issue #334）：右键「发送到会话…」把当前面板选中的文件/
+ * 文件夹经前端中继泵到另一台在线服务器。
  *
  * 字节路径（不新增 sidecar 方法，全部复用既有管线）：
  * - 下载腿：`sftp/download/start`（saveToLocal:false）→ `sftp/download/next`
@@ -17,9 +17,10 @@ import { pluginStore } from "../lib/pluginStore";
  * - 中继泵串在 uploadSource 的 readChunk 里：上传循环逐片拉取，天然背压，
  *   内存峰值只有一片。
  *
- * 阶段 1 仅支持普通文件（文件夹中继 = 远端树遍历 + 逐目录建目录，阶段 2）。
- * sudo 车道不参与：跨机中继按普通车道走，源端 root 属主文件读不到就如实
- * 失败，不做静默换道。
+ * 文件夹：确认时 BFS 遍历源端树（sftp/list 逐目录，上限镜像后端 tree 扫描），
+ * 目标侧按相对路径逐目录 createDirectory（父先于子）后逐文件泵送；symlink
+ * 一律不跟随（环安全）。sudo 车道不参与：跨机中继按普通车道走，源端 root
+ * 属主文件读不到就如实失败，不做静默换道。
  */
 
 /** 上次使用的目标目录（pluginStore：沙箱内 opaque origin 只能经宿主 storage 落盘）。 */
@@ -49,13 +50,6 @@ interface RelayDownloadStart {
   compression?: string;
 }
 
-/** 中继队列行：面板条目 + 稳定调度 key（同名文件不能共用 id）。 */
-interface RelayQueueRow {
-  key: string;
-  name: string;
-  uri: string;
-}
-
 export function useSftpRelay(options: {
   t: (key: string, values?: Record<string, string | number>) => string;
   showNotice: (message: string, actions?: Array<{ label: string; run: () => void }>) => void;
@@ -79,10 +73,11 @@ export function useSftpRelay(options: {
   /** 压缩下载的 staging 等待（useSftpDownload）：gzip 任务 prep 就绪前 download/next 报错。 */
   waitForDownloadReady: (taskId: string, compression: string | undefined) => Promise<void>;
   loadTransferConcurrency: () => number;
+  joinRemote: (dir: string, name: string) => string;
   pathFromUri: (uri: string) => string;
   openTransferPanel: () => void;
 }) {
-  const { t, showNotice, showError, connected, session, currentPath, loadBatchTargets, uploadSource, waitForDownloadChunk, waitForDownloadReady, loadTransferConcurrency, pathFromUri, openTransferPanel } = options;
+  const { t, showNotice, showError, connected, session, currentPath, loadBatchTargets, uploadSource, waitForDownloadChunk, waitForDownloadReady, loadTransferConcurrency, joinRemote, pathFromUri, openTransferPanel } = options;
 
   // 对话框态：relayPrompt 为 null = 关闭；skipped 随批次展示/提示。
   const relayPrompt = ref<{ count: number; skipped: number } | null>(null);
@@ -90,16 +85,16 @@ export function useSftpRelay(options: {
   const relayTargetSession = ref("");
   const relayTargetDir = ref("");
   const relayBusy = ref(false);
-  let relayRows: RelayQueueRow[] = [];
-  let relaySkipped = 0;
+  let relaySelection: Array<{ name: string; kind: string; uri: string }> = [];
   let relaySeq = 0;
 
-  /** 右键「发送到会话…」：规划批次 + 拉目标列表 + 打开对话框。无可选目标时
-   * 直接报错不开框（比打开一个空下拉更直接）。 */
+  /** 右键「发送到会话…」：分诊选中项 + 拉目标列表 + 打开对话框。无可选目标/
+   * 无可发送内容时直接报错不开框（比打开一个空下拉更直接）。文件夹的树遍历
+   * 在确认时进行（开框不阻塞在大目录上）。 */
   async function openSendToSession(entries: ReadonlyArray<{ name: string; kind: string; uri: string }>) {
     if (!connected.value || relayBusy.value) return;
-    const plan = buildRelayRows(entries);
-    if (!plan.rows.length) {
+    const triage = triageRelaySelection(entries);
+    if (!triage.files.length && !triage.dirs.length) {
       showError(new Error(t("sftpRelay.filesOnly")), "sftp");
       return;
     }
@@ -114,12 +109,11 @@ export function useSftpRelay(options: {
       showError(new Error(t("sftpRelay.noTargets")), "sftp");
       return;
     }
-    relayRows = plan.rows;
-    relaySkipped = plan.skipped;
+    relaySelection = [...entries];
     relayTargets.value = targets;
     relayTargetSession.value = targets[0]?.sessionId ?? "";
     relayTargetDir.value = loadRelayTargetDir() || currentPath.value;
-    relayPrompt.value = { count: plan.rows.length, skipped: plan.skipped };
+    relayPrompt.value = { count: entries.length, skipped: triage.skipped };
   }
 
   function closeSendToSession() {
@@ -128,11 +122,11 @@ export function useSftpRelay(options: {
   }
 
   /** 单文件中继：下载腿原始字节 → uploadSource 逐片泵到目标会话。 */
-  async function relayOne(row: RelayQueueRow, sourceSessionId: string, targetSessionId: string, targetDir: string, batchId: string): Promise<boolean> {
+  async function relayOne(file: { name: string; uri: string }, sourceSessionId: string, targetSessionId: string, targetDir: string, batchId: string): Promise<boolean> {
     const info = await window.dbxPlugin.invoke<RelayDownloadStart>("sftp/download/start", {
       sessionId: sourceSessionId,
       // M27-A 路径形态契约：下载 start 只吃列表回传的 wire 形式。
-      remotePath: pathFromUri(row.uri),
+      remotePath: pathFromUri(file.uri),
       saveToLocal: false,
     });
     // 压缩任务等 staging ready（未就绪时 download/next 直接报错）。
@@ -157,7 +151,7 @@ export function useSftpRelay(options: {
       return chunk;
     };
     try {
-      const done = await uploadSource(row.name, info.size, readChunk, undefined, targetDir, {
+      const done = await uploadSource(file.name, info.size, readChunk, undefined, targetDir, {
         sessionId: targetSessionId,
         batchId,
         sudoLane: false,
@@ -172,6 +166,60 @@ export function useSftpRelay(options: {
     }
   }
 
+  // —— 树遍历（阶段 2，文件夹中继）：BFS 走 sftp/list，镜像后端 tree 扫描
+  // 的上限口径（sftp_tree.rs：深度 64 / 目录 1 万 / 文件 5 万）——前端遍历
+  // 是逐目录 RPC，上限只为防失控，不是性能承诺。symlink 一律不跟随（环安全，
+  // 与文件夹下载「跳过符号链接/特殊条目」同语义）。
+  const RELAY_WALK_MAX_DIRS = 10_000;
+  const RELAY_WALK_MAX_FILES = 50_000;
+  const RELAY_WALK_MAX_DEPTH = 64;
+
+  interface RelayWalkAcc {
+    dirs: string[];
+    files: RelayWalkFile[];
+    skipped: number;
+    truncated: number;
+  }
+
+  async function walkRelayDir(sourceSessionId: string, dirUri: string, relBase: string, depth: number, acc: RelayWalkAcc): Promise<void> {
+    const queue: Array<{ uri: string; relBase: string; depth: number }> = [{ uri: dirUri, relBase, depth }];
+    while (queue.length) {
+      const current = queue.shift()!;
+      if (current.depth > RELAY_WALK_MAX_DEPTH || acc.dirs.length >= RELAY_WALK_MAX_DIRS || acc.files.length >= RELAY_WALK_MAX_FILES) {
+        acc.truncated += 1;
+        continue;
+      }
+      let entries: Array<{ name: string; kind: string; uri: string }> = [];
+      try {
+        const result = await window.dbxPlugin.invoke<{ entries?: Array<{ name: string; kind: string; uri: string }> }>("sftp/list", {
+          sessionId: sourceSessionId,
+          // M27-A：sftp/list 吃 wire 路径（列表回传 uri）。
+          path: pathFromUri(current.uri),
+        });
+        entries = result.entries ?? [];
+      } catch {
+        // 目录不可读：计入跳过，不让整棵树失败（与文件夹下载的逐目录容错一致）。
+        acc.skipped += 1;
+        continue;
+      }
+      for (const entry of entries) {
+        if (entry.kind === "directory") {
+          const relPath = current.relBase ? `${current.relBase}/${entry.name}` : entry.name;
+          acc.dirs.push(relPath);
+          queue.push({ uri: entry.uri, relBase: relPath, depth: current.depth + 1 });
+        } else if (entry.kind === "file") {
+          if (acc.files.length >= RELAY_WALK_MAX_FILES) {
+            acc.truncated += 1;
+            continue;
+          }
+          acc.files.push({ relDir: current.relBase, name: entry.name, uri: entry.uri });
+        } else {
+          acc.skipped += 1;
+        }
+      }
+    }
+  }
+
   async function confirmSendToSession() {
     if (relayBusy.value || !relayPrompt.value) return;
     const targetSessionId = relayTargetSession.value.trim();
@@ -180,21 +228,47 @@ export function useSftpRelay(options: {
     if (!sourceSessionId) return;
     const targetDir = relayTargetDir.value.trim() || "/";
     const targetLabel = relayTargets.value.find((target) => target.sessionId === targetSessionId)?.label || targetSessionId;
-    const total = relayRows.length;
-    const skipped = relaySkipped;
+    const skipped = relayPrompt.value.skipped;
     persistRelayTargetDir(targetDir);
     relayBusy.value = true;
     openTransferPanel();
-    const batchId = `relay-${++relaySeq}`;
+    let truncated = 0;
     let uploaded = 0;
+    let total = 0;
     try {
-      // 目标目录 ensure：已存在/无权限等失败静默放行——真正的缺失会在
-      // upload/start 明确报错（任务卡失败），这里不替用户猜语义。
-      await window.dbxPlugin.invoke("sftp/createDirectory", { sessionId: targetSessionId, path: targetDir }).catch(() => undefined);
-      await runTransfers(relayRows, Math.max(1, loadTransferConcurrency()), {
+      // 选中文件直进行（relDir=""），目录先树遍历；顺序收敛交给 orderRelayTree。
+      const triage = triageRelaySelection(relaySelection);
+      const acc: RelayWalkAcc = {
+        dirs: [],
+        files: triage.files.map((file) => ({ relDir: "", name: file.name, uri: file.uri })),
+        skipped,
+        truncated: 0,
+      };
+      for (const dir of triage.dirs) {
+        // cp -r 语义：文件夹本身也复制——目标根下先建同名目录，子项相对其展开。
+        acc.dirs.push(dir.name);
+        await walkRelayDir(sourceSessionId, dir.uri, dir.name, 1, acc);
+      }
+      truncated = acc.truncated;
+      const tree = orderRelayTree(acc.dirs, acc.files);
+      total = tree.files.length;
+      // 目标根逐前缀 ensure（mkdir 非递归兜底）+ 目录树按父先于子 ensure：
+      // 已存在/无权限等失败静默放行——真正的缺失会在 upload/start 明确报错
+      // （任务卡失败），这里不替用户猜语义。
+      for (const prefix of relayTargetDirPrefixes(targetDir)) {
+        await window.dbxPlugin.invoke("sftp/createDirectory", { sessionId: targetSessionId, path: prefix }).catch(() => undefined);
+      }
+      for (const rel of tree.dirs) {
+        await window.dbxPlugin.invoke("sftp/createDirectory", { sessionId: targetSessionId, path: joinRemote(targetDir, rel) }).catch(() => undefined);
+      }
+      // 调度 key 带相对目录：不同目录下的同名文件各自成行。
+      const rows = tree.files.map((file, index) => ({ key: `relay-${index}`, file }));
+      const batchId = `relay-${++relaySeq}`;
+      await runTransfers(rows, Math.max(1, loadTransferConcurrency()), {
         id: (row) => row.key,
         run: async (row) => {
-          const done = await relayOne(row, sourceSessionId, targetSessionId, targetDir, batchId);
+          const rowDir = row.file.relDir ? joinRemote(targetDir, row.file.relDir) : targetDir;
+          const done = await relayOne({ name: row.file.name, uri: row.file.uri }, sourceSessionId, targetSessionId, rowDir, batchId);
           if (done) uploaded += 1;
         },
       });
@@ -210,6 +284,7 @@ export function useSftpRelay(options: {
       showNotice(t("sftpRelay.completedWithFailures", { count: total - uploaded, total, target: targetLabel }));
     }
     if (skipped) showNotice(t("sftpRelay.skippedNote", { count: skipped }));
+    if (truncated) showNotice(t("sftpRelay.truncatedNote", { count: truncated }));
   }
 
   return {
@@ -221,14 +296,5 @@ export function useSftpRelay(options: {
     openSendToSession,
     closeSendToSession,
     confirmSendToSession,
-  };
-}
-
-/** 面板条目 → 中继行：只留普通文件，附稳定调度 key（同名文件各自成行）。 */
-function buildRelayRows(entries: ReadonlyArray<{ name: string; kind: string; uri: string }>): { rows: RelayQueueRow[]; skipped: number } {
-  const plan = buildRelayQueue(entries);
-  return {
-    rows: plan.files.map((entry, index) => ({ key: `relay-${index}`, name: entry.name, uri: entry.uri })),
-    skipped: plan.skipped,
   };
 }
