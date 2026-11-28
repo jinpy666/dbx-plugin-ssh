@@ -289,6 +289,9 @@ SOCKS5 CONNECT（BIND/UDP ASSOCIATE 拒绝）；本地监听通配 `*` 被拒绝
 - **实时指标**：`docker/stats` 一次批量采样 CPU/内存/网络/块设备/PID（1–50 个容器），
   只读；速率由 sidecar 用同一采样键做差分（窗口 <250ms 记 0），旧 payload 缺速率时
   前端用上一帧自算。CLI 缺失或 daemon 不可达时返回 `available:false`，不报错。
+- **指标趋势**：面板打开期间客户端保留最近 3 分钟（60 点 × 3s）的 CPU/内存/网络总量
+  曲线，画在指标条内（CPU/内存固定 0–100% 轴，网络按窗口峰值）；换容器集合即清空，
+  不持久化、不新增 RPC。
 - **日志跟随**：抽屉内 `docker logs -f`，走二进制帧（stdout/stderr 分流），
   64 KiB / 100 ms 任一到达即 flush，回压时阻塞读循环、不丢行；单 sidecar 最多 8 条，
   30 分钟或 20 MiB 先到者自动停并回收子进程；桥接不支持二进制时降级为 16 KiB JSON chunk。
