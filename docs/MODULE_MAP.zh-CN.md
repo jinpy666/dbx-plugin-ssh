@@ -1,7 +1,7 @@
 # 模块地图与边界
 
 本文回答三个问题：**代码分成哪些模块、每个模块负责什么、改一处会牵动哪里**。
-所有数字都在集成分支（2026-11-27，`integration/remotex-learnings`）的工作树上用
+所有数字都在集成分支（2026-11-28，`integration/remotex-learnings`）的工作树上用
 `wc -l` / `grep` 实测（复核命令见
 [附录](#附录复核命令)），不是估算。RPC 方法名以
 [PROTOCOL.zh-CN.md](PROTOCOL.zh-CN.md) 为准；能力对标与「是否已实现」以
@@ -160,14 +160,14 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 
 | 模块（产物行数） | 职责 | 关键入口 | 依赖 |
 | --- | --- | --- | --- |
-| `App.vue` (12,661) | 工作台根组件：工具条/会话菜单/布局、xterm 生命周期与加固、SFTP 与传输编排、跨面板状态 | 全部 RPC 调用点；挂载各 dialog/panel | `composables`、`lib`、`components`、`rdp` |
+| `App.vue` (12,658) | 工作台根组件：工具条/会话菜单/布局、xterm 生命周期与加固、SFTP 与传输编排、跨面板状态 | 全部 RPC 调用点；挂载各 dialog/panel | `composables`、`lib`、`components`、`rdp` |
 | `main.ts` (140) | 启动：`pluginStore` 水合 → 装主题桥 → 按 contribution 挂 3 个根之一 | `dbx-plugin-init` 事件、`host.context` | `shared/frontend/themeSync`、`lib/pluginContext` |
 | `TunnelManager.vue` (78) | 端口映射工作台根（同时服务 `presentation: "dialog"` 的右键入口） | `ssh/forward/*` | `components/ui/dialog` |
 | `components/`（52 个 `.vue`；15,647 行） | 面板与对话框（设置、SFTP 预览、Docker、监控、OTP、导入、搜索…） | 见 §3.1 | `lib`、`composables`、`ui` |
 | `components/ui/`（10 组，1,165 行） | reka-ui/shadcn 风格基础原语（dialog/select/table/tabs…） | — | reka-ui |
-| `composables/`（48 个，12,317 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
-| `lib/`（175 个生产 `.ts`，30,764 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
-| `lib/completion/`（子目录，2,734 行） | 结构化补全（fig 语料、parser、worker、host 客户端） | `CompletionController`、`lib/completion/host/hostClient.ts` | `completion/execute` RPC |
+| `composables/`（52 个，12,281 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制、浮层锚点…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
+| `lib/`（199 个生产 `.ts`，33,820 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
+| `lib/completion/`（子目录，2,849 行） | 结构化补全（fig 语料、parser、worker、host 客户端） | `CompletionController`、`lib/completion/host/hostClient.ts` | `completion/execute` RPC |
 | `rdp/`（1,598 行） | RDP 画布、帧解码、会话与工作台 | `useRdpSession`、`useRdpWorkbench`、`rdpFrame`、`RdpSurface` | `lib`、`components` |
 | `styles/tailwind.css` (64) | Tailwind v4 入口（`style.css` 1,619 行为主题与组件样式） | — | tailwind |
 | `mockDbxHost.ts` (2,335) | 浏览器/vitest 的宿主 + RPC mock（契约镜像） | `mockDbxHost.spec.ts` | 全部 RPC 契约 |
@@ -247,8 +247,9 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | 文件 | 行数 | 当前混合的职责（代码可验证） |
 | --- | --- | --- |
 | `backend/src/ssh/open_session.rs`、`ssh/upload_finish.rs` | **883 / 661** | 各是一个不可再拆的单函数：`open_session`（拨号 → 认证挑战 → 会话登记）与 `finish_upload`（续传收尾 → sudo 提交 → 压缩推送）。原先 18,457 行的 `ssh.rs` 已拆成根 256 + 43 个子模块，这两处是拆分后仅存的两个超预算生产文件 |
-| `frontend/src/App.vue` | **12,543** | ① 工作台外壳（工具条、会话菜单、dock、布局持久化）；② xterm 生命周期与输入路由（搜索、zmodem/trzsz、ghost、高亮装饰）；③ SFTP 浏览 + 预览/编辑 + 传输队列/批量栏；④ 各面板（设置/OTP/导入/Docker/会话信息/告警/审计）的挂载与事件分发 |
-| `frontend/src/lib/i18n.ts` | **10,764** | ① 7 个 locale 的全部文案数据（`en`/`es`/`it`/`ja`/`pt-BR`/`zh-CN`/`zh-TW`）；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`） |
+| `frontend/src/App.vue` | **12,658** | ① 工作台外壳（工具条、会话菜单、dock、布局持久化）；② xterm 生命周期与输入路由（搜索、zmodem/trzsz、ghost、高亮装饰）；③ SFTP 浏览 + 预览/编辑 + 传输队列/批量栏；④ 各面板（设置/OTP/导入/Docker/会话信息/告警/审计）的挂载与事件分发 |
+| `frontend/src/lib/i18n.ts` | **10,984** | ① 7 个 locale 的全部文案数据（`en`/`es`/`it`/`ja`/`pt-BR`/`zh-CN`/`zh-TW`）；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`） |
+| `frontend/src/composables/useCommandSuggestions.ts` | **663** | 历史/快速命令建议与 fig 结构化补全两层浮层的采集→抑制门→检索→定位→按键消费（互斥调度带 issue 链行为面 #120/#138/#169/#317，不宜机械再拆）；锚点量测（`useTerminalSuggestionAnchor`）、Windows shell 采样（`lib/completion/shell/shellSniff`）、空结果宽限（`lib/suggestionCloseGrace`）与键入分类（`lib/suggestionGuard`）已外抽 |
 | `backend/src/mcp.rs` | 9,266 | ① MCP stdio 传输与初始化；② 16 个工具的 schema 目录；③ `mcp/call` 分派与工具实现（exec/SFTP/known_hosts）；④ 桥模式与独立模式的差异处理 |
 | `frontend/src/components/SettingsDialog.vue` | 2,876 | 13 个设置分类的全部表单、校验、加载/保存与局部状态机集中在单文件 |
 | `backend/src/exec.rs` | 4,777 | ① 普通远程 exec 与取消；② Quick Sudo 编排（密码注入、提示词应答、保活）；③ 进程列表与终止；④ metrics/docker/completion 复用的执行底座 |
@@ -301,7 +302,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | 终端输入/输出/回放 | `frontend/src/App.vue` 输入路由 → `lib/terminalInput.ts` → `backend/src/ssh.rs` 的 `write_terminal`/`replay_terminal` | `useSplitPanes.ts`、`lib/terminalZmodem.ts`、`lib/terminalTrzsz.ts`、帧序号缺口处理 |
 | 分屏/镜像会话 | `frontend/src/composables/useSplitPanes.ts`、`frontend/src/components/SplitTerminalPane.vue` | `ssh/session/open` 的 `reuseAuthenticatedTransport`、`SPLIT_PANE_MAX` |
 | SFTP 浏览/预览/编辑 | `frontend/src/composables/useSftp*.ts`、`lib/previewResolver.ts`、`frontend/src/components/PreviewPane.vue` | `backend/src/sftp_raw.rs`、`sftp_ext.rs`、`sftp_name.rs`、`sudo_fs.rs` |
-| 传输队列/续传/压缩 | `frontend/src/composables/useTransferQueue.ts`、`useUploadChain.ts`、`lib/transferSpeed.ts` | `backend/src/transfer_*.rs`、`lzpack.rs`、`sftp/download/next` 协议 |
+| 传输队列/续传/压缩 | `frontend/src/composables/useTransferQueue.ts`、`useUploadChain.ts`、`lib/transferSpeed.ts`、`lib/transferDisplay.ts`、`lib/transferCompletionWatch.ts`、`lib/transferAckWait.ts` | `backend/src/transfer_*.rs`、`lzpack.rs`、`sftp/download/next` 协议 |
 | Quick Sudo / sudo 文件操作 | `backend/src/exec.rs`、`sudo_fs.rs`、`sudo_profiles.rs` | `frontend/src/App.vue` 的 `sudoMode`、`ssh/settings/*`、`triggers.rs` |
 | 端口映射 / 代理 | `backend/src/forward.rs`、`tunnel_menu.rs`、`proxy.rs` | `frontend/src/TunnelManager.vue`、`components/PortForwardDialog.vue`、`lib/portForward.ts` |
 | Docker 面板 | `backend/src/docker/*.rs`（`rpc.rs` 是分派臂实现；`files.rs` 只读文件 list/read；`logs_batch.rs` 聚合/UTF-8/脚本，`logs_stream.rs` runner，`streams.rs` 注册表）→ `frontend/src/components/DockerPanel.vue` + `DockerLogsDrawer.vue` + `DockerStatsBar.vue` + `DockerFilesPane.vue` + `DockerWorkbench.vue` | `lib/dockerEngine.ts`、`lib/dockerActions.ts`、`lib/dockerStats.ts`、`lib/dockerFiles.ts`、`lib/dockerLogStream.ts`、`composables/useDockerStats.ts`、`composables/useDockerLogStream.ts`、`composables/useDockerOpenInTerminal.ts`、`audit_log` |
@@ -320,9 +321,9 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 ```bash
 $ wc -l backend/src/ssh.rs frontend/src/App.vue frontend/src/lib/i18n.ts
      256 backend/src/ssh.rs
-   12543 frontend/src/App.vue
-   10764 frontend/src/lib/i18n.ts
-   33563 total
+   12658 frontend/src/App.vue
+   10984 frontend/src/lib/i18n.ts
+   23898 total
 
 $ find backend/src -name '*.rs' | xargs wc -l | tail -1
   106432 total
