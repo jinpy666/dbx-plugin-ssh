@@ -38,6 +38,7 @@ import { terminalOscMessages } from "./terminal-osc";
 import { terminalHistoryPanelMessages } from "./terminal-history-panel";
 import { transferCompressMessages } from "./transfer-compress";
 import { batchUploadMessages } from "./batch-upload";
+import { monitorSearchMessages } from "./monitor-search";
 
 /** 增量文案表（按合并顺序排列；i18n.ts 的 supplemental 声明在其后填充基础键）。 */
 export const SUPPLEMENTAL_TABLES: ReadonlyArray<Record<string, Record<string, string>>> = [
@@ -78,6 +79,7 @@ export const SUPPLEMENTAL_TABLES: ReadonlyArray<Record<string, Record<string, st
   terminalHistoryPanelMessages,
   transferCompressMessages,
   batchUploadMessages,
+  monitorSearchMessages,
 ];
 
 /** 按表清单顺序把各 locale 的增量键合并进目标表（原地修改并返回）。 */

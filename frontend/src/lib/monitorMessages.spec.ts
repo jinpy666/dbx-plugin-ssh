@@ -45,6 +45,10 @@ const MONITOR_KEYS = [
   "monitor.cpu",
   "monitor.memory",
   "monitor.network",
+  // 卡片检索（监控面板搜索批）：七语齐全由下面的键集/占位符断言兜底。
+  "monitor.searchPlaceholder",
+  "monitor.searchClear",
+  "monitor.searchNoMatch",
 ] as const;
 
 describe("monitor panel messages", () => {

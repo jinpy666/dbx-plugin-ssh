@@ -59,6 +59,8 @@ const {
 // useMonitorGrouping：面板只留工具栏与卡片渲染。
 const {
   statusFilter,
+  query,
+  matchesQuery,
   stateOf,
   watchActive,
   matchesFilter,
@@ -118,6 +120,26 @@ const { groupManagerOpen, draftName, submitNewGroup, setSectionRef, treeMemberSe
           {{ t(FILTER_KEYS[filter]) }}
         </button>
       </div>
+      <label class="monitor-search">
+        <input
+          v-model="query"
+          type="search"
+          class="monitor-search-input"
+          data-testid="monitor-search"
+          :placeholder="t('monitor.searchPlaceholder')"
+          :aria-label="t('monitor.searchPlaceholder')"
+          spellcheck="false"
+        />
+        <button
+          v-if="query"
+          type="button"
+          class="monitor-search-clear"
+          data-testid="monitor-search-clear"
+          :aria-label="t('monitor.searchClear')"
+          :title="t('monitor.searchClear')"
+          @click="query = ''"
+        ><X :size="12" aria-hidden="true" /></button>
+      </label>
       <label class="monitor-refresh">
         <span class="monitor-refresh-label">{{ t("monitor.refresh") }}</span>
         <Select :model-value="refreshMs" @update:model-value="(value) => setRefreshMs(Number(value))">
@@ -233,7 +255,10 @@ const { groupManagerOpen, draftName, submitNewGroup, setSectionRef, treeMemberSe
             @retry="(connectionId) => retry(connectionId)"
           />
         </div>
-        <p v-if="!cardEntries(group).length" class="monitor-empty">{{ t("monitor.emptyGroup") }}</p>
+        <!-- 空组文案区分「检索无命中」：搜索时给出明确的空因，而不是笼统的空组。 -->
+        <p v-if="!cardEntries(group).length" class="monitor-empty" :data-testid="query.trim() ? 'monitor-no-match' : 'monitor-empty-group'">
+          {{ query.trim() ? t("monitor.searchNoMatch") : t("monitor.emptyGroup") }}
+        </p>
       </section>
     </template>
   </div>
@@ -360,6 +385,33 @@ const { groupManagerOpen, draftName, submitNewGroup, setSectionRef, treeMemberSe
   outline: 2px solid var(--primary);
   outline-offset: 1px;
 }
+.monitor-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.monitor-search-input {
+  width: 9rem;
+  font-size: 0.75rem;
+  padding: 0.2rem 1.4rem 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--foreground);
+}
+.monitor-search-input::placeholder { opacity: 0.55; }
+.monitor-search-clear {
+  position: absolute;
+  right: 0.25rem;
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  background: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  padding: 0;
+}
+.monitor-search-clear:hover { color: var(--foreground); }
 .monitor-refresh {
   display: inline-flex;
   align-items: center;

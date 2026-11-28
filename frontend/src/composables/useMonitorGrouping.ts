@@ -1,6 +1,7 @@
 import { computed, ref, type Ref } from "vue";
 import { GROUP_COLOR_PALETTE, groupColorIndex } from "../components/MonitorCard.vue";
 import type { MonitorConnectionRow, MonitorGroupConfig, MonitorSnapshot } from "../lib/monitorProtocol";
+import { matchesMonitorQuery } from "../lib/monitorSearch";
 
 /** 分组视图（tree 镜像 / 自建组 / 尾部平铺桶的统一形态）。 */
 export interface MonitorGroupView {
@@ -48,6 +49,8 @@ export function useMonitorGrouping(options: {
   const { connections, snapshots, watched, tasks, pluginGroups } = options;
 
   const statusFilter = ref<MonitorStatusFilter>("all");
+  /** 卡片检索（名称/类型/分组，空白分词 AND；与状态筛选叠加）。 */
+  const query = ref("");
 
   function stateOf(row: MonitorConnectionRow): MonitorCardState | "" {
     const snapshotState = snapshots.value[row.id]?.state;
@@ -67,6 +70,11 @@ export function useMonitorGrouping(options: {
     if (statusFilter.value === "all") return true;
     if (statusFilter.value === "live") return state === "live";
     return state === "failed" || state === "unsupported";
+  }
+
+  /** 单行是否通过当前检索词（空词恒真）。 */
+  function matchesQuery(row: MonitorConnectionRow): boolean {
+    return matchesMonitorQuery(row, query.value);
   }
 
   /** 宿主侧栏树分组（dock tree）数据在位判定：任一行带 groupId 即 tree 模式
@@ -152,6 +160,7 @@ export function useMonitorGrouping(options: {
     for (const row of group.rows) {
       const state = stateOf(row);
       if (!matchesFilter(state)) continue;
+      if (!matchesQuery(row)) continue;
       ordinal += 1;
       entries.push({ row, privacyIndex: ordinal, state, watched: watchActive(row) });
     }
@@ -160,6 +169,8 @@ export function useMonitorGrouping(options: {
 
   return {
     statusFilter,
+    query,
+    matchesQuery,
     stateOf,
     watchActive,
     matchesFilter,
