@@ -298,8 +298,8 @@ SOCKS5 CONNECT（BIND/UDP ASSOCIATE 拒绝）；本地监听通配 `*` 被拒绝
 - **日志跟随**：抽屉内 `docker logs -f`，走二进制帧（stdout/stderr 分流），
   64 KiB / 100 ms 任一到达即 flush，回压时阻塞读循环、不丢行；单 sidecar 最多 8 条，
   30 分钟或 20 MiB 先到者自动停并回收子进程；桥接不支持二进制时降级为 16 KiB JSON chunk。
-- **容器文件**：工作台「文件」页签浏览目录（最多 500 条，NUL 分隔 + 文件名 base64）与
-  预览文件（缺省 1 MiB，上限 8 MiB）。只读操作，权限等同 `docker exec`，不做 chroot 语义。
+- **容器文件**：工作台「文件」页签浏览目录（最多 500 条，NUL 分隔 + 文件名 base64）、
+  本地搜索（空白分词 AND、大小写不敏感名称匹配）与预览文件（缺省 1 MiB，上限 8 MiB）。只读操作，权限等同 `docker exec`，不做 chroot 语义。
 - **容器终端**：工作台「终端」页签直接 `docker exec -it` 起 PTY；输入带 8 字节序号、
   2 MiB 回放环形、resize 钳 2..500 / 2..300。只读连接直接拒绝；需要提权时**绝不**把
   sudo 密码注入 PTY（无预热时间戳报错，有预热只用 `sudo -n`）；打开前写审计意图行。
