@@ -4,7 +4,7 @@
 // sftp/stat（普通车道）与 sudo/readFile（sudo 车道）；类名 .wb-* 换 .ssh-preview-*。
 // 覆盖：焦点进出、加载态宣告、isDirty 关闭守卫、车道分流（文本/viewer/hex）、
 // sudo 车道、分块流式拼装/进度/取消/超上限、Markdown 渲染视图。
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, config, type VueWrapper } from "@vue/test-utils";
 import { defineComponent } from "vue";
 import PreviewPane from "./PreviewPane.vue";
@@ -340,7 +340,9 @@ describe("PreviewPane large file gate", () => {
     const total = PREVIEW_CONFIRM_BYTES + 1;
     const calls = bindSshApi({ total });
     wrapper = mountPane({ path: "/docs/huge.pdf" });
-    await flush(12);
+    // 条件等待替代固定拍数 flush：并行负载下硬编码 tick 偶尔不够（本用例
+    // 曾以 ~1/3 全量跑的频率抖动）。
+    await vi.waitFor(() => expect(wrapper!.find("[data-test=preview-large]").exists()).toBe(true));
     const notice = wrapper.get("[data-test=preview-large]");
     expect(notice.text()).toContain("previewDialog.largeFileNotice");
     // 门禁阶段不发起任何分块读取。
@@ -350,9 +352,8 @@ describe("PreviewPane large file gate", () => {
     expect(wrapper.emitted("download")).toEqual([["/docs/huge.pdf"]]);
     // 「仍要预览」显式确认后才开始分块并最终交给 viewer。
     await wrapper.get("[data-test=preview-large-anyway]").trigger("click");
-    await flush(40);
+    await vi.waitFor(() => expect(wrapper!.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true));
     expect(calls.some((item) => item.method === "sftp/read")).toBe(true);
-    expect(wrapper.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true);
   });
 });
 

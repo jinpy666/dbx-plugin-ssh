@@ -8,26 +8,24 @@
 // 「在终端打开」（B5）：直接打开容器工作台的终端 tab（PTY 在 sidecar 内建立，
 // 键入走 docker/terminal/in，输出走 docker/terminal/out）。不再向主终端输入行
 // 填命令，也不再派发 dbx:docker-open-in-terminal window 事件。
-import { computed, onMounted, onScopeDispose, onUnmounted, ref, watch } from "vue";
+import { onMounted, onScopeDispose, onUnmounted, ref, watch } from "vue";
 import {
   Loader2,
   RefreshCw,
-  Settings,
-  X,
 } from "@lucide/vue";
-import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
-import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 import DockerContainerList, { type DockerContainerRow } from "./DockerContainerList.vue";
+import DockerEngineSettingsPopover from "./DockerEngineSettings.vue";
+import DockerActionConfirmDialog from "./DockerActionConfirmDialog.vue";
 import DockerLogsDrawer from "./DockerLogsDrawer.vue";
 import DockerStatsBar from "./DockerStatsBar.vue";
 import DockerWorkbench from "./DockerWorkbench.vue";
 import { useDockerStats } from "../composables/useDockerStats";
 import { normalizeBatchTargets } from "../lib/batchSend";
+import { dockerListPayload } from "../lib/dockerListPayload";
 import {
   dockerEngineParams,
   loadDockerEngineSettings,
   saveDockerEngineSettings,
-  validateDockerEngineSettings,
   type DockerEngineSettings,
 } from "../lib/dockerEngine";
 import {
@@ -62,46 +60,11 @@ interface DockerInspectSummary {
   restartPolicy: string;
 }
 
-// 动作动词 → 静态 i18n key（i18nKeyReferences.spec 只认字面量 key）。
-const ACTION_LABEL_KEYS: Record<DockerActionName, string> = {
-  start: "docker.actionStart",
-  stop: "docker.actionStop",
-  restart: "docker.actionRestart",
-  kill: "docker.actionKill",
-  rm: "docker.actionRemove",
-};
-
 const POLL_MS = 10_000;
 const POLL_MAX_FAILURES = 3;
 const LIST_TIMEOUT_MS = 20_000;
 const LOGS_TIMEOUT_MS = 35_000;
 const ACTION_TIMEOUT_MS = 70_000;
-
-function dockerListPayload(raw: unknown): { available: boolean; needsSudo: boolean; containers: DockerContainer[] } {
-  const record = (raw ?? {}) as Record<string, unknown>;
-  const rows = Array.isArray(record.containers) ? record.containers : [];
-  const containers: DockerContainer[] = [];
-  for (const row of rows) {
-    if (!row || typeof row !== "object") continue;
-    const entry = row as Record<string, unknown>;
-    const id = typeof entry.id === "string" ? entry.id : "";
-    if (!id) continue;
-    containers.push({
-      id,
-      name: typeof entry.name === "string" ? entry.name : "",
-      image: typeof entry.image === "string" ? entry.image : "",
-      state: typeof entry.state === "string" ? entry.state : "",
-      status: typeof entry.status === "string" ? entry.status : "",
-      ports: typeof entry.ports === "string" ? entry.ports : "",
-      createdAt: typeof entry.createdAt === "string" ? entry.createdAt : "",
-    });
-  }
-  return {
-    available: record.available === true,
-    needsSudo: record.needsSudo === true,
-    containers,
-  };
-}
 
 // —— 会话解析（SideNavPanel 不透传 session，面板自取最近存活会话）———————
 // 无存活 SSH 会话时回落 target:"local"——查询 sidecar 所在机器的 docker
@@ -115,19 +78,12 @@ const mode = ref<PanelMode>("ssh");
 // invoke 以 cli/socket/host 附加参数下发，sidecar 负责归一与最终校验。
 const connectionKey = ref("");
 const engineSettings = ref<DockerEngineSettings>({ ...loadDockerEngineSettings("") });
-const engineOpen = ref(false);
-const engineDraft = ref<DockerEngineSettings>({ cli: "", socket: "", host: "" });
-const engineErrors = computed(() => validateDockerEngineSettings(engineDraft.value).errors);
+// 引擎弹层子组件的开关把手：cli 徽标与齿轮共开同一弹层。
+const enginePopover = ref<InstanceType<typeof DockerEngineSettingsPopover>>();
 
-function toggleEngineSettings(): void {
-  engineOpen.value = !engineOpen.value;
-  if (engineOpen.value) engineDraft.value = { ...engineSettings.value };
-}
-
-/** 保存即生效并重采列表；非法草稿（红线不满足）不落盘。 */
-function applyEngineSettings(): void {
-  const { settings, errors } = validateDockerEngineSettings(engineDraft.value);
-  if (errors.cli || errors.endpoints) return;
+/** 引擎设置弹层（DockerEngineSettings）回传的已校验草稿：落盘即生效并重采
+ * 列表；弹层内草稿/校验状态随子组件，父层只持权威态（按连接持久化）。 */
+function applyEngineSettings(settings: DockerEngineSettings): void {
   engineSettings.value = settings;
   saveDockerEngineSettings(connectionKey.value, settings);
   void refresh();
@@ -182,7 +138,6 @@ function adoptConnection(connectionId: string): void {
   if (nextKey === connectionKey.value) return;
   connectionKey.value = nextKey;
   engineSettings.value = loadDockerEngineSettings(nextKey);
-  if (engineOpen.value) engineDraft.value = { ...engineSettings.value };
 }
 
 /** 按当前模式组装 docker 家族参数：local 不需要 sessionId；引擎设置随行。 */
@@ -436,7 +391,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
       <span v-if="mode === 'local'" class="docker-source-badge">{{ props.t("docker.localSource") }}</span>
       <span v-if="available && containers.length" class="docker-count">{{ containers.length }}</span>
       <span class="docker-header-spacer" />
-      <button v-if="engineSettings.cli" type="button" class="docker-engine-badge" :title="props.t('docker.engineBadge', { cli: engineSettings.cli })" :aria-label="props.t('docker.engineBadge', { cli: engineSettings.cli })" @click="toggleEngineSettings">
+      <button v-if="engineSettings.cli" type="button" class="docker-engine-badge" :title="props.t('docker.engineBadge', { cli: engineSettings.cli })" :aria-label="props.t('docker.engineBadge', { cli: engineSettings.cli })" @click="enginePopover?.toggle()">
         {{ engineSettings.cli }}
       </button>
       <button
@@ -452,50 +407,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
         <Loader2 v-if="loading" class="spinning" />
         <RefreshCw v-else />
       </button>
-      <Popover :open="engineOpen" @update:open="(open: boolean) => { if (!open) engineOpen = false; }">
-        <PopoverAnchor as-child>
-          <button type="button" class="icon-button" :class="{ 'is-active': engineOpen }" :title="props.t('docker.engineSettings')" :aria-label="props.t('docker.engineSettings')" @click="toggleEngineSettings">
-            <Settings />
-          </button>
-        </PopoverAnchor>
-        <PopoverContent class="popover docker-engine-popover" align="end" :side-offset="5">
-          <h3>{{ props.t("docker.engineSettings") }}</h3>
-          <label class="docker-engine-field">
-            <span>{{ props.t("docker.engineCli") }}</span>
-            <input
-              v-model="engineDraft.cli"
-              class="mono"
-              :placeholder="props.t('docker.engineCliPlaceholder')"
-              spellcheck="false"
-              @change="applyEngineSettings"
-            />
-          </label>
-          <label class="docker-engine-field">
-            <span>{{ props.t("docker.engineSocket") }}</span>
-            <input
-              v-model="engineDraft.socket"
-              class="mono"
-              :placeholder="props.t('docker.engineSocketPlaceholder')"
-              spellcheck="false"
-              @change="applyEngineSettings"
-            />
-          </label>
-          <label class="docker-engine-field">
-            <span>{{ props.t("docker.engineHost") }}</span>
-            <input
-              v-model="engineDraft.host"
-              class="mono"
-              :placeholder="props.t('docker.engineHostPlaceholder')"
-              spellcheck="false"
-              @change="applyEngineSettings"
-            />
-          </label>
-          <p v-if="engineErrors.cli" class="docker-hint docker-hint-error">{{ props.t("docker.engineInvalidCli") }}</p>
-          <p v-else-if="engineErrors.endpoints === 'conflict'" class="docker-hint docker-hint-error">{{ props.t("docker.engineConflict") }}</p>
-          <p v-else-if="engineErrors.endpoints" class="docker-hint docker-hint-error">{{ props.t("docker.engineInvalidEndpoint") }}</p>
-          <p class="docker-hint">{{ props.t("docker.engineHint") }}</p>
-        </PopoverContent>
-      </Popover>
+      <DockerEngineSettingsPopover ref="enginePopover" :t="props.t" :settings="engineSettings" @apply="applyEngineSettings" />
     </div>
 
     <p v-if="pollPaused" class="docker-hint docker-hint-warn">{{ props.t("docker.pollStopped") }}</p>
@@ -536,29 +448,8 @@ const running = (container: DockerContainer): boolean => container.state === "ru
       @terminal="openContainerTerminal"
     />
 
-    <!-- kill/rm 强制确认 -->
-      <Dialog :open="!!confirmTarget" @update:open="(open: boolean) => { if (!open) void confirmAction(false); }">
-
-      <DialogContent class="docker-dialog" @escape-key-down.prevent>
-        <div class="docker-dialog-header">
-          <DialogTitle>
-            {{ confirmTarget ? props.t("docker.confirmTitle", { action: props.t(ACTION_LABEL_KEYS[confirmTarget.action]) }) : "" }}
-          </DialogTitle>
-          <button type="button" class="icon-button" :title="props.t('docker.cancel')" :aria-label="props.t('docker.cancel')" @click="confirmAction(false)"><X /></button>
-        </div>
-        <p class="docker-confirm-body mono">
-          {{ confirmTarget ? props.t("docker.confirmBody", { cli: engineSettings.cli || "docker", action: confirmTarget.action, name: confirmTarget.name }) : "" }}
-        </p>
-        <div class="docker-dialog-actions">
-          <button type="button" class="docker-secondary-button" :disabled="confirmBusy" @click="confirmAction(false)">
-            {{ props.t("docker.cancel") }}
-          </button>
-          <button type="button" class="docker-danger-button" :disabled="confirmBusy" @click="confirmAction(true)">
-            {{ confirmBusy ? props.t("docker.actionBusy") : props.t("docker.confirmOk") }}
-          </button>
-        </div>
-      </DialogContent>
-    </Dialog>
+    <!-- kill/rm 强制确认（弹窗呈现外抽；状态机在 lib/dockerActions，执行仍在此处） -->
+    <DockerActionConfirmDialog :t="props.t" :target="confirmTarget" :busy="confirmBusy" :cli="engineSettings.cli || 'docker'" @confirm="confirmAction" />
     <!-- 容器文件工作台（B4，只读） -->
     <DockerWorkbench v-model:open="filesOpen" :t="props.t" :target="filesTarget" :params="dockerParams" :initial-tab="workbenchTab" />
     <!-- Logs 抽屉（B1 外抽，状态仍在本组件） -->
@@ -604,16 +495,6 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   opacity: 0.65;
 }
 
-.docker-source-badge {
-  padding: 0 6px;
-  border-radius: 8px;
-  font-size: 10px;
-  line-height: 16px;
-  background: rgba(90, 140, 220, 0.22);
-  white-space: nowrap;
-}
-
-/* 引擎设置（齿轮弹层）：紧凑表单，保存即生效。 */
 .docker-engine-badge {
   border: none;
   background: none;
@@ -628,33 +509,16 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   white-space: nowrap;
 }
 
-.docker-engine-popover {
-  min-width: 300px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.docker-source-badge {
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 16px;
+  background: rgba(90, 140, 220, 0.22);
+  white-space: nowrap;
 }
 
-.docker-engine-field {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 12px;
-}
-
-.docker-engine-field input {
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 12px;
-  background: var(--background, transparent);
-  color: inherit;
-}
-
-.docker-engine-field input::placeholder {
-  opacity: 0.45;
-}
-
+/* 引擎设置（齿轮弹层）：紧凑表单，保存即生效。 */
 .docker-empty {
   opacity: 0.65;
   font-size: 12px;
@@ -699,52 +563,6 @@ const running = (container: DockerContainer): boolean => container.state === "ru
 
 .icon-button.is-copied {
   color: var(--success, #22a05e);
-}
-
-.docker-dialog {
-  max-width: 460px;
-}
-
-.docker-dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.docker-confirm-body {
-  margin: 10px 0;
-  word-break: break-all;
-}
-
-.docker-dialog-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.docker-secondary-button,
-.docker-danger-button {
-  border-radius: 6px;
-  padding: 4px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
-  background: transparent;
-  color: inherit;
-}
-
-.docker-danger-button {
-  background: var(--danger, #d64545);
-  border-color: var(--danger, #d64545);
-  color: #fff;
-}
-
-.docker-danger-button:disabled,
-.docker-secondary-button:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 .spinning {

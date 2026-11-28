@@ -30,9 +30,7 @@ const LINE_ALLOWLIST: Record<string, number> = {
   "./mockDbxHost.ts": 2335,
   "./components/OtpPanel.vue": 822,
   "./components/MonitorPanel.vue": 792,
-  "./components/DockerPanel.vue": 759,
   "./composables/useCommandSuggestions.ts": 663,
-  "./components/PreviewPane.vue": 629,
 };
 
 /**
