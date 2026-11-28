@@ -109,3 +109,12 @@ export function canShowSuggestions(input: SuggestionGuardInput, state: Suggestio
   if (isPagerKeystroke(input.typingChar, input.lineEmpty ?? true)) return { show: false, state: next };
   return { show: true, state: next };
 }
+
+/** 单字符输入事件抽取（自 useCommandSuggestions 纯搬移）：多字符粘贴 /
+ * 控制序列 / 回车返回 null。 */
+export function suggestionTypingChar(data: string): string | null {
+  if (data.length !== 1) return null;
+  const char = data.charAt(0);
+  if (char < " " || char === "\u007f") return null;
+  return char;
+}

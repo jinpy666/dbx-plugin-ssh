@@ -14,11 +14,13 @@ import { figCompletionSource } from "../lib/completion/fig/figCompletionSource";
 import { GeneratorScheduler } from "../lib/completion/fig/generatorScheduler";
 import { resolveCompletionKey, type CompletionKeyboardState } from "../lib/completion/keyboard";
 import { withShellBuiltinsSource, detectShellKind } from "../lib/completion/shell/shellBuiltins";
+import { createTerminalShellSniffer } from "../lib/completion/shell/shellSniff";
 import { createEngineRunner } from "../lib/completion/worker/engineRunner";
 import { pluginStore, loadCompletionEngine } from "../lib/pluginStore";
 import { terminalLineEraseSequence, type WindowsShellEraseKind } from "../lib/terminalInput";
-import { canShowSuggestions, createSuggestionGuardState, type SuggestionGuardState } from "../lib/suggestionGuard";
-import { cursorViewportRow, measureCellSizeFromDom } from "../lib/terminalAnchor";
+import { canShowSuggestions, createSuggestionGuardState, suggestionTypingChar, type SuggestionGuardState } from "../lib/suggestionGuard";
+import { createSuggestionCloseGrace } from "../lib/suggestionCloseGrace";
+import { useTerminalSuggestionAnchor } from "./useTerminalSuggestionAnchor";
 import { ArrowDown, ArrowUp } from "@lucide/vue";
 
 /** 命令输入建议浮层（P1-1）+ 结构化补全（FIG wave-1）：历史建议与 fig 引擎
@@ -65,6 +67,13 @@ export function useCommandSuggestions(options: {
   isInteractivePromptPending: () => boolean;
 }) {
   const { terminal: terminalGet, terminalCwd, getTerminalHost, sendTerminalBytes, getPendingTerminalInput, setPendingTerminalInput, commandRunning, isTerminalTransferBusy, commandHistory, quickCommands, suggestionsEnabledState, suggestionMinCharsState, suggestionMaxCharsState, session, getSessionId, getLocalSessionId, getLocalShellEraseKind, persistCommandHistory, isHistoryPanelOpen, syncHistoryPanelAnchor, updateHistoryPanelFilter, pushTerminalCommandHistory, inlineGhostActive, isInteractivePromptPending } = options;
+
+// 浮层光标锚点（issue #120，.xterm-screen 原点 + 渲染尺寸/DOM 实测兜底）下沉
+// useTerminalSuggestionAnchor；Windows shell 提示符采样（shellBuiltins 兜底源
+// 的 detect 回调，TTL 1s）下沉 lib/completion/shell/shellSniff。二者只接终端
+// 依赖，状态与调度仍在本 composable。
+const { suggestionViewport, readTerminalCellFrame, readTerminalSuggestionAnchor } = useTerminalSuggestionAnchor({ terminal: terminalGet, getTerminalHost });
+const sniffTerminalShell = createTerminalShellSniffer(terminalGet);
 
 // 命令输入建议浮层（P1-1）运行时状态：条目/选中项/光标锚点与抑制门锁存。
 // 开关与长度上下限的权威值在上方 suggestions*State（sidecar 偏好）。
@@ -365,27 +374,13 @@ function closeSuggestionsOnly() {
   suggestionActiveIndex.value = 0;
 }
 
-// —— 空结果宽限（批 3b 防闪烁）：快速打词的中间态常瞬时无匹配（"doc"→
-// "dock"→"docker"），逐键即关即开会把浮层闪成频闪灯。空结果先挂 150ms
-// 宽限：窗口内下一次键入若重新命中则照常刷新（取消挂起关闭），真正无匹配
-// 才收起（VS Code 补全同款迟滞）。注意所有「立即关」路径都走
-// closeSuggestionsOnly（其内取消宽限），宽限只兜「打字中瞬时空洞」。 ——
-let suggestionCloseTimer: ReturnType<typeof setTimeout> | undefined;
-const SUGGESTION_CLOSE_GRACE_MS = 150;
-
-function cancelSuggestionCloseGrace() {
-  if (suggestionCloseTimer === undefined) return;
-  clearTimeout(suggestionCloseTimer);
-  suggestionCloseTimer = undefined;
-}
-
+// —— 空结果宽限（批 3b 防闪烁）机制下沉 lib/suggestionCloseGrace：快速打词
+// 的中间态常瞬时无匹配，150ms 迟滞兜「打字中瞬时空洞」（VS Code 补全同款）。
+// 所有「立即关」路径都走 closeSuggestionsOnly（其内取消宽限）。 ——
+const suggestionCloseGrace = createSuggestionCloseGrace(closeSuggestionsOnly);
+const cancelSuggestionCloseGrace = suggestionCloseGrace.cancel;
 function scheduleSuggestionCloseGrace() {
-  cancelSuggestionCloseGrace();
-  if (!suggestionOpen.value) return;
-  suggestionCloseTimer = setTimeout(() => {
-    suggestionCloseTimer = undefined;
-    closeSuggestionsOnly();
-  }, SUGGESTION_CLOSE_GRACE_MS);
+  suggestionCloseGrace.schedule(suggestionOpen.value);
 }
 
 function closeSuggestions() {
@@ -422,14 +417,6 @@ function runSuggestionSearch(query: string): CommandSuggestion[] {
 function ignoreSuggestion(command: string) {
   suggestionBlocklist.value = addToSuggestionBlocklist(command, suggestionBlocklist.value);
   closeSuggestionsOnly();
-}
-
-/** 单字符输入事件抽取：多字符粘贴 / 控制序列 / 回车返回 null。 */
-function suggestionTypingChar(data: string): string | null {
-  if (data.length !== 1) return null;
-  const char = data.charAt(0);
-  if (char < " " || char === "\u007f") return null;
-  return char;
 }
 
 /**
@@ -541,116 +528,8 @@ function refreshSuggestionsAfterInput(data: string, lineBefore: string) {
   suggestionOpen.value = true;
 }
 
-/**
- * 光标像素锚点：xterm 私有渲染尺寸（css.cell 宽高）× 光标缓冲坐标。
- * 读不到（渲染器未就绪/内部结构变化）返回 null，浮层降级贴终端底部。
- */
-// 翻转定位用的可视底界（terminal-host 实际高度，含让位后的净高）：
-// anchor 计算时顺带刷新，两个建议浮层据此决定下方/上方放置。
-const suggestionViewport = ref({ height: 0 });
-
-/** 光标格换算的共享参数：.xterm-screen 原点 + 单元格尺寸 + buffer 坐标。 */
-interface TerminalCellFrame {
-  originLeft: number;
-  originTop: number;
-  cellWidth: number;
-  cellHeight: number;
-  cursorX: number;
-  visibleRow: number;
-}
-
-/**
- * 浮层与 ghost 共用的光标格锚点源（issue #120）：以 .xterm-screen（渲染
- * 内容区，位于 .xterm 内边距内侧）为原点，加光标网格坐标——可配置的终端
- * 内边距由 screen rect 自动计入，ghost 与两个建议浮层不再各自为政。
- * textarea 平时被 xterm 移出屏幕（CSS left:-9999em，仅 IME 时定位），
- * 不可用作锚点。
- */
-function readTerminalCellFrame(): TerminalCellFrame | null {
-  const term = terminalGet();
-  const host = getTerminalHost();
-  if (!term || !host) return null;
-  try {
-    const core = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } } })._core;
-    const cell = core?._renderService?.dimensions?.css?.cell;
-    let cellWidth = cell?.width ?? 0;
-    let cellHeight = cell?.height ?? 0;
-    const screen = term.element?.querySelector(".xterm-screen");
-    // 渲染器尺寸读不到（未就绪/WebGL 恢复切换窗口期，Windows 上更常见）时用
-    // 渲染 DOM 实测兜底：此前直接 null → 浮层永久降级贴底、不跟随不翻转。
-    if (!(cellWidth > 0) || !(cellHeight > 0)) {
-      const fromDom = measureCellSizeFromDom(
-        screen ?? null,
-        term.element?.querySelector(".xterm-rows") ?? null,
-        term.cols,
-      );
-      if (!fromDom) return null;
-      cellWidth = fromDom.width;
-      cellHeight = fromDom.height;
-    }
-    const buffer = term.buffer.active;
-    // cursorY 已是视口内相对行；旧式 `cursorY - viewportY` 在回滚区出现后为负，浮层画出画布。
-    const visibleRow = cursorViewportRow(buffer);
-    const hostRect = host.getBoundingClientRect();
-    const origin = (screen ?? term.element)?.getBoundingClientRect();
-    if (!origin) return null;
-    return {
-      originLeft: origin.left - hostRect.left,
-      originTop: origin.top - hostRect.top,
-      cellWidth,
-      cellHeight,
-      cursorX: buffer.cursorX,
-      visibleRow,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function readTerminalSuggestionAnchor(): SuggestionAnchor | null {
-  const frame = readTerminalCellFrame();
-  if (!frame || !getTerminalHost()) return null;
-  // 翻转定位的可视底界 = terminal-host 实际高度：batch-bar/标记条让位
-  // （inset-bottom）后它比包含块 pane 矮，必须用 host 高度，否则浮层会
-  // 越过终端文字区盖住 footer/批量条（issue #120 实机反馈）。
-  suggestionViewport.value = { height: getTerminalHost()?.clientHeight ?? 0 };
-  return {
-    x: Math.round(frame.originLeft + frame.cursorX * frame.cellWidth),
-    y: Math.round(frame.originTop + frame.visibleRow * frame.cellHeight),
-    cellHeight: frame.cellHeight,
-    cellWidth: frame.cellWidth,
-  };
-}
-
-// Windows shell 提示符采样（shellBuiltins 兜底源的 detect 回调）：光标行起
-// 向上至多 3 行里找 `PS C:\…>` / `C:\…>` 形态提示符。POSIX 提示符不命中，
-// 行为与直连 fig 引擎一致。TTL 1s：键入路径每次调度都会问一次，miss 也廉价
-// （3 行 buffer 扫描）；短 TTL 保证会话早期（提示符刚到达）尽快收敛。
-const terminalShellSniff = { kind: null as "powershell" | "cmd" | null, at: 0 };
-function sniffTerminalShell(): "powershell" | "cmd" | null {
-  const now = Date.now();
-  if (now - terminalShellSniff.at < 1000) return terminalShellSniff.kind;
-  terminalShellSniff.at = now;
-  terminalShellSniff.kind = null;
-  try {
-    const term = terminalGet();
-    if (!term) return null;
-    const buffer = term.buffer.active;
-    if (buffer.type !== "normal") return null;
-    const cursorRow = buffer.baseY + Math.min(buffer.cursorY, buffer.length - 1);
-    for (let rowY = cursorRow; rowY >= Math.max(0, cursorRow - 2); rowY -= 1) {
-      const text = buffer.getLine(rowY)?.translateToString(true) ?? "";
-      const kind = detectShellKind(text);
-      if (kind) {
-        terminalShellSniff.kind = kind;
-        break;
-      }
-    }
-  } catch {
-    return null;
-  }
-  return terminalShellSniff.kind;
-}
+// 锚点量测与 Windows shell 提示符采样已下沉 useTerminalSuggestionAnchor /
+// lib/completion/shell/shellSniff（文件头部接线，状态与调度仍在此处）。
 
 /** 浮层开启时的按键消费：↑↓ 选择（置 Tab 显式选中锁）、Tab 按 #138 语义
  *  裁决（延伸/显式选中回填，其余放行 shell 补全）、Enter 执行当前行、Esc 关闭。 */
