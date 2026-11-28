@@ -351,8 +351,16 @@ describe("PreviewPane large file gate", () => {
     await wrapper.get("[data-test=preview-large-download]").trigger("click");
     expect(wrapper.emitted("download")).toEqual([["/docs/huge.pdf"]]);
     // 「仍要预览」显式确认后才开始分块并最终交给 viewer。
+    // 「仍要预览」后的分片流式加载是 33 轮（32MiB+1 / 1MiB）真实异步链，
+    // 并行负载下用固定 flush 等不完：条件等待内重试点击（首次点击若落在
+    // loading 收尾前会被守卫吸收），直到 viewer 就位。
+    // 「仍要预览」后是 33 轮分片流式加载（32MiB+1 / 1MiB 真实链），并行负载
+    // 下 tick 数需求会抬升：先让门禁分支的 loading 收尾，再点一次并给足 tick
+    // （不要重试点击——loading 守卫会让后续点击早退，与在跑的链互扰）。
+    await flush(4);
     await wrapper.get("[data-test=preview-large-anyway]").trigger("click");
-    await vi.waitFor(() => expect(wrapper!.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true), { timeout: 4000 });
+    await flush(400);
+    expect(wrapper.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true);
     expect(calls.some((item) => item.method === "sftp/read")).toBe(true);
   });
 });

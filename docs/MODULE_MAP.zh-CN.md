@@ -166,7 +166,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `components/`（57 个 `.vue`；15,626 行） | 面板与对话框（设置、SFTP 预览、Docker、监控、OTP、导入、搜索…） | 见 §3.1 | `lib`、`composables`、`ui` |
 | `components/ui/`（10 组，1,165 行） | reka-ui/shadcn 风格基础原语（dialog/select/table/tabs…） | — | reka-ui |
 | `composables/`（56 个，12,800 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制/回放、浮层锚点…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
-| `lib/`（238 个生产 `.ts`，34,064 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
+| `lib/`（239 个生产 `.ts`，33,975 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
 | `lib/completion/`（子目录，2,849 行） | 结构化补全（fig 语料、parser、worker、host 客户端） | `CompletionController`、`lib/completion/host/hostClient.ts` | `completion/execute` RPC |
 | `rdp/`（1,598 行） | RDP 画布、帧解码、会话与工作台 | `useRdpSession`、`useRdpWorkbench`、`rdpFrame`、`RdpSurface` | `lib`、`components` |
 | `styles/tailwind.css` (64) | Tailwind v4 入口（`style.css` 1,619 行为主题与组件样式） | — | tailwind |
@@ -248,7 +248,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | --- | --- | --- |
 | `backend/src/ssh/open_session.rs`、`ssh/upload_finish.rs` | **883 / 661** | 各是一个不可再拆的单函数：`open_session`（拨号 → 认证挑战 → 会话登记）与 `finish_upload`（续传收尾 → sudo 提交 → 压缩推送）。原先 18,457 行的 `ssh.rs` 已拆成根 256 + 43 个子模块，这两处是拆分后仅存的两个超预算生产文件 |
 | `frontend/src/App.vue` | **12,658** | ① 工作台外壳（工具条、会话菜单、dock、布局持久化）；② xterm 生命周期与输入路由（搜索、zmodem/trzsz、ghost、高亮装饰）；③ SFTP 浏览 + 预览/编辑 + 传输队列/批量栏；④ 各面板（设置/OTP/导入/Docker/会话信息/告警/审计）的挂载与事件分发 |
-| `frontend/src/lib/i18n.ts` | **5,139** | ① 7 个 locale 的基础文案数据（`messages` as const，键集类型锚定）＋ 37 张功能增量文案表的合并循环；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`）。增量表本体已按功能外抽 `lib/i18n/supplemental/`（37 个模块，`terminal-behavior.ts` 828 行为唯一超预算项） |
+| `frontend/src/lib/i18n.ts` | **4,960** | ① 7 个 locale 的基础文案数据（`messages` as const，键集类型锚定）；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`）。37 张功能增量表外抽 `lib/i18n/supplemental/`（每表一模块，`terminal-behavior.ts` 828 行为唯一超预算项），表清单与合并顺序集中在 `supplemental/index.ts`（顺序 = 覆盖优先级） |
 | `frontend/src/composables/useCommandSuggestions.ts` | **663** | 历史/快速命令建议与 fig 结构化补全两层浮层的采集→抑制门→检索→定位→按键消费（互斥调度带 issue 链行为面 #120/#138/#169/#317，不宜机械再拆）；锚点量测（`useTerminalSuggestionAnchor`）、Windows shell 采样（`lib/completion/shell/shellSniff`）、空结果宽限（`lib/suggestionCloseGrace`）与键入分类（`lib/suggestionGuard`）已外抽 |
 | `backend/src/mcp.rs` | 9,266 | ① MCP stdio 传输与初始化；② 16 个工具的 schema 目录；③ `mcp/call` 分派与工具实现（exec/SFTP/known_hosts）；④ 桥模式与独立模式的差异处理 |
 | `frontend/src/components/SettingsDialog.vue` | **2,078** | 13 个设置分类的表单/校验/加载保存与局部状态机（transfer/terminal 分类已外抽为 SettingsTransferPane/SettingsTerminalPane，启动命令与连接级编码下沉 useStartupCommands/useConnectionNameEncoding） |
@@ -322,8 +322,8 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 $ wc -l backend/src/ssh.rs frontend/src/App.vue frontend/src/lib/i18n.ts
      256 backend/src/ssh.rs
    12658 frontend/src/App.vue
-    5139 frontend/src/lib/i18n.ts
-   18053 total
+    4960 frontend/src/lib/i18n.ts
+   17874 total
 
 $ find backend/src -name '*.rs' | xargs wc -l | tail -1
   106432 total

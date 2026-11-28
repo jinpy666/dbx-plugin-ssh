@@ -27,12 +27,16 @@ export function useChunkedPreview(options: {
   sessionId: () => string | undefined;
   /** 组件级展示大小（整读与分块两条链路共用）。 */
   size: Ref<number>;
+  /** 门禁阈值（默认取 lib/preview 常量；单测可注入小值，避免改模块级常量）。 */
+  limits?: { maxBytes?: number; confirmBytes?: number };
   /** 组件级错误（整读与分块共用）。 */
   error: Ref<string>;
   setMode: (mode: PreviewMode) => void;
   emitClose: () => void;
 }) {
   const { path, perChunkBytes, readOnce, title, resolution, loading, sudo, sessionId, size, error, setMode, emitClose } = options;
+  const maxBytes = options.limits?.maxBytes ?? PREVIEW_MAX_BYTES;
+  const confirmBytes = options.limits?.confirmBytes ?? PREVIEW_CONFIRM_BYTES;
 
   const chunkActive = ref(false);
   const chunkCancelRequested = ref(false);
@@ -99,8 +103,11 @@ export function useChunkedPreview(options: {
     // 报「缺少可读取的数据源」）。未知大小走 truncated 语义逐片读到 EOF。
     size.value = total ?? 0;
     totalBytes.value = total ?? 0;
-    if (total !== null && total > PREVIEW_MAX_BYTES) {
+    if (total !== null && total > maxBytes) {
       overCap.value = true;
+      // 门禁分支确定不再读取：立即收 loading，否则 load() 的 finally 之前
+      // 「仍要预览」被 loading 守卫早退（快速点击/键盘确认会静默无反应）。
+      loading.value = false;
       return;
     }
     // 大文件先询问：PDF/Office/媒体超过 32MiB 不自动整文件进内存，先给
@@ -108,10 +115,12 @@ export function useChunkedPreview(options: {
     if (
       resolution.previewStrategy === "file-viewer"
       && total !== null
-      && total > PREVIEW_CONFIRM_BYTES
+      && total > confirmBytes
       && !largeFileConfirmed.value
     ) {
       largeFile.value = true;
+      // 同上：询问态不是加载态（否则「仍要预览」会被 loading 守卫早退）。
+      loading.value = false;
       return;
     }
     largeFile.value = false;
@@ -157,7 +166,7 @@ export function useChunkedPreview(options: {
       while (!total() || offset < total()) {
         if (token !== loadToken || chunkCancelRequested.value) return;
         // 未知大小车道没有 stat 上限可依：流式读到 256MiB 即停，保持「下载代替」出口。
-        if (!total() && offset >= PREVIEW_MAX_BYTES) {
+        if (!total() && offset >= maxBytes) {
           chunkActive.value = false;
           parts = [];
           overCap.value = true;

@@ -17,15 +17,11 @@ const fromB64 = (data: string): Uint8Array =>
   new Uint8Array(atob(data).split("").map((c) => c.charCodeAt(0)));
 
 const CHUNK = 1024 * 1024;
-// 与 vi.mock 工厂里的字面量保持一致（256 字节硬上限 / 32 字节询问门）。
+// 门禁阈值注入（不使用 vi.mock：模块级 mock 会泄漏到其他测试文件的
+// PreviewPane.spec，导致门禁常量被替换）。
 const CAP = 256;
 const CONFIRM = 32;
-
-// 门禁常量取小值便于用例构造（vi.mock 工厂被提升，常量必须内联字面量）。
-vi.mock("../lib/preview", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../lib/preview")>();
-  return { ...actual, PREVIEW_MAX_BYTES: 256, PREVIEW_CONFIRM_BYTES: 32 };
-});
+const LIMITS = { maxBytes: CAP, confirmBytes: CONFIRM };
 
 function resolution(strategy: PreviewResolution["previewStrategy"], mime = "application/octet-stream"): PreviewResolution {
   return { extension: "bin", mime, kind: "unknown", previewStrategy: strategy, editable: false, editorStrategy: null, fallback: false, fallbackReason: null };
@@ -77,6 +73,7 @@ function mount(options: MountOptions = {}) {
     error,
     setMode: (value) => { mode.value = value; modes.push(value); },
     emitClose: closed,
+    limits: LIMITS,
   });
   return { chunked, size, error, loading, mode, modes, resolutionRef, closed, invoke };
 }
@@ -171,6 +168,7 @@ describe("useChunkedPreview chunk loop", () => {
       error,
       setMode: (value) => { modes.push(value); },
       emitClose: vi.fn(),
+      limits: LIMITS,
     });
     chunked.newAttempt();
     await chunked.loadChunked(resolution("file-viewer"));
@@ -208,6 +206,7 @@ describe("useChunkedPreview chunk loop", () => {
       error,
       setMode: vi.fn(),
       emitClose: vi.fn(),
+      limits: LIMITS,
     });
     chunked.newAttempt();
     void chunked.loadChunked(resolution("file-viewer"));
@@ -267,6 +266,7 @@ describe("useChunkedPreview finish", () => {
       error,
       setMode: vi.fn(),
       emitClose: closed,
+      limits: LIMITS,
     });
     chunked.newAttempt();
     void chunked.loadChunked(resolution("file-viewer"));
