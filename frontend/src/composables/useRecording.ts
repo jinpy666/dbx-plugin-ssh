@@ -1,15 +1,16 @@
 import { type TerminalThemeLike } from "../lib/terminalScheme";
-import { computed, nextTick, onBeforeUnmount, ref, watch, type Ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import { encodeGif } from "../lib/gifEncoder";
 import { nextCountdownValue, RECORD_COUNTDOWN_START } from "../lib/recordingCountdown";
 import { createRequestEpoch } from "../lib/requestEpoch";
-import { buildTimeline, eventIndexAtTime, gifFramePlan, mergeEventPages, replayDuration, type RecordingSummary, type ReplayEvent, type ReplayEventPage } from "../lib/replayScheduler";
+import { buildTimeline, gifFramePlan, type RecordingSummary, type ReplayEvent } from "../lib/replayScheduler";
 import { standaloneArrayBuffer } from "../lib/standaloneBuffer";
 import { terminalOptionPatch, type TerminalAppearanceState } from "../lib/terminalAppearance";
 import { resolveTerminalFont, type TerminalFontOverride } from "../lib/terminalFont";
 import { attachWebglRenderer } from "../lib/terminalWebgl";
 import { buildTranscript, transcriptFileName } from "../lib/transcript";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { formatDuration, formatRecordedAt } from "../lib/recordingFormat";
+import { useReplayPlayer } from "./useReplayPlayer";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 
@@ -42,6 +43,13 @@ export function useRecording(options: {
 }) {
   const { t, showNotice, showError, recordingTarget, appearance, terminalTheme, openTransferTarget, revealTransferTarget, terminalFontOverride, terminalAppearance, hostFontFamily, closeMetrics, loadDownloadDir, loadDownloadUseDefaultDir, askDownloadTarget, applyChosenDirAsDefault, resolveDownloadConflictFor, probeLocalCapabilities, saveHostFile } = options;
 
+  // 回放播放器（分页拉全/外观跟随/rAF 推进/倍速锚定/请求序号守卫）下沉
+  // useReplayPlayer：录制列表与导出经返回面读 replayState，返回面保持不变。
+  const {
+    REPLAY_EVENT_CAP, replayState, replayPlaying, replaySpeed, replayPlayheadMs, replayDurationMs, replayHost,
+    loadReplayEvents, openReplay, closeReplay, stopReplayLoop, replayFrame, toggleReplayPlay, onReplaySeek,
+  } = useReplayPlayer({ showError, appearance, terminalTheme, terminalFontOverride, terminalAppearance, hostFontFamily });
+
 const recordingActive = ref(false);
 const recordingsOpen = ref(false);
 const recordings = ref<RecordingSummary[]>([]);
@@ -53,12 +61,9 @@ const recordingDeleteSubmitting = ref(false);
 // 行内导出进行中的 recordingId：多条记录共用全局导出锁（replayExporting），
 // 只有发起行显示 Encoding…，其余行仅禁用。
 const recordingExportingId = ref<string | null>(null);
-const replayState = ref<{ summary: RecordingSummary; events: ReplayEvent[] } | null>(null);
-const replayPlaying = ref(false);
-const replaySpeed = ref(1);
-const replayPlayheadMs = ref(0);
+// replayState/replayPlaying/replaySpeed/replayPlayheadMs/replayHost 五个
+// 回放状态随播放器下沉 useReplayPlayer；replayExporting 是导出锁，留在本处。
 const replayExporting = ref(false);
-const replayHost = ref<HTMLDivElement | null>(null);
 
 const recordCountdown = ref<number | null>(null);
 const recordingStartedAt = ref<number | null>(null);
@@ -183,6 +188,41 @@ async function revealRecording(item: RecordingSummary) {
   }
 }
 
+/** 导出落盘的共用收尾（transcript 与 GIF 同款，自两条导出链去重）：sidecar
+ * 在本机时落到下载目录（或「每次询问」选择的目录），冲突走既有协商流，完成
+ * 后提示完整路径并带打开/定位动作；web/docker（sidecar 不在本机）走宿主
+ * host.saveFile——iframe 内 <a download> 被浏览器静默丢弃（issue #93）。 */
+async function saveRecordingFileLocally(bytes: Uint8Array, fileName: string) {
+  const local = await probeLocalCapabilities();
+  if (!local?.canSaveLocal) {
+    await saveHostFile([bytes], fileName);
+    showNotice(t("replayExported"));
+    return;
+  }
+  let targetDir = "";
+  let setDefaultAfter = false;
+  if (!loadDownloadUseDefaultDir()) {
+    const chosen = await askDownloadTarget(fileName);
+    if (chosen === undefined) return;
+    targetDir = chosen.dir.trim();
+    setDefaultAfter = chosen.setDefault;
+  }
+  const conflict = await resolveDownloadConflictFor(targetDir, fileName);
+  if (conflict === undefined) return;
+  const saved = await window.dbxPlugin.invoke<{ localPath: string; name: string }>("local/saveFile", {
+    name: fileName,
+    dataBase64: window.dbxPlugin.encodeBase64(bytes),
+    targetDir: targetDir || loadDownloadDir() || undefined,
+    conflict: conflict === "overwrite" ? "overwrite" : undefined,
+  });
+  const savedPath = saved.localPath;
+  showNotice(t("downloadedTo", { name: saved.name, path: savedPath }), [
+    { label: t("openDownloadedFile"), run: () => void openTransferTarget(savedPath) },
+    { label: t("revealInFolder"), run: () => void revealTransferTarget(savedPath) },
+  ]);
+  if (setDefaultAfter) applyChosenDirAsDefault(targetDir);
+}
+
 // —— M14 录制增强：transcript 导出 ———
 // 回放链已把事件分页拉到前端，transcript 在前端拼装（lib/transcript 纯函数）
 // 并走既有保存桥（宿主 fileTransfer → sidecar local/saveFile → 浏览器下载），
@@ -212,34 +252,8 @@ async function exportRecordingTranscript(item: RecordingSummary) {
       showNotice(t("replayExported"));
       return;
     }
-    const local = await probeLocalCapabilities();
-    if (local?.canSaveLocal) {
-      // sidecar 落盘：默认下载目录（或「每次询问」），冲突走既有协商流。
-      let targetDir = "";
-      let setDefaultAfter = false;
-      if (!loadDownloadUseDefaultDir()) {
-        const chosen = await askDownloadTarget(fileName);
-        if (chosen === undefined) return;
-        targetDir = chosen.dir.trim();
-        setDefaultAfter = chosen.setDefault;
-      }
-      const conflict = await resolveDownloadConflictFor(targetDir, fileName);
-      if (conflict === undefined) return;
-      const saved = await window.dbxPlugin.invoke<{ localPath: string; name: string }>("local/saveFile", {
-        name: fileName,
-        dataBase64: window.dbxPlugin.encodeBase64(bytes),
-        targetDir: targetDir || loadDownloadDir() || undefined,
-        conflict: conflict === "overwrite" ? "overwrite" : undefined,
-      });
-      showNotice(t("downloadedTo", { name: saved.name, path: saved.localPath }), [
-        { label: t("openDownloadedFile"), run: () => void openTransferTarget(saved.localPath) },
-        { label: t("revealInFolder"), run: () => void revealTransferTarget(saved.localPath) },
-      ]);
-      if (setDefaultAfter) applyChosenDirAsDefault(targetDir);
-      return;
-    }
-    await saveHostFile([bytes], fileName);
-    showNotice(t("replayExported"));
+    // sidecar 落盘/宿主兜底的共用收尾（saveRecordingFileLocally）。
+    await saveRecordingFileLocally(bytes, fileName);
   } catch (cause) {
     showError(cause);
   } finally {
@@ -346,143 +360,9 @@ async function confirmRecordingClearAll() {
   }
 }
 
-// 回放：事件一次性拉全（分页合并，封顶 2 万事件），rAF 按时间轴推进。
-const REPLAY_EVENT_CAP = 20000;
-let replayTerminal: Terminal | null = null;
-let replayTimeline: number[] = [];
-let replayWriteIndex = 0;
-let replayRaf = 0;
-let replayStartWall = 0;
-let replayStartPlayhead = 0;
-const replayDurationMs = computed(() => (replayState.value ? replayDuration(replayState.value.events) * 1000 : 0));
-
-async function loadReplayEvents(recordingId: string): Promise<ReplayEvent[]> {
-  const pages: ReplayEventPage[] = [];
-  let offset = 0;
-  for (;;) {
-    const page = await window.dbxPlugin.invoke<ReplayEventPage>("ssh/recording/get", { recordingId, offset, limit: 500 });
-    pages.push(page);
-    offset += page.events.length;
-    if (!page.hasMore || offset >= page.total || offset >= REPLAY_EVENT_CAP) break;
-  }
-  return mergeEventPages(pages);
-}
-
-// 回放打开也走请求序号守卫：大录制（2 万事件封顶）分页拉取可达数秒，快速
-// 连点两条录制时，晚到的旧加载不得关闭/顶替用户新打开的回放。
-const replayEpoch = createRequestEpoch();
-
-async function openReplay(item: RecordingSummary) {
-  const epoch = replayEpoch.next();
-  try {
-    const events = await loadReplayEvents(item.recordingId);
-    if (!replayEpoch.isCurrent(epoch)) return;
-    closeReplay();
-    replayState.value = { summary: item, events };
-    replayTimeline = buildTimeline(events, 1);
-    replayWriteIndex = 0;
-    replayPlayheadMs.value = 0;
-    replayPlaying.value = false;
-    await nextTick();
-    if (replayHost.value) {
-      // 回放终端跟随终端外观（配色/字体/字号/字重/行高/字间距），
-      // 不再是默认纯黑 xterm，也不与主终端产生字形差异。
-      const font = resolveTerminalFont(terminalFontOverride.value, {
-        fontFamily: hostFontFamily(),
-        fontSize: appearance.value.terminal.fontSize,
-      });
-      const optionPatch = terminalOptionPatch(terminalAppearance.value.settings);
-      replayTerminal = new Terminal({
-        cols: 100,
-        rows: 26,
-        convertEol: false,
-        // 下方 unicode.activeVersion 属 proposed API；缺此开关会在弹窗打开时
-        // 直接抛 "allowProposedApi option" 错误横幅（与主终端 2391 同因）。
-        allowProposedApi: true,
-        theme: terminalTheme(),
-        fontFamily: font.fontFamily,
-        fontSize: font.fontSize,
-        fontWeight: optionPatch.fontWeight,
-        fontWeightBold: optionPatch.fontWeightBold,
-        lineHeight: optionPatch.lineHeight,
-        letterSpacing: optionPatch.letterSpacing,
-        drawBoldTextInBrightColors: optionPatch.drawBoldTextInBrightColors,
-      });
-      replayTerminal.open(replayHost.value);
-      // 与主终端同用 Unicode 11 宽度表：emoji/宽字符行在回放里保持相同折行。
-      replayTerminal.loadAddon(new Unicode11Addon());
-      replayTerminal.unicode.activeVersion = "11";
-    }
-  } catch (cause) {
-    if (replayEpoch.isCurrent(epoch)) showError(cause);
-  }
-}
-
-function closeReplay() {
-  cancelAnimationFrame(replayRaf);
-  replayPlaying.value = false;
-  replayTerminal?.dispose();
-  replayTerminal = null;
-  replayState.value = null;
-}
-
-function stopReplayLoop() {
-  cancelAnimationFrame(replayRaf);
-  replayPlaying.value = false;
-}
-
-function replayFrame() {
-  const state = replayState.value;
-  if (!state || !replayPlaying.value) return;
-  const elapsed = (performance.now() - replayStartWall) * replaySpeed.value;
-  replayPlayheadMs.value = Math.min(replayDurationMs.value, replayStartPlayhead + elapsed);
-  const target = eventIndexAtTime(replayTimeline, replayPlayheadMs.value);
-  while (replayWriteIndex < target) {
-    replayTerminal?.write(state.events[replayWriteIndex]!.data);
-    replayWriteIndex += 1;
-  }
-  if (replayPlayheadMs.value >= replayDurationMs.value) {
-    stopReplayLoop();
-    return;
-  }
-  replayRaf = requestAnimationFrame(replayFrame);
-}
-
-function toggleReplayPlay() {
-  if (!replayState.value) return;
-  if (replayPlaying.value) {
-    stopReplayLoop();
-    return;
-  }
-  replayStartWall = performance.now();
-  replayStartPlayhead = replayPlayheadMs.value;
-  replayPlaying.value = true;
-  replayRaf = requestAnimationFrame(replayFrame);
-}
-
-// 倍速只改推进速率，不改进度本身：播放中改档必须以当前进度重新锚定墙钟
-// 基准，否则 elapsed = (now - startWall) × 新倍率会把已播时长整段放大
-// （1x 播到 60s 切 2x，播放头直接跳到 120s）。
-watch(replaySpeed, () => {
-  if (!replayPlaying.value) return;
-  replayStartPlayhead = replayPlayheadMs.value;
-  replayStartWall = performance.now();
-});
-
-function onReplaySeek(event: Event) {
-  const value = Number((event.target as HTMLInputElement).value);
-  if (!Number.isFinite(value) || !replayState.value) return;
-  cancelAnimationFrame(replayRaf);
-  replayPlaying.value = false;
-  replayPlayheadMs.value = value;
-  replayStartPlayhead = value;
-  replayStartWall = performance.now();
-  replayWriteIndex = eventIndexAtTime(replayTimeline, value);
-  replayTerminal?.reset();
-  for (let index = 0; index < replayWriteIndex; index += 1) {
-    replayTerminal?.write(replayState.value.events[index]!.data);
-  }
-}
+// 回放播放器（loadReplayEvents/openReplay/closeReplay/replayFrame/
+// toggleReplayPlay/onReplaySeek/倍速锚定 watch/REPLAY_EVENT_CAP）下沉
+// useReplayPlayer（文件头部接线）。
 
 // GIF 导出管线：离屏 xterm 逐事件重放，按 500ms 事件时间抽帧（封顶 120 帧），
 // 每帧从 xterm 画布取像素 → encodeGif。纯前端，无新依赖。回放弹窗与录制
@@ -598,38 +478,8 @@ async function exportRecordingGif(summary: RecordingSummary, events: readonly Re
       }
       showNotice(t("replayExported"));
     } else {
-      // 沙箱 iframe（宿主 fileTransfer 缺失）下的可靠路径：sidecar 落盘到
-      // 下载目录（或「每次询问」选择的目录），完成后提示完整路径。
-      // web/docker（sidecar 不在本机）走宿主 host.saveFile——iframe 内
-      // <a download> 被浏览器静默丢弃（issue #93）。
-      const local = await probeLocalCapabilities();
-      if (!local?.canSaveLocal) {
-        await saveHostFile([gif], fileName);
-        showNotice(t("replayExported"));
-        return;
-      }
-      let targetDir = "";
-      let setDefaultAfter = false;
-      if (!loadDownloadUseDefaultDir()) {
-        const chosen = await askDownloadTarget(fileName);
-        if (chosen === undefined) return;
-        targetDir = chosen.dir.trim();
-        setDefaultAfter = chosen.setDefault;
-      }
-      const conflict = await resolveDownloadConflictFor(targetDir, fileName);
-      if (conflict === undefined) return;
-      const saved = await window.dbxPlugin.invoke<{ localPath: string; name: string }>("local/saveFile", {
-        name: fileName,
-        dataBase64: window.dbxPlugin.encodeBase64(gif),
-        targetDir: targetDir || loadDownloadDir() || undefined,
-        conflict: conflict === "overwrite" ? "overwrite" : undefined,
-      });
-      const savedPath = saved.localPath;
-      showNotice(t("downloadedTo", { name: saved.name, path: savedPath }), [
-        { label: t("openDownloadedFile"), run: () => void openTransferTarget(savedPath) },
-        { label: t("revealInFolder"), run: () => void revealTransferTarget(savedPath) },
-      ]);
-      if (setDefaultAfter) applyChosenDirAsDefault(targetDir);
+      // sidecar 落盘/宿主兜底的共用收尾（saveRecordingFileLocally）。
+      await saveRecordingFileLocally(gif, fileName);
       return;
     }
     showNotice(t("replayExported"));
@@ -669,24 +519,10 @@ async function exportRecordingFromList(item: RecordingSummary) {
   }
 }
 
-function formatDuration(secs: number) {
-  const total = Math.max(0, Math.round(secs));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = total % 60;
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
-}
-
-function formatRecordedAt(startedAt?: number) {
-  if (!startedAt) return "";
-  return new Date(startedAt * 1000).toLocaleString();
-}
+// formatDuration/formatRecordedAt 下沉 lib/recordingFormat（import 复用）。
 
 onBeforeUnmount(() => {
-  cancelAnimationFrame(replayRaf);
-  replayTerminal?.dispose();
-  replayTerminal = null;
+  // 回放 rAF/终端的清理在 useReplayPlayer 卸载钩子里。
   window.clearInterval(recordCountdownTimer);
   window.clearInterval(recordingElapsedTimer);
   // 搜索防抖：卸载后不再发起 invoke。

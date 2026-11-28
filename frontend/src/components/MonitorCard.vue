@@ -4,7 +4,7 @@
 // 可折叠详情 + 头部动作（加入/移出监控开关、已连接时的终端按钮）。
 // 纯展示组件：数据与动作全部经 props/emits，编排（轮询/收敛/持久化）在
 // useMonitorPanel。组头色板与序列转换从这里导出（面板分组头复用）。
-import type { MonitorGap, MonitorHistoryEntry, MonitorSample } from "../composables/useMonitorPanel";
+import type { MonitorGap, MonitorHistoryEntry, MonitorSample } from "../lib/monitorProtocol";
 
 /** 组头色板（8 色，FNV-1a hash % 8 取色）：同组 id 恒定同色，组间尽量散开。 */
 export const GROUP_COLOR_PALETTE: readonly string[] = [
@@ -53,7 +53,7 @@ export function historySeries(history: readonly MonitorHistoryEntry[], pick: (sa
 import { computed, ref } from "vue";
 import { CheckCircle2, Loader2, PlusCircle, SquareTerminal } from "@lucide/vue";
 import { sparklineSegments } from "../lib/metricsSparkline";
-import type { MonitorConnectionRow, MonitorSnapshot, MonitorState } from "../composables/useMonitorPanel";
+import type { MonitorConnectionRow, MonitorSnapshot, MonitorState } from "../lib/monitorProtocol";
 
 const props = defineProps<{
   row: MonitorConnectionRow;

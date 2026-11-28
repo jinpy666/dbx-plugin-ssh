@@ -43,7 +43,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 > **兼容基线口径**：manifest `engines.host_api` 固定 `">=1.0.0"` 作粗粒度声明；`permissions` 中的
 > `host.storage` / `host.ai` 实为宿主 1.2 能力，运行时全程 `?.` 存在性守卫并逐级降级
 > （`pluginStore.ts` 宿主桥 → guarded localStorage → 内存三级回退），缺失只降功能不致死。
-> **权威安装下限由 `engines.dbx` 承担**（当前 `>=0.6.31`）——宿主 `SUPPORTED_PLUGIN_HOST_API_VERSION`
+> **权威安装下限由 `manifest.json` 的 `engines.dbx` 承担**（该字段是唯一事实源，当前 `>=0.6.59`）——宿主 `SUPPORTED_PLUGIN_HOST_API_VERSION`
 > 的演进先于部分能力面，`host_api` 无法用来门控细粒度能力（论证见 `private_key_path` picker 兼容性段）。
 
 | 方法 | 作用 |
@@ -134,7 +134,7 @@ WezTerm 的 ssh domain 支持 `spawn` 语义：在已认证 transport 上另开 
 | `serial/ports/list` | 本机串口清单（连接弹窗端口下拉数据源）：`{ports: [path], portDetails: [{path, description}]}`，按路径排序；枚举失败回落空清单，USB/PCI/Bluetooth 描述尽力标注 |
 | `serial/start`、`serial/write`、`serial/close` | 串口会话生命周期（回放见「串口终端回放」、写回压见「写序列化与回压」节）：`start {workbenchId, portName, baudRate(50–4000000，越界报错不静默钳制), dataBits?, parity?, stopBits?, flowControl?(缺省 none), backspaceMode?}` → `{sessionId, port, baudRate, binaryInput: true}`（binaryInput 为旧前端 JSON 兼容探测位），线路参数校验失败即 start 报错（绝不静默降级），开端口为阻塞 syscall 走 spawn_blocking；`write {sessionId, dataBase64(≤64KiB)}` → `{success: true}`——JSON 兜底车道（主路径 `serial/terminal/in` 二进制通道），Backspace 改写后进专用写线程队列，超限/队满整包丢弃并发 `serial/input/dropped`（不报错）、会话死亡报错；`close {sessionId}` → `{success: true}`，摘除会话并唤醒写线程退出 |
 | `local/wallpaper/get`、`local/wallpaper/set`、`local/wallpaper/clear` | 工作台背景图（桌面形态）：`get` 返回 `{dataUrl: "data:image/<png|jpeg|webp>;base64,…"}`，无背景时返回 `{}`；`set` 接受 `{imageBase64}`，≤8 MiB 且仅 png/jpeg/webp 魔数，原子落盘 `<plugin_data_dir>/wallpaper`，返回与 `get` 相同的 data URL 载荷；`clear` 幂等删除，返回 `{}` |
-| `docker/list`、`docker/logs`、`docker/action` | Docker 管理面板（参数 `target`/`cli`/`socket`/`host` 与全部语义见「Docker 管理面板」节）：list 探针+七列容器清单，`needsSudo` 且配置 Quick Sudo 时自动提权重采（只读连接/白名单拒绝一律退回原 payload 不报错）；logs `tail` 钳 10–2000（缺省 200）、容器消失降级 `container: null`；action 动词白名单 `start/stop/restart/kill/rm`、`containerId` 限 12–64 位小写十六进制、执行前写审计、kill/rm 走确认门、只读连接直接拒绝 |
+| `docker/list`、`docker/logs`、`docker/action`、`docker/stats`、`docker/files/list`、`docker/files/read`、`docker/files/write`、`docker/files/delete`、`docker/logs/stream/start`、`docker/logs/stream/stop`、`docker/terminal/open`、`docker/terminal/close`、`docker/terminal/resize`、`docker/terminal/replay` | Docker 管理面板（参数 `target`/`cli`/`socket`/`host` 与全部语义见「Docker 管理面板」节）：list 探针+七列容器清单，`needsSudo` 且配置 Quick Sudo 时自动提权重采（只读连接/白名单拒绝一律退回原 payload 不报错）；logs `tail` 钳 10–2000（缺省 200）、容器消失降级 `container: null`；action 动词白名单 `start/stop/restart/kill/rm`、`containerId` 限 12–64 位小写十六进制、执行前写审计、kill/rm 走确认门、只读连接直接拒绝；stats 对 1–50 个容器批量只读采样 CPU/内存/网络/块 IO/PIDs，CLI 或 daemon 不可用时 `available:false` 降级；files/list、files/read 只读浏览容器内目录与普通文件（最多 500 条 / 单次读取 1–8 MiB，只读连接放行）；files/write、files/delete 为破坏性写删（写 ≤64 KiB、原子覆盖、删除禁区与只读连接拒绝，执行前写审计） |
 | `telnet/list`、`vnc/list`、`rdp/list`、`serial/list` | 活跃非 SSH 会话清单（均含 `sessionId`、`workbenchId`、逻辑端点和创建时间；Telnet/VNC saved connection 会额外带 `connectionId`、`runtimeHost`、`runtimePort`）。工作台重建只按相同 `workbenchId` 回附，绝不按连接抢占另一标签页会话。 |
 | `telnet/replay`、`serial/replay`、`vnc/replay`、`rdp/replay` | Webview 重建回附的输出恢复：Telnet/Serial 重发序号制终端帧；VNC 重发当前完整 framebuffer；RDP 重发一张有明确内存预算的完整合成 framebuffer，绝不重放不能独立恢复画面的增量 patch 序列。 |
 | `telnet/start`、`telnet/write`、`telnet/resize`、`telnet/close` | Telnet 会话生命周期（明文协议，逻辑/拨号端点分工见「生命周期与状态隔离」节，二进制通道见「二进制通道」节）：`start {workbenchId, host, port?(23), connectionId?, runtimeHost?, runtimePort?, enterMode?("crlf"\|"cr"\|"lf"), backspaceMode?("del"\|"ctrl_h"), cols?(120), rows?(32), autoLogin?}` → `{sessionId, host, port}`——实际拨号只用 runtime 端点（缺省回落逻辑端点），`autoLogin` 为 expect `rules`（tssh/JSON 文法，同 `triggers/validate`）或 NyaTerm 式 `declarative`（提示词正则+凭据+成功/失败判定+重试预算）二选一，配置非法即 start 报错、凭据 Debug 全程脱敏。请求未带 `autoLogin` 且 `connectionId` 命中连接表单暂存密码（`connection/connect` 生命周期投递的 `connection.password`，见「非 SSH 连接凭据暂存」）时，sidecar 以内置默认提示词正则合成 `declarative` 自动登录——表单存了密码即自动登录的用户意图；弹窗路径显式携带 `autoLogin` 时以请求为准；`write {sessionId, dataBase64(≤64KiB)}` → `{success: true}`——JSON 兜底（主路径 `telnet/terminal/in`），死会话报 `Telnet session was not found or expired`；`resize {sessionId, cols, rows}` 钳 1..=65535 后经泵发 NAWS；`close {sessionId}` → `{success: true}` |
@@ -659,7 +659,7 @@ Quick Sudo（`sudo: true`）提供 sudo 远程执行服务：
 
 ## Docker 管理面板
 
-Docker 家族（`docker/list` / `docker/logs` / `docker/action`）通过固定采集脚本 + 纯解析器驱动远端或本机容器 CLI，不接 daemon API、零新增依赖。三个方法都接受可选 `target` 与引擎/端点参数（`cli` / `socket` / `host`，兼容 Podman 与自定义 daemon）：
+Docker 家族（`docker/list` / `docker/logs` / `docker/action` / `docker/stats`）通过固定采集脚本 + 纯解析器驱动远端或本机容器 CLI，不接 daemon API、零新增依赖。四个方法都接受可选 `target` 与引擎/端点参数（`cli` / `socket` / `host`，兼容 Podman 与自定义 daemon）：
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -675,8 +675,64 @@ Docker 家族（`docker/list` / `docker/logs` / `docker/action`）通过固定�
 - **Quick Sudo 提权**：探针为 found-but-denied（`needsSudo: true`）且连接配置了 Quick Sudo 时，list 自动用 `sudo -S -p '' sh -c '<脚本体>'` 提权重采（密码走 stdin、脚本体走 argv）；logs 在输出命中 daemon 权限签名时同样提权重采。只读连接、sudoers 白名单拒绝、提权失败一律退回原 payload 保留提示，只读调用不报错。
 - **docker/logs**：`{sessionId|target, containerId, tail?, cli?, socket?, host?}`，返回 `{logs, container?}`；`tail` 钳制到 [10, 2000]（默认 200）。inspect 失败（容器消失）降级 `container: null`。
 - **docker/action**：`{sessionId|target, containerId, action, cli?, socket?, host?}`，动词白名单 `start/stop/restart/kill/rm`；`containerId` 必须 12–64 位小写十六进制（容器名一律拒绝）；执行前写审计（意图行 + 失败行，审计文本为 `<cli> <动词> <id>` 短形态，端点 export 只在执行文本里）。plain 失败且命中 daemon 权限签名才回落 Quick Sudo 管线（重放同一条含端点 export 的执行文本；其余失败重试可能把半执行动作应用两次）；本机面无提权管线，daemon 拒绝返回指引文案。kill/rm 由前端/MCP 确认门强制二次确认，只读连接直接拒绝。
+- **docker/stats**（B2，只读）：`{sessionId|target, containerIds, cli?, socket?, host?}`，返回 `{available, needsSudo, sampledAt, stats: [{containerId, name, cpuPercent, memBytes, memLimitBytes, memPercent, netRxBytes, netTxBytes, netRxRate, netTxRate, blockReadBytes, blockWriteBytes, pids}]}`。`containerIds` 1–50 项，逐项过与 action 相同的容器 id 门（`^[0-9a-f]{12,64}$`；name/大写/元字符一律在渲染前拒绝，去重保序）。采集是一次 `<cli> stats --no-stream --format` 批量取（每容器一行、8 列制表输出：id/name/CPUPerc/MemUsage/MemPerc/NetIO/BlockIO/PIDs）。`sampledAt` 为 Unix 毫秒。`memBytes`/`memLimitBytes`、`netRxBytes`/`netTxBytes`、`blockReadBytes`/`blockWriteBytes` 是 CLI 报告的累计值（网络/块 IO 为容器累计字节）；`netRxRate`/`netTxRate` 是同一采样 key（目标 + `cli` + 端点 + 会话）两次采样间的字节/秒差分——首次采样、窗口 < 250ms 或计数器回绕（容器重启）时均为 0，差分缓存只在 sidecar 内存、最多保留 64 个 key，且每个 key 只保留最近一次样本的容器集合（不随容器增删无限增长）。字节单位兼容 SI（`kB`/`MB`/`GB`/`TB`/`PB`，1000 进制）与 IEC（`KiB`/`MiB`/`GiB`/`TiB`/`PiB`，1024 进制），`--` 百分比/计数按 0 处理，`memPercent` 缺失时按 bytes/limit 回算。未运行或已删除的容器按 CLI 行为归一：部分版本跳过该行（`stats` 数组里没有该 `containerId`），Docker 29 对显式指定的已停止容器返回 `0B`/`0.00%` 的 0 值行；两种都由同一解析器接受，缺失时调用方按缺省处理，不报错。
+- **docker/stats 降级与安全**：`<cli>` 未安装 / CLI 不存在 / daemon 不可达 / 远端 shell 跑不了 heredoc（输出无 `DBXDOCKER_PROBE` 标记）时返回 `{available:false, needsSudo, sampledAt, stats:[]}` 而不是 RPC 错误；found-but-denied（`needsSudo:true`）且连接配置了 Quick Sudo 时与 list 同形自动提权重采一次，提权失败/只读连接/白名单拒绝退回原 payload。只读连接放行（纯只读采集，不新增任何写/执行面）。容器 id 与用户输入永不进入脚本文本：远端恒为 `sh -c '<常量脚本体>' sh <id>…`（id 过门后仍 `shell_quote` 作位置参数），本机面 argv 直呼 `stats --no-stream --format <fmt> -- <id>…`（无 shell）。
+- **docker/files/list**（B4，只读）：`{sessionId|target, containerId, path, showHidden?, cli?, socket?, host?}` → `{path, entries: [{name, path, kind: "file"|"dir"|"link"|"other", size}], truncated}`。`path` 必须是绝对路径（校验规则见下）；`showHidden` 缺省 false；最多 500 条，超过时 `truncated: true`。`size` 只对普通文件有效（容器内 `wc -c`），目录/链接/其他恒 0；不返回 mtime。目录项按 sidecar 输出顺序返回，前端自行排序。容器内缺 `sh`/`base64`/`wc` 时返回明确错误（不静默当空目录）。
+- **docker/files/read**（B4，只读）：`{sessionId|target, containerId, path, maxBytes?, cli?, socket?, host?}` → `{path, dataBase64, size, truncated}`。`maxBytes` 1–8 MiB，缺省 1 MiB，越界直接报错（不静默钳制）。`size` 是容器内文件总字节数；`dataBase64` 是前 `min(size, maxBytes)` 字节；`truncated` 即 `size > maxBytes`。只读普通文件；目录、设备、缺失文件返回错误。
+- **docker/files 路径校验与注入面**：`path` 必须绝对、无 NUL/ASCII 控制字符（含换行/制表）、长度 ≤4096 字节、按 `/` 分段后无 `.`/`..`、不以 `//` 开头；校验后只归一尾部 `/`。写/删（破坏性）在上述规则之上再拒绝 shell 元字符（`' " \` $ ; & | < > \ ! ( ) { } * ? [ ] # ~ ^ %`），破坏性方法不接受带元字符的路径。路径**只**作为位置参数进入固定脚本：远端 `sh -c '<常量外层体>' sh <quoted path> <arg>`，容器内 `sh -c '<常量脚本体>' sh "$1" "$2"`，本机面 `docker exec <id> sh -c '<常量脚本体>' sh <path> <arg>`（argv 直呼、无 shell）。脚本文本、`sh -c` 的脚本参数均不含用户输入；容器 id 先过 `^[0-9a-f]{12,64}$` 再 `shell_quote`。列目录的条目名以 base64 编码、记录以 NUL 分隔，避免 tab/换行/空格破坏解析。
+- **docker/files 权限语义**：不做 chroot 语义——文件面看到的就是 `docker exec` 所用用户在容器 rootfs 内能看到的权限；`docker/files/list` / `docker/files/read` 在只读连接放行（§5.4，纯只读采集）。
+- **docker/files/write**（B6，破坏性）：`{sessionId|target, containerId, path, dataBase64, overwrite?, cli?, socket?, host?}` → `{path, size, overwritten}`。`dataBase64` 必须是标准 base64，**解码后 ≤64 KiB（65536 字节）**，超限直接报错、绝不截断；非法 base64 报错。`overwrite` 缺省 `false`，目标已存在时返回可读错误（`file already exists (set overwrite to replace it)`）；`overwrite: true` 时覆盖并返回 `overwritten: true`。写入是原子的：在同目录生成唯一临时名（`.dbx-docker-write-<pid>-<nanos>-<seq>.tmp`）→ 解码写入 → `mv -f` 覆盖；解码或 `mv` 失败都会清理临时文件，临时名已被占用时报错且不动该文件。目标为目录、容器根 `/`、或容器缺 `base64`/`wc` 时返回明确错误。`target:"ssh"` 在只读连接上直接拒绝（文案 `Write/terminal operation is disabled by the read-only connection setting`）；`target:"local"` 无连接语义、不做该门。执行前写审计意图行（见下），失败补失败行。
+- **docker/files/delete**（B6，破坏性）：`{sessionId|target, containerId, path, recursive?, confirm?, cli?, socket?, host?}` → `{path, removed: true}`。`recursive` 缺省 `false`：只删普通文件或符号链接，目录报错（`target is a directory (set recursive to remove it)`）；`recursive: true` 时递归删除，但**精确拒绝**容器根 `/` 与挂载点 `/proc`、`/sys`、`/dev`（任何删除都拒绝 `/`）。`target:"local"` 必须显式传 `confirm: true`（本机删除的二次确认在 sidecar 侧强制；SSH 目标由前端确认门负责）。缺失路径报 `no such file or directory`。`target:"ssh"` 在只读连接上直接拒绝（同一中性文案）。执行前写审计意图行，失败补失败行。
+- **docker/files/write|delete 审计**（§5.8）：审计命令文本只含引擎、容器 id、动作、路径与字节数，例如 `<cli> exec <id> ... write <path> <bytes> bytes` / `<cli> exec <id> ... delete <path>`；**绝不包含文件内容或 `dataBase64`**。意图行在真正执行前落盘（sidecar 在执行前崩溃也能追溯），失败时追加错误行。
 
 MCP 面同名工具已随 #203 瘦身移出——容器巡检/生命周期走 `ssh_exec` 执行 `docker ps` 等命令（`docker ps` 在只读白名单内，需要 daemon 权限时由 Quick Sudo/`ssh_exec_sudo` 提权）；工作台 Docker 面板继续走上述 sidecar 方法族。
+
+### 容器日志流（docker/logs/stream/start、docker/logs/stream/stop）
+
+实时 `docker logs -f`（B3，只读）。通用参数同上（`target` / `sessionId` / `cli` / `socket` / `host`），另加：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `containerId` | string | 是 | 12–64 位小写十六进制；先过 id 门再作位置参数，name/大写/元字符在渲染前拒绝 |
+| `tail` | number | 否 | 启动时回看的行数，10–2000（缺省 200，越界钳制） |
+| `timestamps` | bool | 否 | 透传 `--timestamps`（缺省 false） |
+| `requestedStreamId` | string | 否 | 前端预生成 id（`[A-Za-z0-9._-]{1,128}`），让前端在 RPC 返回前先订阅输出通道；非法值直接拒绝 |
+
+返回 `{streamId, containerId, tail, timestamps, binaryInput: true, startedAt}`（`startedAt` 为 Unix 毫秒）。`binaryInput: true` 是能力位（同 `serial/start` 先例）：输出走二进制通道，而不是 JSON 帧数组。
+
+- **只读与提权**：`start`/`stop` 在只读连接放行（纯只读采集，§5.4），不写审计、不走 Quick Sudo，不新增密码注入面。
+- **命令注入面**：固定脚本体 `exec <cli> logs --follow --tail N [--timestamps] -- "$1"`，容器 id 只作为 `$1`（先过 id 门，再 `shell_quote` 纵深）；本机面 argv 直呼 `<cli> logs --follow --tail N [--timestamps] -- <id>`（无 shell）。脚本文本只含常量与已钳制的数字/布尔值，用户输入永不进入。
+- **通道**：`docker/logs/out/{streamId}`，每批一帧 9 字节 `TerminalFrame`（1 字节流标签 + 大端 `u64` 序号 + 数据）。流标签：`0` = 容器 stdout、`1` = 容器 stderr、`2` = 生命周期状态。批量聚合 64 KiB / 100 ms（任一到达即 flush），单次管道读取的 fragment 不切分；`docker/logs/end` 之前一定先 flush 残余批。
+- **事件**：
+  - `docker/logs/end {streamId, reason: "exited"|"stopped"|"ttl"|"error", exitCode?}`：唯一终态；`ttl` 表示达到 30 分钟或 20 MiB 上限被 sidecar 主动停；`stopped` 来自 `stop`；`error` 表示运行期失败（另发 `docker/logs/error`）。重复 stop 不再发。
+  - `docker/logs/error {streamId, error}`：通道建立后的运行期错误。建立前的参数/权限错误直接作为 RPC 错误返回，不发事件。
+  - `docker/logs/chunk {streamId, sequence, text}`：**兼容降级**，仅当宿主/前端不支持二进制订阅（桥接返回 "Binary messages require framed transport"）时使用：16 KiB/条，多字节 UTF-8 跨条由 sidecar 用增量解码保留残字节；主路径恒走二进制，避免 ANSI 丢失与字符断裂。
+- **生命周期边界**：并发上限 8/sidecar（第 9 个返回可读错误，不排队）；TTL 30 分钟或 20 MiB 输出先到者结束；`stop` 幂等，未知 id 也返回成功，并真正关闭通道/回收子进程（取消后宽限 2s，仍存活则 SIGKILL）。关闭后 30s 内同一 `requestedStreamId` 的迟到 start 被墓碑拒绝（返回错误，不复活旧流）。
+- **回压**：桥接写入阻塞时 sidecar 读循环整体阻塞（本机管道泵走有界队列，OS 管道随即填满），不丢任何日志行；桥接报错（webview 关闭）立即停流并回收，不重试。
+
+### 容器终端（docker/terminal/open、docker/terminal/close、docker/terminal/resize、docker/terminal/replay）
+
+交互式 `docker exec -it`（B5）。通用参数同上（`target` / `sessionId` / `cli` / `socket` / `host`）：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `containerId` | string | 是 | 12–64 位小写十六进制；先过 id 门，再作为固定脚本的位置参数 |
+| `shell` | string | 否 | `auto`（缺省）`bash` `zsh` `fish` `ash` `sh`；其他值直接拒绝 |
+| `cols` / `rows` | number | 否 | 初始 PTY 尺寸，钳制到 2–500 / 2–300（缺省 80×24） |
+| `requestedTerminalId` | string | 否 | 前端预生成 id（`[A-Za-z0-9._-]{1,128}`），让前端在 RPC 返回前先订阅输出通道 |
+| `afterSequence` | number | 否 | open 返回的 replay 只含该序号之后的帧（缺省 0） |
+| `needsSudo` | bool | 否 | 只读探针结果（`docker/list`/`docker/stats` 的 `needsSudo`），用于省一次失败往返；不是授权依据 |
+
+- `open` 返回 `{terminalId, containerId, shell, cols, rows, sequence, replay: [{sequence, dataBase64}]}`。`sequence` 是当前输出尾序号；`replay` 是按 `afterSequence` 过滤后的补发帧。
+- `close` 幂等，未知 id 返回 `{success:true}`；先发 `docker/terminal/end {reason:"closed"}` 再拆会话/回收子进程。
+- `resize` 走会话内 resize（`{terminalId, cols, rows}` → `{success:true}`），尺寸同样钳制。
+- `replay` 与 `serial/replay` 同构：`{terminalId, afterSequence}` → `{frameCount, firstAvailableSequence, tailSequence, complete}`；帧同时补发到 `docker/terminal/out/{terminalId}`。`complete:false` 表示环形缓冲已覆盖请求起点，前端应清屏后以补发帧重建。
+- **授权**：`target:"ssh"` 时只读连接直接拒绝（文案与 `ensure_writable` 同族）；`target:"local"` 无连接语义，不做该门。`needsSudo:true` 时**绝不**把 sudo 密码注入 PTY：无预热时间戳直接返回可读错误（加入 docker 组或先在连接上执行一次 sudo）；有预热（`has_warm_sudo`）时命令前缀只允许 `sudo -n`（非交互），失败原样上抛。
+- **审计**：open 前写意图行，命令文本为 `<cli> exec -it <id> <shell>`，**不含任何键入字节**（键入只走二进制通道，不落审计）。
+- **命令注入面**：远端固定脚本 `sh -c '<常量>' sh <cli> <id> <shell>`，cli/id/shell 全部只作 `$1..$3` 并 `shell_quote`；本机面 argv 直呼 `<cli> exec -it <id> <shell>`（无 shell）。auto 的 shell 探测脚本是常量，按 bash→zsh→fish→ash→sh 顺序 `exec`。
+- **资源边界**：并发上限 8/sidecar（**独立配额**，与日志流的 8 条互不挤占；第 9 个返回可读错误，不排队）；空闲 30 分钟（无输入/输出）回收；replay 2 MiB 环形（`TERMINAL_REPLAY_LIMIT`）；关闭后 30s 内同一 terminalId 的迟到 open 被墓碑拒绝。
+- **通道**：`docker/terminal/in/{terminalId}` 为 8 字节大端序号 + 原始键（复用 `decode_sequenced_input`，序号仅回显不排序）；`docker/terminal/out/{terminalId}` 为 9 字节 `TerminalFrame`（流 `0`=stdout、`1`=stderr，当前不发状态帧）。
+- **事件**：`docker/terminal/inputAck {terminalId, sequence}`（仅审计，无重传）；`docker/terminal/error {terminalId, error}`（通道建立后的运行期错误/写失败）；`docker/terminal/end {terminalId, reason: "exited"|"closed"|"error", exitCode?}`（唯一终态，重复 close 不再发）。参数/权限错误在 open 返回前直接作为 RPC 错误，不发事件。
 
 ## 二进制通道
 
@@ -684,6 +740,9 @@ MCP 面同名工具已随 #203 瘦身移出——容器巡检/生命周期走 `s
 - `ssh/terminal/out/{sessionId}`：首字节为流类型，随后为大端 `u64` 单调序号，再后为终端数据。
 - `local/terminal/in/{sessionId}`：本地终端输入，与 `ssh/terminal/in` 同形（8 字节大端序号 + 数据）；确认事件为 `local/terminal/inputAck`，死会话镜像 `local/terminal/error`。
 - `local/terminal/out/{sessionId}`：本地终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + u64 序号）；stdout/stderr 在 PTY 内合流，数据帧恒为流 0。
+- `docker/terminal/in/{terminalId}`：容器终端输入，8 字节大端序号 + 原始键（无流标签）；成功确认 `docker/terminal/inputAck {terminalId, sequence}`，死会话/写失败镜像 `docker/terminal/error` 并返回 RPC 错误。
+- `docker/terminal/out/{terminalId}`：容器终端输出，9 字节 `TerminalFrame`（流 `0`=stdout、`1`=stderr + 大端 u64 序号 + 数据）；输出在 PTY 内合流，`docker/terminal/out/` 必须在 `ssh/terminal/out/` 之前路由。
+- `docker/logs/out/{streamId}`：Docker 日志流输出，9 字节 `TerminalFrame`（流标签 `0`=容器 stdout、`1`=容器 stderr、`2`=状态 + 大端 `u64` 序号 + 数据）；与 `ssh/terminal/out` 同帧格式但**保留 stderr 分流**，每批一帧（64 KiB / 100 ms 聚合），详见「容器日志流」小节。
 - `serial/terminal/out/{sessionId}`：串口终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + u64 序号），数据帧恒为 Stdout 流（读线程逐读递增序号）。
 - `telnet/terminal/out/{sessionId}`：Telnet 终端输出，与 `ssh/terminal/out` 同帧格式（流类型 + 大端 u64 单调序号 + 数据）；回附经 `telnet/replay` 按序号重发。
 - `telnet/terminal/in/{sessionId}`：Telnet 终端输入二进制写通道，帧与 `ssh/terminal/in` 同形（8 字节大端序号 + 数据，无流标签）；成功确认 `telnet/terminal/inputAck {sessionId, sequence}`（仅审计用，无重传语义），死会话/写失败镜像 `telnet/terminal/error`，语义与 SSH/local 分支一致。
@@ -927,12 +986,12 @@ RDP 客户端（RDP-2，nyaterm-parity P3-4）：引擎为 RDP-1 vendored IronRD
 `DBX_PLUGIN_DATA_DIR/quick-commands.json`（原子写、Unix 0600、坏文件降级为空清单），
 **所有连接与工作台共享一份**（全局共享语义；此前存工作台
 localStorage 会因宿主 webview 存储分区表现为"绑连接"，已废弃该存储）。
-上限 20 条、`name` ≤ 60 字符、`command` ≤ 500 字符（与前端 `lib/quickCommands.ts`
+上限 200 条、`name` ≤ 60 字符、`command` ≤ 500 字符（与前端 `lib/quickCommands.ts`
 常量一致）。命令不含凭据字段，无脱敏需求，但文件权限与 sudo 配置存储保持同款收紧。
 
 `ssh/quickCommands/list`：参数无。返回 `{ commands: [{ id, name, command, createdAt, updatedAt }] }`，按插入顺序（`createdAt` 升序）排列。
 
-`ssh/quickCommands/save`：参数 `id?`（空/缺省=新建，非空=更新须存在）、`name?`（空/缺省取 `command` 截断兜底）、`command`（必填，trim 后非空）。返回 `{ quickCommand: {…}, created: bool, commands: [...] }`（完整清单随响应下发，工作台可直接采纳权威顺序）。错误：超限（"At most 20 quick commands…"）、字段超长、`command` 缺失。
+`ssh/quickCommands/save`：参数 `id?`（空/缺省=新建，非空=更新须存在）、`name?`（空/缺省取 `command` 截断兜底）、`command`（必填，trim 后非空）。返回 `{ quickCommand: {…}, created: bool, commands: [...] }`（完整清单随响应下发，工作台可直接采纳权威顺序）。错误：超限（"At most 200 quick commands…"）、字段超长、`command` 缺失。
 
 `ssh/quickCommands/delete`：参数 `id`。返回 `{ removed: bool, commands: [...] }`；id 不存在时 `removed: false` 不算错误（对齐 `ssh/knownHosts/remove` 语义），此时不重写存储文件。
 

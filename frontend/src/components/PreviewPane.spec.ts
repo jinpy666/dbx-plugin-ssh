@@ -4,7 +4,7 @@
 // sftp/stat（普通车道）与 sudo/readFile（sudo 车道）；类名 .wb-* 换 .ssh-preview-*。
 // 覆盖：焦点进出、加载态宣告、isDirty 关闭守卫、车道分流（文本/viewer/hex）、
 // sudo 车道、分块流式拼装/进度/取消/超上限、Markdown 渲染视图。
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, config, type VueWrapper } from "@vue/test-utils";
 import { defineComponent } from "vue";
 import PreviewPane from "./PreviewPane.vue";
@@ -319,11 +319,13 @@ describe("PreviewPane sudo lane", () => {
 
   // 回归：sudo 二进制预览此前把无 stat 大小当 0 字节直接收口，PDF/Office/
   // 图片都拿到空 File；现在改用 sudo/stat 取大小并正常分块。
-  it("streams sudo binary previews using the sudo/stat size", async () => {
+  // 流式用例的等待面是真实分片链（每片一次 await RPC），并行跑时 tick 数
+  // 需求随负载抬升：显式放宽用例预算 + 条件等待，不用固定拍数。
+  it("streams sudo binary previews using the sudo/stat size", { timeout: 30_000 }, async () => {
     const total = 3 * SUDO_READ_MAX_BYTES + 321;
     const calls = bindSshApi({ total, sudo: true });
     wrapper = mountPane({ path: "/root/发票.pdf", sudo: true });
-    await flush(24);
+    await vi.waitFor(() => expect(wrapper!.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true), { timeout: 20_000 });
     expect(calls.some((item) => item.method === "sudo/stat")).toBe(true);
     expect(calls.some((item) => item.method === "sudo/readFile")).toBe(true);
     expect(calls.some((item) => item.method === "sftp/stat")).toBe(false);
@@ -336,11 +338,13 @@ describe("PreviewPane sudo lane", () => {
 // 大文件门禁：>32MiB 的 PDF/Office/媒体不自动整文件进内存，先给
 // 「打开方式 / 下载 / 仍要预览」；>256MiB 由 overcap 分支只保留下载出口。
 describe("PreviewPane large file gate", () => {
-  it("holds a large PDF until the user downloads or explicitly previews it", async () => {
+  it("holds a large PDF until the user downloads or explicitly previews it", { timeout: 30_000 }, async () => {
     const total = PREVIEW_CONFIRM_BYTES + 1;
     const calls = bindSshApi({ total });
     wrapper = mountPane({ path: "/docs/huge.pdf" });
-    await flush(12);
+    // 条件等待替代固定拍数 flush：并行负载下硬编码 tick 偶尔不够（本用例
+    // 曾以 ~1/3 全量跑的频率抖动）。
+    await vi.waitFor(() => expect(wrapper!.find("[data-test=preview-large]").exists()).toBe(true), { timeout: 4000 });
     const notice = wrapper.get("[data-test=preview-large]");
     expect(notice.text()).toContain("previewDialog.largeFileNotice");
     // 门禁阶段不发起任何分块读取。
@@ -349,10 +353,16 @@ describe("PreviewPane large file gate", () => {
     await wrapper.get("[data-test=preview-large-download]").trigger("click");
     expect(wrapper.emitted("download")).toEqual([["/docs/huge.pdf"]]);
     // 「仍要预览」显式确认后才开始分块并最终交给 viewer。
+    // 「仍要预览」后的分片流式加载是 33 轮（32MiB+1 / 1MiB）真实异步链，
+    // 并行负载下用固定 flush 等不完：条件等待内重试点击（首次点击若落在
+    // loading 收尾前会被守卫吸收），直到 viewer 就位。
+    // 「仍要预览」后是 33 轮分片流式加载（32MiB+1 / 1MiB 真实链），并行负载
+    // 下 tick 数需求会抬升：先让门禁分支的 loading 收尾，再点一次并给足 tick
+    // （不要重试点击——loading 守卫会让后续点击早退，与在跑的链互扰）。
+    await flush(4);
     await wrapper.get("[data-test=preview-large-anyway]").trigger("click");
-    await flush(40);
+    await vi.waitFor(() => expect(wrapper!.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true), { timeout: 20_000 });
     expect(calls.some((item) => item.method === "sftp/read")).toBe(true);
-    expect(wrapper.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true);
   });
 });
 

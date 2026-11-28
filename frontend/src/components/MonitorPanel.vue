@@ -15,7 +15,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import MonitorCard, { GROUP_COLOR_PALETTE, groupColorIndex } from "./MonitorCard.vue";
 import { workbenchMessage } from "../lib/i18n";
 import { pluginStore } from "../lib/pluginStore";
-import { useMonitorPanel, type MonitorConnectionRow } from "../composables/useMonitorPanel";
+import { useMonitorPanel } from "../composables/useMonitorPanel";
+import type { MonitorConnectionRow } from "../lib/monitorProtocol";
+import { useMonitorGrouping, MONITOR_FILTER_KEYS, MONITOR_REFRESH_OPTIONS, type MonitorStatusFilter } from "../composables/useMonitorGrouping";
+import { useMonitorGroupManager } from "../composables/useMonitorGroupManager";
 
 defineProps<{ context: Record<string, unknown> }>();
 
@@ -51,6 +54,25 @@ const {
   retry,
   openTerminal,
 } = useMonitorPanel({ api: window.dbxPlugin, storage: pluginStore });
+
+// 分组/过滤/可见性推导（tree 镜像、自建组、tab 前缀、隐私序号）下沉
+// useMonitorGrouping：面板只留工具栏与卡片渲染。
+const {
+  statusFilter,
+  query,
+  matchesQuery,
+  stateOf,
+  watchActive,
+  matchesFilter,
+  hasTree,
+  treeGroups,
+  groups,
+  groupTabs,
+  activeTab,
+  visibleGroups,
+  groupAccent,
+  cardEntries,
+} = useMonitorGrouping({ connections, snapshots, watched, tasks, pluginGroups });
 onMounted(() => void start());
 onBeforeUnmount(() => {
   unsubscribe();
@@ -59,205 +81,19 @@ onBeforeUnmount(() => {
 
 // —— 工具栏 ——
 
-type StatusFilter = "all" | "live" | "issues";
-const statusFilter = ref<StatusFilter>("all");
-const FILTER_KEYS: Record<StatusFilter, string> = {
-  all: "monitor.filterAll",
-  live: "monitor.filterLive",
-  issues: "monitor.filterIssues",
-};
-const REFRESH_OPTIONS = [2000, 5000, 10000, 30000, 60000] as const;
+// 过滤/刷新常量随 useMonitorGrouping 提供。
+const FILTER_KEYS = MONITOR_FILTER_KEYS;
+const REFRESH_OPTIONS = MONITOR_REFRESH_OPTIONS;
 
-// —— 分组与筛选 ——
-
-const CARD_STATES = ["connecting", "live", "failed", "unsupported", "stopped"] as const;
-type PanelCardState = (typeof CARD_STATES)[number];
-
-interface MonitorGroupView {
-  /** 空串 = 平铺桶（无 groupId 字段的行/整体降级），不渲染组头。 */
-  id: string;
-  /** 自建分组的显式色（空串走 hash 派生；平铺桶恒为空串）。 */
-  color?: string;
-  name: string;
-  rows: MonitorConnectionRow[];
-}
-
-interface MonitorCardEntry {
-  row: MonitorConnectionRow;
-  privacyIndex: number;
-  state: PanelCardState | "";
-  watched: boolean;
-}
-
-function stateOf(row: MonitorConnectionRow): PanelCardState | "" {
-  const snapshotState = snapshots.value[row.id]?.state;
-  if (snapshotState && (CARD_STATES as readonly string[]).includes(snapshotState)) return snapshotState as PanelCardState;
-  // watched 但首个快照未落：按 connecting 叙事渲染（任务在途）。
-  return watched.value[row.id] ? "connecting" : "";
-}
-
-/** 卡片开关的 on 态：显式 watched，或任务在采（已连接自动采集）——
- *  已连接卡片的开关默认就是 on（关闭即停止采集并记 dismissed）。 */
-function watchActive(row: MonitorConnectionRow): boolean {
-  if (watched.value[row.id]) return true;
-  return tasks.value.some((task: { connectionId: string }) => task.connectionId === row.id);
-}
-
-function matchesFilter(state: PanelCardState | ""): boolean {
-  if (statusFilter.value === "all") return true;
-  if (statusFilter.value === "live") return state === "live";
-  return state === "failed" || state === "unsupported";
-}
-
-/** 宿主侧栏树分组（dock tree）数据在位判定：任一行带 groupId 即 tree 模式
- *  （PR #15003 落地的宿主；旧宿主无此字段 → 回退自建分组/平铺）。 */
-const hasTree = computed(() => connections.value.some((row) => typeof row.groupId === "string" && !!row.groupId));
-
-/** tree 分组区块（dock 侧栏树镜像）：组序 = 行首次出现序，组名 = groupName。 */
-const treeGroups = computed<MonitorGroupView[]>(() => {
-  if (!hasTree.value) return [];
-  const rows = connections.value;
-  const order: Array<{ id: string; name: string }> = [];
-  const byGroup = new Map<string, MonitorConnectionRow[]>();
-  for (const row of rows) {
-    const groupId = typeof row.groupId === "string" && row.groupId ? row.groupId : "";
-    if (!byGroup.has(groupId)) {
-      byGroup.set(groupId, []);
-      if (groupId) order.push({ id: groupId, name: typeof row.groupName === "string" && row.groupName ? row.groupName : groupId });
-    }
-    byGroup.get(groupId)!.push(row);
-  }
-  const view: MonitorGroupView[] = order.map(({ id, name }) => ({ id, name, color: "", rows: byGroup.get(id)! }));
-  const ungrouped = byGroup.get("");
-  if (ungrouped?.length) view.push({ id: "", name: "", color: "", rows: ungrouped });
-  return view;
+// 分组管理浮层（新建/成员分节/全选三态）下沉 useMonitorGroupManager。
+const { groupManagerOpen, draftName, submitNewGroup, setSectionRef, treeMemberSections, toggleSection } = useMonitorGroupManager({
+  t,
+  pluginGroups,
+  treeGroups,
+  activeTab,
+  createGroup,
+  toggleGroupMember,
 });
-
-const groups = computed<MonitorGroupView[]>(() => {
-  const rows = connections.value;
-  if (hasTree.value) return treeGroups.value;
-  // 自建分组驱动（无 tree 数据的旧宿主回退）：配置序 = 区块序；未入组成员
-  // 落尾部平铺桶（不渲染组头）。
-  const viewGroups: MonitorGroupView[] = pluginGroups.value.map((group) => ({
-    id: group.id,
-    name: group.name,
-    color: group.color,
-    rows: rows.filter((row) => group.connectionIds.includes(row.id)),
-  }));
-  const ungrouped = rows.filter((row) => !pluginGroups.value.some((group) => group.connectionIds.includes(row.id)));
-  if (ungrouped.length) viewGroups.push({ id: "", name: "", color: "", rows: ungrouped });
-  return viewGroups.filter((group) => group.id === "" || group.rows.length > 0);
-});
-
-/** 面板 tab（前缀区分两个维度）：
- *  - tree 模式：「全部」+ dock 树分组（镜像宿主侧栏，只读展示 tab）+ 自建组（过滤视图）
- *  - 旧宿主回退：「全部」+ 自建分组（含空组——tab 是入口，删成员不该抹掉配置） */
-const groupTabs = computed(() => {
-  const pluginTabs = pluginGroups.value.map((group) => ({ id: `group:${group.id}`, name: group.name, color: group.color, tree: false }));
-  if (hasTree.value) {
-    return [
-      ...treeGroups.value.filter((group) => group.id).map((group) => ({ id: `tree:${group.id}`, name: group.name, color: group.color, tree: true })),
-      ...pluginTabs,
-    ];
-  }
-  return pluginTabs;
-});
-
-const activeTab = ref<string>("all");
-
-/** tab → 区块过滤：tree:前缀选 tree 组；group:前缀（回退模式）选自建组成员。 */
-function visibleGroups(): MonitorGroupView[] {
-  if (activeTab.value === "all") return groups.value;
-  if (activeTab.value.startsWith("tree:")) {
-    const treeId = activeTab.value.slice(5);
-    return groups.value.filter((group) => group.id === treeId);
-  }
-  const pluginId = activeTab.value.slice(6);
-  const memberIds = new Set(pluginGroups.value.find((group) => group.id === pluginId)?.connectionIds ?? []);
-  return groups.value
-    .map((group) => ({ ...group, rows: group.rows.filter((row) => memberIds.has(row.id)) }))
-    .filter((group) => group.rows.length > 0 || (hasTree.value ? false : group.id === pluginId));
-}
-
-function groupAccent(group: MonitorGroupView): string {
-  const configured = pluginGroups.value.find((candidate) => candidate.id === group.id)?.color;
-  if (configured) return configured;
-  return GROUP_COLOR_PALETTE[groupColorIndex(group.id)];
-}
-
-function cardEntries(group: MonitorGroupView): MonitorCardEntry[] {
-  const entries: MonitorCardEntry[] = [];
-  // 隐私模式下的组内序号（1 起，按筛选后的可见序）。
-  let ordinal = 0;
-  for (const row of group.rows) {
-    const state = stateOf(row);
-    if (!matchesFilter(state)) continue;
-    ordinal += 1;
-    entries.push({ row, privacyIndex: ordinal, state, watched: watchActive(row) });
-  }
-  return entries;
-}
-
-// —— 分组管理弹层 ——
-const groupManagerOpen = ref(false);
-const draftName = ref("");
-// 打开浮层时自动选中一个自建分组作为编辑目标（成员区依赖它）；无组则提示先建。
-watch(groupManagerOpen, (open) => {
-  if (!open) return;
-  if (!activeTab.value.startsWith("group:")) {
-    const first = pluginGroups.value[0];
-    if (first) activeTab.value = `group:${first.id}`;
-  }
-});
-
-function submitNewGroup() {
-  const id = createGroup(draftName.value);
-  if (id) {
-    draftName.value = "";
-    activeTab.value = `group:${id}`;
-  }
-}
-
-// —— 成员区的 dock 树分节（tree 模式）：组头全选整组进/出当前编辑的 monitor 组 ——
-const sectionCheckRefs = new Map<string, HTMLInputElement>();
-
-function setSectionRef(sectionId: string, el: unknown) {
-  const input = el as HTMLInputElement | null;
-  if (input) sectionCheckRefs.set(sectionId, input);
-  else sectionCheckRefs.delete(sectionId);
-}
-
-const treeMemberSections = computed(() => {
-  const activeGroupId = activeTab.value.startsWith("group:") ? activeTab.value.slice(6) : "";
-  const activeGroup = pluginGroups.value.find((group) => group.id === activeGroupId);
-  if (!activeGroup) return [];
-  return treeGroups.value
-    .filter((section) => section.rows.length > 0)
-    .map((section) => {
-      const memberIds = section.rows.map((row) => row.id);
-      const selected = memberIds.filter((id) => activeGroup.connectionIds.includes(id)).length;
-      return { id: section.id, name: section.name || t("monitor.groupAll"), rows: section.rows, allSelected: selected === memberIds.length && memberIds.length > 0, selected };
-    });
-});
-
-function toggleSection(section: { id: string; rows: MonitorConnectionRow[]; allSelected: boolean }) {
-  const activeGroupId = activeTab.value.startsWith("group:") ? activeTab.value.slice(6) : "";
-  if (!activeGroupId) return;
-  const memberSet = new Set(pluginGroups.value.find((group) => group.id === activeGroupId)?.connectionIds ?? []);
-  for (const row of section.rows) {
-    const isMember = memberSet.has(row.id);
-    if (!section.allSelected && !isMember) toggleGroupMember(activeGroupId, row.id);
-    else if (section.allSelected && isMember) toggleGroupMember(activeGroupId, row.id);
-  }
-}
-
-// 部分选中 → indeterminate 视觉态（checkbox 三态）。
-watch(treeMemberSections, (sections) => {
-  for (const section of sections) {
-    const el = sectionCheckRefs.get(section.id);
-    if (el) el.indeterminate = section.selected > 0 && !section.allSelected;
-  }
-}, { deep: true });
 </script>
 
 <template>
@@ -273,7 +109,7 @@ watch(treeMemberSections, (sections) => {
       </button>
       <div class="monitor-filter" role="group" :aria-label="t('monitor.title')">
         <button
-          v-for="filter in Object.keys(FILTER_KEYS) as StatusFilter[]"
+          v-for="filter in Object.keys(FILTER_KEYS) as MonitorStatusFilter[]"
           :key="filter"
           type="button"
           class="monitor-filter-btn"
@@ -284,6 +120,26 @@ watch(treeMemberSections, (sections) => {
           {{ t(FILTER_KEYS[filter]) }}
         </button>
       </div>
+      <label class="monitor-search">
+        <input
+          v-model="query"
+          type="search"
+          class="monitor-search-input"
+          data-testid="monitor-search"
+          :placeholder="t('monitor.searchPlaceholder')"
+          :aria-label="t('monitor.searchPlaceholder')"
+          spellcheck="false"
+        />
+        <button
+          v-if="query"
+          type="button"
+          class="monitor-search-clear"
+          data-testid="monitor-search-clear"
+          :aria-label="t('monitor.searchClear')"
+          :title="t('monitor.searchClear')"
+          @click="query = ''"
+        ><X :size="12" aria-hidden="true" /></button>
+      </label>
       <label class="monitor-refresh">
         <span class="monitor-refresh-label">{{ t("monitor.refresh") }}</span>
         <Select :model-value="refreshMs" @update:model-value="(value) => setRefreshMs(Number(value))">
@@ -343,67 +199,24 @@ watch(treeMemberSections, (sections) => {
     </nav>
 
     <!-- 分组管理浮层：backdrop + 居中卡（不再内联推挤 dashboard） -->
-    <div v-if="groupManagerOpen" class="monitor-manager-overlay" @click.self="groupManagerOpen = false">
-      <section class="monitor-group-manager" data-testid="monitor-group-manager" role="dialog" :aria-label="t('monitor.groupManage')">
-        <header class="monitor-manager-head">
-          <strong>{{ t("monitor.groupManage") }}</strong>
-          <button type="button" class="monitor-icon-btn" :aria-label="t('monitor.close')" data-testid="monitor-group-close" @click="groupManagerOpen = false">
-            <X :size="15" aria-hidden="true" />
-          </button>
-        </header>
-        <form class="monitor-group-new" @submit.prevent="submitNewGroup">
-          <input v-model="draftName" class="monitor-group-input" :placeholder="t('monitor.groupName')" :aria-label="t('monitor.groupName')" />
-          <button type="submit" class="monitor-toolbar-btn" :disabled="!draftName.trim()">{{ t("monitor.groupNew") }}</button>
-        </form>
-        <div v-for="group in pluginGroups" :key="group.id" class="monitor-group-row" :data-group-id="group.id">
-          <div class="monitor-group-row-head">
-            <input class="monitor-group-input" :value="group.name" :aria-label="t('monitor.groupName')" @change="(event) => renameGroup(group.id, (event.target as HTMLInputElement).value)" />
-            <div class="monitor-group-colors" role="group" :aria-label="t('monitor.groupColor')">
-              <button
-                v-for="palette in GROUP_COLOR_PALETTE"
-                :key="palette"
-                type="button"
-                class="monitor-color-dot"
-                :class="{ 'is-active': group.color === palette }"
-                :style="{ backgroundColor: palette }"
-                :aria-label="`${t('monitor.groupColor')} ${palette}`"
-                @click="setGroupColor(group.id, group.color === palette ? '' : palette)"
-              ></button>
-            </div>
-          <button type="button" class="monitor-group-delete" @click="deleteGroup(group.id); if (activeTab === `group:${group.id}`) activeTab = 'all'">
-            {{ t("monitor.groupDelete") }}
-          </button>
-        </div>
-        <!-- 成员区：tree 分组在位时按 dock 树两级展示（组头全选整组 / 单机勾选）；
-             旧宿主无 tree 数据回退平铺 chips。 -->
-        <template v-if="hasTree">
-          <div v-for="section in treeMemberSections" :key="section.id" class="monitor-member-section">
-            <label class="monitor-member-section-head">
-              <input
-                type="checkbox"
-                :checked="section.allSelected"
-                :ref="(el) => setSectionRef(section.id, el)"
-                @change="() => toggleSection(section)"
-              />
-              <span class="monitor-member-section-name">{{ section.name }}</span>
-            </label>
-            <div class="monitor-group-members">
-              <label v-for="row in section.rows" :key="row.id" class="monitor-member-chip" :class="{ 'is-member': group.connectionIds.includes(row.id) }">
-                <input type="checkbox" :checked="group.connectionIds.includes(row.id)" @change="() => toggleGroupMember(group.id, row.id)" />
-                {{ privacy ? `#${connections.indexOf(row) + 1}` : row.name }}
-              </label>
-            </div>
-          </div>
-        </template>
-        <div v-else class="monitor-group-members">
-          <label v-for="row in connections" :key="row.id" class="monitor-member-chip" :class="{ 'is-member': group.connectionIds.includes(row.id) }">
-            <input type="checkbox" :checked="group.connectionIds.includes(row.id)" @change="() => toggleGroupMember(group.id, row.id)" />
-            {{ privacy ? `#${connections.indexOf(row) + 1}` : row.name }}
-          </label>
-        </div>
-      </div>
-      </section>
-    </div>
+    <MonitorGroupManager
+      v-if="groupManagerOpen"
+      :t="t"
+      :open="groupManagerOpen"
+      :groups="pluginGroups"
+      :connections="connections"
+      :has-tree="hasTree"
+      :tree-groups="treeGroups"
+      :active-tab="activeTab"
+      :privacy="privacy"
+      :create-group="createGroup"
+      :rename-group="renameGroup"
+      :delete-group="deleteGroup"
+      :set-group-color="setGroupColor"
+      :toggle-group-member="toggleGroupMember"
+      @close="groupManagerOpen = false"
+      @update:active-tab="(value: string) => (activeTab = value)"
+    />
 
     <!-- 连续 3 次快照失败后轮询自停：横幅即恢复按钮（refresh 会清 pollStopped） -->
     <button v-if="pollStopped" type="button" class="monitor-banner" @click="() => refresh()">{{ t("monitor.pollStopped") }}</button>
@@ -442,7 +255,10 @@ watch(treeMemberSections, (sections) => {
             @retry="(connectionId) => retry(connectionId)"
           />
         </div>
-        <p v-if="!cardEntries(group).length" class="monitor-empty">{{ t("monitor.emptyGroup") }}</p>
+        <!-- 空组文案区分「检索无命中」：搜索时给出明确的空因，而不是笼统的空组。 -->
+        <p v-if="!cardEntries(group).length" class="monitor-empty" :data-testid="query.trim() ? 'monitor-no-match' : 'monitor-empty-group'">
+          {{ query.trim() ? t("monitor.searchNoMatch") : t("monitor.emptyGroup") }}
+        </p>
       </section>
     </template>
   </div>
@@ -569,143 +385,33 @@ watch(treeMemberSections, (sections) => {
   outline: 2px solid var(--primary);
   outline-offset: 1px;
 }
-/* —— 分组管理浮层（backdrop + 居中卡） —— */
-.monitor-manager-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 4rem 1rem 1rem;
-  background: rgb(0 0 0 / 0.5);
-  backdrop-filter: blur(2px);
-}
-.monitor-group-manager {
-  width: min(560px, 100%);
-  max-height: min(70vh, 560px);
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 0.625rem;
-  padding: 0.875rem;
-  background: var(--card, var(--background));
-  box-shadow: 0 12px 40px rgb(0 0 0 / 0.35);
-}
-.monitor-manager-head {
-  display: flex;
+.monitor-search {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
 }
-.monitor-manager-head strong {
-  font-size: 0.8125rem;
-}
-/* —— 分组管理弹层 —— */
-.monitor-group-manager {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 0.5rem;
-  padding: 0.75rem;
-  margin: 0 0 0.75rem;
-}
-.monitor-group-new {
-  display: flex;
-  gap: 0.5rem;
-}
-.monitor-group-input {
-  flex: 1;
-  min-width: 0;
+.monitor-search-input {
+  width: 9rem;
   font-size: 0.75rem;
-  padding: 0.25rem 0.5rem;
+  padding: 0.2rem 1.4rem 0.2rem 0.5rem;
   border: 1px solid var(--border);
   border-radius: 0.375rem;
   background: transparent;
   color: var(--foreground);
 }
-.monitor-group-row {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  border-top: 1px solid var(--border);
-  padding-top: 0.5rem;
-}
-.monitor-group-row-head {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-.monitor-group-colors {
+.monitor-search-input::placeholder { opacity: 0.55; }
+.monitor-search-clear {
+  position: absolute;
+  right: 0.25rem;
   display: inline-flex;
-  gap: 0.25rem;
-}
-.monitor-color-dot {
-  width: 0.875rem;
-  height: 0.875rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
+  align-items: center;
+  border: none;
+  background: none;
+  color: var(--muted-foreground);
   cursor: pointer;
   padding: 0;
 }
-.monitor-color-dot.is-active {
-  outline: 2px solid var(--primary);
-  outline-offset: 1px;
-}
-.monitor-group-delete {
-  font-size: 0.75rem;
-  padding: 0.25rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 0.375rem;
-  background: transparent;
-  color: var(--destructive, #ef4444);
-  cursor: pointer;
-}
-.monitor-group-members {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.375rem;
-}
-/* —— 成员区 dock 树分节（tree 模式） —— */
-.monitor-member-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.375rem;
-  border-left: 2px solid var(--border);
-  padding-left: 0.5rem;
-  margin-bottom: 0.5rem;
-}
-.monitor-member-section-head {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  font-size: 0.75rem;
-  color: var(--foreground);
-  cursor: pointer;
-  user-select: none;
-}
-.monitor-member-section-name {
-  font-weight: 600;
-}
-.monitor-member-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  font-size: 0.6875rem;
-  padding: 0.125rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--muted-foreground);
-  cursor: pointer;
-}
-.monitor-member-chip.is-member {
-  border-color: var(--primary);
-  color: var(--foreground);
-}
+.monitor-search-clear:hover { color: var(--foreground); }
 .monitor-refresh {
   display: inline-flex;
   align-items: center;

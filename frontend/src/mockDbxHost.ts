@@ -4,6 +4,7 @@ const appearanceListeners = new Set<(appearance: DbxPluginAppearance) => void>()
 const contextListeners = new Set<(context: Record<string, unknown>) => void>();
 
 import { pluginStore } from "./lib/pluginStore";
+import { mockDockerFileRead, mockDockerFilesListing, mockDockerStatsPayload } from "./mockDockerFixtures";
 
 const fixtureParams = new URLSearchParams(location.search);
 // ?render=dom 强制关闭终端 WebGL 加速（pluginStore 偏好，见 lib/pluginStore.ts）：
@@ -595,8 +596,11 @@ let mockTransferHistoryCleared = false;
 // "保存 → 重开预览" 在可视化夹具里闭环（真实 sidecar 写远端文件）。
 const mockFileContents = new Map<string, Uint8Array>();
 // 全局快速命令（ssh/quickCommands/*）与批量发送（ssh/terminal/batchInput）的
-// mock 状态：镜像真实 sidecar 的响应形状与上限/错误语义，防可视化夹具脱节。
-const QUICK_COMMANDS_LIMIT = 20;
+// mock 状态：镜像 UI 侧的响应形状、上限与错误语义，防可视化夹具脱节。上限对齐
+// 前端权威常量 lib/quickCommands.ts 的 200（legacy sidecar RPC 的 20 条上限已
+// 不驱动 UI：工作台权威存储是宿主 pluginStore，sidecar 仅作一次性迁移种子）——
+// mock 若继续按 20 拦，演示导入会比生产早 180 条失败。
+const QUICK_COMMANDS_LIMIT = 200;
 const quickCommandsState: { id: string; name: string; command: string; createdAt: number; updatedAt: number }[] = [];
 const settingsState = { quickSudo: true, sudoUsePty: false, sudoPasswordSet: true, totpConfigured: false, authFlowMode: "password_then_otp", passwordPromptHint: "", totpPromptHint: "", agentTerminalMode: "off", rememberedCommands: [] as string[] };
 
@@ -860,6 +864,26 @@ let mockForwardSeq = 1;
 // per-task 相位计数器推进（每次 snapshot +1），浏览器走查每轮轮询都能看到
 // 曲线前移；数值用确定性正弦叠加（无 Math.random），快照可复现。
 const mockMonitorTasks = new Map<string, { state: string; since: number; phase: number }>();
+// B3 日志流夹具：streamId → 定时器（3 帧后 end；stop 提前清理）。
+const mockDockerLogTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+let mockDockerLogSeq = 0;
+const mockDockerTerminalTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+let mockDockerTerminalSeq = 0;
+let mockDockerTerminalActive = "";
+let mockDockerTerminalFrameSeq = 0;
+
+function emitDockerTerminalFrame(terminalId: string, text: string) {
+  mockDockerTerminalFrameSeq += 1;
+  const event = {
+    channel: `docker/terminal/out/${terminalId}`,
+    data: terminalFrame(mockDockerTerminalFrameSeq, text),
+  };
+  for (const listener of binaryListeners) listener(event);
+}
+
+function emitDockerTerminalEvent(method: string, params: Record<string, unknown>) {
+  for (const listener of eventListeners) listener({ method, params });
+}
 const monUnsupported = fixtureParams.get("mon") === "unsupported";
 const MONITOR_POINTS_DEFAULT = 120; // Lane A SNAPSHOT_DEFAULT_POINTS（monitor.rs）。
 const MONITOR_POINTS_MAX = 720; // Lane A FAST_RING_CAP：快照点数上限（12min @ 1s）。
@@ -991,6 +1015,38 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
   // 形状。?docker=off 模拟「CLI 未安装」（available:false），?docker=sudo 模拟
   // found-but-denied（needsSudo:true）；默认返回容器表。cli 参数仅做白名单
   // 校验回显（真实端点归一在 sidecar），供引擎设置联动走查。
+  else if (method === "docker/logs/stream/start") {
+    // B3 日志流：返回能力位后按 3 帧 → end 的节奏推二进制帧，走查抽屉的
+    // 跟随/结束态；stop 立即清定时器并补一条 stopped 终态。
+    const input = params as Record<string, unknown>;
+    const containerId = String(input.containerId || "");
+    if (!/^[0-9a-f]{12,64}$/.test(containerId)) throw new Error(`Invalid containerId '${containerId}': expected 12-64 lowercase hex characters`);
+    const streamId = typeof input.requestedStreamId === "string" && input.requestedStreamId ? input.requestedStreamId : `mock-log-${mockDockerLogSeq++}`;
+    const channel = `docker/logs/out/${streamId}`;
+    const lines = ["[mock] nginx ready on :80", "[mock] upstream 612ms (slow)", "[mock] GET /health 200"];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    lines.forEach((line, index) => {
+      timers.push(setTimeout(() => {
+        for (const listener of binaryListeners) listener({ channel, data: terminalFrame(index + 1, `${line}\n`) });
+      }, 40 * (index + 1)));
+    });
+    timers.push(setTimeout(() => {
+      mockDockerLogTimers.delete(streamId);
+      for (const listener of eventListeners) listener({ method: "docker/logs/end", params: { streamId, reason: "exited", exitCode: 0 } });
+    }, 40 * (lines.length + 1)));
+    mockDockerLogTimers.set(streamId, timers);
+    result = { streamId, containerId, tail: Math.min(2000, Math.max(10, Number(input.tail) || 200)), binaryInput: true, startedAt: Date.now() };
+  }
+  else if (method === "docker/logs/stream/stop") {
+    const streamId = String((params as Record<string, unknown>)?.streamId || "");
+    const timers = mockDockerLogTimers.get(streamId);
+    if (timers) {
+      timers.forEach((timer) => clearTimeout(timer));
+      mockDockerLogTimers.delete(streamId);
+      for (const listener of eventListeners) listener({ method: "docker/logs/end", params: { streamId, reason: "stopped" } });
+    }
+    result = { success: true };
+  }
   else if (method === "docker/list") {
     const mode = fixtureParams.get("docker");
     if (mode === "off") result = { available: false, needsSudo: false, containers: [] };
@@ -1039,6 +1095,81 @@ const invoke: DbxPluginApi["invoke"] = async <T = unknown>(method: string, param
     if (!["start", "stop", "restart", "kill", "rm"].includes(action)) throw new Error(`Unsupported docker action '${action}'. Supported: start, stop, restart, kill, rm`);
     if (fixtureParams.get("docker") === "off") throw new Error(`${action} failed: docker CLI not found`);
     result = { success: true, output: `${containerId}\n` };
+  }
+  // B2 容器指标：形状与降级叙事镜像 sidecar；夹具在 mockDockerFixtures.ts。
+  else if (method === "docker/stats") {
+    result = mockDockerStatsPayload((params || {}) as Record<string, unknown>, fixtureParams.get("docker"));
+  }
+  // B4 容器文件（只读）：夹具在 mockDockerFixtures.ts，形状镜像 sidecar。
+  else if (method === "docker/terminal/open") {
+    // B5 容器终端：先返回 terminalId，再推 2 帧 → end（exited 0），走查
+    // 终态与重试。输入通道在 end 前会回显，便于手动确认键入路径。
+    const input = (params || {}) as Record<string, unknown>;
+    const containerId = String(input.containerId || "");
+    if (!/^[0-9a-f]{12,64}$/.test(containerId)) throw new Error(`Invalid containerId '${containerId}': expected 12-64 lowercase hex characters`);
+    const terminalId = typeof input.requestedTerminalId === "string" && input.requestedTerminalId
+      ? input.requestedTerminalId
+      : `mock-term-${mockDockerTerminalSeq++}`;
+    const cols = Math.max(2, Math.min(500, Number(input.cols) || 80));
+    const rows = Math.max(2, Math.min(300, Number(input.rows) || 24));
+    mockDockerTerminalActive = terminalId;
+    mockDockerTerminalFrameSeq = 0;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    timers.push(setTimeout(() => emitDockerTerminalFrame(terminalId, `container ${containerId.slice(0, 12)} shell\r\n`), 120));
+    timers.push(setTimeout(() => emitDockerTerminalFrame(terminalId, "$ "), 240));
+    timers.push(setTimeout(() => {
+      if (mockDockerTerminalActive !== terminalId) return;
+      mockDockerTerminalActive = "";
+      emitDockerTerminalEvent("docker/terminal/end", { terminalId, reason: "exited", exitCode: 0 });
+      mockDockerTerminalTimers.delete(terminalId);
+    }, 420));
+    mockDockerTerminalTimers.set(terminalId, timers);
+    result = {
+      terminalId,
+      containerId,
+      shell: typeof input.shell === "string" ? input.shell : "auto",
+      cols,
+      rows,
+      sequence: 2,
+      replay: [],
+    };
+  }
+  else if (method === "docker/terminal/close") {
+    const terminalId = String((params as Record<string, unknown>)?.terminalId || "");
+    for (const timer of mockDockerTerminalTimers.get(terminalId) ?? []) clearTimeout(timer);
+    mockDockerTerminalTimers.delete(terminalId);
+    if (mockDockerTerminalActive === terminalId) {
+      mockDockerTerminalActive = "";
+      emitDockerTerminalEvent("docker/terminal/end", { terminalId, reason: "closed" });
+    }
+    result = { success: true };
+  }
+  else if (method === "docker/terminal/resize") {
+    result = { success: true };
+  }
+  else if (method === "docker/terminal/replay") {
+    result = { frameCount: 0, firstAvailableSequence: 1, tailSequence: 0, complete: true };
+  }
+  else if (method === "docker/files/list") {
+    result = mockDockerFilesListing((params || {}) as Record<string, unknown>);
+  }
+  else if (method === "docker/files/read") {
+    result = mockDockerFileRead((params || {}) as Record<string, unknown>);
+  }
+  else if (method === "docker/files/write") {
+    const input = (params || {}) as Record<string, unknown>;
+    const encoded = typeof input.dataBase64 === "string" ? input.dataBase64 : "";
+    const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+    const size = Math.max(0, Math.floor((encoded.length * 3) / 4) - padding);
+    result = {
+      path: String(input.path || ""),
+      size,
+      overwritten: input.overwrite === true,
+    };
+  }
+  else if (method === "docker/files/delete") {
+    const input = (params || {}) as Record<string, unknown>;
+    result = { path: String(input.path || ""), removed: true };
   }
   else if (method === "sftp/createDirectory" || method === "sudo/mkdir") result = mockWriteEntry(String((params as Record<string, unknown>)?.path || ""), mockDir(String((params as Record<string, unknown>)?.path || "/").split("/").pop() || "folder"));
   else if (method === "sftp/touch") result = mockWriteEntry(String((params as Record<string, unknown>)?.path || ""), mockFile(String((params as Record<string, unknown>)?.path || "").split("/").pop() || "file.txt", 0));
@@ -2019,6 +2150,17 @@ window.dbxPlugin = {
       for (const listener of eventListeners) listener({ method: "sftp/upload/ack", params: { taskId, nextOffset } });
       // 镜像真实 sidecar 的 staging 进度事件（phase 字段见 issue #60 修复）。
       for (const listener of eventListeners) listener({ method: "sftp/transfer/progress", params: { taskId, direction: "upload", transferred: nextOffset, size: 0, phase: "staging", status: "running" } });
+      return;
+    }
+    if (channel.startsWith("docker/terminal/in/")) {
+      const bytes = typeof data === "string" ? Uint8Array.from(atob(data), (value) => value.charCodeAt(0)) : data instanceof Uint8Array ? data : new Uint8Array(data);
+      const terminalId = channel.slice("docker/terminal/in/".length);
+      const inputSequence = Number(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, false));
+      emitDockerTerminalEvent("docker/terminal/inputAck", { terminalId, sequence: inputSequence });
+      if (mockDockerTerminalActive === terminalId) {
+        const typed = new TextDecoder().decode(bytes.slice(8));
+        setTimeout(() => emitDockerTerminalFrame(terminalId, typed.replace(/\r/g, "\r\n")), 12);
+      }
       return;
     }
     if (channel.startsWith("local/terminal/in/")) {

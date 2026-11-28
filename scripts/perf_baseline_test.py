@@ -83,9 +83,30 @@ def pop_binary(client: SidecarClient, prefix: str) -> list[tuple[str, bytes]]:
     return matched
 
 
+def wait_for_terminal_ready(client: SidecarClient, session_id: str, timeout: float = 15.0) -> bool:
+    """PTY 就绪门：`ssh/session/open` 返回时 shell 的 banner/prompt 可能还没到，
+    此时立刻写命令会被服务器丢弃（本地 3/3 复现：0 输出且 replay 也是空）。
+    等到第一条 out 帧再发压测命令；超时返回 False，让用例自己报错而不是静默
+    假装「管道没输出」。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            client.timeout = 0.5
+            client._pump(None)
+        except SidecarError:
+            pass
+        finally:
+            client.timeout = 30.0
+        if pop_binary(client, f"ssh/terminal/out/{session_id}"):
+            return True
+    return False
+
+
 def case_terminal_buffer(client: SidecarClient, session_id: str, mb: int) -> dict:
     """Pipe `mb` MiB through the PTY, then verify the 2 MiB replay cap."""
     step(f"terminal ring buffer stress: {mb} MiB of continuous PTY output")
+    if not wait_for_terminal_ready(client, session_id):
+        raise AssertionError("terminal produced no output after session open (PTY never became ready)")
     client.binary_frames.clear()
     payload = struct.pack(">Q", 1) + f"dd if=/dev/zero bs=1M count={mb} 2>/dev/null | tr '\\0' 'x'\r".encode()
     started = time.monotonic()

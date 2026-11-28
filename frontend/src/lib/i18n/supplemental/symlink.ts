@@ -1,0 +1,95 @@
+// 增量文案表（自 lib/i18n.ts 纯搬移）：七语键集与占位符一致性由
+// workbench.spec.ts 与 i18nKeyReferences.spec.ts 双向校验；合并顺序见 i18n.ts。
+
+// ---------------------------------------------------------------------------
+// SFTP 符号链接（IMPL_PLAN v2 P2-6）追加文案块：只增不改 —— supplemental 平铺
+// dotted key 合并，七语键集与占位符完全一致（由 workbench.spec.ts 与
+// i18nKeyReferences.spec.ts 双向校验）。
+// ---------------------------------------------------------------------------
+
+export const symlinkMessages: Record<string, Record<string, string>> = {
+  en: {
+    "symlink.createAction": "New symbolic link…",
+    "symlink.editAction": "Edit link target…",
+    "symlink.createTitle": "New symbolic link",
+    "symlink.editTitle": "Edit link target",
+    "symlink.createHint": "Creates the link inside {dir}",
+    "symlink.editHint": "Re-points the link \"{name}\" (the link is removed and recreated)",
+    "symlink.namePlaceholder": "link name",
+    "symlink.targetPlaceholder": "target path (e.g. ../data/config.json)",
+    "symlink.created": "Symbolic link \"{name}\" created",
+    "symlink.updated": "Link target of \"{name}\" updated",
+  },
+  "zh-CN": {
+    "symlink.createAction": "新建符号链接…",
+    "symlink.editAction": "编辑链接指向…",
+    "symlink.createTitle": "新建符号链接",
+    "symlink.editTitle": "编辑链接指向",
+    "symlink.createHint": "将在 {dir} 内创建链接",
+    "symlink.editHint": "将重新指向链接「{name}」（删除后重建）",
+    "symlink.namePlaceholder": "链接名称",
+    "symlink.targetPlaceholder": "目标路径（如 ../data/config.json）",
+    "symlink.created": "已创建符号链接「{name}」",
+    "symlink.updated": "已更新「{name}」的链接指向",
+  },
+  "zh-TW": {
+    "symlink.createAction": "新增符號連結…",
+    "symlink.editAction": "編輯連結指向…",
+    "symlink.createTitle": "新增符號連結",
+    "symlink.editTitle": "編輯連結指向",
+    "symlink.createHint": "將在 {dir} 內建立連結",
+    "symlink.editHint": "將重新指向連結「{name}」（刪除後重建）",
+    "symlink.namePlaceholder": "連結名稱",
+    "symlink.targetPlaceholder": "目標路徑（如 ../data/config.json）",
+    "symlink.created": "已建立符號連結「{name}」",
+    "symlink.updated": "已更新「{name}」的連結指向",
+  },
+  es: {
+    "symlink.createAction": "Nuevo enlace simbólico…",
+    "symlink.editAction": "Editar destino del enlace…",
+    "symlink.createTitle": "Nuevo enlace simbólico",
+    "symlink.editTitle": "Editar destino del enlace",
+    "symlink.createHint": "Crea el enlace dentro de {dir}",
+    "symlink.editHint": "Redirige el enlace \"{name}\" (se elimina y se vuelve a crear)",
+    "symlink.namePlaceholder": "nombre del enlace",
+    "symlink.targetPlaceholder": "ruta de destino (p. ej. ../data/config.json)",
+    "symlink.created": "Enlace simbólico \"{name}\" creado",
+    "symlink.updated": "Destino del enlace \"{name}\" actualizado",
+  },
+  it: {
+    "symlink.createAction": "Nuovo collegamento simbolico…",
+    "symlink.editAction": "Modifica destinazione collegamento…",
+    "symlink.createTitle": "Nuovo collegamento simbolico",
+    "symlink.editTitle": "Modifica destinazione collegamento",
+    "symlink.createHint": "Crea il collegamento dentro {dir}",
+    "symlink.editHint": "Reindirizza il collegamento \"{name}\" (viene rimosso e ricreato)",
+    "symlink.namePlaceholder": "nome del collegamento",
+    "symlink.targetPlaceholder": "percorso di destinazione (es. ../data/config.json)",
+    "symlink.created": "Collegamento simbolico \"{name}\" creato",
+    "symlink.updated": "Destinazione del collegamento \"{name}\" aggiornata",
+  },
+  ja: {
+    "symlink.createAction": "シンボリックリンクを新規作成…",
+    "symlink.editAction": "リンク先を編集…",
+    "symlink.createTitle": "シンボリックリンクを新規作成",
+    "symlink.editTitle": "リンク先を編集",
+    "symlink.createHint": "{dir} 内にリンクを作成します",
+    "symlink.editHint": "リンク「{name}」の参照先を変更します（削除して再作成）",
+    "symlink.namePlaceholder": "リンク名",
+    "symlink.targetPlaceholder": "参照先パス（例: ../data/config.json）",
+    "symlink.created": "シンボリックリンク「{name}」を作成しました",
+    "symlink.updated": "「{name}」のリンク先を更新しました",
+  },
+  "pt-BR": {
+    "symlink.createAction": "Novo link simbólico…",
+    "symlink.editAction": "Editar destino do link…",
+    "symlink.createTitle": "Novo link simbólico",
+    "symlink.editTitle": "Editar destino do link",
+    "symlink.createHint": "Cria o link dentro de {dir}",
+    "symlink.editHint": "Redireciona o link \"{name}\" (ele é removido e recriado)",
+    "symlink.namePlaceholder": "nome do link",
+    "symlink.targetPlaceholder": "caminho de destino (ex.: ../data/config.json)",
+    "symlink.created": "Link simbólico \"{name}\" criado",
+    "symlink.updated": "Destino do link \"{name}\" atualizado",
+  },
+};

@@ -6,6 +6,8 @@ import { mergeTransferProgress, transferCancelReason } from "../lib/transferProg
 import { clampTransferConcurrency, clampTransferDownloadLimit, clampTransferMaxActive, sanitizeTransferDuplicatePolicy, type TransferDuplicatePolicy } from "../lib/transferQueue";
 import { transferPausable } from "../lib/transferResume";
 import { sampleTransferSpeed, type TransferSpeedSample } from "../lib/transferSpeed";
+import { createTransferCompletionWatch } from "../lib/transferCompletionWatch";
+import { createUploadAckWait } from "../lib/transferAckWait";
 import { Download } from "@lucide/vue";
 
 /** 传输队列核心（上传/下载统一账本）：任务记录（终态清收 ring）、进度事件
@@ -63,19 +65,27 @@ const transferSpeeds = reactive<Record<string, number>>({});
 // 下载历史项右键：只为已有本机落盘路径提供定位/打开操作；taskId 用于按卡受控打开。
 const transferHistoryMenu = ref<{ taskId: string }>();
 
-const uploadAckWaiters = new Map<string, { nextOffset: number; resolve: () => void; reject: (error: Error) => void; timer: number }>();
-// 上传收尾等待器（issue #60）：finish RPC 只负责把远端推送交给 sidecar
-// 后台任务，真正的完成/失败经终态 progress 事件回传，这里据此结算。
-// 评审 H-1（2026-09-30）：等待器自带 watchdog 轮询——终态事件丢失（宿主
-// 桥抖动）或 sidecar 在长推送期间重启时，靠 sftp/transfer/status 兜底
-// 结算，不再让 uploadSource 永久挂起拖死整批队列。
-// issue #305：固定 15s 的首轮兜底正是「几 KB 小文件成功提示迟到十几秒」
-// 的主因——事件丢失后用户至少要盯着一动不动的卡片等一整轮。改为 1s 起步
-// 逐级退避：健康链路事件亚秒到达，轮询只是丢失后的保险；退避到 15s 封顶，
-// 长推送期间也不会产生高频轮询。
-const COMPLETION_WATCHDOG_STEPS_MS = [1_000, 2_000, 4_000, 8_000];
-const COMPLETION_WATCHDOG_MAX_MS = 15_000;
-const transferCompletionWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void; watchdog: number }>();
+// 终态收尾等待器与分片 ACK 兜底轮询的机制下沉 lib/transferCompletionWatch 与
+// lib/transferAckWait（纯搬移）；此处只接任务账本（错误文案/ackLagging 标记）
+// 与 sftp/transfer/status RPC 面。ACK 等待器 Map 原样暴露：ACK/error 桥事件
+// （usePluginEvents）与取消路径直接结算条目（clearTimeout + delete + settle）。
+const uploadAckWait = createUploadAckWait({
+  markAckLagging: (taskId) => {
+    if (transferTasks[taskId]) transferTasks[taskId].ackLagging = true;
+  },
+  clearAckLagging: (taskId) => {
+    if (transferTasks[taskId]?.ackLagging) delete transferTasks[taskId].ackLagging;
+  },
+  taskError: (taskId) => transferTasks[taskId]?.error,
+  statusLabel: (status) => t(`transferStatus.${status}`),
+  fetchStatus: (taskId) => window.dbxPlugin.invoke<{ transferred: number; status: string }>("sftp/transfer/status", { taskId }),
+});
+const uploadAckWaiters = uploadAckWait.waiters;
+const completionWatch = createTransferCompletionWatch({
+  taskError: (taskId) => transferTasks[taskId]?.error,
+  statusLabel: (status) => t(`transferStatus.${status}`),
+  pollStatus: (taskId) => pollTransferStatus(taskId),
+});
 const downloadChunkWaiters = new Map<string, { offset: number; resolve: (bytes: Uint8Array) => void; reject: (error: Error) => void; timer: number }>();
 const transferSamples = new Map<string, TransferSpeedSample>();
 // Download task ids the user cancelled from the transfer panel; lets the download
@@ -136,7 +146,7 @@ function updateTransfer(params: Record<string, unknown>) {
     // 事件从不携带确认滞后键（issue #237）：透传 ACK 兜底轮询的实时标记。
     ackLagging: existing?.ackLagging,
   };
-  settleTransferCompletion(taskId, status);
+  completionWatch.settle(taskId, status);
   if (!isLiveTransferStatus(status)) scheduleTerminalTaskSweep(taskId);
   if (!existing && isLiveTransferStatus(transferTasks[taskId].status)) {
     // 面板已开时不得重开：openTransferPanel 的"先收口再开"会卸载弹层、
@@ -198,19 +208,6 @@ onBeforeUnmount(() => {
   terminalTaskSweepTimers.clear();
 });
 
-/** 终态事件结算 finish 之后的收尾等待器：completed 兑现；cancelled 按用户
- * 取消回传（transfer-cancelled 码，runTransfers 据此继续派发剩余项，评审
- * H-3）；failed 才视为批次失败。 */
-function settleTransferCompletion(taskId: string, status: TransferTask["status"]) {
-  const waiter = transferCompletionWaiters.get(taskId);
-  if (!waiter || (status !== "completed" && status !== "cancelled" && status !== "failed")) return;
-  transferCompletionWaiters.delete(taskId);
-  window.clearTimeout(waiter.watchdog);
-  if (status === "completed") waiter.resolve();
-  else if (status === "cancelled") waiter.reject(Object.assign(new Error(transferTasks[taskId]?.error || t(`transferStatus.${status}`)), { code: "transfer-cancelled" }));
-  else waiter.reject(Object.assign(new Error(transferTasks[taskId]?.error || t(`transferStatus.${status}`)), { code: "transfer-terminal" }));
-}
-
 /** 后端状态快照统一入账（评审 H-1）：面板对账与 watchdog 轮询共用——
  * 终态才生效，且必须穿过 settleTransferCompletion。此前 reconcile 直接改
  * task.status 绕过结算，事件丢失后等待器永不兑现、批次挂死。 */
@@ -225,7 +222,7 @@ function applyTransferStatusSnapshot(taskId: string, status: { transferred?: num
       if (status.phase === "staging") task.staged = status.transferred;
       else task.transferred = status.transferred;
     }
-    settleTransferCompletion(taskId, normalized);
+    completionWatch.settle(taskId, normalized);
     if (!isLiveTransferStatus(normalized)) scheduleTerminalTaskSweep(taskId);
     return true;
   }
@@ -241,30 +238,6 @@ async function pollTransferStatus(taskId: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function armCompletionWatchdog(taskId: string, step = 0): number {
-  const delay = step < COMPLETION_WATCHDOG_STEPS_MS.length ? COMPLETION_WATCHDOG_STEPS_MS[step]! : COMPLETION_WATCHDOG_MAX_MS;
-  return window.setTimeout(async () => {
-    if (!transferCompletionWaiters.has(taskId)) return;
-    if (await pollTransferStatus(taskId)) return;
-    const waiter = transferCompletionWaiters.get(taskId);
-    if (waiter) waiter.watchdog = armCompletionWatchdog(taskId, step + 1);
-  }, delay);
-}
-
-/** 挂起直到该任务收到终态 progress 事件（完成/取消/失败）；注册前已终态则
- * 立即结算，否则挂等待器并武装 watchdog 轮询兜底（评审 H-1）。后台推送可
- * 持续数十分钟（issue #60），轮询只是轻量 RPC，不设次数上限。 */
-function waitForTransferCompletion(taskId: string) {
-  const existing = transferTasks[taskId];
-  const status = existing?.status;
-  if (status === "completed" || status === "cancelled" || status === "failed") {
-    return status === "completed" ? Promise.resolve() : Promise.reject(Object.assign(new Error(existing?.error || t(`transferStatus.${status}`)), { code: status === "cancelled" ? "transfer-cancelled" : "transfer-terminal" }));
-  }
-  return new Promise<void>((resolve, reject) => {
-    transferCompletionWaiters.set(taskId, { resolve, reject, watchdog: armCompletionWatchdog(taskId) });
-  });
 }
 
 async function restoreTransfers() {
@@ -302,7 +275,7 @@ async function reconcileActiveTransfers() {
     } catch {
       task.status = "failed";
       task.error = t("transfersHistory.interrupted");
-      settleTransferCompletion(task.taskId, "failed");
+      completionWatch.settle(task.taskId, "failed");
     }
   }
 }
@@ -456,7 +429,7 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
       writeU64(payload, 0, offset);
       payload.set(chunk, 8);
       const nextOffset = offset + chunk.byteLength;
-      const ack = waitForUploadAck(info.taskId, nextOffset);
+      const ack = uploadAckWait.waitForAck(info.taskId, nextOffset);
       await window.dbxPlugin.sendBinary(`sftp/upload/${info.taskId}`, payload);
       await ack;
       offset = nextOffset;
@@ -469,67 +442,12 @@ async function uploadSource(name: string, size: number, readChunk: (offset: numb
     } catch (cause) {
       throw Object.assign(cause instanceof Error ? cause : new Error(String(cause)), { code: "upload-start-failed" });
     }
-    await waitForTransferCompletion(info.taskId);
+    await completionWatch.waitFor(info.taskId, transferTasks[info.taskId]?.status);
     return true;
   } catch (cause) {
     await window.dbxPlugin.invoke("sftp/transfer/cancel", { taskId: info.taskId, reason: transferCancelReason(cause) }).catch(() => undefined);
     throw cause;
   }
-}
-
-// issue #305：分片 ACK 事件丢失时不再死等 30s——按阶梯轮询 sftp/transfer/
-// status 兜底。3s 首查（健康链路 ACK 亚秒到达，缺席即异常），之后 8s/15s/30s
-// 退避重查；transferred 达标即放行，大分片慢链路不受影响（轮询只在 ACK 缺席
-// 时发生，正常传输零额外 RPC）。
-// issue #237：轮询触发即给任务挂 ackLagging 标记（卡片外显「确认滞后」），
-// 串行停等链路上的静默卡住变成可感知状态；等待器结算（ACK 事件、error
-// 事件、兜底轮询放行/拒绝、面板分离拒绝）一律先清标记再收场。
-const UPLOAD_ACK_POLL_STEPS_MS = [3_000, 8_000, 15_000, 30_000];
-
-function waitForUploadAck(taskId: string, nextOffset: number) {
-  const clearAckLagging = () => {
-    if (transferTasks[taskId]?.ackLagging) delete transferTasks[taskId].ackLagging;
-  };
-  return new Promise<void>((resolve, reject) => {
-    const resolveSettled = () => {
-      clearAckLagging();
-      resolve();
-    };
-    const rejectSettled = (error: Error) => {
-      clearAckLagging();
-      reject(error);
-    };
-    const settle = (outcome: () => void) => {
-      uploadAckWaiters.delete(taskId);
-      outcome();
-    };
-    const poll = (step: number) => {
-      const delay = UPLOAD_ACK_POLL_STEPS_MS[Math.min(step, UPLOAD_ACK_POLL_STEPS_MS.length - 1)]!;
-      const timer = window.setTimeout(async () => {
-        // ACK 事件在阶梯步长内缺席：挂上可感知标记（任务已被清收则跳过）。
-        if (transferTasks[taskId]) transferTasks[taskId].ackLagging = true;
-        try {
-          const status = await window.dbxPlugin.invoke<{ transferred: number; status: string }>("sftp/transfer/status", { taskId });
-          if (status.transferred >= nextOffset && status.status !== "cancelled" && status.status !== "failed") {
-            settle(resolveSettled);
-            return;
-          }
-          if (status.status === "cancelled" || status.status === "failed") {
-            settle(() => rejectSettled(Object.assign(new Error(transferTasks[taskId]?.error || t(`transferStatus.${status.status}`)), { code: status.status === "cancelled" ? "transfer-cancelled" : "transfer-terminal" })));
-            return;
-          }
-          poll(step + 1);
-        } catch {
-          // 状态查询失败（sidecar 重启中/任务已清收）：按阶梯继续重试；
-          // 封顶后以 30s 周期持续轮询直到结算（评审 H-1 同款：轻量 RPC
-          // 不设次数上限），大分片慢链路的 ACK 迟到不再被误杀。
-          poll(step + 1);
-        }
-      }, delay);
-      uploadAckWaiters.set(taskId, { nextOffset, resolve: resolveSettled, reject: rejectSettled, timer });
-    };
-    poll(0);
-  });
 }
 
 // 分片循环在每个分片之间调用；暂停时挂起，恢复后继续。
@@ -585,31 +503,8 @@ async function cancelTransfer(task: TransferTask) {
   await window.dbxPlugin.invoke("sftp/transfer/cancel", { taskId: task.taskId, reason: "user" }).catch((cause) => showError(cause));
 }
 
-function transferPercent(task: TransferTask) {
-  return task.size > 0 ? Math.min(100, Math.round((task.transferred / task.size) * 100)) : task.status === "completed" ? 100 : 0;
-}
-
-/** 本机 CPU/磁盘阶段（staging/compressing/decompressing）与 prep 就绪标记
- * 走不定态进度条；网络阶段（uploading/fetching/transferring）用真实百分比
- * （压缩任务各阶段事件自带分母，切换自然衔接）。 */
-const INDETERMINATE_BAR_PHASES: ReadonlySet<string> = new Set(["staging", "compressing", "decompressing", "ready"]);
-
-function transferBarValue(task: TransferTask): number | undefined {
-  return task.phase !== undefined && INDETERMINATE_BAR_PHASES.has(task.phase) ? undefined : transferPercent(task);
-}
-
-/** staging/compressing 行展示的字节数：本地阶段计数（spool 缓存/压缩输入）；
- * 其余阶段是已推送/已接收计数。 */
-function transferShownBytes(task: TransferTask): number {
-  return task.phase === "staging" || task.phase === "compressing" ? task.staged ?? 0 : task.transferred;
-}
-
-/** 精确字节数 tooltip：化解 5.9GB(十进制) vs 5.49GiB(二进制) 的口径困惑（issue #60）。 */
-function transferBytesTitle(task: TransferTask): string | undefined {
-  if (!(task.size > 0)) return undefined;
-  return `${transferShownBytes(task).toLocaleString()} / ${task.size.toLocaleString()} bytes`;
-}
-
+  // 展示助手（transferPercent/transferBarValue/transferShownBytes/
+  // transferBytesTitle）下沉 lib/transferDisplay，模板直接从 lib 取用。
 
   return {
     TRANSFER_CONCURRENCY_KEY,
@@ -646,9 +541,5 @@ function transferBytesTitle(task: TransferTask): string | undefined {
     waitWhilePaused,
     toggleTransferPause,
     cancelTransfer,
-    transferPercent,
-    transferBarValue,
-    transferShownBytes,
-    transferBytesTitle,
   };
 }

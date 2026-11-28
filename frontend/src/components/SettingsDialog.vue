@@ -7,13 +7,16 @@
 // （WebGL/选中复制/终端字体）的权威态在宿主 App——下载偏好经 downloadPrefs
 // 适配器读写，终端偏好经 props 下发 + emits 上抛。
 import { computed, reactive, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Check, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, ShieldCheck, Trash2, Upload, X } from "@lucide/vue";
+import { Check, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, ShieldCheck, Trash2, Upload, X } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import PasswordField from "./PasswordField.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 import { Switch } from "./ui/switch";
 import TerminalAppearancePreview from "./TerminalAppearancePreview.vue";
+import SettingsTransferPane from "./SettingsTransferPane.vue";
+import SettingsTerminalPane from "./SettingsTerminalPane.vue";
+import SettingsSchemePane from "./SettingsSchemePane.vue";
 import TerminalSchemePicker from "./TerminalSchemePicker.vue";
 import TerminalHotkeyEditor from "./TerminalHotkeyEditor.vue";
 import HighlightRulesSection from "./HighlightRulesSection.vue";
@@ -22,19 +25,18 @@ import { HIGHLIGHT_RULES_LIMIT, type HighlightDisplayMode, type HighlightRuleVie
 import { QUICK_COMMANDS_LIMIT, type QuickCommand } from "../lib/quickCommands";
 import { AGENT_MODES, SSH_AGENT_APPROVED_STORE_KEY, SSH_AGENT_MODES_STORE_KEY, sanitizeAgentTerminalMode, sanitizeRememberedCommands } from "../lib/agentTerminal";
 import { connectionEntryEquals, loadConnectionEntry, saveConnectionEntry } from "../lib/connectionSettingMirror";
-import { clampFontSize, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
+import { TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
+import { useTerminalFontDraft, TERMINAL_FONT_CUSTOM, TERMINAL_FONT_FOLLOW_HOST, TERMINAL_FONT_PRESETS } from "../composables/useTerminalFontDraft";
+import { filterSettingsCategories } from "../lib/settingsSearch";
 import { confirmDialog } from "../lib/confirmDialog";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
 import { MCP_LIMIT_CEILING_MIB, SFTP_DOUBLE_CLICK_ACTIONS, mibField, parseMibInput, persistMcpSettingsMirror, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SftpDoubleClickAction, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
-import { DOWNLOAD_CONFLICT_POLICIES, type DownloadConflictPolicy } from "../lib/downloadPrefs";
-import { type EditorAssociation, type EditorConfig, type KnownEditor } from "../lib/editorRules";
-import { TRANSFER_DUPLICATE_POLICIES, type TransferDuplicatePolicy } from "../lib/transferQueue";
-import { SFTP_NAME_ENCODINGS, type SftpNameEncoding } from "../lib/sftpName";
+import { type DownloadConflictPolicy } from "../lib/downloadPrefs";
+import { type EditorConfig, type KnownEditor } from "../lib/editorRules";
+import { type TransferDuplicatePolicy } from "../lib/transferQueue";
+import { type SftpNameEncoding } from "../lib/sftpName";
 import {
-  allAppearanceProfiles,
   applySchemeToTerminalTheme,
-  CUSTOM_SCHEME_LIMIT,
-  TERMINAL_APPEARANCE_PRESETS,
   terminalOptionPatch,
   type TerminalAppearanceProfile,
   type TerminalAppearanceSettings,
@@ -42,302 +44,18 @@ import {
   type TerminalCursorInactiveStyle,
   type TerminalCursorStyle,
 } from "../lib/terminalAppearance";
-import { BUILTIN_TERMINAL_SCHEMES, contrastRatio, parseHexColor, parseSchemeImport, type TerminalColorScheme, type TerminalThemeLike } from "../lib/terminalScheme";
-import {
-  BELL_MODES,
-  LINK_MODIFIERS,
-  RIGHT_CLICK_MODES,
-  SCROLLBACK_MAX,
-  SCROLLBACK_MIN,
-  NOWRAP_COLUMNS_MAX,
-  NOWRAP_COLUMNS_MIN,
-  WORD_SEPARATOR_MAX_LENGTH,
-  type TerminalBehaviorSettings,
-  type TerminalBellMode,
-  type TerminalLinkModifier,
-  type TerminalRightClickMode,
-} from "../lib/terminalBehavior";
+import { contrastRatio, parseHexColor, type TerminalColorScheme, type TerminalThemeLike } from "../lib/terminalScheme";
 import type { TerminalHotkeyBindings } from "../lib/terminalHotkeys";
+import { COMPLETION_ENGINE_KEY, loadCompletionEngine, pluginStore, sanitizeCompletionEngine, type CompletionEngineSetting } from "../lib/pluginStore";
+import { clearSuggestionBlocklist, loadSuggestionBlocklist } from "../lib/suggestionBlocklist";
+import { COMMAND_HISTORY_LIMIT, MAX_COMMAND_HISTORY_LIMIT, MIN_COMMAND_HISTORY_LIMIT, sanitizeCommandHistoryLimit } from "../lib/commandHistory";
+import { type TerminalBehaviorSettings } from "../lib/terminalBehavior";
+import { type ToolbarButtonId, type ToolbarVisibility } from "../lib/toolbarVisibility";
+import { type GutterSettings } from "../lib/terminalGutter";
 import type { PaneDirectionPref } from "../lib/paneLayout";
 import type { AiSettings } from "../lib/aiSettings";
-import { TOOLBAR_BUTTONS, type ToolbarButtonId, type ToolbarVisibility } from "../lib/toolbarVisibility";
 import { type ActionLinkMatcherToggles, type ActionLinksSettings } from "../lib/actionLinksMatcher";
-import { rdpExperimentalEnabled as parseRdpExperimentalEnabled } from "../lib/rdpExperimental";
-import { GUTTER_TIMESTAMP_DEFAULT_FORMAT, type GutterSettings } from "../lib/terminalGutter";
-import {
-  createStartupEntry,
-  mergeStartupStore,
-  normalizeStartupConfig,
-  STARTUP_COMMAND_MAX,
-  STARTUP_COMMANDS_STORE_KEY,
-  STARTUP_DELAY_MAX_MS,
-  STARTUP_DELAY_DEFAULT_MS,
-  type StartupCommandEntry,
-  type StartupCommandsConfig,
-} from "../lib/startupCommands";
-import {
-  choiceFromOverride,
-  mergeNameEncodingStore,
-  NAME_ENCODING_OVERRIDES_STORE_KEY,
-  normalizeNameEncodingOverride,
-  overrideFromChoice,
-  type ConnectionNameEncodingChoice,
-  type NameEncodingOverride,
-} from "../lib/connectionNameEncoding";
 
-/** 连接级启动命令（P0-4，Tabby「Login scripts」对标）：同 X11 走组件内自治
- * RPC 读写 sidecar 偏好（`startup_commands` 键按 connectionId 分桶，读改写
- * 合并只动本连接的桶）；shell 起来后按序注入，改动对新开会话生效。 */
-const startupEnabled = ref(false);
-const startupCommands = ref<StartupCommandEntry[]>([]);
-
-async function loadStartupCommands() {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  // 存储迁移批 2（IMPL_PLAN_STORAGE_SYNC）：镜像播种/收敛——条目缺失从
-  // sidecar 播种；条目存在但与 sidecar 漂移（云同步恢复后）则 store 赢，
-  // 推回 sidecar（复用读改写持久化）。
-  const mirrored = loadConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, normalizeStartupConfig);
-  const apply = (config: StartupCommandsConfig) => {
-    startupEnabled.value = config.enabled;
-    startupCommands.value = config.commands;
-  };
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ startup_commands?: unknown }>("local/preferences/get", {});
-    const store = prefs?.startup_commands as Record<string, unknown> | undefined;
-    const sidecar = normalizeStartupConfig(store?.[connectionId]);
-    if (mirrored === null) {
-      apply(sidecar);
-      saveConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, sidecar);
-      return;
-    }
-    if (!connectionEntryEquals(mirrored, sidecar)) {
-      apply(mirrored);
-      await persistStartupConfig(mirrored);
-      return;
-    }
-    apply(sidecar);
-  } catch {
-    // sidecar 不可用：镜像兜底（未迁移则维持空表，下次打开重试播种）。
-    if (mirrored !== null) apply(mirrored);
-  }
-}
-
-function applyStartupConfig(config: StartupCommandsConfig) {
-  startupEnabled.value = config.enabled;
-  startupCommands.value = config.commands;
-}
-
-/// 读改写合并：`local/preferences/set` 对 startup_commands 是整键替换，
-/// 其他连接的桶从最新偏好读回后原样保留。
-async function persistStartupConfig(config: StartupCommandsConfig) {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ startup_commands?: unknown }>("local/preferences/get", {});
-    await window.dbxPlugin?.invoke("local/preferences/set", {
-      startup_commands: mergeStartupStore(
-        prefs?.startup_commands,
-        connectionId,
-        config,
-      ),
-    });
-  } catch (cause) {
-    emit("error", cause);
-  }
-}
-
-async function persistStartupCommands() {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  const config: StartupCommandsConfig = { enabled: startupEnabled.value, commands: startupCommands.value };
-  await persistStartupConfig(config);
-  // 保存双写：RPC（sidecar 即时权威）+ 镜像（云同步载荷）。
-  saveConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, config);
-}
-
-async function setStartupEnabled(next: boolean) {
-  startupEnabled.value = next;
-  // 开启且无命令时给一行空行，省一次点击；清空命令立即持久化。
-  if (next && startupCommands.value.length === 0) startupCommands.value.push(createStartupEntry());
-  await persistStartupCommands();
-}
-
-function addStartupEntry() {
-  if (startupCommands.value.length >= STARTUP_COMMAND_MAX) return;
-  startupCommands.value.push(createStartupEntry());
-  void persistStartupCommands();
-}
-
-function removeStartupEntry(index: number) {
-  startupCommands.value.splice(index, 1);
-  void persistStartupCommands();
-}
-
-function moveStartupEntry(index: number, delta: number) {
-  const target = index + delta;
-  if (target < 0 || target >= startupCommands.value.length) return;
-  const [row] = startupCommands.value.splice(index, 1);
-  startupCommands.value.splice(target, 0, row);
-  void persistStartupCommands();
-}
-
-/** 行内增量（命令文本 / 延迟 / 启用）：改完即持久化（@change 语义，非逐键）。 */
-function updateStartupEntry(index: number, patch: Partial<StartupCommandEntry>) {
-  const row = startupCommands.value[index];
-  if (!row) return;
-  Object.assign(row, patch);
-  void persistStartupCommands();
-}
-
-/** 延迟输入收敛：空/非法回缺省 300ms，越界截断到 30s。 */
-function clampStartupDelayInput(raw: string): number {
-  const value = Number.parseInt(raw.trim(), 10);
-  if (!Number.isFinite(value) || value < 0) return STARTUP_DELAY_DEFAULT_MS;
-  return Math.min(value, STARTUP_DELAY_MAX_MS);
-}
-import { COMPLETION_ENGINE_KEY, loadCompletionEngine, pluginStore, sanitizeCompletionEngine, type CompletionEngineSetting } from "../lib/pluginStore";
-import { COMMAND_HISTORY_LIMIT, MAX_COMMAND_HISTORY_LIMIT, MIN_COMMAND_HISTORY_LIMIT, sanitizeCommandHistoryLimit } from "../lib/commandHistory";
-import { clearSuggestionBlocklist, loadSuggestionBlocklist } from "../lib/suggestionBlocklist";
-
-/** 连接级 SFTP 文件名编码覆盖（M16）：同启动命令的自治 RPC 读写
- * （`sftp_name_encoding_overrides` 键按 connectionId 分桶）。控件缺省
- * 「跟随全局」且不落盘（删除本连接桶）；连接未覆盖时全局
- * `sftp_name_encoding` 生效，判定优先级在 sidecar（覆盖 > 全局 > auto）。 */
-const connNameEncodingChoice = ref<ConnectionNameEncodingChoice>("follow");
-
-async function loadConnNameEncoding() {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  // 存储迁移批 2：镜像条目值与 sidecar 同形（"auto"/"latin-1"/null=跟随全局），
-  // 播种/收敛语义同启动命令；垃圾条目归一为 null，不会误删 sidecar 覆盖。
-  const mirrored = loadConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, normalizeNameEncodingOverride);
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ sftp_name_encoding_overrides?: unknown }>("local/preferences/get", {});
-    const store = prefs?.sftp_name_encoding_overrides as Record<string, unknown> | undefined;
-    const sidecar = normalizeNameEncodingOverride(store?.[connectionId]);
-    if (mirrored === null) {
-      connNameEncodingChoice.value = choiceFromOverride(sidecar);
-      saveConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, sidecar);
-      return;
-    }
-    if (mirrored !== sidecar) {
-      connNameEncodingChoice.value = choiceFromOverride(mirrored);
-      await persistConnNameEncodingOverride(mirrored);
-      return;
-    }
-    connNameEncodingChoice.value = choiceFromOverride(sidecar);
-  } catch {
-    // sidecar 不可用：镜像兜底。
-    if (mirrored !== null) connNameEncodingChoice.value = choiceFromOverride(mirrored);
-  }
-}
-
-/// 读改写合并：`local/preferences/set` 对该键是整表替换（其他连接的桶从最新
-/// 偏好读回后原样保留）；value=null 删除本连接桶（「跟随全局」）。
-async function persistConnNameEncodingOverride(override: NameEncodingOverride | null) {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ sftp_name_encoding_overrides?: unknown }>("local/preferences/get", {});
-    await window.dbxPlugin?.invoke("local/preferences/set", {
-      sftp_name_encoding_overrides: mergeNameEncodingStore(
-        prefs?.sftp_name_encoding_overrides,
-        connectionId,
-        override,
-      ),
-    });
-  } catch (cause) {
-    emit("error", cause);
-  }
-}
-
-async function persistConnNameEncoding() {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  const override = overrideFromChoice(connNameEncodingChoice.value);
-  await persistConnNameEncodingOverride(override);
-  // 保存双写：RPC + 镜像（null 同样落条目 = 「跟随全局」已迁移）。
-  saveConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, override);
-}
-
-function setConnNameEncoding(choice: ConnectionNameEncodingChoice) {
-  connNameEncodingChoice.value = choice;
-  void persistConnNameEncoding();
-}
-
-/** X11 转发偏好（P3-3）：组件内自治读写 sidecar 偏好——即时生效语义
- * （新会话才启用），不走 props/emit（App 无需感知）。 */
-const x11Enabled = ref(false);
-const x11ReadOnlyNote = ref(false);
-
-async function loadX11Preference() {
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ x11_forwarding?: unknown }>("local/preferences/get", {});
-    x11Enabled.value = prefs?.x11_forwarding === true;
-  } catch {
-    x11Enabled.value = false;
-  }
-}
-
-async function setX11Enabled(next: boolean) {
-  x11Enabled.value = next;
-  try {
-    await window.dbxPlugin?.invoke("local/preferences/set", { x11_forwarding: next });
-  } catch {
-    x11Enabled.value = !next;
-  }
-}
-
-/** 会话自动录制偏好（M14，对标 iShell）：与 X11 同款「组件内自治读写
- * sidecar 偏好」模式，即时生效语义（之后 open 的会话才自动录制）。 */
-const autoRecordEnabled = ref(false);
-
-/** RDP 仍处实验阶段：默认关闭，必须由用户在设置中显式启用。 */
-const rdpExperimentalEnabled = ref(false);
-
-async function loadRdpExperimentalPreference() {
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ rdp_experimental_enabled?: unknown }>("local/preferences/get", {});
-    rdpExperimentalEnabled.value = parseRdpExperimentalEnabled(prefs?.rdp_experimental_enabled);
-  } catch {
-    rdpExperimentalEnabled.value = false;
-  }
-}
-
-async function setRdpExperimentalEnabled(next: boolean) {
-  rdpExperimentalEnabled.value = next;
-  try {
-    // 开关持久化到 sidecar 偏好即可生效（后端 rdp/start 前置检查）；
-    // App 不再持有内存门副本（M32-A 后工具条无 RDP 入口）。
-    await window.dbxPlugin?.invoke("local/preferences/set", { rdp_experimental_enabled: next });
-  } catch {
-    rdpExperimentalEnabled.value = !next;
-  }
-}
-
-async function loadAutoRecordPreference() {
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ auto_record?: unknown }>("local/preferences/get", {});
-    autoRecordEnabled.value = prefs?.auto_record === true;
-  } catch {
-    autoRecordEnabled.value = false;
-  }
-}
-
-async function setAutoRecordEnabled(next: boolean) {
-  autoRecordEnabled.value = next;
-  try {
-    await window.dbxPlugin?.invoke("local/preferences/set", { auto_record: next });
-  } catch {
-    autoRecordEnabled.value = !next;
-  }
-}
-
-void loadAutoRecordPreference();
-void loadRdpExperimentalPreference();
-
-void loadX11Preference();
 
 // 结构化补全引擎选择（FIG wave-1，契约 §2.3）：组件内自治读写 pluginStore
 // （键 ssh-completion-engine，fig-safe 默认 / fig / off）——不走 props/emit，
@@ -708,6 +426,20 @@ const visibleSettingsCategories = computed(() =>
   ),
 );
 
+// 分类检索（13 个分类逐个点太慢）：匹配本地化分类名 + id + labelKey，空白
+// 分词 AND；命中保持导航原序。输入即切到首个命中分类（有命中时），清空搜索
+// 不改变当前分类。会话级门控先于检索（sudo/agent 在本地终端不参与搜索）。
+const settingsQuery = ref("");
+const filteredSettingsCategories = computed(() =>
+  filterSettingsCategories(visibleSettingsCategories.value, (cat) => t(cat.labelKey), settingsQuery.value),
+);
+watch(filteredSettingsCategories, (list) => {
+  if (!settingsQuery.value.trim() || !list.length) return;
+  if (!list.some((cat) => cat.id === settingsCategory.value)) {
+    settingsCategory.value = list[0]!.id as SettingsCategory;
+  }
+});
+
 function onSettingsCategoryChange(value: string | number) {
   settingsCategory.value = value as SettingsCategory;
 }
@@ -730,80 +462,9 @@ const settingsDraft = reactive({
   agentTerminalMode: "off",
   rememberedCommands: [] as string[],
 });
-const downloadDirDraft = ref("");
-const downloadUseDefaultDraft = ref(props.downloadPrefs.loadUseDefault());
-const downloadConflictDraft = ref<DownloadConflictPolicy>("rename");
-// 上传并发（1..10，默认 3）与重复目标策略（P1-5）草稿；建议设置草稿（P1-1）。
-const transferConcurrencyDraft = ref(String(props.transferPrefs.loadConcurrency()));
-const transferDuplicateDraft = ref<TransferDuplicatePolicy>(props.transferPrefs.loadDuplicatePolicy());
-// M14-B：会话并发深度（1-8）/ 兼容模式 / 文件名编码草稿。
-const transferMaxActiveDraft = ref(String(props.transferPrefs.loadMaxActive()));
-const transferDownloadLimitDraft = ref(String(props.transferPrefs.loadDownloadLimit()));
-const sftpCompatModeDraft = ref(props.transferPrefs.loadCompatMode());
-const sftpNameEncodingDraft = ref<SftpNameEncoding>(props.transferPrefs.loadNameEncoding());
-// 文件浏览（双击文件行为）：preview=预览（默认）/ edit=直接编辑；主保存写穿。
-const sftpDoubleClickDraft = ref<SftpDoubleClickAction>(props.transferPrefs.loadDoubleClickAction());
-// 外部编辑器草稿（transfer 面板）：配置整体草稿化、随主「保存」落库；
-// known 目录（local/editors/list 探测）每次打开设置时重探。
-const editorConfigDraft = ref<EditorConfig>({ associations: [], customEditors: [], uploadPolicy: "auto" });
-const editorKnownEditors = ref<KnownEditor[]>([]);
-const editorAssociationPatternDraft = ref("");
-const editorAssociationTargetDraft = ref("");
-const editorDefaultDraft = ref("");
-const editorTargetOptions = computed(() => [
-  ...editorKnownEditors.value.filter((editor) => editor.available).map((editor) => ({ value: `known:${editor.id}`, label: editor.name })),
-  ...editorConfigDraft.value.customEditors.map((editor) => ({ value: `custom:${editor.id}`, label: editor.name })),
-]);
-function editorTargetName(target: string): string {
-  if (target.startsWith("custom:")) {
-    const id = target.slice(7);
-    return editorConfigDraft.value.customEditors.find((editor) => editor.id === id)?.name || id;
-  }
-  if (target.startsWith("known:")) {
-    const id = target.slice(6);
-    return editorKnownEditors.value.find((editor) => editor.id === id)?.name || id;
-  }
-  return target;
-}
-function associationTargetValue(assoc: EditorAssociation): string {
-  return assoc.customId ? `custom:${assoc.customId}` : assoc.editorId ? `known:${assoc.editorId}` : "";
-}
-function editorDefaultValue(config: EditorConfig): string {
-  return config.defaultCustomId
-    ? `custom:${config.defaultCustomId}`
-    : config.defaultEditorId
-      ? `known:${config.defaultEditorId}`
-      : /* reka Select 不接受空串 value，用 "system" 哨兵表示系统默认 */ "system";
-}
-function addEditorAssociation() {
-  const pattern = editorAssociationPatternDraft.value.trim();
-  const target = editorAssociationTargetDraft.value;
-  if (!pattern || !target) return;
-  const assoc: EditorAssociation = target.startsWith("custom:")
-    ? { pattern, customId: target.slice("custom:".length) }
-    : { pattern, editorId: target.slice("known:".length) };
-  editorConfigDraft.value = { ...editorConfigDraft.value, associations: [...editorConfigDraft.value.associations, assoc] };
-  editorAssociationPatternDraft.value = "";
-  editorAssociationTargetDraft.value = "";
-}
-function removeEditorAssociation(index: number) {
-  editorConfigDraft.value = {
-    ...editorConfigDraft.value,
-    associations: editorConfigDraft.value.associations.filter((_, i) => i !== index),
-  };
-}
-function removeCustomEditor(id: string) {
-  editorConfigDraft.value = {
-    ...editorConfigDraft.value,
-    customEditors: editorConfigDraft.value.customEditors.filter((editor) => editor.id !== id),
-    associations: editorConfigDraft.value.associations.filter((assoc) => assoc.customId !== id),
-  };
-  if (editorDefaultDraft.value === `custom:${id}`) editorDefaultDraft.value = "system";
-}
-// M33：压缩传输策略与阈值草稿（阈值 0=不限下限，上限 65536 MiB）。
-const TRANSFER_COMPRESS_MODES = ["auto", "on", "off"] as const;
-const transferCompressModeDraft = ref(props.transferPrefs.loadCompressMode());
-const transferCompressThresholdDraft = ref(String(props.transferPrefs.loadCompressThreshold()));
+// 传输/编辑器草稿（下载、上传并发/重复策略、双击行为、外部编辑器、管线、
+// 压缩）与 known 编辑器目录探测随 transfer 分类面板下沉 SettingsTransferPane；
+// 父层经模板 ref 委托 reload()/save()。
 const suggestionsEnabledDraft = ref(props.suggestionPrefs.loadEnabled());
 const suggestionMinCharsDraft = ref(String(props.suggestionPrefs.loadMinChars()));
 const suggestionMaxCharsDraft = ref(String(props.suggestionPrefs.loadMaxChars()));
@@ -864,10 +525,6 @@ const agentTerminalModeHint = computed(() => t(
   : "agentTerminalOffHint",
 ));
 
-// 终端字体设置控件态（issue #31）：预设等宽字体 + 跟随宿主 + 自定义；哨兵值
-// 只作选择器键使用，不会作为字体串写入（写入前映射回 null/真实字体串）。
-const TERMINAL_FONT_FOLLOW_HOST = "__follow-host__";
-
 // 背景图上传（P2-9）：本地 FileReader 读成 data URL，拆出 mime + 纯 base64
 // 交 App 走 sidecar 落盘（web/docker 失败时 App 降级会话内存态）。客户端先做
 // 8MiB 上限与 accept 类型粗校验，权威校验在 sidecar（魔数 + 大小）。
@@ -895,77 +552,30 @@ function onWallpaperFileChange(event: Event) {
   reader.onerror = () => emit("error", new Error(t("wallpaper.invalidImage")));
   reader.readAsDataURL(file);
 }
-const TERMINAL_FONT_CUSTOM = "__custom__";
-const TERMINAL_FONT_PRESETS: Array<{ value: string; label: string }> = [
-  { value: "'JetBrains Mono', Consolas, monospace", label: "JetBrains Mono" },
-  { value: "'Cascadia Code', 'Cascadia Mono', monospace", label: "Cascadia Code" },
-  { value: "'Fira Code', monospace", label: "Fira Code" },
-  { value: "'Source Code Pro', monospace", label: "Source Code Pro" },
-  { value: "Menlo, Monaco, monospace", label: "Menlo" },
-  { value: "Consolas, 'Courier New', monospace", label: "Consolas" },
-  { value: "'DejaVu Sans Mono', monospace", label: "DejaVu Sans Mono" },
-  { value: "monospace", label: "monospace" },
-];
-const terminalFontFamilyChoice = ref(TERMINAL_FONT_FOLLOW_HOST);
-const terminalFontCustomDraft = ref("");
-const terminalFontSizeDraft = ref(String(props.terminalFontSize));
-
-// 字体控件回显当前覆盖态：初始化与应用/恢复默认后都会刷新，避免草稿漂移。
-function syncFontControls(family: string | null, size: number) {
-  if (!family) {
-    terminalFontFamilyChoice.value = TERMINAL_FONT_FOLLOW_HOST;
-    terminalFontCustomDraft.value = "";
-  } else if (TERMINAL_FONT_PRESETS.some((preset) => preset.value === family)) {
-    terminalFontFamilyChoice.value = family;
-    terminalFontCustomDraft.value = "";
-  } else {
-    terminalFontFamilyChoice.value = TERMINAL_FONT_CUSTOM;
-    terminalFontCustomDraft.value = family;
-  }
-  terminalFontSizeDraft.value = String(size);
-}
-syncFontControls(loadTerminalFontOverride().fontFamily, props.terminalFontSize);
-
-// 设置页字体族下拉：跟随宿主/预设即时应用并持久化；选「自定义」时仅展开
-// 输入框，待输入 @change 再应用（applyTerminalFontFromControls）。
-function onTerminalFontFamilyChoice(choice: string) {
-  terminalFontFamilyChoice.value = choice;
-  if (choice === TERMINAL_FONT_CUSTOM) return;
-  applyTerminalFont(choice === TERMINAL_FONT_FOLLOW_HOST ? null : choice, props.terminalFontSize);
-}
-
-function applyTerminalFontFromControls() {
-  let family: string | null;
-  if (terminalFontFamilyChoice.value === TERMINAL_FONT_CUSTOM) {
-    const custom = terminalFontCustomDraft.value.trim();
-    family = custom.length > 0 ? custom : null; // 空自定义视作跟随宿主
-  } else if (terminalFontFamilyChoice.value === TERMINAL_FONT_FOLLOW_HOST) {
-    family = null;
-  } else {
-    family = terminalFontFamilyChoice.value;
-  }
-  const parsed = Number(terminalFontSizeDraft.value);
-  const size = Number.isFinite(parsed) && parsed > 0 ? clampFontSize(parsed, 0) : props.hostFontSize;
-  applyTerminalFont(family, size);
-}
-
-// 恢复默认：并入「外观」分类的 resetAppearance（同一套默认值链路），
-// 此处不再保留独立的字体重置入口。
-
-/// 应用用户字体设置：应用侧（App）负责落到 xterm、持久化与 toast。
-function applyTerminalFont(family: string | null, size: number) {
-  emit("apply-font", { family, size });
-  syncFontControls(family, size);
-}
-
 // ---------------------------------------------------------------------------
 // 终端外观（配色方案 / 主题快照 / 字体间距 / 光标）
 // ---------------------------------------------------------------------------
-const appearanceSettings = computed(() => props.appearance.settings);
-const appearanceProfiles = computed(() => allAppearanceProfiles({ ...props.appearance, customThemes: props.customThemes }));
+// 字体控件草稿（预设/跟随宿主/自定义 + 应用回显）下沉 useTerminalFontDraft。
+const {
+  terminalFontFamilyChoice,
+  terminalFontCustomDraft,
+  terminalFontSizeDraft,
+  syncFontControls,
+  applyTerminalFontFromControls,
+  onTerminalFontFamilyChoice,
+} = useTerminalFontDraft({
+  terminalFontSize: () => props.terminalFontSize,
+  hostFontSize: () => props.hostFontSize,
+  applyFont: (payload) => emit("apply-font", payload),
+});
 
-// 预览与真实终端共用同一套纯函数合成：预览呈现的就是 xterm 实际拿到的主题，
-// 不会出现「设置页好看、终端不对」的偏差。
+// 初次挂载即按持久化覆盖态回显（下面的 open watch 只在弹窗开关时刷新）。
+syncFontControls(loadTerminalFontOverride().fontFamily, props.terminalFontSize);
+
+const appearanceSettings = computed(() => props.appearance.settings);
+// 配色方案面板（主题快照/方案选择/导入）外抽 SettingsSchemePane，apply-theme
+// 在父层拦截以同步字体控件草稿；预览纯函数合成留在父层——scheme 与外观两个
+// 面板各放一次实时预览，共用同一推导（预览呈现的就是 xterm 实际拿到的主题）。
 const previewTheme = computed(() => applySchemeToTerminalTheme(
   props.hostTheme,
   appearanceSettings.value,
@@ -979,16 +589,15 @@ const previewContrast = computed(() => {
   const background = parseHexColor(previewTheme.value.background);
   return foreground && background ? contrastRatio(foreground, background) : 21;
 });
-
-const allSchemes = computed<readonly TerminalColorScheme[]>(() => [...BUILTIN_TERMINAL_SCHEMES, ...props.appearance.customSchemes]);
-const themeNameDraft = ref("");
-const importText = ref("");
-const importError = ref("");
-const importOpen = ref(false);
-const schemeFileInput = ref<HTMLInputElement>();
-
 function updateAppearance(patch: Partial<TerminalAppearanceSettings>) {
   emit("update-appearance", patch);
+}
+
+/** scheme 面板 apply-theme 拦截：字体控件立即回显真实覆盖态（issue #219 的
+ *  「界面显示自定义、终端却是默认字体」——主题快照携带字体，null = 跟随宿主）。 */
+function onSchemeApplyTheme(theme: TerminalAppearanceProfile) {
+  emit("apply-theme", theme);
+  syncFontControls(theme.font.family, theme.font.size ?? props.terminalFontSize);
 }
 
 /** 数值型外观字段：留空 = 恢复默认（null 回落到 xterm 既有默认），非法输入不落地。 */
@@ -1009,79 +618,6 @@ const FONT_WEIGHT_OPTIONS = ["300", "400", "500", "600", "700", "800", "900"];
 function updateFontWeight(key: "fontWeight" | "fontWeightBold", value: unknown) {
   const next = String(value);
   updateAppearance({ [key]: next === FONT_WEIGHT_AUTO ? null : Number(next) });
-}
-
-function applyTheme(theme: TerminalAppearanceProfile) {
-  emit("apply-theme", theme);
-  // #219：主题快照携带字体（null = 跟随宿主），apply-theme 落地后弹窗的字体
-  // 控件必须立刻回显真实覆盖态——否则控件仍显示上一次的自定义字体，用户以为
-  // 自己的设置还在（issue #219 的「界面显示自定义、终端却是默认字体」）。
-  syncFontControls(theme.font.family, theme.font.size ?? props.terminalFontSize);
-}
-
-function resetAppearance() {
-  // 复用「跟随 DBX 宿主」预设：设置重置与字体回跟随宿主走同一条链路，
-  // 不另写一份默认值展开，避免两处默认值漂移。
-  emit("apply-theme", TERMINAL_APPEARANCE_PRESETS[0]);
-  syncFontControls(TERMINAL_APPEARANCE_PRESETS[0].font.family, props.terminalFontSize);
-}
-
-function saveCurrentTheme() {
-  const name = themeNameDraft.value.trim();
-  if (!name) return;
-  emit("save-theme", name);
-  themeNameDraft.value = "";
-}
-
-async function deleteTheme(theme: TerminalAppearanceProfile) {
-  if (!(await confirmDialog(t("terminalAppearance.deleteThemeConfirm", { name: t(theme.name) })))) return;
-
-  emit("delete-theme", theme.id);
-}
-
-async function removeCustomScheme(scheme: TerminalColorScheme) {
-  if (!(await confirmDialog(t("terminalAppearance.importRemoveConfirm", { name: scheme.name })))) return;
-
-  emit("remove-scheme", scheme.id);
-}
-
-// 导入：粘贴文本或选文件。解析是纯逻辑（terminalScheme.parseSchemeImport），
-// 分配 id / 持久化 / 提示交给 App（权威态在 App）。
-function importSchemesFromText(text: string, fallbackName: string) {
-  const result = parseSchemeImport(text, fallbackName);
-  if (!result.schemes.length) {
-    importError.value = t("terminalAppearance.importEmpty");
-    return;
-  }
-  importError.value = "";
-  importText.value = "";
-  emit("add-schemes", result.schemes);
-}
-
-function submitImport() {
-  if (!importText.value.trim()) return;
-  importSchemesFromText(importText.value, "Imported scheme");
-}
-
-function pickSchemeFile() {
-  schemeFileInput.value?.click();
-}
-
-async function onSchemeFile(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  try {
-    // iTerm2/.itermcolors 与 Windows Terminal 导出都是文本，File API 读原文即可，
-    // 不依赖宿主 fileTransfer（web/docker 模式同样可用）。
-    const text = await file.text();
-    importSchemesFromText(text, file.name.replace(/\.[^.]+$/, ""));
-  } catch (cause) {
-    importError.value = settingsErrorOf(cause);
-  } finally {
-    // 清空 value：同一个文件连续选两次也要能再次触发 change。
-    input.value = "";
-  }
 }
 
 const CURSOR_STYLES: readonly TerminalCursorStyle[] = ["bar", "block", "underline"];
@@ -1114,57 +650,10 @@ function numberFieldValue(event: Event): string {
 }
 
 // 单选组在模板里迭代（写死 `as const` 字面量在模板表达式中不被支持）。
-const SCHEME_SOURCES: Array<{ value: TerminalAppearanceSettings["schemeSource"]; label: string }> = [
-  { value: "host", label: "terminalAppearance.modeFollowHost" },
-  { value: "custom", label: "terminalAppearance.modeCustom" },
-];
-const BACKGROUND_SOURCES: Array<{ value: TerminalAppearanceSettings["backgroundSource"]; label: string }> = [
-  { value: "scheme", label: "terminalAppearance.backgroundScheme" },
-  { value: "host", label: "terminalAppearance.backgroundHost" },
-];
-
-/** 终端行为枚举 → i18n key。模板按 lib 的常量数组顺序迭代，渲染单选组。 */
-const RIGHT_CLICK_LABELS: Record<TerminalRightClickMode, string> = {
-  off: "terminalBehavior.rightClickOff",
-  menu: "terminalBehavior.rightClickMenu",
-  paste: "terminalBehavior.rightClickPaste",
-  clipboard: "terminalBehavior.rightClickClipboard",
-};
-const BELL_LABELS: Record<TerminalBellMode, string> = {
-  off: "terminalBehavior.bellOff",
-  visual: "terminalBehavior.bellVisual",
-  audible: "terminalBehavior.bellAudible",
-};
-const LINK_MODIFIER_LABELS: Record<TerminalLinkModifier, string> = {
-  none: "terminalBehavior.linkModifierNone",
-  ctrl: "terminalBehavior.linkModifierCtrl",
-  alt: "terminalBehavior.linkModifierAlt",
-  shift: "terminalBehavior.linkModifierShift",
-  meta: "terminalBehavior.linkModifierMeta",
-};
-
 // 行为设置只上抛增量：归一化、持久化与落地到 xterm 选项全在 App，
 // 保证「权威态唯一」——本组件不持有行为设置的副本，重开弹窗也不会出现回显漂移。
 function updateBehavior(patch: Partial<TerminalBehaviorSettings>) {
   emit("update-behavior", patch);
-}
-
-/** 数字输入框 → 行为字段：空串或非数值直接忽略，避免清空输入框把值打成 NaN。 */
-function updateScrollback(raw: string) {
-  const trimmed = raw.trim();
-  if (!trimmed) return;
-  const value = Number(trimmed);
-  if (!Number.isFinite(value)) return;
-  updateBehavior({ scrollbackLines: value });
-}
-
-/** #306 无折行列数：空串/非数值忽略，范围钳位交给 App 侧 sanitize。 */
-function updateNoWrapColumns(raw: string) {
-  const trimmed = raw.trim();
-  if (!trimmed) return;
-  const value = Number(trimmed);
-  if (!Number.isFinite(value)) return;
-  updateBehavior({ noWrapColumns: value });
 }
 
 /** 快捷键整表替换：编辑器内部管草稿，只把最终结果上抛给 App 持久化。 */
@@ -1179,34 +668,6 @@ function updateActionLinks(patch: { enabled?: boolean; matchers?: Partial<Action
 
 function updateGutter(patch: { showLineNumbers?: boolean; showTimestamps?: boolean; timestampFormat?: string }) {
   emit("update:gutter", patch);
-}
-
-/** 单个匹配器开关：reka Switch 回传 boolean | string，收紧为布尔再上抛。 */
-function updateMatcher(key: keyof ActionLinkMatcherToggles, value: unknown) {
-  updateActionLinks({ matchers: { [key]: value === true } });
-}
-
-/** 时间戳格式输入：空串回退默认格式（输入中途清空不落空格式）。 */
-function updateGutterFormat(raw: string) {
-  const trimmed = raw.trim();
-  updateGutter({ timestampFormat: trimmed || GUTTER_TIMESTAMP_DEFAULT_FORMAT });
-}
-
-/** 三类匹配器开关按常量数组迭代（模板不支持 as const 字面量迭代）。 */
-const ACTION_LINK_MATCHER_ROWS: Array<{ key: keyof ActionLinkMatcherToggles; label: string }> = [
-  { key: "ipv4", label: "actionLinks.ipv4" },
-  { key: "hostPort", label: "actionLinks.hostPort" },
-  { key: "archive", label: "actionLinks.archive" },
-];
-
-/** 文本输入框取原始串（同 numberFieldValue，避免在模板里写 as 断言）。 */
-function textFieldValue(event: Event): string {
-  return (event.target as HTMLInputElement).value;
-}
-
-/** reka Select 回传 AcceptableValue（含 null 与对象），这里只接受字符串形态。 */
-function updateLinkModifier(value: unknown) {
-  updateBehavior({ linkModifier: String(value) as TerminalLinkModifier });
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,25 +706,18 @@ async function syncAgentSettingsMirror() {
   }
 }
 
+// 传输分类面板把手：reload（开窗/刷新重读）与 save（主保存委托）。
+const transferPaneRef = ref<InstanceType<typeof SettingsTransferPane>>();
+// 终端分类面板把手：当前无父层委托需求，保留以便后续增量（保留 ref 以稳模板）。
+const terminalPaneRef = ref<InstanceType<typeof SettingsTerminalPane>>();
+
 async function reloadSettings() {
-  downloadDirDraft.value = props.downloadPrefs.loadDir();
-  downloadUseDefaultDraft.value = props.downloadPrefs.loadUseDefault();
-  downloadConflictDraft.value = props.downloadPrefs.loadConflict();
-  transferConcurrencyDraft.value = String(props.transferPrefs.loadConcurrency());
-  transferDuplicateDraft.value = props.transferPrefs.loadDuplicatePolicy();
-  transferMaxActiveDraft.value = String(props.transferPrefs.loadMaxActive());
-  transferDownloadLimitDraft.value = String(props.transferPrefs.loadDownloadLimit());
-  sftpCompatModeDraft.value = props.transferPrefs.loadCompatMode();
-  sftpNameEncodingDraft.value = props.transferPrefs.loadNameEncoding();
-  sftpDoubleClickDraft.value = props.transferPrefs.loadDoubleClickAction();
-  transferCompressModeDraft.value = props.transferPrefs.loadCompressMode();
-  transferCompressThresholdDraft.value = String(props.transferPrefs.loadCompressThreshold());
+  // 传输/编辑器草稿随 SettingsTransferPane 重读（首次开窗可能早于子组件
+  // 挂载，子组件自身 onMounted 也会 reload 一次）。
   suggestionsEnabledDraft.value = props.suggestionPrefs.loadEnabled();
   suggestionMinCharsDraft.value = String(props.suggestionPrefs.loadMinChars());
   suggestionMaxCharsDraft.value = String(props.suggestionPrefs.loadMaxChars());
-  editorConfigDraft.value = props.editorPrefs.loadConfig();
-  editorDefaultDraft.value = editorDefaultValue(editorConfigDraft.value);
-  void props.editorPrefs.reloadEditors().then((list) => { editorKnownEditors.value = list; });
+  void transferPaneRef.value?.reload();
   if (settingsLoading.value || settingsSaving.value) return;
   settingsLoading.value = true;
   settingsLoadFailed.value = false;
@@ -1276,8 +730,7 @@ async function reloadSettings() {
   void loadLocalKeys();
   void loadMcpSettings();
   void loadSudoProfiles();
-  void loadStartupCommands();
-  void loadConnNameEncoding();
+  // 启动命令/连接级编码/X11 等自治偏好随 SettingsTerminalPane 挂载自加载。
   try {
     // 本地终端没有 SSH 会话：跳过会话级设置拉取，只保留全局偏好面板——
     // 否则 required_string 直接报错，整条弹窗被「SSH 设置加载失败」横幅替换。
@@ -1309,13 +762,8 @@ async function reloadSettings() {
 // 本地终端默认 Shell（设置·终端）：下拉项来自 local/shells/list（弹窗打开时
 // 拉一次）；localShell 偏好的权威态在 App，这里经 set-local-shell 上抛。
 // reka Select 不接受空串 value，用哨兵表达「自动检测」。
-const LOCAL_SHELL_AUTO = "__auto__";
 const localShellOptions = ref<Array<{ program: string; name: string; isDefault: boolean; isUserShell: boolean; injectable?: boolean }>>([]);
 const localShellOptionsLoaded = ref(false);
-const localShellModelValue = computed(() => (props.localShell ? props.localShell : LOCAL_SHELL_AUTO));
-function resolveLocalShellValue(value: string): string {
-  return value === LOCAL_SHELL_AUTO ? "" : value;
-}
 async function ensureLocalShellOptions() {
   if (localShellOptionsLoaded.value) return;
   localShellOptionsLoaded.value = true;
@@ -1348,8 +796,6 @@ watch(() => props.terminalFontSize, (size) => {
 // 弹窗开着时活跃会话切到另一连接：启动命令区按新 connectionId 重新回显。
 watch(() => props.connectionId, () => {
   if (props.open) {
-    void loadStartupCommands();
-    void loadConnNameEncoding();
   }
 });
 
@@ -1602,27 +1048,11 @@ async function saveSettings() {
   if (!isLocalSession.value && !settingsMeta.value) return;
   settingsSaving.value = true;
   try {
-    props.downloadPrefs.persistDir(downloadDirDraft.value);
-    props.downloadPrefs.persistUseDefault(downloadUseDefaultDraft.value);
-    props.downloadPrefs.persistConflict(downloadConflictDraft.value);
-    props.transferPrefs.persistConcurrency(Number.parseInt(transferConcurrencyDraft.value, 10) || 3);
-    props.transferPrefs.persistDuplicatePolicy(transferDuplicateDraft.value);
-    props.transferPrefs.persistMaxActive(Number.parseInt(transferMaxActiveDraft.value, 10) || 3);
-    props.transferPrefs.persistDownloadLimit(Math.max(0, Number.parseInt(transferDownloadLimitDraft.value, 10) || 0));
-    props.transferPrefs.persistCompatMode(sftpCompatModeDraft.value);
-    props.transferPrefs.persistNameEncoding(sftpNameEncodingDraft.value);
-    props.transferPrefs.persistDoubleClickAction(sftpDoubleClickDraft.value);
-    props.transferPrefs.persistCompressMode(transferCompressModeDraft.value);
-    props.transferPrefs.persistCompressThreshold(Math.min(65536, Math.max(0, Number.parseInt(transferCompressThresholdDraft.value, 10) || 0)));
+    // 传输/编辑器草稿写穿随 SettingsTransferPane（数值裁剪与缺省回退在子组件）。
+    transferPaneRef.value?.save();
     props.suggestionPrefs.persistEnabled(suggestionsEnabledDraft.value);
     props.suggestionPrefs.persistMinChars(Number.parseInt(suggestionMinCharsDraft.value, 10) || 1);
     props.suggestionPrefs.persistMaxChars(Number.parseInt(suggestionMaxCharsDraft.value, 10) || 64);
-    props.editorPrefs.persistConfig({
-      ...editorConfigDraft.value,
-      defaultEditorId: editorDefaultDraft.value.startsWith("known:") ? editorDefaultDraft.value.slice("known:".length) : undefined,
-      defaultCustomId: editorDefaultDraft.value.startsWith("custom:") ? editorDefaultDraft.value.slice("custom:".length) : undefined,
-      // editorDefaultDraft === "system"（或意外值）时不落默认编辑器字段。
-    });
     if (profileEditing.value) await saveProfileDraft();
     // 会话级段：本地 Shell 工作台整段跳过（分类已隐藏，无表单可改）。
     if (!isLocalSession.value) {
@@ -1694,13 +1124,14 @@ function consumeInlineEsc(): boolean {
 
 
 /// 下载询问弹窗勾选「设为默认」/目录选择器回填后，App 同步设置页草稿
-/// （弹窗开着也能立即看到）。
+/// （弹窗开着也能立即看到）。草稿随 transfer 分类面板在子组件，这里委托；
+/// 弹窗未挂载时为 no-op（下次开窗 reload 自会重读权威态）。
 function setDownloadDirDraft(dir: string) {
-  downloadDirDraft.value = dir;
+  transferPaneRef.value?.setDownloadDirDraft(dir);
 }
 
 function setDownloadUseDefaultDraft(value: boolean) {
-  downloadUseDefaultDraft.value = value;
+  transferPaneRef.value?.setDownloadUseDefaultDraft(value);
 }
 
 function shortFingerprint(fingerprint: string) {
@@ -1725,134 +1156,57 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
           <template v-else>
           <div class="settings-layout">
             <nav class="settings-nav" aria-label="settings categories">
+              <label class="settings-nav-search">
+                <input
+                  v-model="settingsQuery"
+                  type="search"
+                  class="settings-nav-search-input"
+                  data-test="settings-nav-search"
+                  :placeholder="t('settingsNav.searchPlaceholder')"
+                  :aria-label="t('settingsNav.searchPlaceholder')"
+                  spellcheck="false"
+                />
+                <button
+                  v-if="settingsQuery"
+                  type="button"
+                  class="settings-nav-search-clear"
+                  data-test="settings-nav-search-clear"
+                  :title="t('settingsNav.searchClear')"
+                  :aria-label="t('settingsNav.searchClear')"
+                  @click="settingsQuery = ''"
+                >×</button>
+              </label>
               <Tabs :model-value="settingsCategory" orientation="vertical" class="settings-nav-tabs" @update:model-value="onSettingsCategoryChange">
                 <TabsList class="settings-nav-list">
-                  <TabsTrigger v-for="cat in visibleSettingsCategories" :key="cat.id" :value="cat.id" class="settings-nav-item">{{ t(cat.labelKey) }}</TabsTrigger>
+                  <TabsTrigger v-for="cat in filteredSettingsCategories" :key="cat.id" :value="cat.id" class="settings-nav-item">{{ t(cat.labelKey) }}</TabsTrigger>
                 </TabsList>
               </Tabs>
+              <p v-if="!filteredSettingsCategories.length" class="muted settings-nav-empty" data-test="settings-nav-no-match">{{ t("settingsNav.searchNoMatch") }}</p>
             </nav>
             <div class="settings-content">
             <!-- 配色方案（对标 Tabby「Color scheme」页，从原「外观」里拆出）：主题
                  快照、实时预览、深浅两槽配色方案、终端背景来源、自定义方案导入。 -->
             <div v-show="settingsCategory === 'scheme'" class="settings-pane">
-            <h3 class="settings-section-title">{{ t("terminalAppearance.themeSection") }}</h3>
-            <p class="muted settings-note">{{ t("terminalAppearance.themeHint") }}</p>
-            <div class="theme-chips">
-              <button
-                v-for="theme in appearanceProfiles"
-                :key="theme.id"
-                type="button"
-                class="theme-chip"
-                :class="{ active: theme.id === activeThemeId }"
-                :aria-pressed="theme.id === activeThemeId"
-                @click="applyTheme(theme)"
-              >
-                <Check v-if="theme.id === activeThemeId" class="theme-chip-icon" aria-hidden="true" />
-                <span class="theme-chip-label">{{ t(theme.name) }}</span>
-                <span
-                  v-if="!theme.builtin"
-                  class="theme-chip-delete"
-                  role="button"
-                  tabindex="0"
-                  :title="t('terminalAppearance.deleteTheme')"
-                  :aria-label="t('terminalAppearance.deleteTheme')"
-                  @click.stop="deleteTheme(theme)"
-                  @keydown.enter.stop="deleteTheme(theme)"
-                ><Trash2 /></span>
-              </button>
-              <span v-if="!activeThemeId" class="theme-chip theme-chip--dirty">{{ t("terminalAppearance.themeCustom") }}</span>
-            </div>
-            <div class="theme-save-row">
-              <input v-model="themeNameDraft" spellcheck="false" :placeholder="t('terminalAppearance.themeNamePlaceholder')" />
-              <button type="button" :disabled="!themeNameDraft.trim()" @click="saveCurrentTheme">{{ t("terminalAppearance.saveTheme") }}</button>
-              <button type="button" @click="resetAppearance"><RotateCcw />{{ t("terminalAppearance.reset") }}</button>
-            </div>
-
-            <h3 class="settings-section-title">{{ t("terminalAppearance.previewTitle") }}</h3>
-            <TerminalAppearancePreview
-              :theme="previewTheme"
-              :font-family="previewFontFamily"
-              :font-size="terminalFontSize"
-              :font-weight="previewOptions.fontWeight"
-              :font-weight-bold="previewOptions.fontWeightBold"
-              :line-height="previewOptions.lineHeight"
-              :letter-spacing="previewOptions.letterSpacing"
-              :cursor-style="previewOptions.cursorStyle"
-              :cursor-blink="previewOptions.cursorBlink"
-              :contrast-ratio="previewContrast"
-              :t="t"
-            />
-
-            <h3 class="settings-section-title">{{ t("terminalAppearance.schemeSection") }}</h3>
-            <p class="muted settings-note">{{ t("terminalAppearance.schemeHint") }}</p>
-            <label v-for="option in SCHEME_SOURCES" :key="option.value" class="settings-field settings-radio-row">
-              <input
-                type="radio"
-                name="terminal-scheme-source"
-                :value="option.value"
-                :checked="appearanceSettings.schemeSource === option.value"
-                @change="updateAppearance({ schemeSource: option.value })"
+              <SettingsSchemePane
+                :t="t"
+                :appearance="appearance"
+                :custom-themes="customThemes"
+                :active-theme-id="activeThemeId"
+                :host-theme="hostTheme"
+                :host-color-scheme="hostColorScheme"
+                :host-font-family="hostFontFamily"
+                :terminal-font-size="terminalFontSize"
+                :preview-theme="previewTheme"
+                :preview-options="previewOptions"
+                :preview-font-family="previewFontFamily"
+                :preview-contrast="previewContrast"
+                @update-appearance="(patch) => emit('update-appearance', patch)"
+                @apply-theme="onSchemeApplyTheme"
+                @save-theme="(name) => emit('save-theme', name)"
+                @delete-theme="(id) => emit('delete-theme', id)"
+                @remove-scheme="(id) => emit('remove-scheme', id)"
+                @add-schemes="(schemes) => emit('add-schemes', schemes)"
               />
-              <span>{{ t(option.label) }}</span>
-            </label>
-            <TerminalSchemePicker
-              v-if="appearanceSettings.schemeSource === 'custom'"
-              :dark-scheme-id="appearanceSettings.darkSchemeId"
-              :light-scheme-id="appearanceSettings.lightSchemeId"
-              :custom-schemes="appearance.customSchemes"
-              :schemes="allSchemes"
-              :host-follow-label="t('terminalAppearance.modeFollowHost')"
-              :t="t"
-              @pick="(payload) => updateAppearance(payload.slot === 'dark' ? { darkSchemeId: payload.id } : { lightSchemeId: payload.id })"
-            />
-            <template v-if="appearanceSettings.schemeSource === 'custom'">
-              <h4 class="settings-section-title">{{ t("terminalAppearance.backgroundSection") }}</h4>
-              <label v-for="option in BACKGROUND_SOURCES" :key="option.value" class="settings-field settings-radio-row">
-                <input
-                  type="radio"
-                  name="terminal-background-source"
-                  :value="option.value"
-                  :checked="appearanceSettings.backgroundSource === option.value"
-                  @change="updateAppearance({ backgroundSource: option.value })"
-                />
-                <span>{{ t(option.label) }}</span>
-              </label>
-              <p class="muted settings-note">{{ t("terminalAppearance.backgroundHint") }}</p>
-            </template>
-
-            <h4 class="settings-section-title">{{ t("terminalAppearance.importSection") }}</h4>
-            <p class="muted settings-note">
-              {{ t("terminalAppearance.importHint") }}
-              <button class="link-button" type="button" :aria-expanded="importOpen" @click="importOpen = !importOpen">{{ t("terminalAppearance.importAction") }}</button>
-            </p>
-            <template v-if="importOpen">
-              <label class="settings-field">
-                <span>{{ t("terminalAppearance.importSection") }}</span>
-                <textarea v-model="importText" rows="4" class="mono" spellcheck="false" :placeholder="t('terminalAppearance.importPlaceholder')" />
-              </label>
-              <div class="appearance-actions">
-                <button type="button" :disabled="!importText.trim()" @click="submitImport"><Upload />{{ t("terminalAppearance.importAction") }}</button>
-                <button type="button" @click="pickSchemeFile"><FolderOpen />{{ t("downloadSettings.browse") }}</button>
-                <input
-                  ref="schemeFileInput"
-                  type="file"
-                  class="hidden-file-input"
-                  accept=".itermcolors,.json,.xresources,.yaml,.yml,.conf,.txt"
-                  @change="onSchemeFile"
-                />
-              </div>
-              <p v-if="importError" class="task-error" role="alert">{{ importError }}</p>
-            </template>
-            <ul v-if="appearance.customSchemes.length" class="settings-list">
-              <li v-for="scheme in appearance.customSchemes" :key="scheme.id">
-                <div class="settings-list-main">
-                  <strong>{{ scheme.name }}</strong>
-                  <span class="scheme-mini-swatch" aria-hidden="true"><i v-for="(color, index) in scheme.colors.slice(0, 16)" :key="index" :style="{ background: color }" /></span>
-                </div>
-                <button class="icon-button" :title="t('terminalAppearance.importRemove')" :aria-label="t('terminalAppearance.importRemove')" @click="removeCustomScheme(scheme)"><Trash2 /></button>
-              </li>
-            </ul>
-            <p class="muted">{{ t("profilesLimit", { count: appearance.customSchemes.length, limit: CUSTOM_SCHEME_LIMIT }) }}</p>
             </div>
 
             <!-- 外观（对标 Tabby「Appearance」页）：字体与字号、字重/行高/字间距/内边距、
@@ -2146,408 +1500,46 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </div>
 
             <div v-show="settingsCategory === 'transfer'" class="settings-pane">
-            <h3 class="settings-section-title">{{ t("downloadSettings.title") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("downloadSettings.directory") }}</span>
-              <span class="settings-dir-row">
-                <input v-model="downloadDirDraft" class="mono" spellcheck="false" :placeholder="localDownloadDir || t('downloadSettings.default')" />
-                <button v-if="localCanSave" type="button" class="browse-button" :title="t('downloadSettings.browse')" :aria-label="t('downloadSettings.browse')" @click="emit('browse-download-dir')"><FolderOpen /></button>
-              </span>
-            </label>
-            <label class="settings-field settings-switch-row">
-              <Switch v-model="downloadUseDefaultDraft" size="sm" />
-              <span>{{ t("downloadSettings.useDefaultDir") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("downloadSettings.useDefaultDirHint") }}</p>
-            <h3 class="settings-section-title">{{ t("downloadSettings.conflictTitle") }}</h3>
-            <label v-for="policy in DOWNLOAD_CONFLICT_POLICIES" :key="policy" class="settings-field settings-radio-row">
-              <input v-model="downloadConflictDraft" type="radio" name="download-conflict-policy" :value="policy" />
-              <span>{{ t(`downloadSettings.conflict.${policy}`) }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("downloadSettings.conflictHint") }}</p>
-            <p class="muted settings-note">{{ t("downloadSettings.hint") }}</p>
-            <!-- 上传设置（issue #337 第 2 条）：上传相关项独立成组，不再混在
-                 「下载设置」标题下；上传并发 + 远端同名策略搬出编辑器组之后。 -->
-            <h3 class="settings-section-title">{{ t("uploadSettings.title") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.concurrency") }}</span>
-              <input v-model="transferConcurrencyDraft" type="number" min="1" max="10" step="1" @change="transferConcurrencyDraft = String(Math.min(10, Math.max(1, Number.parseInt(transferConcurrencyDraft, 10) || 3)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.concurrencyHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.duplicatePolicy") }}</span>
-              <Select :model-value="transferDuplicateDraft" @update:model-value="(v) => (transferDuplicateDraft = String(v) as TransferDuplicatePolicy)">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="policy in TRANSFER_DUPLICATE_POLICIES" :key="policy" :value="policy">{{ t(`transferCfg.policy.${policy}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.duplicatePolicyHint") }}</p>
-            <h3 class="settings-section-title">{{ t("fileBrowse.title") }}</h3>
-            <label v-for="action in SFTP_DOUBLE_CLICK_ACTIONS" :key="action" class="settings-field settings-radio-row">
-              <input v-model="sftpDoubleClickDraft" type="radio" name="sftp-double-click-action" :value="action" />
-              <span>{{ t(`fileBrowse.doubleClick.${action}`) }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("fileBrowse.doubleClickHint") }}</p>
-            <h3 class="settings-section-title">{{ t("sftpEdit.settingsSection") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("sftpEdit.defaultEditorTitle") }}</span>
-              <Select :model-value="editorDefaultDraft" @update:model-value="(v) => (editorDefaultDraft = String(v))">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="system">{{ t("sftpEdit.defaultEditorSystem") }}</SelectItem>
-                  <SelectItem v-for="option in editorTargetOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("sftpEdit.defaultEditorHint") }}</p>
-            <span class="settings-field"><span>{{ t("sftpEdit.uploadPolicyTitle") }}</span></span>
-            <label class="settings-field settings-radio-row">
-              <input v-model="editorConfigDraft.uploadPolicy" type="radio" name="editor-upload-policy" value="auto" />
-              <span>{{ t("sftpEdit.uploadPolicy.auto") }}</span>
-            </label>
-            <label class="settings-field settings-radio-row">
-              <input v-model="editorConfigDraft.uploadPolicy" type="radio" name="editor-upload-policy" value="ask" />
-              <span>{{ t("sftpEdit.uploadPolicy.ask") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("sftpEdit.uploadPolicyHint") }}</p>
-            <h3 class="settings-section-title">{{ t("sftpEdit.associationsTitle") }}</h3>
-            <p v-if="!editorConfigDraft.associations.length" class="muted settings-note">{{ t("sftpEdit.noAssociations") }}</p>
-            <div v-for="(assoc, index) in editorConfigDraft.associations" :key="`${assoc.pattern}-${index}`" class="flex items-center gap-2 py-0.5">
-              <span class="mono">{{ assoc.pattern }}</span>
-              <span class="muted truncate">→ {{ editorTargetName(associationTargetValue(assoc)) }}</span>
-              <button type="button" class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="removeEditorAssociation(index)"><Trash2 /></button>
-            </div>
-            <div class="settings-dir-row">
-              <input v-model="editorAssociationPatternDraft" class="mono" spellcheck="false" :placeholder="t('sftpEdit.associationPatternPlaceholder')" />
-              <Select :model-value="editorAssociationTargetDraft" @update:model-value="(v) => (editorAssociationTargetDraft = String(v))">
-                <SelectTrigger size="xs"><SelectValue :placeholder="t('sftpEdit.associationTargetPlaceholder')" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="option in editorTargetOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <button type="button" :disabled="!editorAssociationPatternDraft.trim() || !editorAssociationTargetDraft" @click="addEditorAssociation"><Plus />{{ t("sftpEdit.addAssociation") }}</button>
-            <p class="muted settings-note">{{ t("sftpEdit.associationsHint") }}</p>
-            <h3 class="settings-section-title">{{ t("sftpEdit.customEditorsTitle") }}</h3>
-            <p v-if="!editorConfigDraft.customEditors.length" class="muted settings-note">{{ t("sftpEdit.noCustomEditors") }}</p>
-            <div v-for="editor in editorConfigDraft.customEditors" :key="editor.id" class="flex items-center gap-2 py-0.5">
-              <span class="shrink-0">{{ editor.name }}</span>
-              <span class="muted mono truncate">{{ editor.command }}</span>
-              <button type="button" class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="removeCustomEditor(editor.id)"><Trash2 /></button>
-            </div>
-            <h3 class="settings-section-title">{{ t("transferCfg.pipelineTitle") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.maxActive") }}</span>
-              <input v-model="transferMaxActiveDraft" type="number" min="1" max="8" step="1" @change="transferMaxActiveDraft = String(Math.min(8, Math.max(1, Number.parseInt(transferMaxActiveDraft, 10) || 3)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.maxActiveHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.downloadLimit") }}</span>
-              <input v-model="transferDownloadLimitDraft" type="number" min="0" max="1048576" step="64" @change="transferDownloadLimitDraft = String(Math.min(1048576, Math.max(0, Number.parseInt(transferDownloadLimitDraft, 10) || 0)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.downloadLimitHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch v-model="sftpCompatModeDraft" size="sm" />
-              <span>{{ t("transferCfg.compatMode") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.compatModeHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.nameEncoding") }}</span>
-              <Select :model-value="sftpNameEncodingDraft" @update:model-value="(v) => (sftpNameEncodingDraft = String(v) as SftpNameEncoding)">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="encoding in SFTP_NAME_ENCODINGS" :key="encoding" :value="encoding">{{ t(`transferCfg.encoding.${encoding}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.nameEncodingHint") }}</p>
-            <h3 class="settings-section-title">{{ t("transferCfg.compressTitle") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.compressMode") }}</span>
-              <Select :model-value="transferCompressModeDraft" @update:model-value="(v) => (transferCompressModeDraft = String(v))">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="mode in TRANSFER_COMPRESS_MODES" :key="mode" :value="mode">{{ t(`transferCfg.compressMode.${mode}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.compressModeHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.compressThreshold") }}</span>
-              <input v-model="transferCompressThresholdDraft" type="number" min="0" max="65536" step="16" :disabled="transferCompressModeDraft === 'off'" @change="transferCompressThresholdDraft = String(Math.min(65536, Math.max(0, Number.parseInt(transferCompressThresholdDraft, 10) || 0)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.compressThresholdHint") }}</p>
+              <SettingsTransferPane
+                ref="transferPaneRef"
+                :t="t"
+                :download-prefs="downloadPrefs"
+                :transfer-prefs="transferPrefs"
+                :editor-prefs="editorPrefs"
+                :local-can-save="localCanSave"
+                :local-download-dir="localDownloadDir"
+                @browse-download-dir="emit('browse-download-dir')"
+              />
             </div>
 
             <!-- 终端（对标 Tabby「Terminal」页）：渲染 / 键盘 / 鼠标 / 剪贴板 / 声音五组。
                  只上抛增量，归一化与落地在 App；每项默认值都复现改动前的行为。 -->
             <div v-show="settingsCategory === 'terminal'" class="settings-pane">
-            <!-- 分栏布局方向（issue #187）：终端与 SFTP 的排布三选；auto 沿用
-                 窄屏断点，强制上下/左右不受视口影响。 -->
-            <h3 class="settings-section-title">{{ t("workbenchLayout.sectionTitle") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("workbenchLayout.direction") }}</span>
-              <Select :model-value="paneDirection" @update:model-value="(v) => emit('update:paneDirection', String(v) as PaneDirectionPref)">
-                <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="auto">{{ t("workbenchLayout.directionAuto") }}</SelectItem>
-                  <SelectItem value="vertical">{{ t("workbenchLayout.directionVertical") }}</SelectItem>
-                  <SelectItem value="horizontal">{{ t("workbenchLayout.directionHorizontal") }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <!-- 工具栏按钮可配置隐藏（issue #309）：逐按钮开关，默认全显示；
-                 隐藏只收敛主工作台工具条视觉密度，核心入口不进清单。 -->
-            <h3 class="settings-section-title">{{ t("toolbarButtons.sectionTitle") }}</h3>
-            <p class="muted settings-note">{{ t("toolbarButtons.hint") }}</p>
-            <label v-for="button in TOOLBAR_BUTTONS" :key="button.id" class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="toolbarVisibility[button.id] !== false" @update:model-value="(value) => emit('update-toolbar-visibility', button.id, value === true)" />
-              <span>{{ t(button.labelKey) }}</span>
-            </label>
-            <h3 class="settings-section-title">{{ t("terminalBehavior.renderingSection") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="webglEnabled" @update:model-value="(value) => emit('update:webgl', value === true)" />
-              <span>{{ t("webglLabel") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("webglHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("terminalBehavior.scrollbackLines") }}</span>
-              <input type="number" :min="SCROLLBACK_MIN" :max="SCROLLBACK_MAX" step="100" :value="terminalBehavior.scrollbackLines" @change="updateScrollback(numberFieldValue($event))" />
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.scrollbackHint") }}</p>
-            <!-- #306 无折行模式：宽 PTY + 横向滚动；vim/htop 等备用屏自动回退可视宽度。 -->
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.noWrap" @update:model-value="(value) => updateBehavior({ noWrap: value === true })" />
-              <span>{{ t("terminalBehavior.noWrap") }}</span>
-            </label>
-            <label class="settings-field" v-if="terminalBehavior.noWrap">
-              <span>{{ t("terminalBehavior.noWrapColumns") }}</span>
-              <input type="number" :min="NOWRAP_COLUMNS_MIN" :max="NOWRAP_COLUMNS_MAX" step="50" :value="terminalBehavior.noWrapColumns" @change="updateNoWrapColumns(numberFieldValue($event))" />
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.noWrapHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.localShellSection") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("terminalBehavior.localShell") }}</span>
-              <Select :model-value="localShellModelValue" @update:model-value="(value) => emit('set-local-shell', resolveLocalShellValue(String(value)))">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__auto__">{{ t("terminalBehavior.localShellAuto") }}</SelectItem>
-                  <SelectItem v-for="shell in localShellOptions" :key="shell.program" :value="shell.program" :title="shell.program">{{ shell.name === shell.program ? shell.name : `${shell.name} · ${shell.program}` }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.localShellHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.keyboardSection") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.altIsMeta" @update:model-value="(v) => updateBehavior({ altIsMeta: v === true })" />
-              <span>{{ t("terminalBehavior.altIsMeta") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.altIsMetaHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.altWordEditing" @update:model-value="(v) => updateBehavior({ altWordEditing: v === true })" />
-              <span>{{ t("terminalBehavior.altWordEditing") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.altWordEditingHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.scrollOnInput" @update:model-value="(v) => updateBehavior({ scrollOnInput: v === true })" />
-              <span>{{ t("terminalBehavior.scrollOnInput") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.scrollOnInputHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.mouseSection") }}</h3>
-            <h4 class="settings-section-title">{{ t("terminalBehavior.rightClick") }}</h4>
-            <label v-for="mode in RIGHT_CLICK_MODES" :key="mode" class="settings-field settings-radio-row">
-              <input type="radio" name="terminal-right-click" :value="mode" :checked="terminalBehavior.rightClick === mode" @change="updateBehavior({ rightClick: mode })" />
-              <span>{{ t(RIGHT_CLICK_LABELS[mode]) }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.rightClickHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.pasteOnMiddleClick" @update:model-value="(v) => updateBehavior({ pasteOnMiddleClick: v === true })" />
-              <span>{{ t("terminalBehavior.pasteOnMiddleClick") }}</span>
-            </label>
-            <label class="settings-field">
-              <span>{{ t("terminalBehavior.wordSeparator") }}</span>
-              <input class="mono" spellcheck="false" :maxlength="WORD_SEPARATOR_MAX_LENGTH" :value="terminalBehavior.wordSeparator" @change="updateBehavior({ wordSeparator: textFieldValue($event) })" />
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.wordSeparatorHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("terminalBehavior.linkModifier") }}</span>
-              <Select :model-value="terminalBehavior.linkModifier" @update:model-value="updateLinkModifier">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="modifier in LINK_MODIFIERS" :key="modifier" :value="modifier">{{ t(LINK_MODIFIER_LABELS[modifier]) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.linkModifierHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.clipboardSection") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.copyOnSelect" @update:model-value="(v) => updateBehavior({ copyOnSelect: v === true })" />
-              <span>{{ t("terminalSelectCopy.label") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalSelectCopy.hint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.bracketedPaste" @update:model-value="(v) => updateBehavior({ bracketedPaste: v === true })" />
-              <span>{{ t("terminalBehavior.bracketedPaste") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.bracketedPasteHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.warnOnMultilinePaste" @update:model-value="(v) => updateBehavior({ warnOnMultilinePaste: v === true })" />
-              <span>{{ t("terminalBehavior.warnOnMultilinePaste") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.warnOnMultilinePasteHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.replaceNewlinesWithSpaces" @update:model-value="(v) => updateBehavior({ replaceNewlinesWithSpaces: v === true })" />
-              <span>{{ t("terminalBehavior.replaceNewlines") }}</span>
-            </label>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.trimWhitespaceOnPaste" @update:model-value="(v) => updateBehavior({ trimWhitespaceOnPaste: v === true })" />
-              <span>{{ t("terminalBehavior.trimWhitespace") }}</span>
-            </label>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.soundSection") }}</h3>
-            <h4 class="settings-section-title">{{ t("terminalBehavior.bell") }}</h4>
-            <label v-for="mode in BELL_MODES" :key="mode" class="settings-field settings-radio-row">
-              <input type="radio" name="terminal-bell" :value="mode" :checked="terminalBehavior.bell === mode" @change="updateBehavior({ bell: mode })" />
-              <span>{{ t(BELL_LABELS[mode]) }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.bellHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("actionLinks.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="actionLinks.enabled" @update:model-value="(v) => updateActionLinks({ enabled: v === true })" />
-              <span>{{ t("actionLinks.enabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("actionLinks.enabledHint") }}</p>
-            <template v-if="actionLinks.enabled">
-              <label v-for="matcher in ACTION_LINK_MATCHER_ROWS" :key="matcher.key" class="settings-field settings-switch-row">
-                <Switch size="sm" :model-value="actionLinks.matchers[matcher.key]" @update:model-value="(v) => updateMatcher(matcher.key, v)" />
-                <span>{{ t(matcher.label) }}</span>
-              </label>
-            </template>
-
-            <h3 class="settings-section-title">{{ t("gutter.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="gutter.showLineNumbers" @update:model-value="(v) => updateGutter({ showLineNumbers: v === true })" />
-              <span>{{ t("gutter.showLineNumbers") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("gutter.showLineNumbersHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="gutter.showTimestamps" @update:model-value="(v) => updateGutter({ showTimestamps: v === true })" />
-              <span>{{ t("gutter.showTimestamps") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("gutter.showTimestampsHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("gutter.timestampFormat") }}</span>
-              <input class="mono" spellcheck="false" :maxlength="64" :placeholder="GUTTER_TIMESTAMP_DEFAULT_FORMAT" :value="gutter.timestampFormat" @change="updateGutterFormat(textFieldValue($event))" />
-            </label>
-            <p class="muted settings-note">{{ t("gutter.timestampFormatHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("ctxSearch.sectionTitle") }}</h3>
-            <p class="muted settings-note">{{ t("ctxSearch.hint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("ctxSearch.enginesLabel") }}</span>
-              <textarea class="mono" rows="4" spellcheck="false" :value="ctxSearchEngines" @change="emit('update:ctxSearchEngines', ($event.target as HTMLTextAreaElement).value)"></textarea>
-            </label>
-
-            <p class="muted settings-note">{{ t("terminalBehavior.scopeNote") }}</p>
-            <p class="muted settings-note">{{ t("terminalFont.movedHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("x11.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="x11Enabled" size="sm" @update:model-value="setX11Enabled(Boolean($event))" />
-              <span>{{ t("x11.enabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("x11.enabledHint") }}</p>
-            <p v-if="x11ReadOnlyNote" class="muted settings-note">{{ t("x11.readOnlyNote") }}</p>
-
-            <h3 class="settings-section-title">{{ t("rdp.experimentalSection") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="rdpExperimentalEnabled" size="sm" @update:model-value="setRdpExperimentalEnabled(Boolean($event))" />
-              <span>{{ t("rdp.experimentalEnabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("rdp.experimentalHint") }}</p>
-
-            <!-- 会话自动录制（M14）：新会话自动挂录制器，标 iShell 录制增强。 -->
-            <h3 class="settings-section-title">{{ t("autoRecord.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="autoRecordEnabled" size="sm" @update:model-value="setAutoRecordEnabled(Boolean($event))" />
-              <span>{{ t("autoRecord.enabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("autoRecord.enabledHint") }}</p>
-
-            <!-- 启动命令（对标 Tabby「Login scripts」）：连接建立进入 shell 后按序
-                 自动键入；仅 SSH 交互 shell 会话生效（RemoteCommand exec 会话跳过）。 -->
-            <template v-if="connectionId">
-            <h3 class="settings-section-title">{{ t("startupCommands.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="startupEnabled" size="sm" @update:model-value="setStartupEnabled(Boolean($event))" />
-              <span>{{ t("startupCommands.enabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("startupCommands.enabledHint") }}</p>
-            <template v-if="startupEnabled">
-              <p v-if="!startupCommands.length" class="muted settings-note">{{ t("startupCommands.empty") }}</p>
-              <ul v-else class="settings-list startup-commands-list">
-                <li v-for="(entry, index) in startupCommands" :key="index">
-                  <input
-                    type="checkbox"
-                    :checked="entry.enabled"
-                    :aria-label="t('startupCommands.rowEnabled')"
-                    :title="t('startupCommands.rowEnabled')"
-                    @change="updateStartupEntry(index, { enabled: ($event.target as HTMLInputElement).checked })"
-                  />
-                  <input
-                    class="mono startup-command-text"
-                    spellcheck="false"
-                    :value="entry.command"
-                    :placeholder="t('startupCommands.commandPlaceholder')"
-                    :aria-label="t('startupCommands.commandPlaceholder')"
-                    @change="updateStartupEntry(index, { command: textFieldValue($event) })"
-                  />
-                  <input
-                    class="mono startup-command-delay"
-                    type="number"
-                    min="0"
-                    :max="STARTUP_DELAY_MAX_MS"
-                    step="50"
-                    :value="entry.delayMs"
-                    :aria-label="t('startupCommands.delay')"
-                    :title="t('startupCommands.delay')"
-                    @change="updateStartupEntry(index, { delayMs: clampStartupDelayInput(($event.target as HTMLInputElement).value) })"
-                  />
-                  <span class="settings-list-actions">
-                    <button class="icon-button" :disabled="index === 0" :title="t('startupCommands.moveUp')" :aria-label="t('startupCommands.moveUp')" @click="moveStartupEntry(index, -1)"><ArrowUp /></button>
-                    <button class="icon-button" :disabled="index === startupCommands.length - 1" :title="t('startupCommands.moveDown')" :aria-label="t('startupCommands.moveDown')" @click="moveStartupEntry(index, 1)"><ArrowDown /></button>
-                    <button class="icon-button" :title="t('startupCommands.remove')" :aria-label="t('startupCommands.remove')" @click="removeStartupEntry(index)"><Trash2 /></button>
-                  </span>
-                </li>
-              </ul>
-              <button v-if="startupCommands.length < STARTUP_COMMAND_MAX" class="link-button" type="button" @click="addStartupEntry"><Plus />{{ t("startupCommands.add") }}</button>
-              <p class="muted settings-note">{{ t("startupCommands.scopeNote") }}</p>
-            </template>
-
-            <!-- 连接级 SFTP 文件名编码（M16）：覆盖全局 `sftp_name_encoding`；
-                 缺省「跟随全局」（不落盘），白名单 auto/latin-1 与全局一致。 -->
-            <h3 class="settings-section-title">{{ t("connNameEncoding.sectionTitle") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("connNameEncoding.label") }}</span>
-              <Select :model-value="connNameEncodingChoice" @update:model-value="setConnNameEncoding(String($event) as ConnectionNameEncodingChoice)">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="follow">{{ t("connNameEncoding.follow") }}</SelectItem>
-                  <SelectItem value="auto">{{ t("transferCfg.encoding.auto") }}</SelectItem>
-                  <SelectItem value="latin-1">{{ t("transferCfg.encoding.latin-1") }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("connNameEncoding.hint") }}</p>
-            </template>
+              <SettingsTerminalPane
+                ref="terminalPaneRef"
+                :t="t"
+                :connection-id="connectionId"
+                :terminal-behavior="terminalBehavior"
+                :pane-direction="paneDirection"
+                :toolbar-visibility="toolbarVisibility"
+                :webgl-enabled="webglEnabled"
+                :local-shell="localShell"
+                :local-shell-options="localShellOptions"
+                :action-links="actionLinks"
+                :gutter="gutter"
+                :ctx-search-engines="ctxSearchEngines"
+                :update-behavior="updateBehavior"
+                :update-action-links="updateActionLinks"
+                :update-gutter="updateGutter"
+                :set-pane-direction="(value) => emit('update:paneDirection', value)"
+                :set-toolbar-visibility="(id, visible) => emit('update-toolbar-visibility', id, visible)"
+                :set-webgl="(value) => emit('update:webgl', value)"
+                :set-local-shell="(program) => emit('set-local-shell', program)"
+                :set-ctx-search-engines="(value) => emit('update:ctxSearchEngines', value)"
+                @error="(cause) => emit('error', cause)"
+              />
             </div>
+
             <!-- 命令建议独立分栏：从 Terminal 分栏拆出（#138 反馈——建议/补全/ghost
                  配置挤在终端页难找）。历史建议 + 结构化补全 + 行内 ghost 三组
                  配置与忽略列表、接受键换绑在此集中管理。 -->

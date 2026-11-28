@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from "vitest";
-import { useMonitorPanel, type MonitorApi } from "./useMonitorPanel";
+import { useMonitorPanel } from "./useMonitorPanel";
+import type { MonitorApi } from "../lib/monitorProtocol";
 
 // 编排核心的单测（计划 §4-B4）：假 api + 手动 tick 定时器，场景全覆盖。
 // 假 api 形状对齐 window.dbxPlugin 的 MonitorApi 子集；storage 用内存 Map 模拟

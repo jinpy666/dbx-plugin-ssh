@@ -6,8 +6,11 @@
 // （不经 App.vue：自带 sequenced-input 队列走 ssh/terminal/in/<sessionId>，不回车）。
 // 纯逻辑（协议解析 / 倒计时 / 草稿映射）在 lib/otpPanel.ts。
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { Check, Copy, Eye, EyeOff, Link2, Loader2, Pencil, Plus, QrCode, RefreshCw, Send, Trash2, Unlink, X } from "@lucide/vue";
+import { Check, Copy, Link2, Loader2, Pencil, Plus, QrCode, RefreshCw, Send, Trash2, Unlink, X } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
+import OtpEditorDialog from "./OtpEditorDialog.vue";
+import { useOtpCodes } from "../composables/useOtpCodes";
+import { useOtpBindings } from "../composables/useOtpBindings";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { writeClipboardText } from "../lib/clipboardBridge";
 import { normalizeConnectionText } from "../lib/connectionInfo";
@@ -49,50 +52,31 @@ const entries = ref<OtpEntryView[]>([]);
 const bindings = ref<Record<string, string>>({});
 const connections = ref<HostConnection[]>([]);
 const connectionsUnavailable = ref(false);
-/** 条目 id → 当前验证码状态（TOTP 倒计时 / HOTP 最近一次生成）。 */
-const codes = reactive<Record<string, OtpCodeState>>({});
-const copiedId = ref("");
-const sentId = ref("");
-const actionError = ref("");
-const saving = ref(false);
-
-const editor = reactive<{ open: boolean; draft: OtpDraft; showSecret: boolean; touched: boolean }>({
-  open: false,
-  draft: emptyOtpDraft(),
-  showSecret: false,
-  touched: false,
-});
-/** 后端校验错误的原始文案（对话框错误行展示，优先于本地校验文案）。 */
-const draftBackendError = ref("");
-const deleteTarget = ref<OtpEntryView | null>(null);
-const bindOpen = reactive<Record<string, boolean>>({});
-const bindPick = reactive<Record<string, string>>({});
-const bindManual = reactive<Record<string, string>>({});
-
-const qrInput = ref<HTMLInputElement | null>(null);
-const qrBusy = ref(false);
-
-let tickTimer = 0;
-/** 在途生成中的条目 id（reactive Set：驱动按钮 spinner / 禁用态）。 */
-const generating = reactive(new Set<string>());
-// 生成失败后的自动重试退避：连续失败按 5s→10s→30s 封顶阶梯推迟 tick 的
-// 自动拉码（手动点击不受退避约束，成功即清零）。没有退避时 sidecar 不可达
-// 的条目会每秒重发一次 invoke 并反复刷新错误条。
-const RETRY_BACKOFF_STEPS_MS = [5000, 10000, 30000];
-const retryBackoffAt: Record<string, number> = {};
-const retryBackoffStep: Record<string, number> = {};
-
 const connectionName = computed(() => {
   const names = new Map<string, string>();
   for (const connection of connections.value) names.set(connection.id, connection.name || connection.id);
   return (id: string) => names.get(id) ?? id;
 });
 
+function showActionError(cause: unknown) {
+  actionError.value = cause instanceof Error ? cause.message : String(cause);
+  window.setTimeout(() => {
+    if (actionError.value === (cause instanceof Error ? cause.message : String(cause))) actionError.value = "";
+  }, 6000);
+}
+
+/** 条目 id → 当前验证码状态（TOTP 倒计时 / HOTP 最近一次生成）。
+ *  码引擎（取码/批量/倒计时/退避）下沉 useOtpCodes。 */
+const { codes, generating, generateFor, generateAllTotp, tick, forget: forgetCode } = useOtpCodes({
+  entries,
+  showActionError: (cause) => showActionError(cause),
+});
+
 // 验证码遮蔽用的占位（无码时展示，避免布局抖动）。
 const CODE_PLACEHOLDER = "······";
 
 // ---------------------------------------------------------------------------
-// 数据加载与验证码生成
+// 数据加载（码生成/倒计时/退避在 useOtpCodes）
 // ---------------------------------------------------------------------------
 
 async function refresh() {
@@ -104,50 +88,6 @@ async function refresh() {
     showActionError(cause);
   } finally {
     loading.value = false;
-  }
-}
-
-async function generateFor(entry: OtpEntryView) {
-  if (generating.has(entry.id)) return;
-  generating.add(entry.id);
-  try {
-    const payload = await window.dbxPlugin.invoke("otp/generate", { entryId: entry.id });
-    delete retryBackoffAt[entry.id];
-    delete retryBackoffStep[entry.id];
-    const state = parseGenerateResponse(payload);
-    if (!state) return;
-    // reused：本窗口已取过码（code 为 null）——保留旧码置灰展示，倒计时走完
-    // 新窗口开启后由 tick 自动重新生成。
-    codes[entry.id] = state.reused ? { ...state, code: codes[entry.id]?.code ?? "" } : state;
-  } catch (cause) {
-    const step = Math.min(retryBackoffStep[entry.id] ?? 0, RETRY_BACKOFF_STEPS_MS.length - 1);
-    retryBackoffAt[entry.id] = Date.now() + RETRY_BACKOFF_STEPS_MS[step];
-    retryBackoffStep[entry.id] = Math.min((retryBackoffStep[entry.id] ?? 0) + 1, RETRY_BACKOFF_STEPS_MS.length - 1);
-    showActionError(cause);
-  } finally {
-    generating.delete(entry.id);
-  }
-}
-
-async function generateAllTotp() {
-  for (const entry of entries.value.filter((candidate) => candidate.otpType === "totp")) {
-    await generateFor(entry);
-  }
-}
-
-/** 每秒 tick：TOTP 剩余秒递减，归零即拉新码（新窗口）；失败退避期内跳过
- * 自动拉码，等下一次窗口再试。 */
-function tick() {
-  const now = Date.now();
-  for (const entry of entries.value) {
-    const state = codes[entry.id];
-    if (!state || entry.otpType !== "totp") continue;
-    if (state.remaining > 0) {
-      state.remaining = tickCountdown(state.remaining);
-      continue;
-    }
-    if ((retryBackoffAt[entry.id] ?? 0) > now) continue;
-    void generateFor(entry);
   }
 }
 
@@ -203,69 +143,31 @@ async function sendCode(entry: OtpEntryView) {
     showActionError(cause);
   }
 }
+const copiedId = ref("");
+const sentId = ref("");
+const actionError = ref("");
+const saving = ref(false);
+const deleteTarget = ref<OtpEntryView | null>(null);
+// 绑定向导状态与 bind/unbind 下沉 useOtpBindings。
+const { bindOpen, bindPick, bindManual, bindEntry, unbindConnection, dropBindingsFor } = useOtpBindings({
+  bindings,
+  showActionError: (cause) => showActionError(cause),
+});
 
-function showActionError(cause: unknown) {
-  actionError.value = cause instanceof Error ? cause.message : String(cause);
-  window.setTimeout(() => {
-    if (actionError.value === (cause instanceof Error ? cause.message : String(cause))) actionError.value = "";
-  }, 6000);
-}
+const qrInput = ref<HTMLInputElement | null>(null);
+const qrBusy = ref(false);
 
-// ---------------------------------------------------------------------------
-// 编辑 / 删除 / 扫码导入
-// ---------------------------------------------------------------------------
+let tickTimer = 0;
 
-function openCreate() {
-  editor.draft = emptyOtpDraft();
-  editor.showSecret = false;
-  editor.touched = false;
-  // 上一次保存失败的文案不能跨对话框残留到新表单。
-  draftBackendError.value = "";
-  editor.open = true;
-}
+// 条目编辑弹窗（草稿/校验/保存）下沉 OtpEditorDialog：父层经 ref 打开，
+// 保存成功后落位 entries 并按类型取码。
+const editorDialog = ref<InstanceType<typeof OtpEditorDialog>>();
 
-function openEdit(entry: OtpEntryView) {
-  editor.draft = entryToDraft(entry);
-  editor.showSecret = false;
-  editor.touched = false;
-  draftBackendError.value = "";
-  editor.open = true;
-}
-
-const draftError = computed(() => {
-  if (!editor.touched) return "";
-  switch (otpDraftError(editor.draft)) {
-    case "issuer":
-      return props.t("otpPanel.error.issuer");
-    case "secret":
-      return props.t("otpPanel.error.secret");
-    case "counter":
-      return props.t("otpPanel.error.counter");
-    case "counterNumber":
-      return props.t("otpPanel.error.counterNumber");
-    default:
-      return "";
-  }
-});async function saveDraft() {
-  editor.touched = true;
-  if (otpDraftError(editor.draft)) return;
-  saving.value = true;
-  try {
-    const payload = await window.dbxPlugin.invoke<{ entry: unknown }>("otp/save", otpSaveParams(editor.draft));
-    const saved = parseOtpEntries({ entries: [payload?.entry] })[0];
-    if (saved) {
-      const existing = entries.value.findIndex((entry) => entry.id === saved.id);
-      if (existing >= 0) entries.value.splice(existing, 1, saved);
-      else entries.value.push(saved);
-      if (saved.otpType === "totp") void generateFor(saved);
-    }
-    editor.open = false;
-  } catch (cause) {
-    // 后端校验错误直接落在对话框错误行（原始文案，字段可读）。
-    draftBackendError.value = cause instanceof Error ? cause.message : String(cause);
-  } finally {
-    saving.value = false;
-  }
+function onOtpSaved(saved: OtpEntryView) {
+  const existing = entries.value.findIndex((entry) => entry.id === saved.id);
+  if (existing >= 0) entries.value.splice(existing, 1, saved);
+  else entries.value.push(saved);
+  if (saved.otpType === "totp") void generateFor(saved);
 }
 
 async function confirmDelete() {
@@ -275,12 +177,8 @@ async function confirmDelete() {
     const payload = await window.dbxPlugin.invoke<{ deleted: boolean }>("otp/delete", { id: target.id });
     if (payload?.deleted) {
       entries.value = entries.value.filter((entry) => entry.id !== target.id);
-      delete codes[target.id];
-      const nextBindings = { ...bindings.value };
-      for (const [connectionId, entryId] of Object.entries(nextBindings)) {
-        if (entryId === target.id) delete nextBindings[connectionId];
-      }
-      bindings.value = nextBindings;
+      forgetCode(target.id);
+      dropBindingsFor(target.id);
     }
     deleteTarget.value = null;
   } catch (cause) {
@@ -299,10 +197,7 @@ async function importQrImage(file: File) {
       showActionError(new Error("otp/import-qr returned no secret"));
       return;
     }
-    editor.draft = draft;
-    editor.showSecret = true;
-    editor.touched = false;
-    editor.open = true;
+    editorDialog.value?.openWithDraft(draft);
   } catch (cause) {
     showActionError(cause);
   } finally {
@@ -333,31 +228,6 @@ async function loadConnections() {
   }
 }
 
-async function bindEntry(entry: OtpEntryView) {
-  const connectionId = (bindPick[entry.id] || bindManual[entry.id] || "").trim();
-  if (!connectionId) return;
-  try {
-    await window.dbxPlugin.invoke("otp/bind", { connectionId, entryId: entry.id });
-    bindings.value = { ...bindings.value, [connectionId]: entry.id };
-    bindPick[entry.id] = "";
-    bindManual[entry.id] = "";
-  } catch (cause) {
-    showActionError(cause);
-  }
-}
-
-async function unbindConnection(connectionId: string) {
-  try {
-    const payload = await window.dbxPlugin.invoke<{ removed: boolean }>("otp/unbind", { connectionId });
-    if (payload?.removed) {
-      const nextBindings = { ...bindings.value };
-      delete nextBindings[connectionId];
-      bindings.value = nextBindings;
-    }
-  } catch (cause) {
-    showActionError(cause);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // 生命周期
@@ -378,7 +248,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="otp-panel">
     <div class="otp-toolbar">
-      <button type="button" class="otp-add" @click="openCreate"><Plus />{{ t("otpPanel.add") }}</button>
+      <button type="button" class="otp-add" @click="editorDialog?.openCreate()"><Plus />{{ t("otpPanel.add") }}</button>
       <button type="button" class="icon-button" :title="t('otpPanel.scanQr')" :aria-label="t('otpPanel.scanQr')" :disabled="qrBusy" @click="qrInput?.click()">
         <Loader2 v-if="qrBusy" class="spinning" /><QrCode v-else />
       </button>
@@ -428,7 +298,7 @@ onBeforeUnmount(() => {
             <Link2 />
           </button>
           <span class="otp-actions-spacer" />
-          <button type="button" class="icon-button" :title="t('otpPanel.edit')" :aria-label="t('otpPanel.edit')" @click="openEdit(entry)"><Pencil /></button>
+          <button type="button" class="icon-button" :title="t('otpPanel.edit')" :aria-label="t('otpPanel.edit')" @click="editorDialog?.openEdit(entry)"><Pencil /></button>
           <button type="button" class="icon-button" :title="t('otpPanel.delete')" :aria-label="t('otpPanel.delete')" @click="deleteTarget = entry"><Trash2 /></button>
         </div>
 
@@ -462,73 +332,7 @@ onBeforeUnmount(() => {
 
     <p v-if="actionError" class="otp-error">{{ actionError }}</p>
 
-    <Dialog :open="editor.open" @update:open="(open) => (editor.open = open)">
-      <DialogContent class="modal otp-editor-modal" @escape-key-down.prevent>
-        <header>
-          <DialogTitle>{{ editor.draft.id ? t("otpPanel.editor.edit") : t("otpPanel.editor.add") }}</DialogTitle>
-          <button type="button" class="icon-button" :title="t('otpPanel.editor.cancel')" :aria-label="t('otpPanel.editor.cancel')" @click="editor.open = false"><X /></button>
-        </header>
-        <form class="otp-editor" @submit.prevent="() => void saveDraft()">
-          <div class="otp-editor-row">
-            <label><input v-model="editor.draft.otpType" type="radio" value="totp" />{{ t("otpPanel.totp") }}</label>
-            <label><input v-model="editor.draft.otpType" type="radio" value="hotp" />{{ t("otpPanel.hotp") }}</label>
-          </div>
-          <label class="otp-editor-field">
-            <span>{{ t("otpPanel.editor.issuer") }}</span>
-            <input v-model="editor.draft.issuer" spellcheck="false" />
-          </label>
-          <label class="otp-editor-field">
-            <span>{{ t("otpPanel.editor.username") }}</span>
-            <input v-model="editor.draft.username" spellcheck="false" />
-          </label>
-          <label class="otp-editor-field">
-            <span class="otp-editor-secret-label">
-              {{ t("otpPanel.editor.secret") }}
-              <button type="button" class="icon-button" :title="editor.showSecret ? t('otpPanel.editor.hide') : t('otpPanel.editor.show')" :aria-label="editor.showSecret ? t('otpPanel.editor.hide') : t('otpPanel.editor.show')" @click="editor.showSecret = !editor.showSecret">
-                <EyeOff v-if="editor.showSecret" /><Eye v-else />
-              </button>
-            </span>
-            <textarea v-if="editor.showSecret" v-model="editor.draft.secret" rows="2" class="mono" spellcheck="false" :placeholder="editor.draft.id ? t('otpPanel.editor.secretHint') : ''" />
-            <input v-else v-model="editor.draft.secret" type="password" autocomplete="off" spellcheck="false" :placeholder="editor.draft.id ? t('otpPanel.editor.secretHint') : ''" />
-          </label>
-          <div class="otp-editor-grid">
-            <label class="otp-editor-field">
-              <span>{{ t("otpPanel.editor.algorithm") }}</span>
-              <Select :model-value="editor.draft.algorithm" @update:model-value="(value) => { editor.draft.algorithm = typeof value === 'string' ? value : 'SHA1'; }">
-                <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="algorithm in ['SHA1', 'SHA256', 'SHA512']" :key="algorithm" :value="algorithm">{{ algorithm }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label class="otp-editor-field">
-              <span>{{ t("otpPanel.editor.digits") }}</span>
-              <Select :model-value="String(editor.draft.digits)" @update:model-value="(value) => { editor.draft.digits = Number(value) || 6; }">
-                <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="digits in [6, 7, 8]" :key="digits" :value="String(digits)">{{ digits }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label v-if="editor.draft.otpType === 'totp'" class="otp-editor-field">
-              <span>{{ t("otpPanel.editor.period") }}</span>
-              <input v-model.number="editor.draft.period" type="number" min="1" max="3600" />
-            </label>
-            <label v-if="editor.draft.otpType === 'hotp'" class="otp-editor-field">
-              <span>{{ t("otpPanel.editor.counter") }}</span>
-              <input v-model="editor.draft.counter" type="number" min="0" />
-            </label>
-          </div>
-          <p v-if="draftError || draftBackendError" class="otp-error">{{ draftBackendError || draftError }}</p>
-          <footer>
-            <button type="button" class="otp-cancel" @click="editor.open = false">{{ t("otpPanel.editor.cancel") }}</button>
-            <button type="submit" class="primary-button" :disabled="saving">
-              <Loader2 v-if="saving" class="spinning" />{{ t("otpPanel.editor.save") }}
-            </button>
-          </footer>
-        </form>
-      </DialogContent>
-    </Dialog>
+    <OtpEditorDialog ref="editorDialog" :t="t" @saved="onOtpSaved" />
 
     <Dialog :open="deleteTarget !== null" @update:open="(open) => { if (!open) deleteTarget = null; }">
       <DialogContent class="modal otp-delete-modal" @escape-key-down.prevent>
@@ -745,48 +549,7 @@ onBeforeUnmount(() => {
   font-size: 11px;
   word-break: break-word;
 }
-.otp-editor-modal { width: min(420px, calc(100vw - 40px)); }
-.otp-delete-modal { width: min(360px, calc(100vw - 40px)); }
-.otp-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.otp-editor-row {
-  display: flex;
-  gap: 14px;
-  font-size: 12px;
-}
-.otp-editor-row label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.otp-editor-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-}
-.otp-editor-field input, .otp-editor-field textarea {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 4px 8px;
-  background: transparent;
-  color: var(--foreground);
-  font-size: 12px;
-}
-.otp-editor-secret-label {
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.otp-editor-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-.otp-editor footer, .otp-delete-modal footer {
+.otp-delete-modal footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;

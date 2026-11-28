@@ -5,34 +5,27 @@
 // 只读采集走 docker/list；动作走 docker/action（后端负责白名单、容器 id 门、
 // 只读连接拒绝、执行前审计与 Quick Sudo 回落）。会话 id 由面板自行从
 // ssh/sessions/list 解析（最近的存活会话）——SideNavPanel 容器不透传 session。
-// 「在终端打开」（M3 遗留 6）：面板不直接写 PTY，改为 emit 语义的 window 自定义
-// 事件（SideNavPanel 不透传事件且不在本次改动范围），由 App.vue 走「填入输入行
-// 不回车」通道——命令落到 shell 输入行原地，用户确认后再回车执行。
-import { computed, onMounted, onScopeDispose, onUnmounted, ref, watch } from "vue";
+// 「在终端打开」（B5）：直接打开容器工作台的终端 tab（PTY 在 sidecar 内建立，
+// 键入走 docker/terminal/in，输出走 docker/terminal/out）。不再向主终端输入行
+// 填命令，也不再派发 dbx:docker-open-in-terminal window 事件。
+import { onMounted, onScopeDispose, onUnmounted, ref, watch } from "vue";
 import {
-  Check,
-  ChevronDown,
   Loader2,
-  Play,
   RefreshCw,
-  RotateCw,
-  ScrollText,
-  Settings,
-  Square,
-  Terminal,
-  Trash2,
-  X,
 } from "@lucide/vue";
-import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
-import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
+import DockerContainerList, { type DockerContainerRow } from "./DockerContainerList.vue";
+import DockerEngineSettingsPopover from "./DockerEngineSettings.vue";
+import DockerActionConfirmDialog from "./DockerActionConfirmDialog.vue";
+import DockerLogsDrawer from "./DockerLogsDrawer.vue";
+import DockerStatsBar from "./DockerStatsBar.vue";
+import DockerWorkbench from "./DockerWorkbench.vue";
+import { useDockerStats } from "../composables/useDockerStats";
 import { normalizeBatchTargets } from "../lib/batchSend";
+import { dockerListPayload } from "../lib/dockerListPayload";
 import {
   dockerEngineParams,
   loadDockerEngineSettings,
   saveDockerEngineSettings,
-  validateDockerEngineSettings,
   type DockerEngineSettings,
 } from "../lib/dockerEngine";
 import {
@@ -42,7 +35,6 @@ import {
   type DockerActionName,
   type DockerActionTarget,
 } from "../lib/dockerActions";
-import { createRowMenuController } from "../lib/dockerRowMenu";
 
 const props = defineProps<{
   t: (key: string, values?: Record<string, string | number>) => string;
@@ -55,15 +47,7 @@ const props = defineProps<{
   targetMode?: "ssh" | "local";
 }>();
 
-interface DockerContainer {
-  id: string;
-  name: string;
-  image: string;
-  state: string;
-  status: string;
-  ports: string;
-  createdAt: string;
-}
+type DockerContainer = DockerContainerRow;
 
 interface DockerInspectSummary {
   id: string;
@@ -76,60 +60,11 @@ interface DockerInspectSummary {
   restartPolicy: string;
 }
 
-// 动作动词 → 静态 i18n key（i18nKeyReferences.spec 只认字面量 key）。
-const ACTION_LABEL_KEYS: Record<DockerActionName, string> = {
-  start: "docker.actionStart",
-  stop: "docker.actionStop",
-  restart: "docker.actionRestart",
-  kill: "docker.actionKill",
-  rm: "docker.actionRemove",
-};
-
 const POLL_MS = 10_000;
 const POLL_MAX_FAILURES = 3;
 const LIST_TIMEOUT_MS = 20_000;
 const LOGS_TIMEOUT_MS = 35_000;
 const ACTION_TIMEOUT_MS = 70_000;
-const TAIL_OPTIONS = ["100", "200", "500", "1000", "2000"] as const;
-
-function dockerListPayload(raw: unknown): { available: boolean; needsSudo: boolean; containers: DockerContainer[] } {
-  const record = (raw ?? {}) as Record<string, unknown>;
-  const rows = Array.isArray(record.containers) ? record.containers : [];
-  const containers: DockerContainer[] = [];
-  for (const row of rows) {
-    if (!row || typeof row !== "object") continue;
-    const entry = row as Record<string, unknown>;
-    const id = typeof entry.id === "string" ? entry.id : "";
-    if (!id) continue;
-    containers.push({
-      id,
-      name: typeof entry.name === "string" ? entry.name : "",
-      image: typeof entry.image === "string" ? entry.image : "",
-      state: typeof entry.state === "string" ? entry.state : "",
-      status: typeof entry.status === "string" ? entry.status : "",
-      ports: typeof entry.ports === "string" ? entry.ports : "",
-      createdAt: typeof entry.createdAt === "string" ? entry.createdAt : "",
-    });
-  }
-  return {
-    available: record.available === true,
-    needsSudo: record.needsSudo === true,
-    containers,
-  };
-}
-
-/** 「在终端打开」命令：先检测可用 shell，再 exec；非零退出不触发其他 shell。
- *  CLI 跟随引擎设置（podman 等自定义命令同样可进终端 exec）。 */
-function dockerExecCommand(containerId: string): string {
-  const cli = engineSettings.value.cli || "docker";
-  return `${cli} exec -it ${containerId} sh -lc 'for shell in bash zsh fish ash; do if command -v "$shell" >/dev/null 2>&1; then exec "$shell"; fi; done; exec sh'`;
-}
-
-/** 状态徽标 class：已知状态着色，未知状态走中性灰。 */
-function dockerStateClass(state: string): string {
-  const known = ["running", "exited", "paused", "created", "restarting", "dead", "removing"];
-  return known.includes(state) ? `docker-state-${state}` : "docker-state-unknown";
-}
 
 // —— 会话解析（SideNavPanel 不透传 session，面板自取最近存活会话）———————
 // 无存活 SSH 会话时回落 target:"local"——查询 sidecar 所在机器的 docker
@@ -143,19 +78,12 @@ const mode = ref<PanelMode>("ssh");
 // invoke 以 cli/socket/host 附加参数下发，sidecar 负责归一与最终校验。
 const connectionKey = ref("");
 const engineSettings = ref<DockerEngineSettings>({ ...loadDockerEngineSettings("") });
-const engineOpen = ref(false);
-const engineDraft = ref<DockerEngineSettings>({ cli: "", socket: "", host: "" });
-const engineErrors = computed(() => validateDockerEngineSettings(engineDraft.value).errors);
+// 引擎弹层子组件的开关把手：cli 徽标与齿轮共开同一弹层。
+const enginePopover = ref<InstanceType<typeof DockerEngineSettingsPopover>>();
 
-function toggleEngineSettings(): void {
-  engineOpen.value = !engineOpen.value;
-  if (engineOpen.value) engineDraft.value = { ...engineSettings.value };
-}
-
-/** 保存即生效并重采列表；非法草稿（红线不满足）不落盘。 */
-function applyEngineSettings(): void {
-  const { settings, errors } = validateDockerEngineSettings(engineDraft.value);
-  if (errors.cli || errors.endpoints) return;
+/** 引擎设置弹层（DockerEngineSettings）回传的已校验草稿：落盘即生效并重采
+ * 列表；弹层内草稿/校验状态随子组件，父层只持权威态（按连接持久化）。 */
+function applyEngineSettings(settings: DockerEngineSettings): void {
   engineSettings.value = settings;
   saveDockerEngineSettings(connectionKey.value, settings);
   void refresh();
@@ -210,7 +138,6 @@ function adoptConnection(connectionId: string): void {
   if (nextKey === connectionKey.value) return;
   connectionKey.value = nextKey;
   engineSettings.value = loadDockerEngineSettings(nextKey);
-  if (engineOpen.value) engineDraft.value = { ...engineSettings.value };
 }
 
 /** 按当前模式组装 docker 家族参数：local 不需要 sessionId；引擎设置随行。 */
@@ -219,7 +146,12 @@ function dockerParams(extra: Record<string, unknown> = {}): Record<string, unkno
     mode.value === "local"
       ? { target: "local" as const, ...extra }
       : { sessionId: sessionId.value, ...extra };
-  return { ...base, ...dockerEngineParams(engineSettings.value) };
+  // needsSudo 是只读探针结果；容器终端据此决定是否要求 sudo 预热（不是授权依据）。
+  return {
+    ...base,
+    ...dockerEngineParams(engineSettings.value),
+    ...(needsSudo.value ? { needsSudo: true } : {}),
+  };
 }
 
 // —— 列表 + 轮询（10s；3 连败停轮询，弱化空态）——————————————
@@ -322,13 +254,16 @@ onMounted(() => {
 
 onUnmounted(stopPolling);
 
+// —— B2 容器指标（只读，3s 轮询；页面隐藏即停）——————————————————
+const { snapshot: statsSnapshot, history: statsHistory, error: statsError } = useDockerStats({
+  params: dockerParams,
+  containerIds: () => containers.value.filter((c) => c.state === "running").map((c) => c.id),
+  enabled: () => available.value === true,
+});
+
 // —— 生命周期动作（kill/rm 先确认）———————————————————————
 const busyContainerId = ref("");
 const actionError = ref("");
-
-function rowBusy(container: DockerContainer): boolean {
-  return busyContainerId.value === container.id;
-}
 
 const confirmTarget = ref<(DockerActionTarget & { action: DockerActionName }) | null>(null);
 const confirmBusy = ref(false);
@@ -384,33 +319,27 @@ watch(confirmTarget, (target) => {
 });
 onScopeDispose(() => document.removeEventListener("keydown", onConfirmEsc, true));
 
-// —— 行操作悬浮下拉（hover 开合，状态机在 lib/dockerRowMenu）—————————————
-// 触发器 hover 延迟开、移出延迟关（跨 side-offset 间隙不闪断）、click 兜底
-// 切换；7 个内联按钮收纳为单项下拉，操作列不再挤占容器表宽度。
-const rowMenu = createRowMenuController();
-onScopeDispose(() => rowMenu.close());
-
-/** reka 打开弹层默认把焦点迁入首控件；hover 开启的菜单不迁移——用户可能正在
- *  终端输入，焦点被抢走后按键（Space/Enter）会落到菜单项上误触容器操作。
- *  click/键盘/触屏开启的菜单保留默认迁移，方向键与 Esc 才能在菜单内工作。 */
-function onRowMenuOpenAutoFocus(event: Event): void {
-  if (rowMenu.openedByHover()) event.preventDefault();
-}
-
-/** 菜单选项统一入口：先收菜单再派发（kill/rm 仍走确认弹层）。 */
-function runMenuAction(container: DockerContainer, action: DockerActionName): void {
-  rowMenu.close();
+// —— 列表事件（行操作/工作台；菜单开合在 DockerContainerList 内部）———————
+/** 行操作入口：kill/rm 仍走确认弹层，其余直接派发。 */
+function handleListAction(container: DockerContainer, action: DockerActionName): void {
   requestAction(container, action);
 }
 
-function menuOpenLogs(container: DockerContainer): void {
-  rowMenu.close();
-  openLogs(container);
+// —— 容器工作台（B4 文件只读 + B5 终端）——————————————
+const filesOpen = ref(false);
+const filesTarget = ref<DockerContainer | null>(null);
+const workbenchTab = ref<"files" | "terminal">("files");
+
+function openContainerFiles(container: DockerContainer): void {
+  filesTarget.value = container;
+  workbenchTab.value = "files";
+  filesOpen.value = true;
 }
 
-function menuOpenInTerminal(container: DockerContainer): void {
-  rowMenu.close();
-  openInTerminal(container);
+function openContainerTerminal(container: DockerContainer): void {
+  filesTarget.value = container;
+  workbenchTab.value = "terminal";
+  filesOpen.value = true;
 }
 
 // —— Logs 抽屉 ———————————————————————————————————————
@@ -452,29 +381,6 @@ async function loadLogs(): Promise<void> {
   }
 }
 
-// —— 「在终端打开」（window 事件 → App.vue 填入输入行，不回车）——————————
-// 事件名与 App.vue 的监听保持一致；detail 只带命令字符串。无终端会话时由
-// App.vue 侧 toast 提示先连接（面板无法感知终端状态）。
-const DOCKER_OPEN_IN_TERMINAL_EVENT = "dbx:docker-open-in-terminal";
-
-const fillRequestedId = ref("");
-let fillReset: ReturnType<typeof setTimeout> | undefined;
-
-function openInTerminal(container: DockerContainer): void {
-  window.dispatchEvent(
-    new CustomEvent(DOCKER_OPEN_IN_TERMINAL_EVENT, { detail: { command: dockerExecCommand(container.id) } }),
-  );
-  fillRequestedId.value = container.id;
-  if (fillReset) clearTimeout(fillReset);
-  fillReset = setTimeout(() => {
-    fillRequestedId.value = "";
-  }, 2000);
-}
-
-onUnmounted(() => {
-  if (fillReset) clearTimeout(fillReset);
-});
-
 const running = (container: DockerContainer): boolean => container.state === "running";
 </script>
 
@@ -485,7 +391,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
       <span v-if="mode === 'local'" class="docker-source-badge">{{ props.t("docker.localSource") }}</span>
       <span v-if="available && containers.length" class="docker-count">{{ containers.length }}</span>
       <span class="docker-header-spacer" />
-      <button v-if="engineSettings.cli" type="button" class="docker-engine-badge" :title="props.t('docker.engineBadge', { cli: engineSettings.cli })" :aria-label="props.t('docker.engineBadge', { cli: engineSettings.cli })" @click="toggleEngineSettings">
+      <button v-if="engineSettings.cli" type="button" class="docker-engine-badge" :title="props.t('docker.engineBadge', { cli: engineSettings.cli })" :aria-label="props.t('docker.engineBadge', { cli: engineSettings.cli })" @click="enginePopover?.toggle()">
         {{ engineSettings.cli }}
       </button>
       <button
@@ -501,50 +407,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
         <Loader2 v-if="loading" class="spinning" />
         <RefreshCw v-else />
       </button>
-      <Popover :open="engineOpen" @update:open="(open: boolean) => { if (!open) engineOpen = false; }">
-        <PopoverAnchor as-child>
-          <button type="button" class="icon-button" :class="{ 'is-active': engineOpen }" :title="props.t('docker.engineSettings')" :aria-label="props.t('docker.engineSettings')" @click="toggleEngineSettings">
-            <Settings />
-          </button>
-        </PopoverAnchor>
-        <PopoverContent class="popover docker-engine-popover" align="end" :side-offset="5">
-          <h3>{{ props.t("docker.engineSettings") }}</h3>
-          <label class="docker-engine-field">
-            <span>{{ props.t("docker.engineCli") }}</span>
-            <input
-              v-model="engineDraft.cli"
-              class="mono"
-              :placeholder="props.t('docker.engineCliPlaceholder')"
-              spellcheck="false"
-              @change="applyEngineSettings"
-            />
-          </label>
-          <label class="docker-engine-field">
-            <span>{{ props.t("docker.engineSocket") }}</span>
-            <input
-              v-model="engineDraft.socket"
-              class="mono"
-              :placeholder="props.t('docker.engineSocketPlaceholder')"
-              spellcheck="false"
-              @change="applyEngineSettings"
-            />
-          </label>
-          <label class="docker-engine-field">
-            <span>{{ props.t("docker.engineHost") }}</span>
-            <input
-              v-model="engineDraft.host"
-              class="mono"
-              :placeholder="props.t('docker.engineHostPlaceholder')"
-              spellcheck="false"
-              @change="applyEngineSettings"
-            />
-          </label>
-          <p v-if="engineErrors.cli" class="docker-hint docker-hint-error">{{ props.t("docker.engineInvalidCli") }}</p>
-          <p v-else-if="engineErrors.endpoints === 'conflict'" class="docker-hint docker-hint-error">{{ props.t("docker.engineConflict") }}</p>
-          <p v-else-if="engineErrors.endpoints" class="docker-hint docker-hint-error">{{ props.t("docker.engineInvalidEndpoint") }}</p>
-          <p class="docker-hint">{{ props.t("docker.engineHint") }}</p>
-        </PopoverContent>
-      </Popover>
+      <DockerEngineSettingsPopover ref="enginePopover" :t="props.t" :settings="engineSettings" @apply="applyEngineSettings" />
     </div>
 
     <p v-if="pollPaused" class="docker-hint docker-hint-warn">{{ props.t("docker.pollStopped") }}</p>
@@ -554,6 +417,8 @@ const running = (container: DockerContainer): boolean => container.state === "ru
     <p v-if="actionError" class="docker-hint docker-hint-error" :title="actionError">
       {{ props.t("docker.actionFailed", { error: actionError }) }}
     </p>
+
+    <DockerStatsBar v-if="available === true" :t="props.t" :snapshot="statsSnapshot" :history="statsHistory" :error="statsError" />
 
     <!-- 加载中 -->
     <p v-if="loading && available === null" class="docker-empty"><Loader2 class="spinning" />{{ props.t("docker.loading") }}</p>
@@ -571,146 +436,37 @@ const running = (container: DockerContainer): boolean => container.state === "ru
     <!-- 空列表 -->
     <p v-else-if="!containers.length" class="docker-empty">{{ props.t("docker.empty") }}</p>
 
-    <!-- 容器表 -->
-    <div v-else class="docker-table-wrap">
-      <Table class="docker-table">
-        <TableHeader>
-          <TableRow>
-            <TableHead>{{ props.t("docker.colName") }}</TableHead>
-            <TableHead>{{ props.t("docker.colImage") }}</TableHead>
-            <TableHead>{{ props.t("docker.colState") }}</TableHead>
-            <TableHead>{{ props.t("docker.colPorts") }}</TableHead>
-            <TableHead class="docker-col-actions">{{ props.t("docker.colActions") }}</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          <TableRow v-for="container in containers" :key="container.id">
-            <TableCell class="docker-cell-name" :title="container.id">
-              <strong class="mono">{{ container.name || container.id.slice(0, 12) }}</strong>
-            </TableCell>
-            <TableCell class="docker-cell-image mono" :title="container.image">{{ container.image }}</TableCell>
-            <TableCell class="docker-cell-state">
-              <span class="docker-badge" :class="dockerStateClass(container.state)">{{ container.state }}</span>
-              <small class="docker-status" :title="container.status">{{ container.status }}</small>
-            </TableCell>
-            <TableCell class="docker-cell-ports mono" :title="container.ports">{{ container.ports || "–" }}</TableCell>
-            <TableCell class="docker-col-actions">
-              <Popover :open="rowMenu.isOpen(container.id)" @update:open="(open: boolean) => { if (!open) rowMenu.close(); }">
-                <PopoverAnchor as-child>
-                  <button
-                    type="button"
-                    class="icon-button docker-row-trigger"
-                    :class="{ 'is-active': rowMenu.isOpen(container.id) }"
-                    :title="props.t('docker.colActions')"
-                    :aria-label="props.t('docker.colActions')"
-                    aria-haspopup="menu"
-                    :aria-expanded="rowMenu.isOpen(container.id)"
-                    @pointerenter="rowMenu.hoverTrigger(container.id)"
-                    @pointerleave="rowMenu.leaveToClose()"
-                    @click="rowMenu.toggle(container.id)"
-                  >
-                    <Check v-if="fillRequestedId === container.id" />
-                    <ChevronDown v-else />
-                  </button>
-                </PopoverAnchor>
-                <PopoverContent
-                  class="docker-row-menu w-auto gap-1 p-1"
-                  align="end"
-                  :side-offset="4"
-                  @open-auto-focus="onRowMenuOpenAutoFocus"
-                  @pointerenter="rowMenu.hoverContent()"
-                  @pointerleave="rowMenu.leaveToClose()"
-                >
-                  <button type="button" class="docker-row-menu-item" :disabled="running(container) || rowBusy(container)" @click="runMenuAction(container, 'start')">
-                    <Play />{{ props.t("docker.actionStart") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item" :disabled="!running(container) || rowBusy(container)" @click="runMenuAction(container, 'stop')">
-                    <Square />{{ props.t("docker.actionStop") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item" :disabled="!running(container) || rowBusy(container)" @click="runMenuAction(container, 'restart')">
-                    <RotateCw />{{ props.t("docker.actionRestart") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item docker-row-menu-item--danger" :disabled="rowBusy(container)" @click="runMenuAction(container, 'kill')">
-                    <X />{{ props.t("docker.actionKill") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item docker-row-menu-item--danger" :disabled="rowBusy(container)" @click="runMenuAction(container, 'rm')">
-                    <Trash2 />{{ props.t("docker.actionRemove") }}
-                  </button>
-                  <div class="docker-row-menu-sep" role="separator" />
-                  <button type="button" class="docker-row-menu-item" @click="menuOpenLogs(container)">
-                    <ScrollText />{{ props.t("docker.actionLogs") }}
-                  </button>
-                  <button v-if="mode === 'ssh'" type="button" class="docker-row-menu-item" @click="menuOpenInTerminal(container)">
-                    <Terminal />{{ props.t("docker.actionTerminal") }}
-                  </button>
-                </PopoverContent>
-              </Popover>
-            </TableCell>
-          </TableRow>
-        </TableBody>
-      </Table>
-      <p v-if="mode === 'ssh'" class="docker-hint">{{ props.t("docker.terminalHint") }}</p>
-    </div>
+    <!-- 容器表 + 本地搜索/状态筛选（行操作与过滤在 DockerContainerList） -->
+    <DockerContainerList
+      v-else
+      :t="props.t"
+      :containers="containers"
+      :busy-ids="busyContainerId ? [busyContainerId] : []"
+      @action="handleListAction"
+      @logs="openLogs"
+      @files="openContainerFiles"
+      @terminal="openContainerTerminal"
+    />
 
-    <!-- kill/rm 强制确认 -->
-      <Dialog :open="!!confirmTarget" @update:open="(open: boolean) => { if (!open) void confirmAction(false); }">
-
-      <DialogContent class="docker-dialog" @escape-key-down.prevent>
-        <div class="docker-dialog-header">
-          <DialogTitle>
-            {{ confirmTarget ? props.t("docker.confirmTitle", { action: props.t(ACTION_LABEL_KEYS[confirmTarget.action]) }) : "" }}
-          </DialogTitle>
-          <button type="button" class="icon-button" :title="props.t('docker.cancel')" :aria-label="props.t('docker.cancel')" @click="confirmAction(false)"><X /></button>
-        </div>
-        <p class="docker-confirm-body mono">
-          {{ confirmTarget ? props.t("docker.confirmBody", { cli: engineSettings.cli || "docker", action: confirmTarget.action, name: confirmTarget.name }) : "" }}
-        </p>
-        <div class="docker-dialog-actions">
-          <button type="button" class="docker-secondary-button" :disabled="confirmBusy" @click="confirmAction(false)">
-            {{ props.t("docker.cancel") }}
-          </button>
-          <button type="button" class="docker-danger-button" :disabled="confirmBusy" @click="confirmAction(true)">
-            {{ confirmBusy ? props.t("docker.actionBusy") : props.t("docker.confirmOk") }}
-          </button>
-        </div>
-      </DialogContent>
-    </Dialog>
-
-    <!-- Logs 抽屉 -->
-    <Dialog :open="logsOpen" @update:open="(open: boolean) => { logsOpen = open; }">
-      <DialogContent class="docker-dialog docker-logs-dialog" @escape-key-down.prevent>
-        <div class="docker-dialog-header">
-          <DialogTitle>
-            {{ logsTarget ? props.t("docker.logsTitle", { name: logsTarget.name || logsTarget.id.slice(0, 12) }) : "" }}
-          </DialogTitle>
-          <button type="button" class="icon-button" :title="props.t('docker.close')" :aria-label="props.t('docker.close')" @click="logsOpen = false"><X /></button>
-        </div>
-        <div class="docker-logs-bar">
-          <label class="docker-tail-label">
-            <span>{{ props.t("docker.logsTail") }}</span>
-            <Select
-              :model-value="logsTail"
-              @update:model-value="(value: unknown) => { logsTail = String(value); void loadLogs(); }"
-            >
-              <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="option in TAIL_OPTIONS" :key="option" :value="option">{{ option }}</SelectItem>
-              </SelectContent>
-            </Select>
-          </label>
-          <button type="button" class="icon-button" :title="props.t('docker.logsRefresh')" :aria-label="props.t('docker.logsRefresh')" @click="loadLogs">
-            <Loader2 v-if="logsBusy" class="spinning" />
-            <RefreshCw v-else />
-          </button>
-        </div>
-        <p v-if="logsError" class="docker-hint docker-hint-error">{{ props.t("docker.logsLoadFailed", { error: logsError }) }}</p>
-        <div v-if="logsMeta" class="docker-logs-meta mono">
-          {{ logsMeta.image }} · {{ logsMeta.status }}<template v-if="logsMeta.health"> · {{ logsMeta.health }}</template>
-        </div>
-        <pre v-if="logsText" class="docker-logs-pre mono">{{ logsText }}</pre>
-        <p v-else-if="!logsBusy && !logsError" class="docker-empty">{{ props.t("docker.logsEmpty") }}</p>
-      </DialogContent>
-    </Dialog>
+    <!-- kill/rm 强制确认（弹窗呈现外抽；状态机在 lib/dockerActions，执行仍在此处） -->
+    <DockerActionConfirmDialog :t="props.t" :target="confirmTarget" :busy="confirmBusy" :cli="engineSettings.cli || 'docker'" @confirm="confirmAction" />
+    <!-- 容器文件工作台（B4，只读） -->
+    <DockerWorkbench v-model:open="filesOpen" :t="props.t" :target="filesTarget" :params="dockerParams" :initial-tab="workbenchTab" />
+    <!-- Logs 抽屉（B1 外抽，状态仍在本组件） -->
+    <DockerLogsDrawer
+      :t="props.t"
+      :open="logsOpen"
+      :target="logsTarget"
+      :text="logsText"
+      :meta="logsMeta"
+      :busy="logsBusy"
+      :error="logsError"
+      :tail="logsTail"
+      :stream-base="dockerParams()"
+      @update:open="(open: boolean) => { logsOpen = open; }"
+      @update:tail="(value: string) => { logsTail = value; void loadLogs(); }"
+      @refresh="loadLogs"
+    />
   </div>
 </template>
 
@@ -739,16 +495,6 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   opacity: 0.65;
 }
 
-.docker-source-badge {
-  padding: 0 6px;
-  border-radius: 8px;
-  font-size: 10px;
-  line-height: 16px;
-  background: rgba(90, 140, 220, 0.22);
-  white-space: nowrap;
-}
-
-/* 引擎设置（齿轮弹层）：紧凑表单，保存即生效。 */
 .docker-engine-badge {
   border: none;
   background: none;
@@ -763,240 +509,16 @@ const running = (container: DockerContainer): boolean => container.state === "ru
   white-space: nowrap;
 }
 
-.docker-engine-popover {
-  min-width: 300px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.docker-engine-field {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 12px;
-}
-
-.docker-engine-field input {
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 12px;
-  background: var(--background, transparent);
-  color: inherit;
-}
-
-.docker-engine-field input::placeholder {
-  opacity: 0.45;
-}
-
-.docker-table-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  min-width: 0;
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  border-radius: 12px;
-  background: var(--popover);
-  /* 列多超出工作台宽度时横向滚动兜底。 */
-  overflow-x: auto;
-  /* 内容过宽时用户找不到滚动入口——全局 `*::-webkit-scrollbar{display:none}`
-     把 wrap 的滚动条也藏了。这里作为例外显式恢复（同 .file-rows 模式）：
-     横向溢出时滚动条可见可拖。 */
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--foreground) 25%, transparent) transparent;
-}
-
-.docker-table-wrap::-webkit-scrollbar { display: block; height: 8px; width: 8px; }
-.docker-table-wrap::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--foreground) 25%, transparent); border-radius: 4px; }
-.docker-table-wrap::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--foreground) 40%, transparent); }
-.docker-table-wrap::-webkit-scrollbar-track { background: transparent; }
-
-.docker-table {
-  width: 100%;
-  /* 粘性列需要 separate：collapse 下 Firefox 的粘性单元格边框不随滚动绘制。
-     行分隔线本就只画在各 cell 的 border-bottom 上，spacing 0 视觉等价。 */
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 11px;
-}
-
-.docker-table th {
-  height: 32px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.25));
-  font-size: 10px;
-  font-weight: 600;
-  text-align: left;
-  vertical-align: middle;
-  opacity: 0.6;
-  white-space: nowrap;
-}
-
-.docker-table td {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.15));
-  vertical-align: middle;
-}
-
-.docker-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-/* 列设最小宽度：窄面板下表格总宽超过容器 → wrap 横向滚动展示完整内容，
-   而不是各列被省略号挤没；宽面板下仍按 max-width 截长内容。 */
-.docker-cell-name {
-  min-width: 110px;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 粘性首列（容器名）：横向滚动时固定靠左，滚动出的内容从其右缘滑过。
-   实底取浮层同款 --popover（下层内容透出会误读成两列重叠）；右缘 1px
-   分隔让滚动时的层叠关系可见。表头同规则，滚动中表头保持一致。 */
-.docker-table th:first-child,
-.docker-table td.docker-cell-name {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  background: var(--popover);
-  box-shadow: 1px 0 0 var(--border, rgba(128, 128, 128, 0.25));
-}
-
-.docker-cell-image {
-  min-width: 130px;
-  max-width: 280px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.8;
-}
-
-.docker-cell-state {
-  min-width: 96px;
-  white-space: nowrap;
-}
-
-.docker-status {
-  display: block;
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0.6;
-}
-
-/* 端口映射串很长且逗号分隔：允许换行展示全部映射（省略号会吞信息），
-   列宽在 min/max 间自适应，默认面板宽度下五列 + 操作列即可全部见。 */
-.docker-cell-ports {
-  min-width: 130px;
-  max-width: 220px;
-}
-
-.docker-col-actions {
-  min-width: 44px;
-  white-space: nowrap;
-  text-align: right;
-}
-
-/* 粘性末列（操作按钮）：横向滚动时固定靠右，下拉触发器永不被内容推出
-   视口（issue：列内容过大时下拉按钮被遮挡）。实底同浮层底色，左缘 1px
-   分隔；z-index 与首列同级。 */
-.docker-table th.docker-col-actions,
-.docker-table td.docker-col-actions {
-  position: sticky;
-  right: 0;
-  z-index: 2;
-  background: var(--popover);
-  box-shadow: -1px 0 0 var(--border, rgba(128, 128, 128, 0.25));
-}
-
-.docker-table tbody tr:hover td {
-  background: color-mix(in srgb, var(--accent) 45%, var(--popover));
-}
-
-/* 行操作悬浮下拉：触发器（⌄，终端回填成功短暂显示 ✓）+ hover 菜单。 */
-.docker-row-trigger svg {
-  width: 14px;
-  height: 14px;
-}
-
-.docker-row-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: none;
-  border-radius: 6px;
-  padding: 5px 10px;
-  background: none;
-  color: inherit;
-  font: inherit;
-  font-size: 12px;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.docker-row-menu-item svg {
-  width: 14px;
-  height: 14px;
-  flex-basis: 14px;
-  opacity: 0.75;
-}
-
-.docker-row-menu-item:hover:not(:disabled),
-.docker-row-menu-item:focus-visible {
-  background: color-mix(in srgb, var(--foreground) 8%, transparent);
-  outline: none;
-}
-
-.docker-row-menu-item:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.docker-row-menu-item--danger:hover:not(:disabled),
-.docker-row-menu-item--danger:focus-visible {
-  background: color-mix(in srgb, var(--danger, #d64545) 16%, transparent);
-  color: var(--danger, #d64545);
-}
-
-.docker-row-menu-sep {
-  height: 1px;
-  margin: 3px 6px;
-  background: var(--border, rgba(128, 128, 128, 0.25));
-}
-
-.docker-badge {
-  display: inline-block;
+.docker-source-badge {
   padding: 0 6px;
   border-radius: 8px;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 16px;
-  background: rgba(128, 128, 128, 0.18);
+  background: rgba(90, 140, 220, 0.22);
+  white-space: nowrap;
 }
 
-.docker-state-running {
-  background: rgba(34, 160, 94, 0.22);
-}
-
-.docker-state-exited,
-.docker-state-created,
-.docker-state-removing,
-.docker-state-unknown {
-  background: rgba(128, 128, 128, 0.18);
-}
-
-.docker-state-paused,
-.docker-state-restarting {
-  background: rgba(217, 154, 35, 0.25);
-}
-
-.docker-state-dead {
-  background: rgba(214, 69, 69, 0.25);
-}
-
+/* 引擎设置（齿轮弹层）：紧凑表单，保存即生效。 */
 .docker-empty {
   opacity: 0.65;
   font-size: 12px;
@@ -1041,88 +563,6 @@ const running = (container: DockerContainer): boolean => container.state === "ru
 
 .icon-button.is-copied {
   color: var(--success, #22a05e);
-}
-
-.docker-dialog {
-  max-width: 460px;
-}
-
-.docker-logs-dialog {
-  max-width: 820px;
-  width: min(820px, 90vw);
-}
-
-.docker-dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.docker-confirm-body {
-  margin: 10px 0;
-  word-break: break-all;
-}
-
-.docker-dialog-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.docker-secondary-button,
-.docker-danger-button {
-  border-radius: 6px;
-  padding: 4px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
-  background: transparent;
-  color: inherit;
-}
-
-.docker-danger-button {
-  background: var(--danger, #d64545);
-  border-color: var(--danger, #d64545);
-  color: #fff;
-}
-
-.docker-danger-button:disabled,
-.docker-secondary-button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.docker-logs-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.docker-tail-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-
-.docker-logs-meta {
-  font-size: 11px;
-  opacity: 0.65;
-}
-
-.docker-logs-pre {
-  margin: 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(128, 128, 128, 0.1);
-  max-height: 50vh;
-  overflow: auto;
-  font-size: 11px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 .spinning {

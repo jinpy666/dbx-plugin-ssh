@@ -1089,11 +1089,15 @@ def permission_env_section(args: argparse.Namespace) -> None:
     print("permission env gates ok (confirm fail-closed + scope fail-closed)")
 
 
-def _readline_timeout(proc: subprocess.Popen, timeout: float = 20.0) -> bytes:
+def _readline_timeout(proc: subprocess.Popen, timeout: float = 45.0) -> bytes:
     """readline with a watchdog: a hung or crashed sidecar fails the smoke
     instead of blocking the whole run. POSIX watches the pipe fd with
     select; on Windows select() only accepts sockets, so the read runs in
-    a daemon thread and the deadline is enforced on the queue wait."""
+    a daemon thread and the deadline is enforced on the queue wait.
+
+    预算按「真挂起才失败」取宽松值：CI runner 冷启动（首次 exec release
+    二进制、页面缓存未热）出现过单步 30s 未回响应而整步误报的实例（同一次
+    运行后续 24 项断言全过）。超时只放宽等待，不放宽任何断言。"""
     fd = proc.stdout.fileno()
     deadline = time.monotonic() + timeout
 
@@ -1133,7 +1137,7 @@ def _readline_timeout(proc: subprocess.Popen, timeout: float = 20.0) -> bytes:
     return line
 
 
-def _recv_id(proc: subprocess.Popen, want_id, timeout: float = 30.0) -> dict:
+def _recv_id(proc: subprocess.Popen, want_id, timeout: float = 60.0) -> dict:
     deadline = time.monotonic() + timeout
     while True:
         remaining = deadline - time.monotonic()

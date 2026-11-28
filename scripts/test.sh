@@ -34,20 +34,78 @@ node scripts/connection-forms/verify.mjs
 # 方法注册四路比对（backend 分派 ↔ mock 桩 ↔ 前端 invoke ↔ PROTOCOL 文档）：
 # 分派臂/桩/调用点三方不一致是硬门禁，文档滞后 report-only。
 node scripts/mock_host_registry_check.mjs
+# 结构白名单与文件树一致性：只读文件树，秒级失败。放在编译前，避免白名单
+# 过期要等整条链路（前端安装 + 后端编译）跑完才由 structure 测试报出来。
+node scripts/refresh_structure_allowlist.mjs --check
 # 单测密闭：宿主桥端口读 DBX_APP_DATA_DIR/mcp-bridge-port，未设时回落真实
 # app 数据目录——开发机上 DBX 运行中会让 read_only 稳定性等用例读到真实连接
 # （首次命中/二次抖动即漂移），甚至经 ensure_app_bridge 的 open -a 兜底拉起
 # DBX。钉到一次性空目录（与 CI 无运行 DBX 同态），启动命令置 no-op。
-DBX_APP_DATA_DIR="$DBX_PLUGIN_DATA_DIR" DBX_APP_LAUNCH_CMD="true" \
-  cargo test --manifest-path backend/Cargo.toml
+# macOS 沙箱下 portable-pty 用例并发跑会互相干扰（pty 分配失败/超时抖动，
+# 表现为随机失败）。因此仅 Darwin 默认串行；Linux 等平台保持并行，避免全量
+# 跑无谓变慢。BACKEND_TEST_THREADS 在任何平台都优先（显式设置即覆盖默认）。
+dbx_test_threads=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  dbx_test_threads="${BACKEND_TEST_THREADS:-1}"
+else
+  dbx_test_threads="${BACKEND_TEST_THREADS:-}"
+fi
+if [ -n "$dbx_test_threads" ]; then
+  DBX_APP_DATA_DIR="$DBX_PLUGIN_DATA_DIR" DBX_APP_LAUNCH_CMD="true" \
+    cargo test --manifest-path backend/Cargo.toml \
+    -- --test-threads="$dbx_test_threads"
+else
+  DBX_APP_DATA_DIR="$DBX_PLUGIN_DATA_DIR" DBX_APP_LAUNCH_CMD="true" \
+    cargo test --manifest-path backend/Cargo.toml
+fi
 
 echo "==> dead-code warning gate"
 # 未接线的功能会先以 dead_code 警告形态暴露（案例：remembered 审批 /
 # ssh_terminal_input 的安全函数写完却没接进路由）。零容忍：
-# cargo build 出现任何 "never used" 警告即失败，避免新功能静默脱接。
-if cargo build --manifest-path backend/Cargo.toml 2>&1 | grep -q "never used"; then
-  echo "FAIL: dead-code warnings present (an unwired feature or leftover code?):"
-  cargo build --manifest-path backend/Cargo.toml 2>&1 | grep -B1 "never used"
+# cargo build 出现任何 dead_code 警告即失败，避免新功能静默脱接。
+#
+# 不要用 `cargo build ... | grep -q ...` 做判定：grep -q 命中即退出，
+# cargo 继续写输出会收到 SIGPIPE（141），pipefail 下整条管道非零、if 被判
+# 假，门禁静默放行。这里只构建一次并落盘，再对日志文件做匹配。
+#
+# 不能依赖热 target 的现成输出：cargo 对已是最新的单元只重放它缓存的诊断，
+# 缓存缺失时（缓存恢复/换了构建入口）只剩 "Finished"，dead_code 警告不会
+# 重新发出。也不用 `cargo clean -p`（删 1.6GiB 增量产物、整包重编）：把
+# crate 根 mtime 推后 1s 强制 bin target 重编，让 rustc 必然重新发警告。
+# 实测（热 target）强制重编约 2.5s，cargo clean -p + 重建约 19s。检查完
+# 必须还原 mtime——Cargo 按路径源 mtime 判定新鲜度，不还原会让后续构建
+# 误判源已更新而连带重编（实测还原后 cargo build 0.2s 直接 Finished）。
+deadcode_log=""
+main_mtime=""
+cleanup_deadcode() {
+  if [ -n "${main_mtime:-}" ] && [ -f "$main_mtime" ]; then
+    # 每条退出路径（含构建失败/门禁命中）都还原 mtime。
+    touch -r "$main_mtime" backend/src/main.rs 2>/dev/null || true
+    rm -f "$main_mtime"
+  fi
+  if [ -n "${deadcode_log:-}" ]; then
+    rm -f "$deadcode_log"
+  fi
+  return 0
+}
+trap cleanup_deadcode EXIT
+deadcode_log="$(mktemp "${TMPDIR:-/tmp}/dbx-deadcode.XXXXXX")"
+main_mtime="$(mktemp "${TMPDIR:-/tmp}/dbx-main-mtime.XXXXXX")"
+touch -r backend/src/main.rs "$main_mtime"
+sleep 1
+touch backend/src/main.rs
+if ! cargo build --manifest-path backend/Cargo.toml >"$deadcode_log" 2>&1; then
+  cat "$deadcode_log" >&2
+  echo "FAIL: cargo build failed (output above)" >&2
+  exit 1
+fi
+# dead_code 的三种形态：未使用项 "never used"、未读字段 "is never read"、
+# 未构造的结构体/枚举变体 "is never constructed"。模式抽成变量，判定与打印
+# 共用，避免两处漂移。
+DEADCODE_PATTERN='never used|never read|never constructed'
+if grep -Eq "$DEADCODE_PATTERN" "$deadcode_log"; then
+  echo "FAIL: dead-code warnings present (an unwired feature or leftover code?):" >&2
+  grep -E -B1 "$DEADCODE_PATTERN" "$deadcode_log" >&2
   exit 1
 fi
 echo "  no dead-code warnings"

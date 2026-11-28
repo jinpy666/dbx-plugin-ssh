@@ -118,6 +118,7 @@ import {
   type TerminalSearchOptions,
 } from "./lib/terminalInteraction";
 import { createTerminalWriteThrottle, type TerminalWriteThrottle } from "./lib/terminalWriteThrottle";
+import { dockerTerminalChannelId } from "./lib/dockerTerminalFrames";
 import { createOutputGate } from "./lib/terminalBackpressure";
 import { createGhostSelectionGuard } from "./lib/terminalGhostSelectionGuard";
 import { createTerminalInputQueue, terminalInputChannel, TerminalInputTimeoutError } from "./lib/terminalInputQueue";
@@ -267,6 +268,7 @@ import {
   type GutterSettings,
 } from "./lib/terminalGutter";
 import { transferPausable } from "./lib/transferResume";
+import { transferBarValue, transferBytesTitle, transferPercent, transferShownBytes } from "./lib/transferDisplay";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
 import { useSessionReconnect } from "./composables/useSessionReconnect";
@@ -895,10 +897,6 @@ const {
   waitWhilePaused,
   toggleTransferPause,
   cancelTransfer,
-  transferPercent,
-  transferBarValue,
-  transferShownBytes,
-  transferBytesTitle,
 } = useTransferQueue({
   t: (key, values) => t(key, values),
   showError,
@@ -1001,7 +999,7 @@ const commandHistoryMeta = computed<Record<string, import("./lib/historyPanel").
     historyMetaBuckets.value = { ...historyMetaBuckets.value, [historyScope.value]: next };
   },
 });
-// 快速命令：用户自定义片段（≤20 条），全局存储在插件数据目录（sidecar），
+// 快速命令：用户自定义片段（≤200 条），全局存储在插件数据目录（sidecar），
 // 所有连接/工作台共享；状态与 PTY 写入语义收口在 composables/useQuickCommands。
 const {
   quickCommands,
@@ -4221,6 +4219,9 @@ const {
 });
 
 function handleBinary(event: DbxPluginBinaryEvent) {
+  // 容器终端输出由 DockerTerminalPane 的组合式自行订阅；主工作台绝不能把
+  // docker/terminal/out/* 落进下面的 ssh 分支（会污染 SSH sequence 状态）。
+  if (dockerTerminalChannelId(event.channel) !== null) return;
   if (event.channel.startsWith("local/terminal/out/")) {
     const localId = event.channel.slice("local/terminal/out/".length);
     if (!localSession.value || localId !== localSession.value.sessionId) return;
@@ -6183,25 +6184,6 @@ function handleActionLinkActivate(match: ActionLinkMatch, event: MouseEvent) {
   if (!sessionId) return;
   sendTerminalBytes(new TextEncoder().encode(match.command));
   terminal?.focus();
-}
-
-// ---- Docker 面板「在终端打开」（M3 遗留 6）----
-// DockerPanel 挂在 SideNavPanel 内（后者不透传事件且不在本次改动范围），面板经
-// window 自定义事件把命令字符串直达这里；走与建议浮层同款的「填入输入行不回车」
-// 通道（replaceTerminalLineWith）：命令落在 shell 输入行原地，用户确认后自行回车。
-// 无终端会话时 toast 提示先连接，不静默丢弃。
-function handleDockerOpenInTerminal(event: Event) {
-  const command = (event as CustomEvent<{ command?: string }>).detail?.command ?? "";
-  if (!command) return;
-  const hasTerminalSession = Boolean(
-    localSession.value ?? session.value ?? serialSession.value ?? telnetSession.value,
-  );
-  if (!terminal || !hasTerminalSession) {
-    showNotice(t("docker.terminalNeedSession"));
-    return;
-  }
-  replaceTerminalLineWith(command, false);
-  terminal.focus();
 }
 
 function showActionLinkHintAt(match: ActionLinkMatch, event: MouseEvent) {
@@ -9388,7 +9370,6 @@ onMounted(() => {
   document.addEventListener("focusout", onTooltipFocusOut);
   document.addEventListener("pointerdown", hideTooltip, true);
   document.addEventListener("wheel", hideTooltip, true);
-  window.addEventListener("dbx:docker-open-in-terminal", handleDockerOpenInTerminal);
   window.addEventListener("dragleave", resetDragHighlightOnWindowLeave);
   hostFontObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
   void hydrateQuickCommands();
@@ -9404,7 +9385,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   disposed = true;
   splitPane.disposeAll();
-  window.removeEventListener("dbx:docker-open-in-terminal", handleDockerOpenInTerminal);
   window.removeEventListener("dragleave", resetDragHighlightOnWindowLeave);
   document.removeEventListener("mouseover", onTooltipOver);
   document.removeEventListener("mouseout", onTooltipOut);
