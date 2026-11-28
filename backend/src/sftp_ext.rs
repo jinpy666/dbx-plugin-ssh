@@ -219,6 +219,53 @@ const MAX_UNIQUE_NAME_CHARS: usize = 255;
 /// 走裸包 LSTAT；裸包客户端**建立**失败回退高层探测路径（M15 先例）。返回
 /// 的 `name` 保持显示形式——前端把它拼回上传路径后，落盘侧 [`write_path_bytes`]
 /// 的分工（wire 前缀 + 显示末段）会编码出同一组服务器字节。
+/// rename_unique 的公共扫描核心：按候选序逐个问「目标是否已被占用」
+/// （probe 返回 exists 决定：`Ok(true)`=占用、`Ok(false)`=空闲），返回第一个
+/// 空闲候选，`conflict` 标记是否发生了 `(n)` 让位；全部被占返回 `None`。
+/// 探测错误（权限拒绝等非确定性答复）原样上抛——绝不把探测失败当
+/// 「不存在」放行原名覆盖（NO_SUCH_FILE-only 契约，M23/R1）。#337 回归
+/// 警示：极性一旦反转，重命名车道会烧满 999 次探测后必然失败，前端回落
+/// 原名 = 撞名静默覆盖，慢链路上表现为任务长时间停在「等待中」。
+async fn first_free_candidate<F, Fut>(
+    candidates: Vec<String>,
+    mut probe: F,
+) -> Result<Option<(String, bool)>, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, String>>,
+{
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        if !probe(candidate.clone()).await? {
+            return Ok(Some((candidate, index > 0)));
+        }
+    }
+    Ok(None)
+}
+
+/// rename_unique 的高层车道扫描：共享 SFTP 通道上的 LSTAT 逐候选探测。
+/// 目录是列表回传的 wire 形式，候选名是显示文本（latin-1 编码分工见
+/// [`rename_unique`] 文档）。
+async fn high_level_free_candidate(
+    runtime: &SshRuntime,
+    session_id: &str,
+    dir: &str,
+    candidates: Vec<String>,
+) -> Result<Option<(String, bool)>, String> {
+    let sftp = runtime.sftp(session_id).await?;
+    let guard = sftp.lock().await;
+    let session = &*guard;
+    first_free_candidate(candidates, |candidate| async move {
+        match session
+            .symlink_metadata(join_remote_name(dir, &candidate))
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) => high_level_exists_decision(&error),
+        }
+    })
+    .await
+}
+
 pub async fn rename_unique(
     runtime: &SshRuntime,
     session_id: &str,
@@ -227,62 +274,56 @@ pub async fn rename_unique(
     encoding: NameEncoding,
     sudo: bool,
 ) -> Result<Value, String> {
-    let dir = normalize_remote_path(dir)?;
+    let dir = &normalize_remote_path(dir)?;
     let clean = clean_unique_name(name)?;
-    if sudo {
-        for (index, candidate) in unique_name_candidates(&clean).into_iter().enumerate() {
-            let full = join_remote_name(&dir, &candidate);
-            if !crate::sudo_fs::exists(runtime, session_id, &full).await? {
-                return Ok(json!({ "name": candidate, "conflict": index > 0 }));
-            }
-        }
-        return Err(format!(
-            "No unique name derived from '{clean}' within {UNIQUE_NAME_PROBE_LIMIT} attempts"
-        ));
-    }
-    if encoding == NameEncoding::Latin1 {
+    let free = if sudo {
+        // sudo（UploadSudo 配套）：目标目录对登录用户不可读（如 /root）时，
+        // SFTP 探测全部失败会退化成原名覆盖；改走 sudo `test -e` 逐候选探测，
+        // 撞名让位语义与普通车道一致。latin-1 非 UTF-8 字节名是该车道登记
+        // 边界（exec 命令串是 UTF-8 String）。
+        first_free_candidate(unique_name_candidates(&clean), |candidate| async move {
+            crate::sudo_fs::exists(runtime, session_id, &join_remote_name(dir, &candidate)).await
+        })
+        .await?
+    } else if encoding == NameEncoding::Latin1 {
         match runtime.raw_sftp_client(session_id).await {
             Ok(mut client) => {
-                for (index, (candidate, raw)) in unique_name_raw_candidates(&dir, name)?
-                    .into_iter()
-                    .enumerate()
-                {
+                // 裸包 LSTAT 逐候选探测；裸包客户端建立成功即首选车道
+                // （M15 先例）。候选名按 latin-1 编码回字节，目录前缀按 wire
+                // 还原（unique_name_raw_path 分工）。裸包 lstat 是 &mut self，
+                // RawSftpClient 借用无法穿 FnMut 闭包出借，此车道保留内联
+                // 循环；极性与 first_free_candidate 一致，改动须两处同改。
+                let raw_dir = sftp_name::unescape_wire(dir);
+                let mut free = None;
+                for (index, candidate) in unique_name_candidates(&clean).into_iter().enumerate() {
+                    let raw = unique_name_raw_path(&raw_dir, &candidate);
                     // NO_SUCH_FILE-only 契约（同 raw_exists_decision）：把任何
                     // lstat 错误当"目标不存在"会在链路抖动下让原名直接撞上
                     // 既有文件、上传走 CREAT|TRUNC 静默覆盖。
-                    if raw_exists_decision(client.lstat(&raw).await)? {
-                        return Ok(json!({ "name": candidate, "conflict": index > 0 }));
+                    if !raw_exists_decision(client.lstat(&raw).await)? {
+                        free = Some((candidate, index > 0));
+                        break;
                     }
                 }
-                return Err(format!(
-                    "No unique name derived from '{clean}' within {UNIQUE_NAME_PROBE_LIMIT} attempts"
-                ));
+                free
             }
             Err(error) => {
                 eprintln!(
                     "[ssh-sftp-plugin] raw byte rename-unique unavailable, falling back: {error}"
                 );
+                high_level_free_candidate(runtime, session_id, dir, unique_name_candidates(&clean))
+                    .await?
             }
         }
-    }
-    let sftp = runtime.sftp(session_id).await?;
-    let session = sftp.lock().await;
-    let probe = |candidate: &str| {
-        let full = join_remote_name(&dir, candidate);
-        session.symlink_metadata(full)
+    } else {
+        high_level_free_candidate(runtime, session_id, dir, unique_name_candidates(&clean)).await?
     };
-    for (index, candidate) in unique_name_candidates(&clean).into_iter().enumerate() {
-        let absent = match probe(&candidate).await {
-            Ok(_) => false,
-            Err(error) => high_level_exists_decision(&error)?,
-        };
-        if absent {
-            return Ok(json!({ "name": candidate, "conflict": index > 0 }));
-        }
-    }
-    Err(format!(
-        "No unique name derived from '{clean}' within {UNIQUE_NAME_PROBE_LIMIT} attempts"
-    ))
+    let Some((candidate, conflict)) = free else {
+        return Err(format!(
+            "No unique name derived from '{clean}' within {UNIQUE_NAME_PROBE_LIMIT} attempts"
+        ));
+    };
+    Ok(json!({ "name": candidate, "conflict": conflict }))
 }
 
 /// `sftp/touch` — creates an empty file when missing, otherwise refreshes
@@ -1041,20 +1082,11 @@ fn unique_name_candidates(name: &str) -> Vec<String> {
     candidates
 }
 
-/// latin-1 裸包探测用的候选序列：目录前缀按 wire 还原为字节，候选名（显示
-/// 文本——`(n)` 是 ASCII 增量，编码次序无关）按 [`sftp_name::
-/// latin1_encode_display`] 编码回字节。纯函数，供 [`rename_unique`] 与单测。
-fn unique_name_raw_candidates(dir: &str, name: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let clean = clean_unique_name(name)?;
-    let raw_dir = sftp_name::unescape_wire(dir);
-    Ok(unique_name_candidates(&clean)
-        .into_iter()
-        .map(|candidate| {
-            let raw =
-                sftp_name::join_raw_path(&raw_dir, &sftp_name::latin1_encode_display(&candidate));
-            (candidate, raw)
-        })
-        .collect())
+/// latin-1 裸包探测的单候选路径：目录前缀（已按 wire 还原为字节）拼接候选名
+/// （显示文本——`(n)` 是 ASCII 增量，编码次序无关）按 [`sftp_name::
+/// latin1_encode_display`] 编码回字节。纯函数，供 [`rename_unique`] 裸包车道。
+fn unique_name_raw_path(raw_dir: &[u8], candidate: &str) -> Vec<u8> {
+    sftp_name::join_raw_path(raw_dir, &sftp_name::latin1_encode_display(candidate))
 }
 
 /// Pure decision core of [`rename_unique`]: the first candidate the `exists`
@@ -1831,20 +1863,73 @@ mod tests {
     }
 
     #[test]
-    fn unique_name_raw_candidates_encode_wire_prefix_and_display_names() {
-        let candidates = unique_name_raw_candidates("/tmp/caf%E9", "naïve.txt").unwrap();
+    fn unique_name_raw_path_encodes_wire_prefix_and_display_names() {
         // 目录前缀来自列表回传的 wire 形式（%E9 → 0xE9），候选名是用户新输入
         // 的显示文本按 latin-1 编码（ï → 0xEF）；(n) 是 ASCII 增量。
-        assert_eq!(candidates[0].1, b"/tmp/caf\xe9/na\xefve.txt".to_vec());
-        assert_eq!(candidates[1].1, b"/tmp/caf\xe9/na\xefve(1).txt".to_vec());
-        assert_eq!(candidates[0].0, "naïve.txt");
-        assert_eq!(candidates[1].0, "naïve(1).txt");
+        let raw_dir = sftp_name::unescape_wire("/tmp/caf%E9");
+        let candidates = unique_name_candidates("naïve.txt");
+        assert_eq!(
+            unique_name_raw_path(&raw_dir, &candidates[0]),
+            b"/tmp/caf\xe9/na\xefve.txt".to_vec()
+        );
+        assert_eq!(
+            unique_name_raw_path(&raw_dir, &candidates[1]),
+            b"/tmp/caf\xe9/na\xefve(1).txt".to_vec()
+        );
+        assert_eq!(candidates[0], "naïve.txt");
+        assert_eq!(candidates[1], "naïve(1).txt");
         assert_eq!(candidates.len(), (UNIQUE_NAME_PROBE_LIMIT + 1) as usize);
         // 字面 %XX 的新输入名保持字面量（不二次转义）。
-        let literal = unique_name_raw_candidates("/tmp", "100%.pdf").unwrap();
-        assert_eq!(literal[0].1, b"/tmp/100%.pdf".to_vec());
-        // 非法输入仍然被拒绝。
-        assert!(unique_name_raw_candidates("/tmp", "a/b").is_err());
+        assert_eq!(
+            unique_name_raw_path(b"/tmp", "100%.pdf"),
+            b"/tmp/100%.pdf".to_vec()
+        );
+    }
+
+    /// #337 回归锁定：首个空闲候选即返回（Ok(false)=空闲）。极性反转的旧
+    /// 实现会在候选 0 被占时错误地让位、全占时烧满探测序列后失败。
+    #[tokio::test]
+    async fn first_free_candidate_returns_the_first_free_candidate() {
+        let picked = first_free_candidate(
+            vec!["a.log".to_string(), "a(1).log".to_string()],
+            |_| async { Ok(false) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(picked, Some(("a.log".to_string(), false)));
+    }
+
+    #[tokio::test]
+    async fn first_free_candidate_defers_to_the_first_free_suffix() {
+        // 候选 0 被占、候选 1 空闲 → 让位 name(1)，conflict=true。
+        let picked = first_free_candidate(
+            unique_name_candidates("report.log"),
+            |candidate| async move { Ok(candidate == "report.log") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(picked, Some(("report(1).log".to_string(), true)));
+    }
+
+    #[tokio::test]
+    async fn first_free_candidate_reports_exhaustion_when_every_name_is_taken() {
+        let picked =
+            first_free_candidate(unique_name_candidates("report.log"), |_| async { Ok(true) })
+                .await
+                .unwrap();
+        assert_eq!(picked, None);
+    }
+
+    #[tokio::test]
+    async fn first_free_candidate_propagates_probe_errors_verbatim() {
+        // 权限拒绝等非确定性答复必须上抛，绝不误判成「不存在」放行原名覆盖
+        // （NO_SUCH_FILE-only 契约，M23/R1）。
+        let error = first_free_candidate(vec!["a.log".to_string()], |_| async {
+            Err("SFTP raw lstat failed with status 3".to_string())
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("status 3"), "{error}");
     }
 
     /// 两条 latin-1 路径还原分工的对照证明：touch/symlink-create/exists/

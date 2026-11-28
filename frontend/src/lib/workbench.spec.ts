@@ -344,6 +344,16 @@ describe("sftp panel search, type filter, and multi-select", () => {
     expect(filterSftpEntries(entries, "", "directory").map((entry) => entry.name)).toEqual(["Beta"]);
     expect(filterSftpEntries(entries, "", "file").map((entry) => entry.name)).toEqual(["alpha.txt", "gamma.log"]);
     expect(filterSftpEntries(entries, "missing", "all")).toEqual([]);
+
+    // issue #330：目录符号链接归入"文件夹"筛选，文件链接仍不属于任何类型筛选
+    // （与旧行为一致：symlink 只在"全部"里出现）。
+    const withLinks = [
+      { name: "Beta-link", kind: "symlink" as const, targetKind: "directory" as const },
+      { name: "alpha-link", kind: "symlink" as const, targetKind: "file" as const },
+      { name: "broken-link", kind: "symlink" as const },
+    ];
+    expect(filterSftpEntries(withLinks, "", "directory").map((entry) => entry.name)).toEqual(["Beta-link"]);
+    expect(filterSftpEntries(withLinks, "", "file")).toEqual([]);
   });
 
   it("expands shift-click selection between anchor and target rows", () => {
@@ -931,6 +941,11 @@ describe("App.vue template component resolution guard", () => {
       const alias = spec.trim().split(/\s+as\s+/).pop()?.trim();
       if (alias) importedNames.add(alias);
     }
+  }
+  // #326：预览组件改为 defineAsyncComponent(() => import(...)) 的本地绑定，
+  // 不再走静态 import；它们同样是模板可解析的 script-setup 绑定。
+  for (const hit of appScript.matchAll(/const\s+([\w$]+)\s*=\s*defineAsyncComponent\s*\(/g)) {
+    importedNames.add(hit[1]);
   }
   const templateTags = new Set<string>();
   for (const hit of appTemplate.matchAll(/<([A-Z][A-Za-z0-9]*)(?=[\s/>])/g)) {

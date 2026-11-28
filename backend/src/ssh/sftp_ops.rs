@@ -62,7 +62,8 @@ impl SshRuntime {
             .read_dir(path.to_string())
             .await
             .map_err(sftp_error)?;
-        Ok(entries
+        let mut result: Vec<SftpEntry> = entries
+            .into_iter()
             .map(|entry| {
                 let metadata = entry.metadata();
                 let kind = classify_entry_kind(entry.file_type());
@@ -93,9 +94,20 @@ impl SshRuntime {
                     content_type: content_type_for_path(&entry.path()),
                     owner,
                     group,
+                    target_kind: None,
                 }
             })
-            .collect())
+            .collect();
+        // issue #330：只有 symlink 条目做一次跟随探测（STAT 由服务器跟随
+        // 链接，返回目标自身类型）；普通文件/目录零额外 RTT。
+        for (index, probe_path) in symlink_probe_paths(&result) {
+            let probe = sftp.lock().await.metadata(probe_path).await;
+            if let Ok(metadata) = probe {
+                result[index].target_kind =
+                    Some(link_target_kind(classify_entry_kind(metadata.file_type())));
+            }
+        }
+        Ok(result)
     }
 
     /// latin-1 路径：裸包客户端取原始字节。显示名 = latin-1 解码（忠实）；
@@ -109,27 +121,47 @@ impl SshRuntime {
     ) -> Result<Vec<SftpEntry>, String> {
         let mut client = self.raw_sftp_client(session_id).await?;
         let raw_entries = client.readdir(path.as_bytes()).await?;
-        Ok(raw_entries
+        let mut result: Vec<SftpEntry> = Vec::with_capacity(raw_entries.len());
+        let mut probes: Vec<(usize, Vec<u8>)> = Vec::new();
+        for entry in raw_entries
             .into_iter()
             .filter(|entry| entry.name.as_slice() != b"." && entry.name.as_slice() != b"..")
-            .map(|entry| {
-                let display = sftp_name::decode_display_name(&entry.name, encoding);
-                let wire_name = sftp_name::escape_wire(&entry.name);
-                let wire_path = sftp_name::join_wire_name(path, &wire_name);
-                SftpEntry {
-                    lossy: display.lossy,
-                    name: display.text,
-                    uri: sftp_uri(&wire_path),
-                    kind: classify_raw_kind(entry.attrs.permissions),
-                    size: entry.attrs.size,
-                    modified_at: entry.attrs.mtime.map(u64::from),
-                    permissions: entry.attrs.permissions.map(format_permissions),
-                    content_type: content_type_for_path(&wire_path),
-                    owner: None,
-                    group: None,
-                }
-            })
-            .collect())
+        {
+            let display = sftp_name::decode_display_name(&entry.name, encoding);
+            let wire_name = sftp_name::escape_wire(&entry.name);
+            let wire_path = sftp_name::join_wire_name(path, &wire_name);
+            let kind = classify_raw_kind(entry.attrs.permissions);
+            if kind == "symlink" {
+                // 探测路径与 READDIR 同一字节口径（父路径 + 原始名字），
+                // 不经过 wire 转义，否则含非 ASCII 字节的链接名探测不到。
+                probes.push((
+                    result.len(),
+                    sftp_name::join_raw_path(path.as_bytes(), &entry.name),
+                ));
+            }
+            result.push(SftpEntry {
+                lossy: display.lossy,
+                name: display.text,
+                uri: sftp_uri(&wire_path),
+                kind,
+                size: entry.attrs.size,
+                modified_at: entry.attrs.mtime.map(u64::from),
+                permissions: entry.attrs.permissions.map(format_permissions),
+                content_type: content_type_for_path(&wire_path),
+                owner: None,
+                group: None,
+                target_kind: None,
+            });
+        }
+        // issue #330：仅 symlink 条目各付一次 STAT（服务器跟随链接），
+        // 普通文件/目录零额外往返。
+        for (index, raw_path) in probes {
+            if let Ok(attrs) = client.stat(&raw_path).await {
+                result[index].target_kind =
+                    Some(link_target_kind(classify_raw_kind(attrs.permissions)));
+            }
+        }
+        Ok(result)
     }
 
     /// 打开一条独立 sftp 子系统通道并跑裸包客户端（严格串行请求/响应）。

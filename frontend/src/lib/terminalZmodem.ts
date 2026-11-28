@@ -266,29 +266,50 @@ export async function sendZmodemFiles(session: Session, files: readonly File[], 
  * Receive-side session pump: starts the session (the ZRINIT that invites the
  * sender's first ZFILE is emitted by `start()`, not by `confirm()`) and
  * registers the batch offer handler. Resolves once the session ends
- * (ZFIN/OO, abort, or peer loss). An offer handler that throws resolves the
- * promise with `{ error }` so the caller can tear the session down — a
- * rejection inside the event emitter would otherwise surface as an unhandled
- * rejection while the wire sits idle.
+ * (ZFIN/OO, abort, or peer loss) — after any in-flight offer handler settles,
+ * so the caller's completion callback sees the final save bookkeeping
+ * (issue #336: sz's ZFIN/"OO" tail races the still-running `local/saveFile`
+ * IPC; settling early made the 10MB-class success notice silently vanish
+ * while the file did land on disk). An offer handler that throws resolves the
+ * promise with `{ error }` immediately so the caller can tear the session
+ * down — a rejection inside the event emitter would otherwise surface as an
+ * unhandled rejection while the wire sits idle.
  */
 export function receiveZmodemSession(session: Session, onOffer: (offer: ZmodemOffer) => Promise<void> | void): Promise<{ error?: unknown }> {
   return new Promise((resolve) => {
     let settled = false;
+    let endSeen = false;
+    let pendingHandlers = 0;
+    let handlerError: { error: unknown } | undefined;
     const settle = (outcome: { error?: unknown }) => {
       if (settled) return;
       settled = true;
       resolve(outcome);
     };
     session.on("offer", (offer) => {
+      pendingHandlers += 1;
       Promise.resolve()
         .then(() => onOffer(offer))
-        .catch((cause) => settle({ error: cause }));
+        .catch((cause) => {
+          handlerError ??= { error: cause };
+          settle(handlerError);
+        })
+        .finally(() => {
+          pendingHandlers -= 1;
+          if (endSeen && pendingHandlers === 0) settle(handlerError ?? {});
+        });
     });
-    session.on("session_end", () => settle({}));
+    session.on("session_end", () => {
+      endSeen = true;
+      if (pendingHandlers === 0) settle({});
+    });
     // Receive sessions must be started explicitly: start() emits the ZRINIT
     // that invites the sender's first ZFILE (confirm() alone stays silent).
     void session.start?.()?.catch(() => undefined);
-    if (session.has_ended()) settle({});
+    if (session.has_ended()) {
+      endSeen = true;
+      if (pendingHandlers === 0) settle({});
+    }
   });
 }
 

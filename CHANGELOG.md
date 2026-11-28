@@ -4,6 +4,27 @@
 
 This file records user-facing changes for Terminal. Unless noted otherwise, version dates follow the corresponding GitHub Release.
 
+## [0.7.17] — 2026-11-28
+
+- **0.7.17 正式版**。汇总 beta.1～beta.2：只读连接禁止命令执行与终端注入（P0 安全加固——原只读命令白名单可被进程替换、重定向与带写参数的动词穿透，只读连接现为 inspection-only，巡检走 `sftp_list_dir` / `sftp_stat` / `sftp_read_file`）；SFTP 跨会话传输「发送到会话…」——右键把选中的文件/文件夹经前端中继泵到其他在线服务器，进度/取消/暂停全在传输面板，文件夹按 cp -r 语义整树中继、目标侧逐级建目录（#334）；修复撞名上传「自动重命名」策略**静默覆盖远端同名文件**的数据丢失 bug——`sftp/rename-unique` 探测极性在 10 月加固批次被改反，撞名烧满 999 次探测后失败、前端回落原名，慢链路上表现为任务长时间停在「等待中」（#337）；修复 sz 下载 ~10MB 文件进度走完无任何反馈——完成结算早于落盘保存，成功提示被静默跳过而文件其实已存盘（#336）；SFTP 面板快捷键 `F2` 重命名 / `Delete` 删除（面板空白焦点下也生效）+ 传输 tab 改叫「传输」、上传设置独立分组（#337）。
+  **0.7.17 stable.** Includes beta.1–beta.2: read-only connections now refuse command execution and terminal injection (P0 — the old read-only whitelist was unsound against process substitution, redirection, and read-looking verbs with mutating arguments; inspection belongs to `sftp_list_dir` / `sftp_stat` / `sftp_read_file`); cross-session transfer "Send to session…" relays selected files and folders to another live server with progress/cancel/pause in the transfer panel and cp -r semantics for whole-folder trees (#334); fixed a data-loss bug where same-name uploads silently overwrote the remote file under the default auto-rename policy — the rename-unique probe was inverted, burning 999 LSTAT probes per collision with minutes-long "queued" stalls on slow links (#337); fixed missing sz download completion feedback on ~10MB files, where the completion settled before the in-flight save and the notice was silently skipped even though the file did land on disk (#336); SFTP panel shortcuts F2 rename / Delete delete (also when no row is focused) with the transfer tab renamed "Transfer" and upload settings grouped separately (#337).
+
+## [0.7.17-beta.2] — 2026-11-28
+
+### 修复
+- **撞名上传「自动重命名」恢复让位语义（数据丢失修复）**：默认策略下撞名上传会**静默覆盖远端同名文件**——`sftp/rename-unique` 的「存在/缺失」探测在 10 月加固批次中被改反（sudo 车道语义正确、冒烟恰好只测 sudo 车道，回归漏网）：撞名时烧满 999 次 LSTAT 后必然失败（慢链路上任务长时间停在「等待中」），前端回落原名直接覆盖（#337）。恢复「首个空闲候选」语义（`report.pdf` → `report(1).pdf`），探测失败（权限等）仍如实上抛，绝不静默放行覆盖。
+  **Same-name uploads under the default auto-rename policy silently OVERWROTE the remote file.** The rename-unique exists/absent probe was inverted since the October hardening batch (sudo-lane polarity was correct and smoke only covered that lane, so the regression slipped through): every collision burned 999 LSTAT probes and failed — minutes-long "queued" stalls on slow links — and the frontend fell back to the original name. First-free-candidate semantics restored; probe failures still surface as errors instead of overwriting (#337).
+
+- **sz 下载完成反馈不再丢失**：~10MB 文件下载进度走完后没有任何提示——接收会话在 `session_end` 即结算，落盘保存（同步 base64 + IPC）必输给 sz 的 ZFIN/"OO" 收尾往返，完成回调读到已保存计数为 0，成功提示与「在文件夹中显示」被静默跳过；**文件其实已经存盘**（#336）。现在完成结算等待全部在途落盘落账后再兑现；hostSave 通道从不计数的次生问题一并修复。
+  **sz downloads of ~10MB showed no completion feedback.** The receive session settled at session_end before the in-flight save finished, so the success notice and reveal actions were silently skipped even though the file did land on disk (#336). Completion now waits for outstanding saves to settle, and the hostSave channel finally counts saved files.
+
+### 新增
+- **SFTP 跨会话传输「发送到会话…」**：右键把选中的文件/**文件夹**经前端中继泵送到其他在线服务器（#334 阶段 1+2）。目标会话 + 目标目录确认后后台传输，进度/取消/暂停全在传输面板；下载腿按原始字节拉取、上传腿按目标会话投递（与批量上传同通道），内存峰值单片；文件夹按 cp -r 语义整树中继——BFS 遍历（上限镜像后端扫描口径，symlink 不跟随防环）、目标侧逐前缀建目录，目标列表复用批量条会话刷新并过滤本地/只读/死会话。不新增 sidecar 方法，全复用既有管线。
+  **Cross-session transfer: right-click → "Send to session…"** relays selected files and folders to another live server (#334 phase 1+2) with progress/cancel/pause in the transfer panel — a raw-byte download leg piped into the cross-connection upload lane with one-chunk memory footprint; folders relay whole trees (cp -r semantics, bounded BFS walk, symlinks not followed) with per-level directory creation on the target.
+
+- **SFTP 面板快捷键 + 上传设置独立分组**：面板级 `F2` 重命名（单选）、`Delete` 删除（单选确认、多选批量确认），面板空白/工具栏按钮焦点下也生效（此前只有文件行持有焦点时才响应）；输入控件内不接管；快捷键页补默认键说明。传输 tab 改叫「传输」（不再叫「下载设置」），上传并发与「远端已有同名文件时」独立成「上传设置」组并前移（#337）。
+  **SFTP panel shortcuts and regrouped upload settings.** F2 renames the single selection and Delete deletes (single confirm / multi batch) even when no row is focused; the transfer tab is renamed "Transfer" with upload concurrency and duplicate policy moved into a dedicated "Uploads" group, plus an SFTP shortcut note on the hotkeys page (#337).
+
 ## [0.7.17-beta.1] — 2026-11-26
 
 ### 安全

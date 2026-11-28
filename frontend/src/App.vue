@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
@@ -184,7 +184,7 @@ import {
 import { COMMAND_HISTORY_LIMIT, mergeShellHistory, parseShellHistoryText, persistableCommandHistoryBuckets, pushCommandHistory, sanitizeCommandHistoryBuckets, sanitizeCommandHistoryLimit, trimCommandHistoryBuckets } from "./lib/commandHistory";
 import { EnterLineTracker, acceptCommandWithContinuation, canCaptureEnterLine, echoConfirmsLine, extractDesyncedCommand, extractEchoedCommand } from "./lib/terminalEnterCapture";
 import { applyLineEditControlChar } from "./lib/terminalLineModel";
-import { loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, resolveCtrlFRoute, saveGhostTabAccept } from "./lib/ghostAcceptKey";
+import { loadCtrlFPassthrough, loadGhostTabAccept, matchesGhostFullAccept, matchesGhostWordAccept, resolveCtrlFRoute, saveCtrlFPassthrough, saveGhostTabAccept } from "./lib/ghostAcceptKey";
 import { isPasswordPromptLine, loadPromptHintsDismissed, loadPromptHintsEnabled, savePromptHintsDismissed, savePromptHintsEnabled, shouldShowPromptHints } from "./lib/terminalPromptHints";
 import { loadFlagHintEnabled, resolveFlagHint, saveFlagHintEnabled, shouldShowFlagHint, FLAG_HINTS, type FlagHint } from "./lib/flagHints";
 import { readWorkbenchUiMirror, writeWorkbenchUiMirror } from "./lib/workbenchUiMirror";
@@ -303,6 +303,7 @@ import { useExternalEdits } from "./composables/useExternalEdits";
 import { useSftpSidebar } from "./composables/useSftpSidebar";
 import { useBatchSend } from "./composables/useBatchSend";
 import { useBatchUpload } from "./composables/useBatchUpload";
+import { useSftpRelay } from "./composables/useSftpRelay";
 import { useMetricsPanel, type ServerMetrics } from "./composables/useMetricsPanel";
 import { useTrzsz } from "./composables/useTrzsz";
 import { useRecording } from "./composables/useRecording";
@@ -327,6 +328,7 @@ import {
   parseSftpPermissionVisibility,
   sanitizeVisibleColumns,
   sftpEntryIconKind,
+  sftpEntryIsDirectoryLike,
   sftpFileTypeName,
   type SftpColumn,
 } from "./lib/sftpEntries";
@@ -334,7 +336,7 @@ import { fileIcon, fileIconClass } from "./lib/fileIcons";
 import {
   folderUploadPercent,
 } from "./lib/folderUpload";
-import { decideFileRowAction } from "./lib/fileRowKeydown";
+import { decideFileRowAction, decideSftpPaneAction } from "./lib/fileRowKeydown";
 import { createCrossSurfaceStorageReader, subscribeStorageEvents } from "./lib/appearanceSync";
 import { attachWebglRenderer, loadWebglEnabled, persistWebglEnabled, syncWebglRenderer, type WebglRecoveryOptions, type WebglRendererLike } from "./lib/terminalWebgl";
 import {
@@ -368,9 +370,6 @@ import { bridgeBinaryBytes } from "../../shared/frontend/binaryEvent";
 import { findTreeNode } from "./lib/sftpDirTree";
 import { workbenchMessage } from "./lib/i18n";
 import { randomUUID } from "./lib/uuid";
-import TextPreview from "./components/TextPreview.vue";
-import PreviewPane from "./components/PreviewPane.vue";
-import JsonPreviewPanel from "./components/JsonPreviewPanel.vue";
 import TerminalSearchPanel from "./components/TerminalSearchPanel.vue";
 import TerminalQuickSelectPanel from "./components/TerminalQuickSelectPanel.vue";
 import TerminalHistoryPanel from "./components/TerminalHistoryPanel.vue";
@@ -452,6 +451,16 @@ import {
 } from "./rdp/rdpFrame";
 import { ToastAction, ToastClose, ToastProvider, ToastRoot, ToastViewport } from "./components/ui/toast";
 
+// 预览链路（CodeMirror 语言包、@file-viewer 的 PDF/Office/表格/媒体等
+// renderer）体积占整个单文件 UI 的大头，但只有用户真正打开文件预览时才
+// 用得上。宿主以 srcdoc 单文件加载工作台，静态 import 会让这份代码在
+// 每次连接首屏就被解析/求值，直接拖慢「点击连接 → 终端可用」（#326）。
+// 改成异步组件后模块体保留在惰性函数里，首屏只付文本解析成本，首次打开
+// 预览时再求值（单 bundle 内 import() 不产生网络请求，仍是即成）。
+const TextPreview = defineAsyncComponent(() => import("./components/TextPreview.vue"));
+const PreviewPane = defineAsyncComponent(() => import("./components/PreviewPane.vue"));
+const JsonPreviewPanel = defineAsyncComponent(() => import("./components/JsonPreviewPanel.vue"));
+
 interface SessionInfo {
   sessionId: string;
   connectionId: string;
@@ -474,6 +483,9 @@ interface SftpEntry {
   name: string;
   uri: string;
   kind: "file" | "directory" | "symlink" | "other";
+  /** issue #330：sidecar 对 symlink 跟随探测的结果；缺省=未知（旧版本/
+   * 断链/探测失败），行为与旧版一致（链接图标、双击不进入）。 */
+  targetKind?: "directory" | "file" | "other";
   size?: number;
   modifiedAt?: number;
   permissions?: string;
@@ -553,6 +565,9 @@ interface ConnectionSummary {
   username?: string;
   color?: string;
   readOnly?: boolean;
+  /** 连接备注（#329，manifest note 字段 binding=config）；真实宿主的 webview
+   *  上下文不带 external_config，缺失时以 connection/protocol 返回的 note 兜底。 */
+  note?: string;
   /** 宿主连接表单的 protocol 字段（缺省 ssh）：非 SSH 连接在 openSession 里路由到各自会话。 */
   protocol?: "ssh" | "telnet" | "vnc" | "serial" | "rdp";
   /** 串口连接配置（M32-B，manifest serial_* 字段；缺失时回落连接表单）。 */
@@ -671,6 +686,14 @@ const ghostAcceptKeyLabel = computed(() => (ghostTabAccept.value ? "Tab" : "→"
 function setGhostTabAccept(value: boolean) {
   ghostTabAccept.value = value;
   saveGhostTabAccept(value);
+}
+// 「Ctrl+F 发送到远端 shell」（issue #332）：默认关（现状）；开启后 Ctrl+F
+// 不再整段接受 ghost、不再打开终端搜索，一律透传远端（readline
+// forward-char 等）。终端搜索仍走可配置热键（默认 Ctrl+Shift+F）。
+const ctrlFPassthrough = ref(loadCtrlFPassthrough());
+function setCtrlFPassthrough(value: boolean) {
+  ctrlFPassthrough.value = value;
+  saveCtrlFPassthrough(value);
 }
 
 // 存储迁移批 3：传输/下载/建议偏好消毒器已下沉 lib/preferencesMirror
@@ -1863,6 +1886,7 @@ const connection = computed<ConnectionSummary>(() => {
     username: normalizeConnectionText(raw.username),
     color: normalizeConnectionText(raw.color),
     readOnly: raw.readOnly === true,
+    note: normalizeConnectionText(field("note")),
     protocol: protocolRaw === "telnet" || protocolRaw === "vnc" || protocolRaw === "serial" || protocolRaw === "rdp" ? protocolRaw : "ssh",
     serialPort: normalizeConnectionText(field("serial_port")),
     serialBaud: [9600, 19200, 38400, 57600, 115200, 230400].includes(Number(field("serial_baud"))) ? Number(field("serial_baud")) : undefined,
@@ -1984,6 +2008,10 @@ const connectionAuthMethodLabel = computed(() => formatAuthMethodLabel(connectio
   };
   return labels[method];
 }));
+// 连接备注（#329）：webview 上下文若带 note（未来宿主/降级形态）优先，否则
+// 用 openSession 里 connection/protocol 查回的 sidecar 权威值。
+const storedConnectionNote = ref("");
+const connectionNoteText = computed(() => normalizeConnectionText(connection.value.note) || storedConnectionNote.value);
 // 连接色染色按主题分级（light 压低 alpha 保 muted 文字 AA 对比度，P2-4）。
 const toolbarStyle = computed(() => toolbarTintStyle(connection.value.color, appearance.value.colorScheme));
 // 终端让宽（纯计算在 lib/paneLayout）：SFTP 分栏按用户拖拽比例。Docker 面板
@@ -2671,7 +2699,7 @@ function handleTerminalKey(event: KeyboardEvent) {
   if (
     ghostMatch.value &&
     !suggestionOpen.value &&
-    (matchesGhostFullAccept(event.key, event) || (ghostTabAccept.value && event.key === "Tab" && !completionOpen.value)) &&
+    (matchesGhostFullAccept(event.key, event, { ctrlFPassthrough: ctrlFPassthrough.value }) || (ghostTabAccept.value && event.key === "Tab" && !completionOpen.value)) &&
     !(event.ctrlKey && event.key === "Tab") &&
     !(commandRunning.value || terminalTransferBusy.value)
   ) {
@@ -2693,6 +2721,7 @@ function handleTerminalKey(event: KeyboardEvent) {
       ghostVisible: !!ghostMatch.value,
       transferBusy: terminalTransferBusy.value,
       alternateActive: terminal?.buffer.active.type === "alternate",
+      ctrlFPassthrough: ctrlFPassthrough.value,
     }) === "search"
   ) {
     openTerminalSearch();
@@ -4504,16 +4533,19 @@ const connectCardStatusText = computed(() => {
 // 恢复态标签更晚的凭据重推，以及非 SSH 协议的迟到推送：恢复态 4×250ms、常规
 // 2×250ms。旧 sidecar 对 SSH 仍回空串，最多多等 0.75s，路由结果不变；真未命中
 // 的连接落进既有重试梯子（每次重试都会重新查询，协议一到就路由）。
-async function resolveStoredConnectionProtocol(connectionId: string, bootRestore: boolean): Promise<{ protocol: string; shell: string; cwd: string; env: Array<{ name: string; value: string }> }> {
+async function resolveStoredConnectionProtocol(connectionId: string, bootRestore: boolean): Promise<{ protocol: string; note: string; shell: string; cwd: string; env: Array<{ name: string; value: string }> }> {
   const attempts = bootRestore ? 4 : 2;
   const delayMs = 250;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const result = await window.dbxPlugin.invoke<{ protocol?: string; shell?: string; cwd?: string; env?: Array<{ name?: unknown; value?: unknown }> }>("connection/protocol", { connectionId });
+      const result = await window.dbxPlugin.invoke<{ protocol?: string; note?: string; shell?: string; cwd?: string; env?: Array<{ name?: unknown; value?: unknown }> }>("connection/protocol", { connectionId });
       const protocol = typeof result?.protocol === "string" ? result.protocol : "";
       if (protocol) {
         return {
           protocol,
+          // 连接备注（#329）：sidecar 从 lifecycle external_config.note 取值；
+          // 旧 sidecar 无此键 → 空串（连接信息面板不显示该行）。
+          note: typeof result.note === "string" ? result.note.trim() : "",
           shell: typeof result.shell === "string" ? result.shell : "",
           // 连接表单的启动目录/环境变量（旧 sidecar 无键 → 空 = 未配置）。
           cwd: typeof result.cwd === "string" ? result.cwd.trim() : "",
@@ -4526,11 +4558,11 @@ async function resolveStoredConnectionProtocol(connectionId: string, bootRestore
       }
     } catch {
       // sidecar 未就绪/旧版 sidecar 无此方法：按未暂存处理，走推送协议。
-      return { protocol: "", shell: "", cwd: "", env: [] };
+      return { protocol: "", note: "", shell: "", cwd: "", env: [] };
     }
     if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
-  return { protocol: "", shell: "", cwd: "", env: [] };
+  return { protocol: "", note: "", shell: "", cwd: "", env: [] };
 }
 
 // RDP 路由重入保护（与 sidecar 同 workbenchId 幂等查重双保险）：reconnect
@@ -4601,6 +4633,7 @@ async function openSession(forceNew = false, bootRestore = false, isRetry = fals
   if (connectionProtocol.value === "ssh" && connectionId.value) {
     const stored = await resolveStoredConnectionProtocol(connectionId.value, bootRestore);
     const storedProtocol = stored.protocol;
+    storedConnectionNote.value = stored.note;
     // 权威协议写回响应式状态（storedConnectionProtocol）：路由之外的连接级
     // 门控（isRdpConnection）也以它为准，否则真实宿主下 RDP 连接的 SSH 入口
     // 整组漏出（宿主推送上下文缺 protocol，查询结果不落状态就只够当次路由）。
@@ -7620,6 +7653,22 @@ function onFileRowKeydown(event: KeyboardEvent, entry: SftpEntry) {
   else deleteTarget.value = entry;
 }
 
+// #337-3：SFTP 面板级快捷键——行级 F2/Delete 只在行持有焦点时生效，这里补齐
+// 面板空白/工具栏按钮焦点下的常用键。输入控件（路径栏/搜索/重命名框）内不
+// 接管：那些场景的 Delete/F2 是文本编辑；行级处理器对已接管按键
+// stopPropagation，冒泡不会到这里重复触发。
+function onSftpPaneKeydown(event: KeyboardEvent) {
+  const target = event.target;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
+  if (target instanceof HTMLElement && (target.isContentEditable || target.closest("[contenteditable='true']"))) return;
+  const action = decideSftpPaneAction(event.key, canWrite.value, selectedEntries.value.length);
+  if (!action) return;
+  event.preventDefault();
+  if (action === "rename") beginRename(selectedEntries.value[0]!);
+  else if (action === "delete-single") deleteTarget.value = selectedEntries.value[0]!;
+  else batchDeleteOpen.value = true;
+}
+
 
 
 // 外部编辑回传：watch 确认状态机/上传串行链收口在 composables/useExternalEdits。
@@ -7687,6 +7736,33 @@ const {
   pathFromUri,
   // sudo 模式 + 可写连接时批量下载对普通文件走 sudo 车道（与右键单项一致）。
   sudoDownload: () => sudoMode.value && canWrite.value,
+});
+
+// 跨会话传输（issue #334 阶段 1）：右键「发送到会话…」经前端中继泵把选中
+// 文件送到另一台在线服务器。下载腿/上传腿全部复用既有管线，编排收口在
+// composables/useSftpRelay。
+const {
+  relayPrompt,
+  relayTargets,
+  relayTargetSession,
+  relayTargetDir,
+  relayBusy,
+  openSendToSession,
+  closeSendToSession,
+  confirmSendToSession,
+} = useSftpRelay({
+  t, showNotice, showError, connected, session, currentPath,
+  loadBatchTargets: async () => {
+    await refreshBatchTargets();
+    return batchTargets.value;
+  },
+  uploadSource,
+  waitForDownloadChunk: (taskId, offset) => waitForDownloadChunk(taskId, offset),
+  waitForDownloadReady: (taskId, compression) => waitForDownloadReady(taskId, compression),
+  loadTransferConcurrency,
+  joinRemote,
+  pathFromUri,
+  openTransferPanel: () => openTransferPanel(),
 });
 
 // —— 断点续传：暂停/恢复 + 可续传上传 ———
@@ -8760,6 +8836,8 @@ const modalOpenStates = computed(() => [
   transferHistoryClearOpen.value,
   chmodTarget.value,
   newFileDialog.value,
+  // 跨会话发送（issue #334 阶段 1）：模板顺序在 newFile 之后、SFTP 对话框区。
+  !!relayPrompt.value,
   operationDialog.value,
   symlinkDialog.value !== null,
   watchModifiedQueue.value.length > 0,
@@ -8889,6 +8967,10 @@ function onDocumentKeydown(event: KeyboardEvent) {
   }
   if (attrsTarget.value) {
     closeAttributes();
+    return;
+  }
+  if (relayPrompt.value) {
+    closeSendToSession();
     return;
   }
   if (deleteTarget.value) {
@@ -9554,6 +9636,7 @@ function flagHintsSource(command: string): string {
             <dt>{{ t("connectionInfoPort") }}</dt><dd class="mono">{{ connection.port || 22 }}</dd>
             <dt>{{ t("connectionInfoUser") }}</dt><dd class="mono">{{ connection.username || "–" }}</dd>
             <dt>{{ t("connectionInfoAuth") }}</dt><dd>{{ connectionAuthMethodLabel }}</dd>
+            <template v-if="connectionNoteText"><dt>{{ t("connectionInfoNote") }}</dt><dd class="connection-note">{{ connectionNoteText }}</dd></template>
             <template v-if="connection.readOnly || connectionReadOnly"><dt>{{ t("readOnly") }}</dt><dd>{{ t("yes") }}</dd></template>
             <dt>{{ t("connectionInfoLatency") }}</dt>
             <dd>
@@ -10907,7 +10990,7 @@ function flagHintsSource(command: string): string {
         @keydown="onDividerKeydown($event, nudgeSplitDivider)"
       />
 
-      <section v-if="sftpPaneOpen && !isRdpConnection && !localUiMode" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave="onSftpDragLeave" @drop.prevent="onDrop">
+      <section v-if="sftpPaneOpen && !isRdpConnection && !localUiMode" ref="sftpPane" class="sftp-pane" tabindex="-1" :class="{ 'drag-active': dragActive }" @pointerdown="focusSftpPaneOnPointerDown" @keydown="onSftpPaneKeydown" @paste.capture="onSftpClipboardPaste" @dragenter.prevent="onSftpDragEnter" @dragover.prevent @dragleave="onSftpDragLeave" @drop.prevent="onDrop">
         <div class="path-toolbar">
           <button class="icon-button" :title="t('parentFolder')" :aria-label="t('parentFolder')" :disabled="currentPath === '/'" @click="goParent"><ArrowUp /></button>
           <button class="icon-button icon-amber" :title="t('home')" :aria-label="t('home')" :disabled="!connected" @click="loadHome"><Home /></button>
@@ -11100,13 +11183,14 @@ function flagHintsSource(command: string): string {
                 @keydown="onFileRowKeydown($event, entry)"
               >
                 <span class="file-name">
-                  <!-- issue #36：图标只认 sftpEntryIconKind —— 仅 directory 出文件夹，
-                       other/未知一律文件图标，symlink 保持链接文档。文件类型图标
-                       按扩展名区分（files 插件同款 fileIcons）。 -->
-                  <Folder v-if="sftpEntryIconKind(entry.kind) === 'folder'" class="folder-icon" />
+                  <!-- issue #36：图标只认 sftpEntryIconKind —— 仅"可进入的目录"
+                       出文件夹，other/未知一律文件图标，普通 symlink 保持链接文档。
+                       issue #330：指向目录的 symlink（targetKind==="directory"）
+                       同样出文件夹图标。文件类型图标按扩展名区分。 -->
+                  <Folder v-if="sftpEntryIconKind(entry.kind, entry.targetKind) === 'folder'" class="folder-icon" />
                   <component
                     :is="fileIcon(entry.name)"
-                    v-else-if="sftpEntryIconKind(entry.kind) === 'file'"
+                    v-else-if="sftpEntryIconKind(entry.kind, entry.targetKind) === 'file'"
                     :class="fileIconClass(entry.name)"
                     aria-hidden="true"
                   />
@@ -11136,7 +11220,7 @@ function flagHintsSource(command: string): string {
                 </span>
                 <span v-if="visibleColumns.includes('modified')">{{ formatModified(entry.modifiedAt) }}</span>
                 <span v-if="visibleColumns.includes('size')">{{ entry.kind === "file" ? formatBytes(entry.size) : "--" }}</span>
-                <span v-if="visibleColumns.includes('kind')">{{ entry.kind === "directory" ? t("sftpFilter.folders") : sftpFileTypeName(entry.name) || t("sftpFilter.files") }}</span>
+                <span v-if="visibleColumns.includes('kind')">{{ sftpEntryIsDirectoryLike(entry.kind, entry.targetKind) ? t("sftpFilter.folders") : sftpFileTypeName(entry.name) || t("sftpFilter.files") }}</span>
                 <span v-if="visibleColumns.includes('owner')" class="mono" :title="entry.owner">{{ entry.owner || "-" }}</span>
                 <span v-if="visibleColumns.includes('group')" class="mono" :title="entry.group">{{ entry.group || "-" }}</span>
               </button>
@@ -11148,18 +11232,23 @@ function flagHintsSource(command: string): string {
                 <!-- 多选感知：右键时已多选（selection > 1）→ 菜单整体切换为批量区，单项动作隐藏 -->
                 <template v-if="fileMenu && fileMenu.selection.length > 1">
                   <ContextMenuItem @select="batchDownload"><Download />{{ t("download") }}</ContextMenuItem>
+                  <!-- 跨会话发送（issue #334 阶段 1）：选中文件经前端中继泵到
+                       其他在线会话（普通文件；文件夹计入跳过并在完成后提示）。 -->
+                  <ContextMenuItem :disabled="!connected || relayBusy" @select="openSendToSession(selectedEntries)"><Send />{{ t("sftpRelay.action") }}</ContextMenuItem>
                   <ContextMenuItem :disabled="!canWrite || archiveBusy || batchDeleteSubmitting" @select="batchArchive()"><Archive />{{ t("sftpBatch.archive") }}</ContextMenuItem>
                   <ContextMenuItem variant="destructive" :disabled="!canWrite || archiveBusy || batchDeleteSubmitting" @select="batchDeleteOpen = true"><Trash2 />{{ t("sftpBatch.delete") }}</ContextMenuItem>
                   <ContextMenuSeparator />
                   <ContextMenuItem @select="copySelectedPaths"><Copy />{{ t("sftpCopy.copySelected") }}</ContextMenuItem>
                 </template>
                 <template v-else-if="fileMenu">
-                  <ContextMenuItem v-if="fileMenu.entry.kind === 'directory' || fileMenu.entry.kind === 'file'" @select="openEntry(fileMenu.entry)"><Folder v-if="fileMenu.entry.kind === 'directory'" /><FileText v-else />{{ fileMenu.entry.kind === "directory" ? t("openFolder") : t("preview") }}</ContextMenuItem>
+                  <ContextMenuItem v-if="sftpEntryIsDirectoryLike(fileMenu.entry.kind, fileMenu.entry.targetKind) || fileMenu.entry.kind === 'file'" @select="openEntry(fileMenu.entry)"><Folder v-if="sftpEntryIsDirectoryLike(fileMenu.entry.kind, fileMenu.entry.targetKind)" /><FileText v-else />{{ sftpEntryIsDirectoryLike(fileMenu.entry.kind, fileMenu.entry.targetKind) ? t("openFolder") : t("preview") }}</ContextMenuItem>
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' || fileMenu.entry.kind === 'directory'" @select="downloadEntry(fileMenu.entry, sudoMode && canWrite && fileMenu.entry.kind === 'file')"><Download />{{ t("download") }}</ContextMenuItem>
                   <!-- 一次性「下载到…」（issue #303）：该次下载强制弹目录询问，
                        不必翻转全局「使用默认地址」；仅文件——目录走递归树下载，
                        目标目录覆盖未接入树下载管线。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" @select="downloadEntry(fileMenu.entry, sudoMode && canWrite, false, true)"><FolderOpen />{{ t("downloadTo") }}</ContextMenuItem>
+                  <!-- 跨会话发送（issue #334）：文件直达；文件夹按 cp -r 语义整树中继。 -->
+                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file' || fileMenu.entry.kind === 'directory'" :disabled="!connected || relayBusy" @select="openSendToSession([fileMenu.entry])"><Send />{{ t("sftpRelay.action") }}</ContextMenuItem>
                   <!-- ST10 显式压缩包模式（自研 lzpack，远端零依赖）：文件级入口。
                        压缩上传交付 <名>.dbxz；解压下载要求源是 .dbxz。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' && !sudoMode" :disabled="!canWrite" @select="chooseUploadLzpack()"><PackageOpen />{{ t("sftpLzpack.uploadAction") }}</ContextMenuItem>
@@ -11536,6 +11625,32 @@ function flagHintsSource(command: string): string {
       </DialogContent>
     </Dialog>
 
+    <!-- 跨会话发送（issue #334 阶段 1）：目标会话 + 目标目录确认。传输本体走
+         传输面板（上传腿卡片，进度/取消/暂停继承），此处只做选择。 -->
+    <Dialog :open="!!relayPrompt" @update:open="(open) => { if (!open) closeSendToSession(); }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <template v-if="relayPrompt">
+        <header><DialogTitle>{{ t("sftpRelay.title") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" :disabled="relayBusy" @click="closeSendToSession"><X /></button></header>
+        <p class="muted">{{ t("itemsSelected", { count: relayPrompt.count }) }}<template v-if="relayPrompt.skipped">{{ t("sftpRelay.skippedNote", { count: relayPrompt.skipped }) }}</template></p>
+        <label class="settings-field">
+          <span>{{ t("sftpRelay.targetLabel") }}</span>
+          <Select :model-value="relayTargetSession" @update:model-value="(v) => (relayTargetSession = String(v))">
+            <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="target in relayTargets" :key="target.sessionId" :value="target.sessionId">{{ target.label }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </label>
+        <label class="settings-field">
+          <span>{{ t("sftpRelay.dirLabel") }}</span>
+          <input v-model="relayTargetDir" class="mono" spellcheck="false" />
+        </label>
+        <p class="muted settings-note">{{ t("sftpRelay.dirHint") }}</p>
+        <footer><button @click="closeSendToSession" :disabled="relayBusy">{{ t("cancel") }}</button><button class="primary-button" :disabled="!relayTargetSession || relayBusy" @click="confirmSendToSession"><Loader2 v-if="relayBusy" class="spinning" /><Send v-else />{{ t("confirm") }}</button></footer>
+        </template>
+      </DialogContent>
+    </Dialog>
+
     <Dialog :open="!!attrsTarget" @update:open="(open) => { if (!open) closeAttributes(); }">
       <DialogContent class="modal small-modal" @escape-key-down.prevent>
         <template v-if="attrsTarget">
@@ -11643,6 +11758,8 @@ function flagHintsSource(command: string): string {
       @update:command-history-limit="applyCommandHistoryLimit"
       :ghost-tab-accept="ghostTabAccept"
       @update:ghost-tab-accept="setGhostTabAccept"
+      :ctrl-f-passthrough="ctrlFPassthrough"
+      @update:ctrl-f-passthrough="setCtrlFPassthrough"
       :ai-settings="aiSettingsState"
       :ai-bridge-ready="aiBridgeReady"
       @update-ai-settings="updateAiSettings"
@@ -12114,6 +12231,7 @@ function flagHintsSource(command: string): string {
 .connection-info-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; font-size: 12px; }
 .connection-info-grid dt { max-width: 16ch; overflow: hidden; color: var(--muted-foreground); text-overflow: ellipsis; white-space: nowrap; }
 .connection-info-grid dd { display: flex; min-width: 0; align-items: center; gap: 8px; margin: 0; overflow-wrap: anywhere; }
+.connection-info-grid dd.connection-note { align-items: flex-start; white-space: pre-wrap; }
 .connection-info-grid .task-error { font-size: 10px; }
 .connection-info-grid .link-button { flex: 0 0 auto; align-self: center; font-size: 10px; }
 

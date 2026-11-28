@@ -397,7 +397,13 @@ async function handleReceiveOffer(offer: ZmodemOffer): Promise<void> {
     on_input: (payload) => noteReceiveChunk(Uint8Array.from(payload), chunks, fileName, details),
   });
   if (receiveChannel === "sidecar") await saveReceivedFileViaSidecar(fileName, chunks);
-  else await saveHostFile(chunks, fileName);
+  else {
+    // hostSave 通道此前从不计数（issue #336）：savedFileCount 不落账，
+    // 完成回调的 savedCount>0 门判恒假——该通道下每次 sz 下载成功都静默
+    // 收场（无提示、无 reveal）。浏览器保存无路径可记，只补计数。
+    await saveHostFile(chunks, fileName);
+    savedFileCount += 1;
+  }
 }
 
 /** 宿主 fileTransfer 流式落盘：beginSave 打开目标后随 on_input 逐块写，

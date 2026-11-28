@@ -394,3 +394,45 @@ describe("SettingsDialog 文件浏览（双击行为）", () => {
     wrapper.unmount();
   });
 });
+
+describe("SettingsDialog Ctrl+F 发送到远端（issue #332）", () => {
+  // Switch 行内第一个 span 是 SwitchThumb 的内部节点（空文本），不能套用
+  // input 行的 `querySelector("span")` 单 span 取文本，需全量扫描行内 span。
+  const ctrlFRow = () =>
+    [...document.body.querySelectorAll<HTMLLabelElement>(".settings-field.settings-switch-row")]
+      .find((el) => [...el.querySelectorAll("span")].some((s) => (s.textContent ?? "").trim() === t("terminalGhost.ctrlFPassthrough")));
+
+  it("回显 prop 并在切换时上抛 update:ctrlFPassthrough", async () => {
+    installInvoke(null);
+    const wrapper = mountSettings(undefined);
+    await openDialog(wrapper);
+
+    const row = ctrlFRow();
+    expect(row, "Ctrl+F 开关行存在").toBeTruthy();
+    const toggle = row!.querySelector<HTMLButtonElement>('button[role="switch"]')!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+
+    toggle.click();
+    await flushPromises();
+    expect(wrapper.emitted("update:ctrlFPassthrough")?.[0]).toEqual([true]);
+
+    await wrapper.setProps({ ctrlFPassthrough: true });
+    await flushPromises();
+    expect(ctrlFRow()!.querySelector('button[role="switch"]')!.getAttribute("aria-checked")).toBe("true");
+    wrapper.unmount();
+  });
+
+  it("开启后按键说明不再列出 Ctrl+F", async () => {
+    installInvoke(null);
+    const wrapper = mountSettings(undefined);
+    await openDialog(wrapper);
+    const notes = () => [...document.body.querySelectorAll<HTMLElement>("p.settings-note")].map((el) => (el.textContent ?? "").trim());
+
+    expect(notes()).toContain(t("terminalGhost.keysSummary"));
+    await wrapper.setProps({ ctrlFPassthrough: true });
+    await flushPromises();
+    expect(notes()).toContain(t("terminalGhost.keysSummaryNoCtrlF"));
+    expect(notes()).not.toContain(t("terminalGhost.keysSummary"));
+    wrapper.unmount();
+  });
+});

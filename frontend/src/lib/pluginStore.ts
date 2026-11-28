@@ -86,6 +86,9 @@ export const PLUGIN_STORE_KEYS: readonly string[] = [
   "ssh-terminal-ghost-suggest",
   // 「Tab 接受建议」可选开关（ghostAcceptKey.ts 自治读写，默认关）。
   "ssh-ghost-tab-accept",
+  // 「Ctrl+F 发送到远端 shell」可选开关（issue #332，ghostAcceptKey.ts
+  // 自治读写，默认关）：开 = Ctrl+F 不接受 ghost、不开终端搜索，一律透传。
+  "ssh-terminal-ctrl-f-passthrough",
   // 历史面板功能开关（issue #169）：关 = 面板整体不可唤起（↑ 与 Ctrl+R 归还
   // 远端 shell 原生历史/反向搜索）。SettingsDialog 开关行自治读写，默认开。
   "ssh-history-panel-enabled",

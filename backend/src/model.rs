@@ -4,6 +4,8 @@ use serde_json::Value;
 pub const TERMINAL_REPLAY_LIMIT: usize = 2 * 1024 * 1024;
 pub const TRANSFER_CHUNK_SIZE: usize = 256 * 1024;
 pub const MAX_TRANSFER_SIZE: u64 = 16 * 1024 * 1024 * 1024;
+/// Upper bound for the free-text connection remark surfaced on the workbench.
+pub const CONNECTION_NOTE_MAX_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthenticationMethod {
@@ -170,6 +172,11 @@ pub struct StoredConnection {
     /// `connectionName` lookup on the MCP surface and the metadata-only
     /// `ssh_list_connections` view. Never a credential.
     pub name: Option<String>,
+    /// Free-text remark from the connection form (manifest `note`, binding
+    /// `config` → `external_config.note`). Display-only metadata: never used
+    /// for routing or credentials. Hosts that carry the first-class
+    /// `ConnectionConfig.note` field are honoured as a fallback.
+    pub note: String,
     pub host: String,
     pub port: u16,
     pub runtime_host: String,
@@ -355,6 +362,7 @@ impl JumpHost {
             // Jump hops are referenced by position in the chain, never by
             // name on the MCP surface.
             name: None,
+            note: String::new(),
             host: self.host.clone(),
             port: self.port,
             runtime_host: self.host.clone(),
@@ -425,6 +433,7 @@ impl StoredConnection {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let note = connection_note(connection);
         let host = validate_host_field(string_field(connection, "host")?)?;
         let port = connection
             .get("port")
@@ -628,6 +637,7 @@ impl StoredConnection {
         Ok(Self {
             id,
             name,
+            note,
             host,
             port,
             runtime_host,
@@ -692,6 +702,25 @@ fn config_text<'a>(
     keys.iter()
         .find_map(|key| config.and_then(|config| config.get(*key)))
         .and_then(Value::as_str)
+}
+
+/// Connection remark (manifest `note` field, `binding: config`). The form
+/// writes it to `external_config.note`; hosts that store the first-class
+/// `ConnectionConfig.note` are honoured as a fallback. Display-only metadata,
+/// so it is trimmed and capped rather than rejected like credentials.
+fn connection_note(connection: &serde_json::Map<String, Value>) -> String {
+    connection
+        .get("external_config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("note"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| connection.get("note").and_then(Value::as_str))
+        .map(str::trim)
+        .unwrap_or_default()
+        .chars()
+        .take(CONNECTION_NOTE_MAX_CHARS)
+        .collect()
 }
 
 /// Terminal activity keepalive: 0 disables, anything else is bounded so a
@@ -911,6 +940,13 @@ pub struct SftpEntry {
     /// 不可还原，可在设置 → 传输切换文件名编码后重列。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lossy: bool,
+    /// 符号链接指向的目标类型（issue #330），取值 `directory`/`file`/
+    /// `other`（指向链接或无法判定）。仅 `kind == "symlink"` 的条目做一次
+    /// 跟随探测，探测失败或非链接条目字段省略。**只用于渲染与导航**：
+    /// delete/rename/递归判型永远按链接自身处理，绝不因本字段变成递归
+    /// 删除（见前端 `useSftpDelete`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_kind: Option<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1091,6 +1127,74 @@ mod tests {
     }
 
     #[test]
+    fn connection_note_comes_from_the_form_field_with_host_fallback() {
+        // #329：表单字段 note（binding=config）落在 external_config.note。
+        let from_form = StoredConnection::from_lifecycle_params(&serde_json::json!({
+            "connection": {
+                "id": "noted",
+                "host": "example.com",
+                "port": 22,
+                "username": "user",
+                "password": "secret",
+                "external_config": { "note": "  Staging bastion\nchange window Tue  " }
+            }
+        }))
+        .unwrap();
+        assert_eq!(from_form.note, "Staging bastion\nchange window Tue");
+
+        // 宿主 first-class ConnectionConfig.note 作为回退。
+        let from_host = StoredConnection::from_lifecycle_params(&serde_json::json!({
+            "connection": {
+                "id": "host-noted",
+                "host": "example.com",
+                "port": 22,
+                "username": "user",
+                "password": "secret",
+                "note": "Host note"
+            }
+        }))
+        .unwrap();
+        assert_eq!(from_host.note, "Host note");
+
+        // 空/空白/非字符串一律折叠为空串，绝不影响连接解析。
+        for note in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::json!(null),
+        ] {
+            let blank = StoredConnection::from_lifecycle_params(&serde_json::json!({
+                "connection": {
+                    "id": "blank-note",
+                    "host": "example.com",
+                    "port": 22,
+                    "username": "user",
+                    "password": "secret",
+                    "external_config": { "note": note }
+                }
+            }))
+            .unwrap();
+            assert!(blank.note.is_empty());
+        }
+    }
+
+    #[test]
+    fn connection_note_is_capped_for_display() {
+        let long = "x".repeat(CONNECTION_NOTE_MAX_CHARS + 500);
+        let connection = StoredConnection::from_lifecycle_params(&serde_json::json!({
+            "connection": {
+                "id": "long-note",
+                "host": "example.com",
+                "port": 22,
+                "username": "user",
+                "password": "secret",
+                "external_config": { "note": long }
+            }
+        }))
+        .unwrap();
+        assert_eq!(connection.note.chars().count(), CONNECTION_NOTE_MAX_CHARS);
+    }
+
+    #[test]
     fn read_only_flags_from_host_and_form_force_read_only() {
         // 插件特定配置项：连接表单 read_only（external_config）→ 只读门禁。
         let form_read_only = StoredConnection::from_lifecycle_params(&serde_json::json!({
@@ -1162,6 +1266,7 @@ mod tests {
             .collect();
         let expected = [
             "display_name",
+            "note",
             "protocol",
             "host",
             "port",
@@ -3088,6 +3193,9 @@ mod manifest_contract_tests {
         let config_keys = [
             "protocol",
             "authentication",
+            // #329 连接备注：表单 binding=config → external_config.note，
+            // 解析进 StoredConnection.note 供 connection/protocol 回读展示。
+            "note",
             "private_key_path",
             "agent_socket",
             "advanced_options",

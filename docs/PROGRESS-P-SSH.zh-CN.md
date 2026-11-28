@@ -4723,3 +4723,165 @@ SFTP 写族 / `ssh_remove_known_host` 原有写门不变。
 `cargo test` 1374 全绿；`scripts/smoke_mcp.py` 全绿（read-only server gate
 覆盖 exec 进程替换/参数形态与 terminal 回车拒绝，破坏性确认无法覆盖）。
 七语 N/A（无前端 UI 文案，MCP 描述为英文契约文本）。
+
+## SFTP 面板目录符号链接显示与双击进入（2026-11-26，#330）
+
+**问题**（[issue #330](https://github.com/jinpy666/dbx-plugin-ssh/issues/330)）：
+SFTP 面板把目录符号链接当普通文件显示（链接文档图标），双击不进入目标
+目录——`sftp/list` 的 `kind` 只表达"链接自身"，UI 无从得知目标类型。
+
+**修复**：
+- **后端（`sftp/list`）**：新增可选字段 `targetKind`
+  （`directory`/`file`/`other`，camelCase）。仅对 `kind == "symlink"` 的
+  条目各付一次跟随探测——高层车道 `metadata`（STAT）、latin-1 裸包车道
+  `stat`（FXP_STAT，探测路径与 READDIR 同为"父路径字节 + 原始名字"，不经
+  wire 转义）；普通文件/目录零额外 RTT。探测失败/断链/服务器未跟随 →
+  字段省略（旧行为不变）。`kind` 仍是链接自身，**delete/rename/递归判型
+  不因 `targetKind` 改变**，链接永远按链接删除。
+- **前端**：`frontend/src/lib/sftpEntries.ts` 新增纯函数
+  `sftpEntryIsDirectoryLike(kind, targetKind)`（"可按目录进入"的唯一裁决点，
+  仅用于图标/导航/排序/筛选）；`sftpEntryIconKind` 对目录链接返回
+  `folder`，文件链接/未知目标仍是 `link`。`openEntry`（双击/回车/右键
+  "打开"）、类型列文案、目录优先排序、文件夹筛选统一走该判定；地址栏
+  保留链接路径，进入后由目录列表自然跟随。
+- `sudo` 列表（`ls -l` 文本车道）不探测目标，字段缺省，保持链接图标
+  （登记为残余风险）。
+
+**测试**：
+- 后端：`cargo test --bin dbx-plugin-ssh` 1377 全绿；新增
+  `link_target_kind_only_promotes_directory_and_file`、
+  `symlink_probe_paths_only_cover_symlink_entries`、
+  `sftp_entry_serializes_target_kind_only_when_known`。
+- 前端：`vitest run` 2367 全绿（新增 targetKind 容错/图标/筛选/双击导航
+  用例）；`vue-tsc --noEmit` 0 错。
+- Smoke：`scripts/smoke_fs_test.py` 对真实 OpenSSH 容器
+  **PASS 109 / SKIP 0 / FAIL 0**（69.4s）。新增
+  `sftp/list symlink targetKind (#330)`：`link-dir → targetKind=directory`、
+  `link-file → targetKind=file`、普通条目无该字段；latin-1 链接用例追加
+  `targetKind=file` 断言，覆盖裸包 FXP_STAT 车道。
+
+**七语**：无新增用户可见文案（复用 `openFolder` / `sftpFilter.folders`
+等既有 key）。
+
+**残余风险**：`sudo` 提权列表不探测链接目标（`ls -l` 文本无跟随信息，
+需额外 `stat` RTT，暂不做）；一个目录内大量符号链接会各付一次探测 RTT
+（只读、串行；只在链接条目上发生）；服务器 STAT 不跟随链接（少见非
+标准实现）时归为 `other`，仍显示链接图标。
+
+## 连接备注字段 + 下载分块等待超时修复（2026-11-26，#329）
+
+**问题一**：连接编辑表单只有名称，用户需要类似 DBX 数据库连接的备注/说明。
+宿主 `PluginFormFieldBinding` 没有 `note` 绑定（config/secret/name/host/port/
+username/password/database），`ConnectionConfig.note` 无法由插件表单写入。
+
+**修复一**：
+- `manifest.json` 连接 provider 新增 `note`（`type: textarea`、
+  `binding: config`、可选）紧跟 `display_name`；写入 `external_config.note`。
+  七语 label/placeholder 均补齐（en Remark / zh-CN 备注 / zh-TW 備註 /
+  es Nota / it Nota / ja メモ / pt-BR Observação）。
+- 工作台展示：真实宿主的 webview 上下文只带 `{id,name,host,port,username,
+  readOnly}`（`queryStore.openPluginConnection`），既无 `external_config`
+  也无 note。因此 sidecar 在 lifecycle `connection/connect` 时把备注解析进
+  `StoredConnection.note`（`external_config.note` 优先、宿主
+  `ConnectionConfig.note` 回退，trim + 2000 字符截断），并由既有
+  `connection/protocol` 响应新增 `note` 字段回传；`App.vue` 在 `openSession`
+  查询协议时同步写入 `storedConnectionNote`，连接信息 Popover 新增「备注」
+  行（`connectionInfoNote`，七语），空值不渲染。上下文若未来直接带 note 则
+  优先使用上下文值。
+- 协议文档 `docs/PROTOCOL.zh-CN.md` 的 `connection/protocol` 行已更新
+  （`{protocol, note, shell?}`）。
+
+**问题二**（`SFTP 下载分块等待超时`）：排查确认后端没有分块 ack/整传输
+时限（`backend/src/ssh.rs` 下载管线只用 `TRANSFER_CHUNK_SIZE = 256 KiB`，
+无整任务 deadline）；缺陷在前端 `useSftpDownload.ts` 的
+`waitForDownloadChunk`——它在发起 `sftp/download/next` 前挂一个**固定
+30s** 定时器，超时即 reject 并 `sftp/transfer/cancel`，与 #305 修复前的
+上传分片 ACK 完全同一形态。慢链路/远端盘繁忙时一片 256 KiB 读取 >30s
+（<8.7 KiB/s）会把仍在推进的下载误杀，报的正是
+`errors.downloadChunkTimeout`。事件流：定时器先于
+`sftp/download/next` 武装 → sidecar 读满一片后才发
+`sftp/download/{taskId}` 二进制帧并推进 `next_offset`
+（`ssh.rs` 10310–10324）→ 前端 App.vue onBinary 按 offset 结算等待器。
+
+**修复二**（纯前端，不改后端下载管线）：
+- 新 `frontend/src/lib/downloadChunkWait.ts`（纯策略）：首查 30s、
+  其后 60s 重查，单块总上限 10 分钟；超时后查 `sftp/transfer/status`：
+  仍在跑且 `transferred <= offset` → 继续等；`transferred > offset`
+  （sidecar 已推进，说明二进制帧在桥上丢失）→ 立即失败；终态
+  （failed/cancelled/completed）→ 立即失败；状态查询连续失败 3 次 →
+  判失联失败（桥抖动容忍）。
+- `useSftpDownload.ts` 的等待器改为可重挂：状态 RPC 在途时若分片帧已到达
+  （App.vue 已结算/删除等待器）则不再重挂；其余分支沿用新增纯函数。
+
+**测试**：`downloadChunkWait.spec.ts` 6 例（步长/分类，TDD 先红后绿）+
+`useSftpDownload.chunkWait.spec.ts` 5 例（30s 不误杀、丢帧快失败、终态
+失败、连续查询失败 3 次失败、10 分钟上限）；后端新增
+`connection_note_comes_from_the_form_field_with_host_fallback`、
+`connection_note_is_capped_for_display`，并同步 manifest↔解析面契约用例
+（`config_keys` / `expected` 增加 note）。`cargo test` 1376 全绿；
+`pnpm typecheck` 0 错；前端 vitest 229 文件 / 2371 例全绿；
+`node scripts/connection-forms/verify.mjs` 新增 note 字段契约断言（textarea /
+config / 可选 / 所有协议可见）全 PASS；`scripts/mock_host_registry_check.mjs`
+PASS。后端发布版 smoke 未跑（需 SSH 测试容器；本次无协议方法新增，仅
+`connection/protocol` 响应加键）。七语文案：manifest note 标签/占位 7 语 +
+`connectionInfoNote` 7 语。
+
+## 连接首屏与 issue #326/#327/#328 跟进（2026-11-26）
+
+**来源**：#326「SSH 建立连接很慢」、#327「多选多个 SSH 连接同时分屏打开 +
+批量发送命令」、#328「自动检测延迟并显示在左侧连接列表」。三者先做宿主契约
+取证，再只对 #326 落了插件侧可验证的低风险优化（其余两份属宿主缺口，
+按 AGENTS 规则 8 只出提案，不改 `host/`）。完整取证、证据表与可直接贴的
+中文回复稿见 `docs/drafts/ISSUE-FOLLOWUP-326-328.zh-CN.md`。
+
+**#326（插件侧，已改）**：sidecar 连接链路本机实测已接近协议下界——
+`connection/connect` 只登记配置（不拨号），首个 `ssh/session/open` 对
+127.0.0.1:2222 测试容器 5 轮平均 **22.4ms**（TCP+握手 10.5–18.9ms、
+password 认证完成 16.5–25.6ms、认证后 channel/PTY/shell 仅 1.4–1.6ms），
+无 sleep/重试/串行探针可删。真正能动的首屏成本在**前端 UI 单文件**：
+`frontend/build.mjs` 把 JS/CSS 全内联、`codeSplitting: false`，宿主以
+`<iframe srcdoc sandbox="allow-scripts">` 加载（
+`host/apps/desktop/src/components/plugins/PluginWorkbenchHost.vue:967`），
+产物已达 **25.1MB**（文件预览链路 `@file-viewer/*` 的 PDF/Office/表格/媒体
+renderer 占约 11.4MB）。这些 renderer 原本由 `App.vue` 静态 import，连接首屏
+就付解析/求值成本。
+
+**改动（纯前端）**：
+- `frontend/src/App.vue`：`PreviewPane` / `TextPreview` / `JsonPreviewPanel`
+  改为 `defineAsyncComponent(() => import(...))`；仍进同一单文件 bundle，
+  但模块体留在惰性工厂，首屏只付文本解析，首次打开预览时才求值。
+- `frontend/src/lib/workbench.spec.ts`：模板组件解析守卫识别
+  `defineAsyncComponent` 本地绑定（否则异步组件被误判「未导入」）。
+- 新增 `frontend/src/connectFirstPaint.spec.ts`（6 例）：锁住三个预览组件
+  必须异步装载、不得回退静态 import。
+
+**测量（headless Chrome，同一 25.1MB 产物，baseline/async 交替 5 对）**：
+`domContentLoaded` 中位 **565ms → 533ms（-32ms，-5.7%）**，
+first-paint 中位 **364ms → 328ms（-36ms，-10%）**，5 对全部变快。
+上限实测（临时移除 `@file-viewer` 装配）：13.7MB / ~340ms —— 即剩余约
+11.4MB 字节仍随首屏付文本解析成本，彻底解决需把 renderer 移出 single-file
+文档（桌面宿主 CSP 已允许插件资产源；Web 宿主无资产 base、外链 chunk 会被拦），
+已写入提案。
+
+**#327（needs host）**：宿主侧已有多选（`connectionMultiSelectActive`、
+批量 connect/disconnect），但（a）没有把「侧栏多选连接」交给插件命令的
+上下文/选择读取 API，（b）分屏是宿主 shell 的 editor group（
+`queryStore.splitTab`，上限 4 组），插件桥只暴露
+`host.openWorkbench` / `host.reopenConnection` / `host.getConnections`，
+没有 split API。插件侧分屏（`useSplitPanes`，同连接副屏 + 镜像会话，上限 3）
+与跨会话批量命令（`ssh/terminal/batchInput`，目标取 `ssh/sessions/list`
+全部活跃会话）都已存在——缺的是「宿主多选 → 一次并行开多个连接窗格/分屏」
+这段编排。
+
+**#328（needs host）**：manifest 贡献点只有 connection-provider /
+workbench / filesystem / context-menu / result-view / command / menus / mcp
+（`host/crates/dbx-plugin-runtime/src/plugins/manifest.rs:280-289`），
+连接行没有插件可写的徽标/状态槽；仓库内的宿主 UI 提案也明确「动态状态栏、
+badge 留待运行时状态协议明确后再发布」（`docs/HOST_PLUGIN_UI_SPEC.zh-CN.md:6,44,338-344`）。
+插件侧已有部分交付面：连接信息气泡里的手动 echo 往返延迟
+（`frontend/src/composables/useConnectionInfo.ts:43-61`，显示于
+`App.vue:9582` 附近），但不做周期自动探测，也不在侧栏列表内。
+
+**验证**：`vue-tsc --noEmit` 0 错；`vitest run` **228 文件 2366 例全绿**
+（含新增 6 例与 workbench 守卫 69 例）；`node build.mjs` 产出单文件 UI 通过
+其自带的单文件护栏。后端零改动，本轮无新增七语文案（纯装载时机，无新 UI 文本）。

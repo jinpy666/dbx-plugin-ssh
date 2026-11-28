@@ -380,6 +380,11 @@ fn parse_ls_output(directory: &str, ls_output: &str) -> Vec<SftpEntry> {
                 content_type: content_type_for_path(&path),
                 owner: entry.owner,
                 group: entry.group,
+                // sudo 列表来自 `ls -l` 文本：`l` 类型只说明是链接，
+                // 目标类型需额外 `ls -lL`/stat，本路径不探测（issue #330
+                // 的 SFTP 面板目标探测只在 sftp/list 正式车道做），字段
+                // 缺省时 UI 保持链接图标。
+                target_kind: None,
             }
         })
         .collect();

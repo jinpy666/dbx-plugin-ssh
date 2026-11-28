@@ -4209,6 +4209,8 @@ fn stored_connection_from_arguments(arguments: &Value) -> Result<StoredConnectio
         id: connection_pool_id(arguments),
         // Inline MCP dials carry no display name.
         name: None,
+        // Inline MCP dials have no connection form, so no remark either.
+        note: String::new(),
         host: host.to_string(),
         port,
         runtime_host: host.to_string(),

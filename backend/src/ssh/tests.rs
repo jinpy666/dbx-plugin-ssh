@@ -519,6 +519,76 @@ fn classify_entry_kind_maps_wire_types() {
 }
 
 #[test]
+fn link_target_kind_only_promotes_directory_and_file() {
+    // issue #330：跟随链接后的类型进入 wire 词汇。
+    assert_eq!(link_target_kind("directory"), "directory");
+    assert_eq!(link_target_kind("file"), "file");
+    // A server that reports the link itself (STAT not following) or any
+    // unknown type must never masquerade as a navigable directory.
+    assert_eq!(link_target_kind("symlink"), "other");
+    assert_eq!(link_target_kind("other"), "other");
+    assert_eq!(link_target_kind(""), "other");
+}
+
+#[test]
+fn symlink_probe_paths_only_cover_symlink_entries() {
+    let entry = |name: &str, kind: &'static str, uri: String| SftpEntry {
+        name: name.to_string(),
+        uri,
+        kind,
+        size: None,
+        modified_at: None,
+        permissions: None,
+        content_type: None,
+        owner: None,
+        group: None,
+        lossy: false,
+        target_kind: None,
+    };
+    let entries = vec![
+        entry("dir", "directory", sftp_uri("/home/u/dir")),
+        entry("link-dir", "symlink", sftp_uri("/home/u/link-dir")),
+        entry("file.txt", "file", sftp_uri("/home/u/file.txt")),
+        entry("link-file", "symlink", sftp_uri("/home/u/link-file")),
+        // Non-`sftp:` URI is skipped instead of aborting the listing.
+        entry("broken", "symlink", "file:///tmp/broken".to_string()),
+    ];
+    let probes = symlink_probe_paths(&entries);
+    assert_eq!(
+        probes,
+        vec![
+            (1, "/home/u/link-dir".to_string()),
+            (3, "/home/u/link-file".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn sftp_entry_serializes_target_kind_only_when_known() {
+    let mut entry = SftpEntry {
+        name: "link".to_string(),
+        uri: sftp_uri("/home/u/link"),
+        kind: "symlink",
+        size: None,
+        modified_at: None,
+        permissions: None,
+        content_type: None,
+        owner: None,
+        group: None,
+        lossy: false,
+        target_kind: None,
+    };
+    let absent = serde_json::to_value(&entry).expect("serialize");
+    assert!(absent.get("targetKind").is_none(), "{absent}");
+    entry.target_kind = Some("directory");
+    let present = serde_json::to_value(&entry).expect("serialize");
+    assert_eq!(
+        present.get("targetKind").and_then(|v| v.as_str()),
+        Some("directory")
+    );
+}
+
+#[test]
 fn test_timeout_message_names_budget_source_and_remedy() {
     let explicit = test_timeout_message("dbx-ssh-test", 22, 29, false, false);
     assert_eq!(

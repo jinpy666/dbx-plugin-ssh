@@ -44,6 +44,40 @@ pub(crate) fn classify_raw_kind(permissions: Option<u32>) -> &'static str {
     }
 }
 
+/// 跟随符号链接后的目标类型词汇（issue #330）：`sftp/list` 条目可选字段
+/// `targetKind` 只取 `directory`/`file`/`other`。
+///
+/// 输入是**跟随链接后**的 kind（高层 `FileType` 或裸包 permissions 判型）：
+/// - `directory` / `file` 原样透传，UI 据此给目录链接换文件夹图标、双击
+///   进入目标目录；
+/// - `symlink`（服务器 STAT 未跟随，链路异常）与一切未知值归为 `other`，
+///   绝不把"再指向一个链接"误当成目录。
+///
+/// 该字段仅用于渲染/导航；delete/rename 永远按链接自身处理。
+pub(super) fn link_target_kind(followed_kind: &str) -> &'static str {
+    match followed_kind {
+        "directory" => "directory",
+        "file" => "file",
+        _ => "other",
+    }
+}
+
+/// 需要探测目标类型的列表条目：仅 `kind == "symlink"`，返回 `(下标, 探测
+/// 路径)`，路径取条目 URI 的 `sftp:` 之后部分（高层客户端按服务器声明
+/// 跟随链接）。URI 解析失败的条目跳过（保持字段缺省），不阻断整个列表。
+pub(super) fn symlink_probe_paths(entries: &[SftpEntry]) -> Vec<(usize, String)> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.kind == "symlink")
+        .filter_map(|(index, entry)| {
+            path_from_sftp_uri(&entry.uri)
+                .ok()
+                .map(|path| (index, path))
+        })
+        .collect()
+}
+
 pub(super) fn content_type_for_path(path: &str) -> Option<String> {
     let extension = path.rsplit('.').next()?.to_ascii_lowercase();
     let content_type = match extension.as_str() {
