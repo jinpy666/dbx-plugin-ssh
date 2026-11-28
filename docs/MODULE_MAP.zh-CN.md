@@ -165,7 +165,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `TunnelManager.vue` (78) | 端口映射工作台根（同时服务 `presentation: "dialog"` 的右键入口） | `ssh/forward/*` | `components/ui/dialog` |
 | `components/`（57 个 `.vue`；15,626 行） | 面板与对话框（设置、SFTP 预览、Docker、监控、OTP、导入、搜索…） | 见 §3.1 | `lib`、`composables`、`ui` |
 | `components/ui/`（10 组，1,165 行） | reka-ui/shadcn 风格基础原语（dialog/select/table/tabs…） | — | reka-ui |
-| `composables/`（56 个，12,800 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制/回放、浮层锚点…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
+| `composables/`（58 个，12,937 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制/回放、浮层锚点…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
 | `lib/`（239 个生产 `.ts`，33,975 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
 | `lib/completion/`（子目录，2,849 行） | 结构化补全（fig 语料、parser、worker、host 客户端） | `CompletionController`、`lib/completion/host/hostClient.ts` | `completion/execute` RPC |
 | `rdp/`（1,598 行） | RDP 画布、帧解码、会话与工作台 | `useRdpSession`、`useRdpWorkbench`、`rdpFrame`、`RdpSurface` | `lib`、`components` |
@@ -181,7 +181,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `MonitorPanel.vue` (791) | 多主机监控卡片、分组、过滤（all/live/issues）、隐私模式 | 独立工作台；分组依赖宿主 `listConnections` 的 `groupId` |
 | `MetricsPanel.vue` (490) | 单机会话指标：概览/进程/磁盘/网络/docker | 5s 刷新，GPU/NPU 卡片 |
 | `PreviewPane.vue` (452) + `PreviewHeader.vue` (92) + `composables/useChunkedPreview.ts` (257) | SFTP 文件预览与编辑（头部图标/标题/大小/Markdown 切换/打开方式/下载/最大化、二进制分块流式加载的 stat 门禁/大文件询问/取消/续传均已外抽） | 文本 CodeMirror、图片、Office/PDF/媒体走 file-viewer |
-| `OtpPanel.vue` (822) | OTP 条目管理、二维码导入、绑定连接、发送验证码 | TOTP/HOTP，单窗口防重放提示 |
+| `OtpPanel.vue` (585) + `OtpEditorDialog.vue` (216) + `composables/useOtpCodes.ts` (71) + `useOtpBindings.ts` (57) | OTP 条目管理、二维码导入（预填编辑框）、绑定连接、发送验证码（码引擎/倒计时/退避与绑定向导已外抽） | TOTP/HOTP，单窗口防重放提示 |
 | `ImportWizard.vue` | 会话导入 3 步：选源 → 解析 → 预览/脱敏导出 | 8 种来源、64 MiB 预算 |
 | `SideNavPanel.vue` | SFTP 侧栏：树 / 快捷路径 / OTP / 导入 | tab 状态由 App 持久化 |
 | `TerminalSearchPanel.vue`、`TerminalQuickSelectPanel.vue`、`TerminalHistoryPanel.vue` | 搜索、可视区快速选择、命令历史面板 | 均由 App 驱动 |

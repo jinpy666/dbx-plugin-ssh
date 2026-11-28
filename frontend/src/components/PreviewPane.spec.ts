@@ -319,11 +319,13 @@ describe("PreviewPane sudo lane", () => {
 
   // 回归：sudo 二进制预览此前把无 stat 大小当 0 字节直接收口，PDF/Office/
   // 图片都拿到空 File；现在改用 sudo/stat 取大小并正常分块。
-  it("streams sudo binary previews using the sudo/stat size", async () => {
+  // 流式用例的等待面是真实分片链（每片一次 await RPC），并行跑时 tick 数
+  // 需求随负载抬升：显式放宽用例预算 + 条件等待，不用固定拍数。
+  it("streams sudo binary previews using the sudo/stat size", { timeout: 30_000 }, async () => {
     const total = 3 * SUDO_READ_MAX_BYTES + 321;
     const calls = bindSshApi({ total, sudo: true });
     wrapper = mountPane({ path: "/root/发票.pdf", sudo: true });
-    await flush(24);
+    await vi.waitFor(() => expect(wrapper!.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true), { timeout: 20_000 });
     expect(calls.some((item) => item.method === "sudo/stat")).toBe(true);
     expect(calls.some((item) => item.method === "sudo/readFile")).toBe(true);
     expect(calls.some((item) => item.method === "sftp/stat")).toBe(false);
@@ -336,7 +338,7 @@ describe("PreviewPane sudo lane", () => {
 // 大文件门禁：>32MiB 的 PDF/Office/媒体不自动整文件进内存，先给
 // 「打开方式 / 下载 / 仍要预览」；>256MiB 由 overcap 分支只保留下载出口。
 describe("PreviewPane large file gate", () => {
-  it("holds a large PDF until the user downloads or explicitly previews it", async () => {
+  it("holds a large PDF until the user downloads or explicitly previews it", { timeout: 30_000 }, async () => {
     const total = PREVIEW_CONFIRM_BYTES + 1;
     const calls = bindSshApi({ total });
     wrapper = mountPane({ path: "/docs/huge.pdf" });
@@ -359,8 +361,7 @@ describe("PreviewPane large file gate", () => {
     // （不要重试点击——loading 守卫会让后续点击早退，与在跑的链互扰）。
     await flush(4);
     await wrapper.get("[data-test=preview-large-anyway]").trigger("click");
-    await flush(400);
-    expect(wrapper.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true);
+    await vi.waitFor(() => expect(wrapper!.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true), { timeout: 20_000 });
     expect(calls.some((item) => item.method === "sftp/read")).toBe(true);
   });
 });
