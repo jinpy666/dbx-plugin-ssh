@@ -6683,6 +6683,98 @@ for (const locale of Object.keys(suggestionTransferMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...suggestionTransferMessages[locale] };
 }
 
+// #334 阶段 1：SFTP 跨会话传输（右键「发送到会话…」）。七语齐套，缺一即被
+// workbench.spec 的键集对比测试拦下。
+const sftpRelayMessages: Record<string, Record<string, string>> = {
+  en: {
+    "sftpRelay.action": "Send to session…",
+    "sftpRelay.title": "Send to session",
+    "sftpRelay.targetLabel": "Target session",
+    "sftpRelay.dirLabel": "Target directory",
+    "sftpRelay.dirHint": "Created automatically if missing; the last used directory is remembered.",
+    "sftpRelay.filesOnly": "Cross-session send supports plain files only; folders are not supported yet.",
+    "sftpRelay.noTargets": "No other live session can receive files.",
+    "sftpRelay.completed": "{count} file(s) sent to {target}",
+    "sftpRelay.completedWithFailures": "{count} of {total} file(s) failed to reach {target}",
+    "sftpRelay.skippedNote": " ({count} folder/special entries skipped)",
+  },
+  "zh-CN": {
+    "sftpRelay.action": "发送到会话…",
+    "sftpRelay.title": "发送到会话",
+    "sftpRelay.targetLabel": "目标会话",
+    "sftpRelay.dirLabel": "目标目录",
+    "sftpRelay.dirHint": "不存在时自动创建；记住上次使用的目录。",
+    "sftpRelay.filesOnly": "跨会话发送仅支持普通文件，文件夹暂不支持。",
+    "sftpRelay.noTargets": "没有可接收文件的其他在线会话。",
+    "sftpRelay.completed": "{count} 个文件已发送到 {target}",
+    "sftpRelay.completedWithFailures": "{total} 个文件中 {count} 个发送到 {target} 失败",
+    "sftpRelay.skippedNote": "（已跳过 {count} 个文件夹/特殊条目）",
+  },
+  "zh-TW": {
+    "sftpRelay.action": "傳送到工作階段…",
+    "sftpRelay.title": "傳送到工作階段",
+    "sftpRelay.targetLabel": "目標工作階段",
+    "sftpRelay.dirLabel": "目標目錄",
+    "sftpRelay.dirHint": "不存在時自動建立；記住上次使用的目錄。",
+    "sftpRelay.filesOnly": "跨工作階段傳送僅支援一般檔案，資料夾暫不支援。",
+    "sftpRelay.noTargets": "沒有可接收檔案的其他線上工作階段。",
+    "sftpRelay.completed": "{count} 個檔案已傳送到 {target}",
+    "sftpRelay.completedWithFailures": "{total} 個檔案中 {count} 個傳送到 {target} 失敗",
+    "sftpRelay.skippedNote": "（已跳過 {count} 個資料夾/特殊項目）",
+  },
+  es: {
+    "sftpRelay.action": "Enviar a sesión…",
+    "sftpRelay.title": "Enviar a sesión",
+    "sftpRelay.targetLabel": "Sesión de destino",
+    "sftpRelay.dirLabel": "Directorio de destino",
+    "sftpRelay.dirHint": "Se crea automáticamente si no existe; se recuerda el último directorio usado.",
+    "sftpRelay.filesOnly": "El envío entre sesiones solo admite archivos normales; las carpetas aún no.",
+    "sftpRelay.noTargets": "No hay otras sesiones activas que puedan recibir archivos.",
+    "sftpRelay.completed": "{count} archivo(s) enviado(s) a {target}",
+    "sftpRelay.completedWithFailures": "{count} de {total} archivo(s) no llegaron a {target}",
+    "sftpRelay.skippedNote": " ({count} carpetas/entradas especiales omitidas)",
+  },
+  it: {
+    "sftpRelay.action": "Invia alla sessione…",
+    "sftpRelay.title": "Invia alla sessione",
+    "sftpRelay.targetLabel": "Sessione di destinazione",
+    "sftpRelay.dirLabel": "Directory di destinazione",
+    "sftpRelay.dirHint": "Creata automaticamente se manca; l'ultima directory usata viene memorizzata.",
+    "sftpRelay.filesOnly": "L'invio tra sessioni supporta solo file normali; le cartelle non sono ancora supportate.",
+    "sftpRelay.noTargets": "Nessun'altra sessione attiva può ricevere file.",
+    "sftpRelay.completed": "{count} file inviati a {target}",
+    "sftpRelay.completedWithFailures": "{count} file su {total} non sono arrivati a {target}",
+    "sftpRelay.skippedNote": " ({count} cartelle/voci speciali omesse)",
+  },
+  ja: {
+    "sftpRelay.action": "セッションへ送信…",
+    "sftpRelay.title": "セッションへ送信",
+    "sftpRelay.targetLabel": "宛先セッション",
+    "sftpRelay.dirLabel": "宛先ディレクトリ",
+    "sftpRelay.dirHint": "存在しない場合は自動作成。最後に使用したディレクトリを記憶します。",
+    "sftpRelay.filesOnly": "セッション間送信は通常ファイルのみ対応（フォルダーは未対応）。",
+    "sftpRelay.noTargets": "受信可能な他のオンラインセッションがありません。",
+    "sftpRelay.completed": "{count} 個のファイルを {target} に送信しました",
+    "sftpRelay.completedWithFailures": "{total} 個中 {count} 個のファイルを {target} へ送信できませんでした",
+    "sftpRelay.skippedNote": "（フォルダー/特殊エントリ {count} 件をスキップ）",
+  },
+  "pt-BR": {
+    "sftpRelay.action": "Enviar para sessão…",
+    "sftpRelay.title": "Enviar para sessão",
+    "sftpRelay.targetLabel": "Sessão de destino",
+    "sftpRelay.dirLabel": "Diretório de destino",
+    "sftpRelay.dirHint": "Criado automaticamente se não existir; o último diretório usado é lembrado.",
+    "sftpRelay.filesOnly": "O envio entre sessões aceita apenas arquivos comuns; pastas ainda não são suportadas.",
+    "sftpRelay.noTargets": "Nenhuma outra sessão ativa pode receber arquivos.",
+    "sftpRelay.completed": "{count} arquivo(s) enviado(s) para {target}",
+    "sftpRelay.completedWithFailures": "{count} de {total} arquivo(s) falharam ao chegar em {target}",
+    "sftpRelay.skippedNote": " ({count} pastas/entradas especiais ignoradas)",
+  },
+};
+for (const locale of Object.keys(sftpRelayMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...sftpRelayMessages[locale] };
+}
+
 // —— SFTP 传输管线（M14-B）：会话级并发深度 / 老旧服务器兼容模式 /
 // 文件名编码。七语齐套，缺一即被 workbenchMessageTable 的键集对比测试拦下。
 const sftpPipelineMessages: Record<string, Record<string, string>> = {

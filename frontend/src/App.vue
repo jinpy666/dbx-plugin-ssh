@@ -302,6 +302,7 @@ import { useExternalEdits } from "./composables/useExternalEdits";
 import { useSftpSidebar } from "./composables/useSftpSidebar";
 import { useBatchSend } from "./composables/useBatchSend";
 import { useBatchUpload } from "./composables/useBatchUpload";
+import { useSftpRelay } from "./composables/useSftpRelay";
 import { useMetricsPanel, type ServerMetrics } from "./composables/useMetricsPanel";
 import { useTrzsz } from "./composables/useTrzsz";
 import { useRecording } from "./composables/useRecording";
@@ -7736,6 +7737,32 @@ const {
   sudoDownload: () => sudoMode.value && canWrite.value,
 });
 
+// 跨会话传输（issue #334 阶段 1）：右键「发送到会话…」经前端中继泵把选中
+// 文件送到另一台在线服务器。下载腿/上传腿全部复用既有管线，编排收口在
+// composables/useSftpRelay。
+const {
+  relayPrompt,
+  relayTargets,
+  relayTargetSession,
+  relayTargetDir,
+  relayBusy,
+  openSendToSession,
+  closeSendToSession,
+  confirmSendToSession,
+} = useSftpRelay({
+  t, showNotice, showError, connected, session, currentPath,
+  loadBatchTargets: async () => {
+    await refreshBatchTargets();
+    return batchTargets.value;
+  },
+  uploadSource,
+  waitForDownloadChunk: (taskId, offset) => waitForDownloadChunk(taskId, offset),
+  waitForDownloadReady: (taskId, compression) => waitForDownloadReady(taskId, compression),
+  loadTransferConcurrency,
+  pathFromUri,
+  openTransferPanel: () => openTransferPanel(),
+});
+
 // —— 断点续传：暂停/恢复 + 可续传上传 ———
 
 
@@ -8807,6 +8834,8 @@ const modalOpenStates = computed(() => [
   transferHistoryClearOpen.value,
   chmodTarget.value,
   newFileDialog.value,
+  // 跨会话发送（issue #334 阶段 1）：模板顺序在 newFile 之后、SFTP 对话框区。
+  !!relayPrompt.value,
   operationDialog.value,
   symlinkDialog.value !== null,
   watchModifiedQueue.value.length > 0,
@@ -8936,6 +8965,10 @@ function onDocumentKeydown(event: KeyboardEvent) {
   }
   if (attrsTarget.value) {
     closeAttributes();
+    return;
+  }
+  if (relayPrompt.value) {
+    closeSendToSession();
     return;
   }
   if (deleteTarget.value) {
@@ -11199,6 +11232,9 @@ function flagHintsSource(command: string): string {
                 <!-- 多选感知：右键时已多选（selection > 1）→ 菜单整体切换为批量区，单项动作隐藏 -->
                 <template v-if="fileMenu && fileMenu.selection.length > 1">
                   <ContextMenuItem @select="batchDownload"><Download />{{ t("download") }}</ContextMenuItem>
+                  <!-- 跨会话发送（issue #334 阶段 1）：选中文件经前端中继泵到
+                       其他在线会话（普通文件；文件夹计入跳过并在完成后提示）。 -->
+                  <ContextMenuItem :disabled="!connected || relayBusy" @select="openSendToSession(selectedEntries)"><Send />{{ t("sftpRelay.action") }}</ContextMenuItem>
                   <ContextMenuItem :disabled="!canWrite || archiveBusy || batchDeleteSubmitting" @select="batchArchive()"><Archive />{{ t("sftpBatch.archive") }}</ContextMenuItem>
                   <ContextMenuItem variant="destructive" :disabled="!canWrite || archiveBusy || batchDeleteSubmitting" @select="batchDeleteOpen = true"><Trash2 />{{ t("sftpBatch.delete") }}</ContextMenuItem>
                   <ContextMenuSeparator />
@@ -11211,6 +11247,8 @@ function flagHintsSource(command: string): string {
                        不必翻转全局「使用默认地址」；仅文件——目录走递归树下载，
                        目标目录覆盖未接入树下载管线。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" @select="downloadEntry(fileMenu.entry, sudoMode && canWrite, false, true)"><FolderOpen />{{ t("downloadTo") }}</ContextMenuItem>
+                  <!-- 跨会话发送（issue #334 阶段 1）：单文件直达目标会话。 -->
+                  <ContextMenuItem v-if="fileMenu.entry.kind === 'file'" :disabled="!connected || relayBusy" @select="openSendToSession([fileMenu.entry])"><Send />{{ t("sftpRelay.action") }}</ContextMenuItem>
                   <!-- ST10 显式压缩包模式（自研 lzpack，远端零依赖）：文件级入口。
                        压缩上传交付 <名>.dbxz；解压下载要求源是 .dbxz。 -->
                   <ContextMenuItem v-if="fileMenu.entry.kind === 'file' && !sudoMode" :disabled="!canWrite" @select="chooseUploadLzpack()"><PackageOpen />{{ t("sftpLzpack.uploadAction") }}</ContextMenuItem>
@@ -11584,6 +11622,32 @@ function flagHintsSource(command: string): string {
         <header><DialogTitle>{{ t("sftpNewFile.title") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" @click="newFileDialog = false"><X /></button></header>
         <input v-model="newFileDraft" autofocus spellcheck="false" :placeholder="t('sftpNewFile.placeholder')" @keydown.enter="createNewFile" />
         <footer><button @click="newFileDialog = false">{{ t("cancel") }}</button><button class="primary-button" :disabled="!newFileDraft.trim() || newFileSubmitting" @click="createNewFile"><Loader2 v-if="newFileSubmitting" class="spinning" />{{ t("confirm") }}</button></footer>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 跨会话发送（issue #334 阶段 1）：目标会话 + 目标目录确认。传输本体走
+         传输面板（上传腿卡片，进度/取消/暂停继承），此处只做选择。 -->
+    <Dialog :open="!!relayPrompt" @update:open="(open) => { if (!open) closeSendToSession(); }">
+      <DialogContent class="modal small-modal" @escape-key-down.prevent>
+        <template v-if="relayPrompt">
+        <header><DialogTitle>{{ t("sftpRelay.title") }}</DialogTitle><button :title="t('close')" :aria-label="t('close')" class="icon-button" :disabled="relayBusy" @click="closeSendToSession"><X /></button></header>
+        <p class="muted">{{ t("itemsSelected", { count: relayPrompt.count }) }}<template v-if="relayPrompt.skipped">{{ t("sftpRelay.skippedNote", { count: relayPrompt.skipped }) }}</template></p>
+        <label class="settings-field">
+          <span>{{ t("sftpRelay.targetLabel") }}</span>
+          <Select :model-value="relayTargetSession" @update:model-value="(v) => (relayTargetSession = String(v))">
+            <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="target in relayTargets" :key="target.sessionId" :value="target.sessionId">{{ target.label }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </label>
+        <label class="settings-field">
+          <span>{{ t("sftpRelay.dirLabel") }}</span>
+          <input v-model="relayTargetDir" class="mono" spellcheck="false" />
+        </label>
+        <p class="muted settings-note">{{ t("sftpRelay.dirHint") }}</p>
+        <footer><button @click="closeSendToSession" :disabled="relayBusy">{{ t("cancel") }}</button><button class="primary-button" :disabled="!relayTargetSession || relayBusy" @click="confirmSendToSession"><Loader2 v-if="relayBusy" class="spinning" /><Send v-else />{{ t("confirm") }}</button></footer>
+        </template>
       </DialogContent>
     </Dialog>
 
