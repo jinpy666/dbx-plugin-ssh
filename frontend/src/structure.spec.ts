@@ -27,7 +27,7 @@ const LINE_ALLOWLIST: Record<string, number> = {
   "./App.vue": 12658,
   "./lib/i18n.ts": 4960,
   "./mockDbxHost.ts": 2335,
-  "./components/SettingsDialog.vue": 1845,
+  "./components/SettingsDialog.vue": 1881,
   "./composables/useCommandSuggestions.ts": 663,
 };
 

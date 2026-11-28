@@ -27,6 +27,7 @@ import { AGENT_MODES, SSH_AGENT_APPROVED_STORE_KEY, SSH_AGENT_MODES_STORE_KEY, s
 import { connectionEntryEquals, loadConnectionEntry, saveConnectionEntry } from "../lib/connectionSettingMirror";
 import { TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
 import { useTerminalFontDraft, TERMINAL_FONT_CUSTOM, TERMINAL_FONT_FOLLOW_HOST, TERMINAL_FONT_PRESETS } from "../composables/useTerminalFontDraft";
+import { filterSettingsCategories } from "../lib/settingsSearch";
 import { confirmDialog } from "../lib/confirmDialog";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
 import { MCP_LIMIT_CEILING_MIB, SFTP_DOUBLE_CLICK_ACTIONS, mibField, parseMibInput, persistMcpSettingsMirror, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SftpDoubleClickAction, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
@@ -424,6 +425,20 @@ const visibleSettingsCategories = computed(() =>
     (cat) => !isLocalSession.value || (cat.id !== "sudo" && cat.id !== "agent"),
   ),
 );
+
+// 分类检索（13 个分类逐个点太慢）：匹配本地化分类名 + id + labelKey，空白
+// 分词 AND；命中保持导航原序。输入即切到首个命中分类（有命中时），清空搜索
+// 不改变当前分类。会话级门控先于检索（sudo/agent 在本地终端不参与搜索）。
+const settingsQuery = ref("");
+const filteredSettingsCategories = computed(() =>
+  filterSettingsCategories(visibleSettingsCategories.value, (cat) => t(cat.labelKey), settingsQuery.value),
+);
+watch(filteredSettingsCategories, (list) => {
+  if (!settingsQuery.value.trim() || !list.length) return;
+  if (!list.some((cat) => cat.id === settingsCategory.value)) {
+    settingsCategory.value = list[0]!.id as SettingsCategory;
+  }
+});
 
 function onSettingsCategoryChange(value: string | number) {
   settingsCategory.value = value as SettingsCategory;
@@ -1141,11 +1156,32 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
           <template v-else>
           <div class="settings-layout">
             <nav class="settings-nav" aria-label="settings categories">
+              <label class="settings-nav-search">
+                <input
+                  v-model="settingsQuery"
+                  type="search"
+                  class="settings-nav-search-input"
+                  data-test="settings-nav-search"
+                  :placeholder="t('settingsNav.searchPlaceholder')"
+                  :aria-label="t('settingsNav.searchPlaceholder')"
+                  spellcheck="false"
+                />
+                <button
+                  v-if="settingsQuery"
+                  type="button"
+                  class="settings-nav-search-clear"
+                  data-test="settings-nav-search-clear"
+                  :title="t('settingsNav.searchClear')"
+                  :aria-label="t('settingsNav.searchClear')"
+                  @click="settingsQuery = ''"
+                >×</button>
+              </label>
               <Tabs :model-value="settingsCategory" orientation="vertical" class="settings-nav-tabs" @update:model-value="onSettingsCategoryChange">
                 <TabsList class="settings-nav-list">
-                  <TabsTrigger v-for="cat in visibleSettingsCategories" :key="cat.id" :value="cat.id" class="settings-nav-item">{{ t(cat.labelKey) }}</TabsTrigger>
+                  <TabsTrigger v-for="cat in filteredSettingsCategories" :key="cat.id" :value="cat.id" class="settings-nav-item">{{ t(cat.labelKey) }}</TabsTrigger>
                 </TabsList>
               </Tabs>
+              <p v-if="!filteredSettingsCategories.length" class="muted settings-nav-empty" data-test="settings-nav-no-match">{{ t("settingsNav.searchNoMatch") }}</p>
             </nav>
             <div class="settings-content">
             <!-- 配色方案（对标 Tabby「Color scheme」页，从原「外观」里拆出）：主题
