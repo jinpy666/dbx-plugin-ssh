@@ -342,7 +342,7 @@ describe("PreviewPane large file gate", () => {
     wrapper = mountPane({ path: "/docs/huge.pdf" });
     // 条件等待替代固定拍数 flush：并行负载下硬编码 tick 偶尔不够（本用例
     // 曾以 ~1/3 全量跑的频率抖动）。
-    await vi.waitFor(() => expect(wrapper!.find("[data-test=preview-large]").exists()).toBe(true));
+    await vi.waitFor(() => expect(wrapper!.find("[data-test=preview-large]").exists()).toBe(true), { timeout: 4000 });
     const notice = wrapper.get("[data-test=preview-large]");
     expect(notice.text()).toContain("previewDialog.largeFileNotice");
     // 门禁阶段不发起任何分块读取。
@@ -352,7 +352,7 @@ describe("PreviewPane large file gate", () => {
     expect(wrapper.emitted("download")).toEqual([["/docs/huge.pdf"]]);
     // 「仍要预览」显式确认后才开始分块并最终交给 viewer。
     await wrapper.get("[data-test=preview-large-anyway]").trigger("click");
-    await vi.waitFor(() => expect(wrapper!.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true));
+    await vi.waitFor(() => expect(wrapper!.findComponent({ name: "FileViewerPreview" }).exists()).toBe(true), { timeout: 4000 });
     expect(calls.some((item) => item.method === "sftp/read")).toBe(true);
   });
 });

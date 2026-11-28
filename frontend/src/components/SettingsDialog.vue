@@ -16,6 +16,7 @@ import { Switch } from "./ui/switch";
 import TerminalAppearancePreview from "./TerminalAppearancePreview.vue";
 import SettingsTransferPane from "./SettingsTransferPane.vue";
 import SettingsTerminalPane from "./SettingsTerminalPane.vue";
+import SettingsSchemePane from "./SettingsSchemePane.vue";
 import TerminalSchemePicker from "./TerminalSchemePicker.vue";
 import TerminalHotkeyEditor from "./TerminalHotkeyEditor.vue";
 import HighlightRulesSection from "./HighlightRulesSection.vue";
@@ -33,10 +34,7 @@ import { type EditorConfig, type KnownEditor } from "../lib/editorRules";
 import { type TransferDuplicatePolicy } from "../lib/transferQueue";
 import { type SftpNameEncoding } from "../lib/sftpName";
 import {
-  allAppearanceProfiles,
   applySchemeToTerminalTheme,
-  CUSTOM_SCHEME_LIMIT,
-  TERMINAL_APPEARANCE_PRESETS,
   terminalOptionPatch,
   type TerminalAppearanceProfile,
   type TerminalAppearanceSettings,
@@ -44,7 +42,7 @@ import {
   type TerminalCursorInactiveStyle,
   type TerminalCursorStyle,
 } from "../lib/terminalAppearance";
-import { BUILTIN_TERMINAL_SCHEMES, contrastRatio, parseHexColor, parseSchemeImport, type TerminalColorScheme, type TerminalThemeLike } from "../lib/terminalScheme";
+import { contrastRatio, parseHexColor, type TerminalColorScheme, type TerminalThemeLike } from "../lib/terminalScheme";
 import type { TerminalHotkeyBindings } from "../lib/terminalHotkeys";
 import { COMPLETION_ENGINE_KEY, loadCompletionEngine, pluginStore, sanitizeCompletionEngine, type CompletionEngineSetting } from "../lib/pluginStore";
 import { clearSuggestionBlocklist, loadSuggestionBlocklist } from "../lib/suggestionBlocklist";
@@ -609,10 +607,9 @@ function applyTerminalFont(family: string | null, size: number) {
 // 终端外观（配色方案 / 主题快照 / 字体间距 / 光标）
 // ---------------------------------------------------------------------------
 const appearanceSettings = computed(() => props.appearance.settings);
-const appearanceProfiles = computed(() => allAppearanceProfiles({ ...props.appearance, customThemes: props.customThemes }));
-
-// 预览与真实终端共用同一套纯函数合成：预览呈现的就是 xterm 实际拿到的主题，
-// 不会出现「设置页好看、终端不对」的偏差。
+// 配色方案面板（主题快照/方案选择/导入）外抽 SettingsSchemePane，apply-theme
+// 在父层拦截以同步字体控件草稿；预览纯函数合成留在父层——scheme 与外观两个
+// 面板各放一次实时预览，共用同一推导（预览呈现的就是 xterm 实际拿到的主题）。
 const previewTheme = computed(() => applySchemeToTerminalTheme(
   props.hostTheme,
   appearanceSettings.value,
@@ -626,16 +623,15 @@ const previewContrast = computed(() => {
   const background = parseHexColor(previewTheme.value.background);
   return foreground && background ? contrastRatio(foreground, background) : 21;
 });
-
-const allSchemes = computed<readonly TerminalColorScheme[]>(() => [...BUILTIN_TERMINAL_SCHEMES, ...props.appearance.customSchemes]);
-const themeNameDraft = ref("");
-const importText = ref("");
-const importError = ref("");
-const importOpen = ref(false);
-const schemeFileInput = ref<HTMLInputElement>();
-
 function updateAppearance(patch: Partial<TerminalAppearanceSettings>) {
   emit("update-appearance", patch);
+}
+
+/** scheme 面板 apply-theme 拦截：字体控件立即回显真实覆盖态（issue #219 的
+ *  「界面显示自定义、终端却是默认字体」——主题快照携带字体，null = 跟随宿主）。 */
+function onSchemeApplyTheme(theme: TerminalAppearanceProfile) {
+  emit("apply-theme", theme);
+  syncFontControls(theme.font.family, theme.font.size ?? props.terminalFontSize);
 }
 
 /** 数值型外观字段：留空 = 恢复默认（null 回落到 xterm 既有默认），非法输入不落地。 */
@@ -656,79 +652,6 @@ const FONT_WEIGHT_OPTIONS = ["300", "400", "500", "600", "700", "800", "900"];
 function updateFontWeight(key: "fontWeight" | "fontWeightBold", value: unknown) {
   const next = String(value);
   updateAppearance({ [key]: next === FONT_WEIGHT_AUTO ? null : Number(next) });
-}
-
-function applyTheme(theme: TerminalAppearanceProfile) {
-  emit("apply-theme", theme);
-  // #219：主题快照携带字体（null = 跟随宿主），apply-theme 落地后弹窗的字体
-  // 控件必须立刻回显真实覆盖态——否则控件仍显示上一次的自定义字体，用户以为
-  // 自己的设置还在（issue #219 的「界面显示自定义、终端却是默认字体」）。
-  syncFontControls(theme.font.family, theme.font.size ?? props.terminalFontSize);
-}
-
-function resetAppearance() {
-  // 复用「跟随 DBX 宿主」预设：设置重置与字体回跟随宿主走同一条链路，
-  // 不另写一份默认值展开，避免两处默认值漂移。
-  emit("apply-theme", TERMINAL_APPEARANCE_PRESETS[0]);
-  syncFontControls(TERMINAL_APPEARANCE_PRESETS[0].font.family, props.terminalFontSize);
-}
-
-function saveCurrentTheme() {
-  const name = themeNameDraft.value.trim();
-  if (!name) return;
-  emit("save-theme", name);
-  themeNameDraft.value = "";
-}
-
-async function deleteTheme(theme: TerminalAppearanceProfile) {
-  if (!(await confirmDialog(t("terminalAppearance.deleteThemeConfirm", { name: t(theme.name) })))) return;
-
-  emit("delete-theme", theme.id);
-}
-
-async function removeCustomScheme(scheme: TerminalColorScheme) {
-  if (!(await confirmDialog(t("terminalAppearance.importRemoveConfirm", { name: scheme.name })))) return;
-
-  emit("remove-scheme", scheme.id);
-}
-
-// 导入：粘贴文本或选文件。解析是纯逻辑（terminalScheme.parseSchemeImport），
-// 分配 id / 持久化 / 提示交给 App（权威态在 App）。
-function importSchemesFromText(text: string, fallbackName: string) {
-  const result = parseSchemeImport(text, fallbackName);
-  if (!result.schemes.length) {
-    importError.value = t("terminalAppearance.importEmpty");
-    return;
-  }
-  importError.value = "";
-  importText.value = "";
-  emit("add-schemes", result.schemes);
-}
-
-function submitImport() {
-  if (!importText.value.trim()) return;
-  importSchemesFromText(importText.value, "Imported scheme");
-}
-
-function pickSchemeFile() {
-  schemeFileInput.value?.click();
-}
-
-async function onSchemeFile(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  try {
-    // iTerm2/.itermcolors 与 Windows Terminal 导出都是文本，File API 读原文即可，
-    // 不依赖宿主 fileTransfer（web/docker 模式同样可用）。
-    const text = await file.text();
-    importSchemesFromText(text, file.name.replace(/\.[^.]+$/, ""));
-  } catch (cause) {
-    importError.value = settingsErrorOf(cause);
-  } finally {
-    // 清空 value：同一个文件连续选两次也要能再次触发 change。
-    input.value = "";
-  }
 }
 
 const CURSOR_STYLES: readonly TerminalCursorStyle[] = ["bar", "block", "underline"];
@@ -761,15 +684,6 @@ function numberFieldValue(event: Event): string {
 }
 
 // 单选组在模板里迭代（写死 `as const` 字面量在模板表达式中不被支持）。
-const SCHEME_SOURCES: Array<{ value: TerminalAppearanceSettings["schemeSource"]; label: string }> = [
-  { value: "host", label: "terminalAppearance.modeFollowHost" },
-  { value: "custom", label: "terminalAppearance.modeCustom" },
-];
-const BACKGROUND_SOURCES: Array<{ value: TerminalAppearanceSettings["backgroundSource"]; label: string }> = [
-  { value: "scheme", label: "terminalAppearance.backgroundScheme" },
-  { value: "host", label: "terminalAppearance.backgroundHost" },
-];
-
 // 行为设置只上抛增量：归一化、持久化与落地到 xterm 选项全在 App，
 // 保证「权威态唯一」——本组件不持有行为设置的副本，重开弹窗也不会出现回显漂移。
 function updateBehavior(patch: Partial<TerminalBehaviorSettings>) {
@@ -1286,124 +1200,26 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             <!-- 配色方案（对标 Tabby「Color scheme」页，从原「外观」里拆出）：主题
                  快照、实时预览、深浅两槽配色方案、终端背景来源、自定义方案导入。 -->
             <div v-show="settingsCategory === 'scheme'" class="settings-pane">
-            <h3 class="settings-section-title">{{ t("terminalAppearance.themeSection") }}</h3>
-            <p class="muted settings-note">{{ t("terminalAppearance.themeHint") }}</p>
-            <div class="theme-chips">
-              <button
-                v-for="theme in appearanceProfiles"
-                :key="theme.id"
-                type="button"
-                class="theme-chip"
-                :class="{ active: theme.id === activeThemeId }"
-                :aria-pressed="theme.id === activeThemeId"
-                @click="applyTheme(theme)"
-              >
-                <Check v-if="theme.id === activeThemeId" class="theme-chip-icon" aria-hidden="true" />
-                <span class="theme-chip-label">{{ t(theme.name) }}</span>
-                <span
-                  v-if="!theme.builtin"
-                  class="theme-chip-delete"
-                  role="button"
-                  tabindex="0"
-                  :title="t('terminalAppearance.deleteTheme')"
-                  :aria-label="t('terminalAppearance.deleteTheme')"
-                  @click.stop="deleteTheme(theme)"
-                  @keydown.enter.stop="deleteTheme(theme)"
-                ><Trash2 /></span>
-              </button>
-              <span v-if="!activeThemeId" class="theme-chip theme-chip--dirty">{{ t("terminalAppearance.themeCustom") }}</span>
-            </div>
-            <div class="theme-save-row">
-              <input v-model="themeNameDraft" spellcheck="false" :placeholder="t('terminalAppearance.themeNamePlaceholder')" />
-              <button type="button" :disabled="!themeNameDraft.trim()" @click="saveCurrentTheme">{{ t("terminalAppearance.saveTheme") }}</button>
-              <button type="button" @click="resetAppearance"><RotateCcw />{{ t("terminalAppearance.reset") }}</button>
-            </div>
-
-            <h3 class="settings-section-title">{{ t("terminalAppearance.previewTitle") }}</h3>
-            <TerminalAppearancePreview
-              :theme="previewTheme"
-              :font-family="previewFontFamily"
-              :font-size="terminalFontSize"
-              :font-weight="previewOptions.fontWeight"
-              :font-weight-bold="previewOptions.fontWeightBold"
-              :line-height="previewOptions.lineHeight"
-              :letter-spacing="previewOptions.letterSpacing"
-              :cursor-style="previewOptions.cursorStyle"
-              :cursor-blink="previewOptions.cursorBlink"
-              :contrast-ratio="previewContrast"
-              :t="t"
-            />
-
-            <h3 class="settings-section-title">{{ t("terminalAppearance.schemeSection") }}</h3>
-            <p class="muted settings-note">{{ t("terminalAppearance.schemeHint") }}</p>
-            <label v-for="option in SCHEME_SOURCES" :key="option.value" class="settings-field settings-radio-row">
-              <input
-                type="radio"
-                name="terminal-scheme-source"
-                :value="option.value"
-                :checked="appearanceSettings.schemeSource === option.value"
-                @change="updateAppearance({ schemeSource: option.value })"
+              <SettingsSchemePane
+                :t="t"
+                :appearance="appearance"
+                :custom-themes="customThemes"
+                :active-theme-id="activeThemeId"
+                :host-theme="hostTheme"
+                :host-color-scheme="hostColorScheme"
+                :host-font-family="hostFontFamily"
+                :terminal-font-size="terminalFontSize"
+                :preview-theme="previewTheme"
+                :preview-options="previewOptions"
+                :preview-font-family="previewFontFamily"
+                :preview-contrast="previewContrast"
+                @update-appearance="(patch) => emit('update-appearance', patch)"
+                @apply-theme="onSchemeApplyTheme"
+                @save-theme="(name) => emit('save-theme', name)"
+                @delete-theme="(id) => emit('delete-theme', id)"
+                @remove-scheme="(id) => emit('remove-scheme', id)"
+                @add-schemes="(schemes) => emit('add-schemes', schemes)"
               />
-              <span>{{ t(option.label) }}</span>
-            </label>
-            <TerminalSchemePicker
-              v-if="appearanceSettings.schemeSource === 'custom'"
-              :dark-scheme-id="appearanceSettings.darkSchemeId"
-              :light-scheme-id="appearanceSettings.lightSchemeId"
-              :custom-schemes="appearance.customSchemes"
-              :schemes="allSchemes"
-              :host-follow-label="t('terminalAppearance.modeFollowHost')"
-              :t="t"
-              @pick="(payload) => updateAppearance(payload.slot === 'dark' ? { darkSchemeId: payload.id } : { lightSchemeId: payload.id })"
-            />
-            <template v-if="appearanceSettings.schemeSource === 'custom'">
-              <h4 class="settings-section-title">{{ t("terminalAppearance.backgroundSection") }}</h4>
-              <label v-for="option in BACKGROUND_SOURCES" :key="option.value" class="settings-field settings-radio-row">
-                <input
-                  type="radio"
-                  name="terminal-background-source"
-                  :value="option.value"
-                  :checked="appearanceSettings.backgroundSource === option.value"
-                  @change="updateAppearance({ backgroundSource: option.value })"
-                />
-                <span>{{ t(option.label) }}</span>
-              </label>
-              <p class="muted settings-note">{{ t("terminalAppearance.backgroundHint") }}</p>
-            </template>
-
-            <h4 class="settings-section-title">{{ t("terminalAppearance.importSection") }}</h4>
-            <p class="muted settings-note">
-              {{ t("terminalAppearance.importHint") }}
-              <button class="link-button" type="button" :aria-expanded="importOpen" @click="importOpen = !importOpen">{{ t("terminalAppearance.importAction") }}</button>
-            </p>
-            <template v-if="importOpen">
-              <label class="settings-field">
-                <span>{{ t("terminalAppearance.importSection") }}</span>
-                <textarea v-model="importText" rows="4" class="mono" spellcheck="false" :placeholder="t('terminalAppearance.importPlaceholder')" />
-              </label>
-              <div class="appearance-actions">
-                <button type="button" :disabled="!importText.trim()" @click="submitImport"><Upload />{{ t("terminalAppearance.importAction") }}</button>
-                <button type="button" @click="pickSchemeFile"><FolderOpen />{{ t("downloadSettings.browse") }}</button>
-                <input
-                  ref="schemeFileInput"
-                  type="file"
-                  class="hidden-file-input"
-                  accept=".itermcolors,.json,.xresources,.yaml,.yml,.conf,.txt"
-                  @change="onSchemeFile"
-                />
-              </div>
-              <p v-if="importError" class="task-error" role="alert">{{ importError }}</p>
-            </template>
-            <ul v-if="appearance.customSchemes.length" class="settings-list">
-              <li v-for="scheme in appearance.customSchemes" :key="scheme.id">
-                <div class="settings-list-main">
-                  <strong>{{ scheme.name }}</strong>
-                  <span class="scheme-mini-swatch" aria-hidden="true"><i v-for="(color, index) in scheme.colors.slice(0, 16)" :key="index" :style="{ background: color }" /></span>
-                </div>
-                <button class="icon-button" :title="t('terminalAppearance.importRemove')" :aria-label="t('terminalAppearance.importRemove')" @click="removeCustomScheme(scheme)"><Trash2 /></button>
-              </li>
-            </ul>
-            <p class="muted">{{ t("profilesLimit", { count: appearance.customSchemes.length, limit: CUSTOM_SCHEME_LIMIT }) }}</p>
             </div>
 
             <!-- 外观（对标 Tabby「Appearance」页）：字体与字号、字重/行高/字间距/内边距、
