@@ -268,6 +268,7 @@ import {
   type GutterSettings,
 } from "./lib/terminalGutter";
 import { transferPausable } from "./lib/transferResume";
+import { transferBarValue, transferBytesTitle, transferPercent, transferShownBytes } from "./lib/transferDisplay";
 import { auditKindLabel, auditKindOptions, auditOutcomeLabel } from "./lib/auditLog";
 import { useAuditLogViewer } from "./composables/useAuditLogViewer";
 import { useSessionReconnect } from "./composables/useSessionReconnect";
@@ -896,10 +897,6 @@ const {
   waitWhilePaused,
   toggleTransferPause,
   cancelTransfer,
-  transferPercent,
-  transferBarValue,
-  transferShownBytes,
-  transferBytesTitle,
 } = useTransferQueue({
   t: (key, values) => t(key, values),
   showError,
