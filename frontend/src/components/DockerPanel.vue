@@ -10,22 +10,14 @@
 // 填命令，也不再派发 dbx:docker-open-in-terminal window 事件。
 import { computed, onMounted, onScopeDispose, onUnmounted, ref, watch } from "vue";
 import {
-  ChevronDown,
-  FolderOpen,
   Loader2,
-  Play,
   RefreshCw,
-  RotateCw,
-  ScrollText,
   Settings,
-  Square,
-  Terminal,
-  Trash2,
   X,
 } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
+import DockerContainerList, { type DockerContainerRow } from "./DockerContainerList.vue";
 import DockerLogsDrawer from "./DockerLogsDrawer.vue";
 import DockerStatsBar from "./DockerStatsBar.vue";
 import DockerWorkbench from "./DockerWorkbench.vue";
@@ -45,7 +37,6 @@ import {
   type DockerActionName,
   type DockerActionTarget,
 } from "../lib/dockerActions";
-import { createRowMenuController } from "../lib/dockerRowMenu";
 
 const props = defineProps<{
   t: (key: string, values?: Record<string, string | number>) => string;
@@ -58,15 +49,7 @@ const props = defineProps<{
   targetMode?: "ssh" | "local";
 }>();
 
-interface DockerContainer {
-  id: string;
-  name: string;
-  image: string;
-  state: string;
-  status: string;
-  ports: string;
-  createdAt: string;
-}
+type DockerContainer = DockerContainerRow;
 
 interface DockerInspectSummary {
   id: string;
@@ -118,12 +101,6 @@ function dockerListPayload(raw: unknown): { available: boolean; needsSudo: boole
     needsSudo: record.needsSudo === true,
     containers,
   };
-}
-
-/** 状态徽标 class：已知状态着色，未知状态走中性灰。 */
-function dockerStateClass(state: string): string {
-  const known = ["running", "exited", "paused", "created", "restarting", "dead", "removing"];
-  return known.includes(state) ? `docker-state-${state}` : "docker-state-unknown";
 }
 
 // —— 会话解析（SideNavPanel 不透传 session，面板自取最近存活会话）———————
@@ -333,10 +310,6 @@ const { snapshot: statsSnapshot, history: statsHistory, error: statsError } = us
 const busyContainerId = ref("");
 const actionError = ref("");
 
-function rowBusy(container: DockerContainer): boolean {
-  return busyContainerId.value === container.id;
-}
-
 const confirmTarget = ref<(DockerActionTarget & { action: DockerActionName }) | null>(null);
 const confirmBusy = ref(false);
 
@@ -391,28 +364,10 @@ watch(confirmTarget, (target) => {
 });
 onScopeDispose(() => document.removeEventListener("keydown", onConfirmEsc, true));
 
-// —— 行操作悬浮下拉（hover 开合，状态机在 lib/dockerRowMenu）—————————————
-// 触发器 hover 延迟开、移出延迟关（跨 side-offset 间隙不闪断）、click 兜底
-// 切换；7 个内联按钮收纳为单项下拉，操作列不再挤占容器表宽度。
-const rowMenu = createRowMenuController();
-onScopeDispose(() => rowMenu.close());
-
-/** reka 打开弹层默认把焦点迁入首控件；hover 开启的菜单不迁移——用户可能正在
- *  终端输入，焦点被抢走后按键（Space/Enter）会落到菜单项上误触容器操作。
- *  click/键盘/触屏开启的菜单保留默认迁移，方向键与 Esc 才能在菜单内工作。 */
-function onRowMenuOpenAutoFocus(event: Event): void {
-  if (rowMenu.openedByHover()) event.preventDefault();
-}
-
-/** 菜单选项统一入口：先收菜单再派发（kill/rm 仍走确认弹层）。 */
-function runMenuAction(container: DockerContainer, action: DockerActionName): void {
-  rowMenu.close();
+// —— 列表事件（行操作/工作台；菜单开合在 DockerContainerList 内部）———————
+/** 行操作入口：kill/rm 仍走确认弹层，其余直接派发。 */
+function handleListAction(container: DockerContainer, action: DockerActionName): void {
   requestAction(container, action);
-}
-
-function menuOpenLogs(container: DockerContainer): void {
-  rowMenu.close();
-  openLogs(container);
 }
 
 // —— 容器工作台（B4 文件只读 + B5 终端）——————————————
@@ -420,15 +375,13 @@ const filesOpen = ref(false);
 const filesTarget = ref<DockerContainer | null>(null);
 const workbenchTab = ref<"files" | "terminal">("files");
 
-function menuOpenFiles(container: DockerContainer): void {
-  rowMenu.close();
+function openContainerFiles(container: DockerContainer): void {
   filesTarget.value = container;
   workbenchTab.value = "files";
   filesOpen.value = true;
 }
 
-function menuOpenInTerminal(container: DockerContainer): void {
-  rowMenu.close();
+function openContainerTerminal(container: DockerContainer): void {
   filesTarget.value = container;
   workbenchTab.value = "terminal";
   filesOpen.value = true;
@@ -571,88 +524,17 @@ const running = (container: DockerContainer): boolean => container.state === "ru
     <!-- 空列表 -->
     <p v-else-if="!containers.length" class="docker-empty">{{ props.t("docker.empty") }}</p>
 
-    <!-- 容器表 -->
-    <div v-else class="docker-table-wrap">
-      <Table class="docker-table">
-        <TableHeader>
-          <TableRow>
-            <TableHead>{{ props.t("docker.colName") }}</TableHead>
-            <TableHead>{{ props.t("docker.colImage") }}</TableHead>
-            <TableHead>{{ props.t("docker.colState") }}</TableHead>
-            <TableHead>{{ props.t("docker.colPorts") }}</TableHead>
-            <TableHead class="docker-col-actions">{{ props.t("docker.colActions") }}</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          <TableRow v-for="container in containers" :key="container.id">
-            <TableCell class="docker-cell-name" :title="container.id">
-              <strong class="mono">{{ container.name || container.id.slice(0, 12) }}</strong>
-            </TableCell>
-            <TableCell class="docker-cell-image mono" :title="container.image">{{ container.image }}</TableCell>
-            <TableCell class="docker-cell-state">
-              <span class="docker-badge" :class="dockerStateClass(container.state)">{{ container.state }}</span>
-              <small class="docker-status" :title="container.status">{{ container.status }}</small>
-            </TableCell>
-            <TableCell class="docker-cell-ports mono" :title="container.ports">{{ container.ports || "–" }}</TableCell>
-            <TableCell class="docker-col-actions">
-              <Popover :open="rowMenu.isOpen(container.id)" @update:open="(open: boolean) => { if (!open) rowMenu.close(); }">
-                <PopoverAnchor as-child>
-                  <button
-                    type="button"
-                    class="icon-button docker-row-trigger"
-                    :class="{ 'is-active': rowMenu.isOpen(container.id) }"
-                    :title="props.t('docker.colActions')"
-                    :aria-label="props.t('docker.colActions')"
-                    aria-haspopup="menu"
-                    :aria-expanded="rowMenu.isOpen(container.id)"
-                    @pointerenter="rowMenu.hoverTrigger(container.id)"
-                    @pointerleave="rowMenu.leaveToClose()"
-                    @click="rowMenu.toggle(container.id)"
-                  >
-                    <ChevronDown />
-                  </button>
-                </PopoverAnchor>
-                <PopoverContent
-                  class="docker-row-menu w-auto gap-1 p-1"
-                  align="end"
-                  :side-offset="4"
-                  @open-auto-focus="onRowMenuOpenAutoFocus"
-                  @pointerenter="rowMenu.hoverContent()"
-                  @pointerleave="rowMenu.leaveToClose()"
-                >
-                  <button type="button" class="docker-row-menu-item" :disabled="running(container) || rowBusy(container)" @click="runMenuAction(container, 'start')">
-                    <Play />{{ props.t("docker.actionStart") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item" :disabled="!running(container) || rowBusy(container)" @click="runMenuAction(container, 'stop')">
-                    <Square />{{ props.t("docker.actionStop") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item" :disabled="!running(container) || rowBusy(container)" @click="runMenuAction(container, 'restart')">
-                    <RotateCw />{{ props.t("docker.actionRestart") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item docker-row-menu-item--danger" :disabled="rowBusy(container)" @click="runMenuAction(container, 'kill')">
-                    <X />{{ props.t("docker.actionKill") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item docker-row-menu-item--danger" :disabled="rowBusy(container)" @click="runMenuAction(container, 'rm')">
-                    <Trash2 />{{ props.t("docker.actionRemove") }}
-                  </button>
-                  <div class="docker-row-menu-sep" role="separator" />
-                  <button type="button" class="docker-row-menu-item" @click="menuOpenLogs(container)">
-                    <ScrollText />{{ props.t("docker.actionLogs") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item" @click="menuOpenFiles(container)">
-                    <FolderOpen />{{ props.t("docker.actionFiles") }}
-                  </button>
-                  <button type="button" class="docker-row-menu-item" :disabled="!running(container) || rowBusy(container)" @click="menuOpenInTerminal(container)">
-                    <Terminal />{{ props.t("docker.actionTerminal") }}
-                  </button>
-                </PopoverContent>
-              </Popover>
-            </TableCell>
-          </TableRow>
-        </TableBody>
-      </Table>
-      <p class="docker-hint">{{ props.t("docker.terminalHint") }}</p>
-    </div>
+    <!-- 容器表 + 本地搜索/状态筛选（行操作与过滤在 DockerContainerList） -->
+    <DockerContainerList
+      v-else
+      :t="props.t"
+      :containers="containers"
+      :busy-ids="busyContainerId ? [busyContainerId] : []"
+      @action="handleListAction"
+      @logs="openLogs"
+      @files="openContainerFiles"
+      @terminal="openContainerTerminal"
+    />
 
     <!-- kill/rm 强制确认 -->
       <Dialog :open="!!confirmTarget" @update:open="(open: boolean) => { if (!open) void confirmAction(false); }">
@@ -771,213 +653,6 @@ const running = (container: DockerContainer): boolean => container.state === "ru
 
 .docker-engine-field input::placeholder {
   opacity: 0.45;
-}
-
-.docker-table-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  min-width: 0;
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  border-radius: 12px;
-  background: var(--popover);
-  /* 列多超出工作台宽度时横向滚动兜底。 */
-  overflow-x: auto;
-  /* 内容过宽时用户找不到滚动入口——全局 `*::-webkit-scrollbar{display:none}`
-     把 wrap 的滚动条也藏了。这里作为例外显式恢复（同 .file-rows 模式）：
-     横向溢出时滚动条可见可拖。 */
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--foreground) 25%, transparent) transparent;
-}
-
-.docker-table-wrap::-webkit-scrollbar { display: block; height: 8px; width: 8px; }
-.docker-table-wrap::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--foreground) 25%, transparent); border-radius: 4px; }
-.docker-table-wrap::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--foreground) 40%, transparent); }
-.docker-table-wrap::-webkit-scrollbar-track { background: transparent; }
-
-.docker-table {
-  width: 100%;
-  /* 粘性列需要 separate：collapse 下 Firefox 的粘性单元格边框不随滚动绘制。
-     行分隔线本就只画在各 cell 的 border-bottom 上，spacing 0 视觉等价。 */
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 11px;
-}
-
-.docker-table th {
-  height: 32px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.25));
-  font-size: 10px;
-  font-weight: 600;
-  text-align: left;
-  vertical-align: middle;
-  opacity: 0.6;
-  white-space: nowrap;
-}
-
-.docker-table td {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.15));
-  vertical-align: middle;
-}
-
-.docker-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-/* 列设最小宽度：窄面板下表格总宽超过容器 → wrap 横向滚动展示完整内容，
-   而不是各列被省略号挤没；宽面板下仍按 max-width 截长内容。 */
-.docker-cell-name {
-  min-width: 110px;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 粘性首列（容器名）：横向滚动时固定靠左，滚动出的内容从其右缘滑过。
-   实底取浮层同款 --popover（下层内容透出会误读成两列重叠）；右缘 1px
-   分隔让滚动时的层叠关系可见。表头同规则，滚动中表头保持一致。 */
-.docker-table th:first-child,
-.docker-table td.docker-cell-name {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  background: var(--popover);
-  box-shadow: 1px 0 0 var(--border, rgba(128, 128, 128, 0.25));
-}
-
-.docker-cell-image {
-  min-width: 130px;
-  max-width: 280px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.8;
-}
-
-.docker-cell-state {
-  min-width: 96px;
-  white-space: nowrap;
-}
-
-.docker-status {
-  display: block;
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0.6;
-}
-
-/* 端口映射串很长且逗号分隔：允许换行展示全部映射（省略号会吞信息），
-   列宽在 min/max 间自适应，默认面板宽度下五列 + 操作列即可全部见。 */
-.docker-cell-ports {
-  min-width: 130px;
-  max-width: 220px;
-}
-
-.docker-col-actions {
-  min-width: 44px;
-  white-space: nowrap;
-  text-align: right;
-}
-
-/* 粘性末列（操作按钮）：横向滚动时固定靠右，下拉触发器永不被内容推出
-   视口（issue：列内容过大时下拉按钮被遮挡）。实底同浮层底色，左缘 1px
-   分隔；z-index 与首列同级。 */
-.docker-table th.docker-col-actions,
-.docker-table td.docker-col-actions {
-  position: sticky;
-  right: 0;
-  z-index: 2;
-  background: var(--popover);
-  box-shadow: -1px 0 0 var(--border, rgba(128, 128, 128, 0.25));
-}
-
-.docker-table tbody tr:hover td {
-  background: color-mix(in srgb, var(--accent) 45%, var(--popover));
-}
-
-/* 行操作悬浮下拉：触发器（⌄，终端回填成功短暂显示 ✓）+ hover 菜单。 */
-.docker-row-trigger svg {
-  width: 14px;
-  height: 14px;
-}
-
-.docker-row-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: none;
-  border-radius: 6px;
-  padding: 5px 10px;
-  background: none;
-  color: inherit;
-  font: inherit;
-  font-size: 12px;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.docker-row-menu-item svg {
-  width: 14px;
-  height: 14px;
-  flex-basis: 14px;
-  opacity: 0.75;
-}
-
-.docker-row-menu-item:hover:not(:disabled),
-.docker-row-menu-item:focus-visible {
-  background: color-mix(in srgb, var(--foreground) 8%, transparent);
-  outline: none;
-}
-
-.docker-row-menu-item:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.docker-row-menu-item--danger:hover:not(:disabled),
-.docker-row-menu-item--danger:focus-visible {
-  background: color-mix(in srgb, var(--danger, #d64545) 16%, transparent);
-  color: var(--danger, #d64545);
-}
-
-.docker-row-menu-sep {
-  height: 1px;
-  margin: 3px 6px;
-  background: var(--border, rgba(128, 128, 128, 0.25));
-}
-
-.docker-badge {
-  display: inline-block;
-  padding: 0 6px;
-  border-radius: 8px;
-  font-size: 11px;
-  line-height: 16px;
-  background: rgba(128, 128, 128, 0.18);
-}
-
-.docker-state-running {
-  background: rgba(34, 160, 94, 0.22);
-}
-
-.docker-state-exited,
-.docker-state-created,
-.docker-state-removing,
-.docker-state-unknown {
-  background: rgba(128, 128, 128, 0.18);
-}
-
-.docker-state-paused,
-.docker-state-restarting {
-  background: rgba(217, 154, 35, 0.25);
-}
-
-.docker-state-dead {
-  background: rgba(214, 69, 69, 0.25);
 }
 
 .docker-empty {
