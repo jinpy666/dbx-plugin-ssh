@@ -36,7 +36,7 @@ const LINE_ALLOWLIST: Record<string, number> = {
   "./composables/useRecording.ts": 749,
   "./lib/completion/fig/figCompletionSource.ts": 742,
   "./composables/useTransferQueue.ts": 654,
-  "./components/PreviewPane.vue": 643,
+  "./components/PreviewPane.vue": 629,
 };
 
 /**

@@ -13,15 +13,14 @@ let sessionMarkdownView: MarkdownView = "render";
 // 流式拼装（≤1MiB/片，≤256MiB）；sudo 模式走 sudo/readFile（≤4MiB/片）；
 // 文本/可编辑链路仍走既有整读（≤1MiB）。
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { Download, Maximize2, Minimize2, Pencil, RefreshCw, X } from "@lucide/vue";
+import { Download, RefreshCw } from "@lucide/vue";
 import { formatBytes } from "../lib/format";
-import { fileIcon, fileIconClass } from "../lib/fileIcons";
 import type { EditorConfig, KnownEditor, ResolvedEditor } from "../lib/editorRules";
 import { canEditBytes, hexDump, PREVIEW_CONFIRM_BYTES, PREVIEW_MAX_BYTES, READ_MAX_BYTES, SUDO_READ_MAX_BYTES } from "../lib/preview";
 import { resolvePreview, type PreviewResolution } from "../lib/previewResolver";
-import FileOpenWithMenu from "./FileOpenWithMenu.vue";
 import FileViewerPreview from "./FileViewerPreview.vue";
 import MarkdownRender from "./MarkdownRender.vue";
+import PreviewHeader from "./PreviewHeader.vue";
 import TextPreview from "./TextPreview.vue";
 
 const props = withDefaults(defineProps<{
@@ -94,6 +93,10 @@ function setMarkdownView(view: MarkdownView) {
   mdView.value = view;
   sessionMarkdownView = view;
 }
+/** 「打开方式」事件转发：模板内联箭头参数会丢类型，统一走具名函数。 */
+function forwardOpenWith(editor: ResolvedEditor): void {
+  emit("open-with", editor);
+}
 // i18n key 未入库时返回 key 本身，据此回退到组件内置兜底文案。
 function mdLabel(key: string, fallback: string): string {
   const value = props.t(key);
@@ -101,6 +104,10 @@ function mdLabel(key: string, fallback: string): string {
 }
 
 const title = computed(() => (props.path ? props.path.split(/[\\/]/).pop() ?? props.path : ""));
+/** 头部大小文案：加载中/图片/外置查看器不显示字节数。 */
+const headerMeta = computed(() =>
+  loading.value || mode.value === "image" || mode.value === "viewer" ? "" : formatBytes(size.value),
+);
 /** 非 UTF-8 文本（按 GB18030 展示）：编辑必须停用——TextEncoder 只按 UTF-8
  *  写回，保存会把 GB18030 字节整体替换成乱码并永久写坏远端文档。 */
 const nonUtf8 = ref(false);
@@ -487,52 +494,31 @@ const canOpenExternal = computed(() =>
 
 <template>
   <div v-if="path" ref="previewEl" tabindex="-1" class="ssh-preview" data-test="ssh-preview">
-    <div class="ssh-preview-header">
-      <component :is="fileIcon(title)" :class="fileIconClass(title)" class="ssh-preview-fileicon" aria-hidden="true" />
-      <strong :title="path">{{ title }}</strong>
-      <span class="ssh-preview-meta">{{ loading || mode === "image" || mode === "viewer" ? "" : formatBytes(size) }}</span>
-      <!-- Markdown 渲染/源码切换（仅 md 文本态出现；i18n key 缺失用兜底文案）。 -->
-      <span v-if="showMdToggle" class="ssh-preview-md-toggle" data-test="md-toggle">
-        <button
-          type="button"
-          class="ssh-preview-chip"
-          :class="{ 'ssh-preview-chip-active': mdView === 'render' }"
-          data-test="md-render"
-          :aria-pressed="mdView === 'render'"
-          @click="setMarkdownView('render')"
-        >{{ mdLabel("previewDialog.mdRenderView", "渲染") }}</button>
-        <button
-          type="button"
-          class="ssh-preview-chip"
-          :class="{ 'ssh-preview-chip-active': mdView === 'source' }"
-          data-test="md-source"
-          :aria-pressed="mdView === 'source'"
-          @click="setMarkdownView('source')"
-        >{{ mdLabel("previewDialog.mdSourceView", "源码") }}</button>
-      </span>
-      <button v-if="canEdit && !saving" type="button" class="ssh-preview-action" data-test="preview-edit" :title="t('editSave.edit')" @click="startEdit"><Pencil />{{ t("editSave.edit") }}</button>
-      <FileOpenWithMenu
-        :file-name="title"
-        :editors="editors"
-        :editor-config="editorConfig"
-        :can-open="canOpenLocal && canWrite"
-        :disabled-hint="canOpenLocal ? undefined : t('sftpEdit.desktopOnly')"
-        :t="t"
-        @open="(editor) => emit('open-with', editor)"
-        @custom-command="emit('custom-command')"
-        @request-editors="emit('request-editors')"
-      />
-      <button type="button" class="ssh-preview-action" :title="t('previewDialog.download')" :aria-label="t('previewDialog.download')" @click="emit('download', path)"><Download /></button>
-      <button
-        type="button"
-        class="ssh-preview-action"
-        data-test="preview-maximize"
-        :title="t(maximized ? 'previewDialog.restore' : 'previewDialog.maximize')"
-        :aria-label="t(maximized ? 'previewDialog.restore' : 'previewDialog.maximize')"
-        @click="emit('toggle-maximize')"
-      ><Minimize2 v-if="maximized" /><Maximize2 v-else /></button>
-      <button type="button" class="ssh-preview-action ssh-preview-close" :title="t('close')" :aria-label="t('close')" @click="emit('close')"><X /></button>
-    </div>
+    <PreviewHeader
+      :t="t"
+      :title="title"
+      :path="path"
+      :meta="headerMeta"
+      :show-md-toggle="showMdToggle"
+      :md-view="mdView"
+      :md-render-label="mdLabel('previewDialog.mdRenderView', '渲染')"
+      :md-source-label="mdLabel('previewDialog.mdSourceView', '源码')"
+      :can-edit="canEdit"
+      :saving="saving"
+      :editors="editors"
+      :editor-config="editorConfig"
+      :can-open="canOpenLocal && canWrite"
+      :disabled-hint="canOpenLocal ? undefined : t('sftpEdit.desktopOnly')"
+      :maximized="maximized"
+      @edit="startEdit"
+      @set-md-view="setMarkdownView"
+      @download="emit('download', path)"
+      @toggle-maximize="emit('toggle-maximize')"
+      @close="emit('close')"
+      @open-with="(editor) => emit('open-with', editor)"
+      @custom-command="emit('custom-command')"
+      @request-editors="emit('request-editors')"
+    />
     <div v-if="nonUtf8 && mode === 'text' && !loading && !error" class="ssh-preview-editbar" data-test="nonutf8-hint">{{ t("previewDialog.nonUtf8") }}</div>
     <div v-if="showEditbar" class="ssh-preview-editbar">
       <template v-if="editing">
@@ -567,7 +553,7 @@ const canOpenExternal = computed(() =>
             :can-open="canOpenLocal && canWrite"
             :disabled-hint="canOpenLocal ? undefined : t('sftpEdit.desktopOnly')"
             :t="t"
-            @open="(editor) => emit('open-with', editor)"
+            @open="forwardOpenWith"
             @custom-command="emit('custom-command')"
             @request-editors="emit('request-editors')"
           />
@@ -589,7 +575,7 @@ const canOpenExternal = computed(() =>
             :can-open="canOpenLocal && canWrite"
             :disabled-hint="canOpenLocal ? undefined : t('sftpEdit.desktopOnly')"
             :t="t"
-            @open="(editor) => emit('open-with', editor)"
+            @open="forwardOpenWith"
             @custom-command="emit('custom-command')"
             @request-editors="emit('request-editors')"
           />
