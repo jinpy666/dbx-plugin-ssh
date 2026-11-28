@@ -29,7 +29,6 @@ const LINE_ALLOWLIST: Record<string, number> = {
   "./mockDbxHost.ts": 2335,
   "./components/SettingsDialog.vue": 1894,
   "./lib/i18n/supplemental/terminal-behavior.ts": 828,
-  "./components/MonitorPanel.vue": 792,
   "./composables/useCommandSuggestions.ts": 663,
 };
 
