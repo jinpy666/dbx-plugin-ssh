@@ -7,7 +7,7 @@
 // （WebGL/选中复制/终端字体）的权威态在宿主 App——下载偏好经 downloadPrefs
 // 适配器读写，终端偏好经 props 下发 + emits 上抛。
 import { computed, reactive, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Check, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, ShieldCheck, Trash2, Upload, X } from "@lucide/vue";
+import { Check, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, ShieldCheck, Trash2, Upload, X } from "@lucide/vue";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import PasswordField from "./PasswordField.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
@@ -15,6 +15,7 @@ import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 import { Switch } from "./ui/switch";
 import TerminalAppearancePreview from "./TerminalAppearancePreview.vue";
 import SettingsTransferPane from "./SettingsTransferPane.vue";
+import SettingsTerminalPane from "./SettingsTerminalPane.vue";
 import TerminalSchemePicker from "./TerminalSchemePicker.vue";
 import TerminalHotkeyEditor from "./TerminalHotkeyEditor.vue";
 import HighlightRulesSection from "./HighlightRulesSection.vue";
@@ -44,301 +45,17 @@ import {
   type TerminalCursorStyle,
 } from "../lib/terminalAppearance";
 import { BUILTIN_TERMINAL_SCHEMES, contrastRatio, parseHexColor, parseSchemeImport, type TerminalColorScheme, type TerminalThemeLike } from "../lib/terminalScheme";
-import {
-  BELL_MODES,
-  LINK_MODIFIERS,
-  RIGHT_CLICK_MODES,
-  SCROLLBACK_MAX,
-  SCROLLBACK_MIN,
-  NOWRAP_COLUMNS_MAX,
-  NOWRAP_COLUMNS_MIN,
-  WORD_SEPARATOR_MAX_LENGTH,
-  type TerminalBehaviorSettings,
-  type TerminalBellMode,
-  type TerminalLinkModifier,
-  type TerminalRightClickMode,
-} from "../lib/terminalBehavior";
 import type { TerminalHotkeyBindings } from "../lib/terminalHotkeys";
+import { COMPLETION_ENGINE_KEY, loadCompletionEngine, pluginStore, sanitizeCompletionEngine, type CompletionEngineSetting } from "../lib/pluginStore";
+import { clearSuggestionBlocklist, loadSuggestionBlocklist } from "../lib/suggestionBlocklist";
+import { COMMAND_HISTORY_LIMIT, MAX_COMMAND_HISTORY_LIMIT, MIN_COMMAND_HISTORY_LIMIT, sanitizeCommandHistoryLimit } from "../lib/commandHistory";
+import { type TerminalBehaviorSettings } from "../lib/terminalBehavior";
+import { type ToolbarButtonId, type ToolbarVisibility } from "../lib/toolbarVisibility";
+import { type GutterSettings } from "../lib/terminalGutter";
 import type { PaneDirectionPref } from "../lib/paneLayout";
 import type { AiSettings } from "../lib/aiSettings";
-import { TOOLBAR_BUTTONS, type ToolbarButtonId, type ToolbarVisibility } from "../lib/toolbarVisibility";
 import { type ActionLinkMatcherToggles, type ActionLinksSettings } from "../lib/actionLinksMatcher";
-import { rdpExperimentalEnabled as parseRdpExperimentalEnabled } from "../lib/rdpExperimental";
-import { GUTTER_TIMESTAMP_DEFAULT_FORMAT, type GutterSettings } from "../lib/terminalGutter";
-import {
-  createStartupEntry,
-  mergeStartupStore,
-  normalizeStartupConfig,
-  STARTUP_COMMAND_MAX,
-  STARTUP_COMMANDS_STORE_KEY,
-  STARTUP_DELAY_MAX_MS,
-  STARTUP_DELAY_DEFAULT_MS,
-  type StartupCommandEntry,
-  type StartupCommandsConfig,
-} from "../lib/startupCommands";
-import {
-  choiceFromOverride,
-  mergeNameEncodingStore,
-  NAME_ENCODING_OVERRIDES_STORE_KEY,
-  normalizeNameEncodingOverride,
-  overrideFromChoice,
-  type ConnectionNameEncodingChoice,
-  type NameEncodingOverride,
-} from "../lib/connectionNameEncoding";
 
-/** 连接级启动命令（P0-4，Tabby「Login scripts」对标）：同 X11 走组件内自治
- * RPC 读写 sidecar 偏好（`startup_commands` 键按 connectionId 分桶，读改写
- * 合并只动本连接的桶）；shell 起来后按序注入，改动对新开会话生效。 */
-const startupEnabled = ref(false);
-const startupCommands = ref<StartupCommandEntry[]>([]);
-
-async function loadStartupCommands() {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  // 存储迁移批 2（IMPL_PLAN_STORAGE_SYNC）：镜像播种/收敛——条目缺失从
-  // sidecar 播种；条目存在但与 sidecar 漂移（云同步恢复后）则 store 赢，
-  // 推回 sidecar（复用读改写持久化）。
-  const mirrored = loadConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, normalizeStartupConfig);
-  const apply = (config: StartupCommandsConfig) => {
-    startupEnabled.value = config.enabled;
-    startupCommands.value = config.commands;
-  };
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ startup_commands?: unknown }>("local/preferences/get", {});
-    const store = prefs?.startup_commands as Record<string, unknown> | undefined;
-    const sidecar = normalizeStartupConfig(store?.[connectionId]);
-    if (mirrored === null) {
-      apply(sidecar);
-      saveConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, sidecar);
-      return;
-    }
-    if (!connectionEntryEquals(mirrored, sidecar)) {
-      apply(mirrored);
-      await persistStartupConfig(mirrored);
-      return;
-    }
-    apply(sidecar);
-  } catch {
-    // sidecar 不可用：镜像兜底（未迁移则维持空表，下次打开重试播种）。
-    if (mirrored !== null) apply(mirrored);
-  }
-}
-
-function applyStartupConfig(config: StartupCommandsConfig) {
-  startupEnabled.value = config.enabled;
-  startupCommands.value = config.commands;
-}
-
-/// 读改写合并：`local/preferences/set` 对 startup_commands 是整键替换，
-/// 其他连接的桶从最新偏好读回后原样保留。
-async function persistStartupConfig(config: StartupCommandsConfig) {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ startup_commands?: unknown }>("local/preferences/get", {});
-    await window.dbxPlugin?.invoke("local/preferences/set", {
-      startup_commands: mergeStartupStore(
-        prefs?.startup_commands,
-        connectionId,
-        config,
-      ),
-    });
-  } catch (cause) {
-    emit("error", cause);
-  }
-}
-
-async function persistStartupCommands() {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  const config: StartupCommandsConfig = { enabled: startupEnabled.value, commands: startupCommands.value };
-  await persistStartupConfig(config);
-  // 保存双写：RPC（sidecar 即时权威）+ 镜像（云同步载荷）。
-  saveConnectionEntry(STARTUP_COMMANDS_STORE_KEY, connectionId, config);
-}
-
-async function setStartupEnabled(next: boolean) {
-  startupEnabled.value = next;
-  // 开启且无命令时给一行空行，省一次点击；清空命令立即持久化。
-  if (next && startupCommands.value.length === 0) startupCommands.value.push(createStartupEntry());
-  await persistStartupCommands();
-}
-
-function addStartupEntry() {
-  if (startupCommands.value.length >= STARTUP_COMMAND_MAX) return;
-  startupCommands.value.push(createStartupEntry());
-  void persistStartupCommands();
-}
-
-function removeStartupEntry(index: number) {
-  startupCommands.value.splice(index, 1);
-  void persistStartupCommands();
-}
-
-function moveStartupEntry(index: number, delta: number) {
-  const target = index + delta;
-  if (target < 0 || target >= startupCommands.value.length) return;
-  const [row] = startupCommands.value.splice(index, 1);
-  startupCommands.value.splice(target, 0, row);
-  void persistStartupCommands();
-}
-
-/** 行内增量（命令文本 / 延迟 / 启用）：改完即持久化（@change 语义，非逐键）。 */
-function updateStartupEntry(index: number, patch: Partial<StartupCommandEntry>) {
-  const row = startupCommands.value[index];
-  if (!row) return;
-  Object.assign(row, patch);
-  void persistStartupCommands();
-}
-
-/** 延迟输入收敛：空/非法回缺省 300ms，越界截断到 30s。 */
-function clampStartupDelayInput(raw: string): number {
-  const value = Number.parseInt(raw.trim(), 10);
-  if (!Number.isFinite(value) || value < 0) return STARTUP_DELAY_DEFAULT_MS;
-  return Math.min(value, STARTUP_DELAY_MAX_MS);
-}
-import { COMPLETION_ENGINE_KEY, loadCompletionEngine, pluginStore, sanitizeCompletionEngine, type CompletionEngineSetting } from "../lib/pluginStore";
-import { COMMAND_HISTORY_LIMIT, MAX_COMMAND_HISTORY_LIMIT, MIN_COMMAND_HISTORY_LIMIT, sanitizeCommandHistoryLimit } from "../lib/commandHistory";
-import { clearSuggestionBlocklist, loadSuggestionBlocklist } from "../lib/suggestionBlocklist";
-
-/** 连接级 SFTP 文件名编码覆盖（M16）：同启动命令的自治 RPC 读写
- * （`sftp_name_encoding_overrides` 键按 connectionId 分桶）。控件缺省
- * 「跟随全局」且不落盘（删除本连接桶）；连接未覆盖时全局
- * `sftp_name_encoding` 生效，判定优先级在 sidecar（覆盖 > 全局 > auto）。 */
-const connNameEncodingChoice = ref<ConnectionNameEncodingChoice>("follow");
-
-async function loadConnNameEncoding() {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  // 存储迁移批 2：镜像条目值与 sidecar 同形（"auto"/"latin-1"/null=跟随全局），
-  // 播种/收敛语义同启动命令；垃圾条目归一为 null，不会误删 sidecar 覆盖。
-  const mirrored = loadConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, normalizeNameEncodingOverride);
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ sftp_name_encoding_overrides?: unknown }>("local/preferences/get", {});
-    const store = prefs?.sftp_name_encoding_overrides as Record<string, unknown> | undefined;
-    const sidecar = normalizeNameEncodingOverride(store?.[connectionId]);
-    if (mirrored === null) {
-      connNameEncodingChoice.value = choiceFromOverride(sidecar);
-      saveConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, sidecar);
-      return;
-    }
-    if (mirrored !== sidecar) {
-      connNameEncodingChoice.value = choiceFromOverride(mirrored);
-      await persistConnNameEncodingOverride(mirrored);
-      return;
-    }
-    connNameEncodingChoice.value = choiceFromOverride(sidecar);
-  } catch {
-    // sidecar 不可用：镜像兜底。
-    if (mirrored !== null) connNameEncodingChoice.value = choiceFromOverride(mirrored);
-  }
-}
-
-/// 读改写合并：`local/preferences/set` 对该键是整表替换（其他连接的桶从最新
-/// 偏好读回后原样保留）；value=null 删除本连接桶（「跟随全局」）。
-async function persistConnNameEncodingOverride(override: NameEncodingOverride | null) {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ sftp_name_encoding_overrides?: unknown }>("local/preferences/get", {});
-    await window.dbxPlugin?.invoke("local/preferences/set", {
-      sftp_name_encoding_overrides: mergeNameEncodingStore(
-        prefs?.sftp_name_encoding_overrides,
-        connectionId,
-        override,
-      ),
-    });
-  } catch (cause) {
-    emit("error", cause);
-  }
-}
-
-async function persistConnNameEncoding() {
-  const connectionId = props.connectionId;
-  if (!connectionId) return;
-  const override = overrideFromChoice(connNameEncodingChoice.value);
-  await persistConnNameEncodingOverride(override);
-  // 保存双写：RPC + 镜像（null 同样落条目 = 「跟随全局」已迁移）。
-  saveConnectionEntry(NAME_ENCODING_OVERRIDES_STORE_KEY, connectionId, override);
-}
-
-function setConnNameEncoding(choice: ConnectionNameEncodingChoice) {
-  connNameEncodingChoice.value = choice;
-  void persistConnNameEncoding();
-}
-
-/** X11 转发偏好（P3-3）：组件内自治读写 sidecar 偏好——即时生效语义
- * （新会话才启用），不走 props/emit（App 无需感知）。 */
-const x11Enabled = ref(false);
-const x11ReadOnlyNote = ref(false);
-
-async function loadX11Preference() {
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ x11_forwarding?: unknown }>("local/preferences/get", {});
-    x11Enabled.value = prefs?.x11_forwarding === true;
-  } catch {
-    x11Enabled.value = false;
-  }
-}
-
-async function setX11Enabled(next: boolean) {
-  x11Enabled.value = next;
-  try {
-    await window.dbxPlugin?.invoke("local/preferences/set", { x11_forwarding: next });
-  } catch {
-    x11Enabled.value = !next;
-  }
-}
-
-/** 会话自动录制偏好（M14，对标 iShell）：与 X11 同款「组件内自治读写
- * sidecar 偏好」模式，即时生效语义（之后 open 的会话才自动录制）。 */
-const autoRecordEnabled = ref(false);
-
-/** RDP 仍处实验阶段：默认关闭，必须由用户在设置中显式启用。 */
-const rdpExperimentalEnabled = ref(false);
-
-async function loadRdpExperimentalPreference() {
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ rdp_experimental_enabled?: unknown }>("local/preferences/get", {});
-    rdpExperimentalEnabled.value = parseRdpExperimentalEnabled(prefs?.rdp_experimental_enabled);
-  } catch {
-    rdpExperimentalEnabled.value = false;
-  }
-}
-
-async function setRdpExperimentalEnabled(next: boolean) {
-  rdpExperimentalEnabled.value = next;
-  try {
-    // 开关持久化到 sidecar 偏好即可生效（后端 rdp/start 前置检查）；
-    // App 不再持有内存门副本（M32-A 后工具条无 RDP 入口）。
-    await window.dbxPlugin?.invoke("local/preferences/set", { rdp_experimental_enabled: next });
-  } catch {
-    rdpExperimentalEnabled.value = !next;
-  }
-}
-
-async function loadAutoRecordPreference() {
-  try {
-    const prefs = await window.dbxPlugin?.invoke<{ auto_record?: unknown }>("local/preferences/get", {});
-    autoRecordEnabled.value = prefs?.auto_record === true;
-  } catch {
-    autoRecordEnabled.value = false;
-  }
-}
-
-async function setAutoRecordEnabled(next: boolean) {
-  autoRecordEnabled.value = next;
-  try {
-    await window.dbxPlugin?.invoke("local/preferences/set", { auto_record: next });
-  } catch {
-    autoRecordEnabled.value = !next;
-  }
-}
-
-void loadAutoRecordPreference();
-void loadRdpExperimentalPreference();
-
-void loadX11Preference();
 
 // 结构化补全引擎选择（FIG wave-1，契约 §2.3）：组件内自治读写 pluginStore
 // （键 ssh-completion-engine，fig-safe 默认 / fig / off）——不走 props/emit，
@@ -1053,48 +770,10 @@ const BACKGROUND_SOURCES: Array<{ value: TerminalAppearanceSettings["backgroundS
   { value: "host", label: "terminalAppearance.backgroundHost" },
 ];
 
-/** 终端行为枚举 → i18n key。模板按 lib 的常量数组顺序迭代，渲染单选组。 */
-const RIGHT_CLICK_LABELS: Record<TerminalRightClickMode, string> = {
-  off: "terminalBehavior.rightClickOff",
-  menu: "terminalBehavior.rightClickMenu",
-  paste: "terminalBehavior.rightClickPaste",
-  clipboard: "terminalBehavior.rightClickClipboard",
-};
-const BELL_LABELS: Record<TerminalBellMode, string> = {
-  off: "terminalBehavior.bellOff",
-  visual: "terminalBehavior.bellVisual",
-  audible: "terminalBehavior.bellAudible",
-};
-const LINK_MODIFIER_LABELS: Record<TerminalLinkModifier, string> = {
-  none: "terminalBehavior.linkModifierNone",
-  ctrl: "terminalBehavior.linkModifierCtrl",
-  alt: "terminalBehavior.linkModifierAlt",
-  shift: "terminalBehavior.linkModifierShift",
-  meta: "terminalBehavior.linkModifierMeta",
-};
-
 // 行为设置只上抛增量：归一化、持久化与落地到 xterm 选项全在 App，
 // 保证「权威态唯一」——本组件不持有行为设置的副本，重开弹窗也不会出现回显漂移。
 function updateBehavior(patch: Partial<TerminalBehaviorSettings>) {
   emit("update-behavior", patch);
-}
-
-/** 数字输入框 → 行为字段：空串或非数值直接忽略，避免清空输入框把值打成 NaN。 */
-function updateScrollback(raw: string) {
-  const trimmed = raw.trim();
-  if (!trimmed) return;
-  const value = Number(trimmed);
-  if (!Number.isFinite(value)) return;
-  updateBehavior({ scrollbackLines: value });
-}
-
-/** #306 无折行列数：空串/非数值忽略，范围钳位交给 App 侧 sanitize。 */
-function updateNoWrapColumns(raw: string) {
-  const trimmed = raw.trim();
-  if (!trimmed) return;
-  const value = Number(trimmed);
-  if (!Number.isFinite(value)) return;
-  updateBehavior({ noWrapColumns: value });
 }
 
 /** 快捷键整表替换：编辑器内部管草稿，只把最终结果上抛给 App 持久化。 */
@@ -1109,34 +788,6 @@ function updateActionLinks(patch: { enabled?: boolean; matchers?: Partial<Action
 
 function updateGutter(patch: { showLineNumbers?: boolean; showTimestamps?: boolean; timestampFormat?: string }) {
   emit("update:gutter", patch);
-}
-
-/** 单个匹配器开关：reka Switch 回传 boolean | string，收紧为布尔再上抛。 */
-function updateMatcher(key: keyof ActionLinkMatcherToggles, value: unknown) {
-  updateActionLinks({ matchers: { [key]: value === true } });
-}
-
-/** 时间戳格式输入：空串回退默认格式（输入中途清空不落空格式）。 */
-function updateGutterFormat(raw: string) {
-  const trimmed = raw.trim();
-  updateGutter({ timestampFormat: trimmed || GUTTER_TIMESTAMP_DEFAULT_FORMAT });
-}
-
-/** 三类匹配器开关按常量数组迭代（模板不支持 as const 字面量迭代）。 */
-const ACTION_LINK_MATCHER_ROWS: Array<{ key: keyof ActionLinkMatcherToggles; label: string }> = [
-  { key: "ipv4", label: "actionLinks.ipv4" },
-  { key: "hostPort", label: "actionLinks.hostPort" },
-  { key: "archive", label: "actionLinks.archive" },
-];
-
-/** 文本输入框取原始串（同 numberFieldValue，避免在模板里写 as 断言）。 */
-function textFieldValue(event: Event): string {
-  return (event.target as HTMLInputElement).value;
-}
-
-/** reka Select 回传 AcceptableValue（含 null 与对象），这里只接受字符串形态。 */
-function updateLinkModifier(value: unknown) {
-  updateBehavior({ linkModifier: String(value) as TerminalLinkModifier });
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,6 +828,8 @@ async function syncAgentSettingsMirror() {
 
 // 传输分类面板把手：reload（开窗/刷新重读）与 save（主保存委托）。
 const transferPaneRef = ref<InstanceType<typeof SettingsTransferPane>>();
+// 终端分类面板把手：当前无父层委托需求，保留以便后续增量（保留 ref 以稳模板）。
+const terminalPaneRef = ref<InstanceType<typeof SettingsTerminalPane>>();
 
 async function reloadSettings() {
   // 传输/编辑器草稿随 SettingsTransferPane 重读（首次开窗可能早于子组件
@@ -1197,8 +850,7 @@ async function reloadSettings() {
   void loadLocalKeys();
   void loadMcpSettings();
   void loadSudoProfiles();
-  void loadStartupCommands();
-  void loadConnNameEncoding();
+  // 启动命令/连接级编码/X11 等自治偏好随 SettingsTerminalPane 挂载自加载。
   try {
     // 本地终端没有 SSH 会话：跳过会话级设置拉取，只保留全局偏好面板——
     // 否则 required_string 直接报错，整条弹窗被「SSH 设置加载失败」横幅替换。
@@ -1230,13 +882,8 @@ async function reloadSettings() {
 // 本地终端默认 Shell（设置·终端）：下拉项来自 local/shells/list（弹窗打开时
 // 拉一次）；localShell 偏好的权威态在 App，这里经 set-local-shell 上抛。
 // reka Select 不接受空串 value，用哨兵表达「自动检测」。
-const LOCAL_SHELL_AUTO = "__auto__";
 const localShellOptions = ref<Array<{ program: string; name: string; isDefault: boolean; isUserShell: boolean; injectable?: boolean }>>([]);
 const localShellOptionsLoaded = ref(false);
-const localShellModelValue = computed(() => (props.localShell ? props.localShell : LOCAL_SHELL_AUTO));
-function resolveLocalShellValue(value: string): string {
-  return value === LOCAL_SHELL_AUTO ? "" : value;
-}
 async function ensureLocalShellOptions() {
   if (localShellOptionsLoaded.value) return;
   localShellOptionsLoaded.value = true;
@@ -1269,8 +916,6 @@ watch(() => props.terminalFontSize, (size) => {
 // 弹窗开着时活跃会话切到另一连接：启动命令区按新 connectionId 重新回显。
 watch(() => props.connectionId, () => {
   if (props.open) {
-    void loadStartupCommands();
-    void loadConnNameEncoding();
   }
 });
 
@@ -2067,270 +1712,31 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             <!-- 终端（对标 Tabby「Terminal」页）：渲染 / 键盘 / 鼠标 / 剪贴板 / 声音五组。
                  只上抛增量，归一化与落地在 App；每项默认值都复现改动前的行为。 -->
             <div v-show="settingsCategory === 'terminal'" class="settings-pane">
-            <!-- 分栏布局方向（issue #187）：终端与 SFTP 的排布三选；auto 沿用
-                 窄屏断点，强制上下/左右不受视口影响。 -->
-            <h3 class="settings-section-title">{{ t("workbenchLayout.sectionTitle") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("workbenchLayout.direction") }}</span>
-              <Select :model-value="paneDirection" @update:model-value="(v) => emit('update:paneDirection', String(v) as PaneDirectionPref)">
-                <SelectTrigger size="sm"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="auto">{{ t("workbenchLayout.directionAuto") }}</SelectItem>
-                  <SelectItem value="vertical">{{ t("workbenchLayout.directionVertical") }}</SelectItem>
-                  <SelectItem value="horizontal">{{ t("workbenchLayout.directionHorizontal") }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <!-- 工具栏按钮可配置隐藏（issue #309）：逐按钮开关，默认全显示；
-                 隐藏只收敛主工作台工具条视觉密度，核心入口不进清单。 -->
-            <h3 class="settings-section-title">{{ t("toolbarButtons.sectionTitle") }}</h3>
-            <p class="muted settings-note">{{ t("toolbarButtons.hint") }}</p>
-            <label v-for="button in TOOLBAR_BUTTONS" :key="button.id" class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="toolbarVisibility[button.id] !== false" @update:model-value="(value) => emit('update-toolbar-visibility', button.id, value === true)" />
-              <span>{{ t(button.labelKey) }}</span>
-            </label>
-            <h3 class="settings-section-title">{{ t("terminalBehavior.renderingSection") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="webglEnabled" @update:model-value="(value) => emit('update:webgl', value === true)" />
-              <span>{{ t("webglLabel") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("webglHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("terminalBehavior.scrollbackLines") }}</span>
-              <input type="number" :min="SCROLLBACK_MIN" :max="SCROLLBACK_MAX" step="100" :value="terminalBehavior.scrollbackLines" @change="updateScrollback(numberFieldValue($event))" />
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.scrollbackHint") }}</p>
-            <!-- #306 无折行模式：宽 PTY + 横向滚动；vim/htop 等备用屏自动回退可视宽度。 -->
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.noWrap" @update:model-value="(value) => updateBehavior({ noWrap: value === true })" />
-              <span>{{ t("terminalBehavior.noWrap") }}</span>
-            </label>
-            <label class="settings-field" v-if="terminalBehavior.noWrap">
-              <span>{{ t("terminalBehavior.noWrapColumns") }}</span>
-              <input type="number" :min="NOWRAP_COLUMNS_MIN" :max="NOWRAP_COLUMNS_MAX" step="50" :value="terminalBehavior.noWrapColumns" @change="updateNoWrapColumns(numberFieldValue($event))" />
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.noWrapHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.localShellSection") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("terminalBehavior.localShell") }}</span>
-              <Select :model-value="localShellModelValue" @update:model-value="(value) => emit('set-local-shell', resolveLocalShellValue(String(value)))">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__auto__">{{ t("terminalBehavior.localShellAuto") }}</SelectItem>
-                  <SelectItem v-for="shell in localShellOptions" :key="shell.program" :value="shell.program" :title="shell.program">{{ shell.name === shell.program ? shell.name : `${shell.name} · ${shell.program}` }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.localShellHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.keyboardSection") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.altIsMeta" @update:model-value="(v) => updateBehavior({ altIsMeta: v === true })" />
-              <span>{{ t("terminalBehavior.altIsMeta") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.altIsMetaHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.altWordEditing" @update:model-value="(v) => updateBehavior({ altWordEditing: v === true })" />
-              <span>{{ t("terminalBehavior.altWordEditing") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.altWordEditingHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.scrollOnInput" @update:model-value="(v) => updateBehavior({ scrollOnInput: v === true })" />
-              <span>{{ t("terminalBehavior.scrollOnInput") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.scrollOnInputHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.mouseSection") }}</h3>
-            <h4 class="settings-section-title">{{ t("terminalBehavior.rightClick") }}</h4>
-            <label v-for="mode in RIGHT_CLICK_MODES" :key="mode" class="settings-field settings-radio-row">
-              <input type="radio" name="terminal-right-click" :value="mode" :checked="terminalBehavior.rightClick === mode" @change="updateBehavior({ rightClick: mode })" />
-              <span>{{ t(RIGHT_CLICK_LABELS[mode]) }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.rightClickHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.pasteOnMiddleClick" @update:model-value="(v) => updateBehavior({ pasteOnMiddleClick: v === true })" />
-              <span>{{ t("terminalBehavior.pasteOnMiddleClick") }}</span>
-            </label>
-            <label class="settings-field">
-              <span>{{ t("terminalBehavior.wordSeparator") }}</span>
-              <input class="mono" spellcheck="false" :maxlength="WORD_SEPARATOR_MAX_LENGTH" :value="terminalBehavior.wordSeparator" @change="updateBehavior({ wordSeparator: textFieldValue($event) })" />
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.wordSeparatorHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("terminalBehavior.linkModifier") }}</span>
-              <Select :model-value="terminalBehavior.linkModifier" @update:model-value="updateLinkModifier">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="modifier in LINK_MODIFIERS" :key="modifier" :value="modifier">{{ t(LINK_MODIFIER_LABELS[modifier]) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.linkModifierHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.clipboardSection") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.copyOnSelect" @update:model-value="(v) => updateBehavior({ copyOnSelect: v === true })" />
-              <span>{{ t("terminalSelectCopy.label") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalSelectCopy.hint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.bracketedPaste" @update:model-value="(v) => updateBehavior({ bracketedPaste: v === true })" />
-              <span>{{ t("terminalBehavior.bracketedPaste") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.bracketedPasteHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.warnOnMultilinePaste" @update:model-value="(v) => updateBehavior({ warnOnMultilinePaste: v === true })" />
-              <span>{{ t("terminalBehavior.warnOnMultilinePaste") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.warnOnMultilinePasteHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.replaceNewlinesWithSpaces" @update:model-value="(v) => updateBehavior({ replaceNewlinesWithSpaces: v === true })" />
-              <span>{{ t("terminalBehavior.replaceNewlines") }}</span>
-            </label>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="terminalBehavior.trimWhitespaceOnPaste" @update:model-value="(v) => updateBehavior({ trimWhitespaceOnPaste: v === true })" />
-              <span>{{ t("terminalBehavior.trimWhitespace") }}</span>
-            </label>
-
-            <h3 class="settings-section-title">{{ t("terminalBehavior.soundSection") }}</h3>
-            <h4 class="settings-section-title">{{ t("terminalBehavior.bell") }}</h4>
-            <label v-for="mode in BELL_MODES" :key="mode" class="settings-field settings-radio-row">
-              <input type="radio" name="terminal-bell" :value="mode" :checked="terminalBehavior.bell === mode" @change="updateBehavior({ bell: mode })" />
-              <span>{{ t(BELL_LABELS[mode]) }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("terminalBehavior.bellHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("actionLinks.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="actionLinks.enabled" @update:model-value="(v) => updateActionLinks({ enabled: v === true })" />
-              <span>{{ t("actionLinks.enabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("actionLinks.enabledHint") }}</p>
-            <template v-if="actionLinks.enabled">
-              <label v-for="matcher in ACTION_LINK_MATCHER_ROWS" :key="matcher.key" class="settings-field settings-switch-row">
-                <Switch size="sm" :model-value="actionLinks.matchers[matcher.key]" @update:model-value="(v) => updateMatcher(matcher.key, v)" />
-                <span>{{ t(matcher.label) }}</span>
-              </label>
-            </template>
-
-            <h3 class="settings-section-title">{{ t("gutter.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="gutter.showLineNumbers" @update:model-value="(v) => updateGutter({ showLineNumbers: v === true })" />
-              <span>{{ t("gutter.showLineNumbers") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("gutter.showLineNumbersHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch size="sm" :model-value="gutter.showTimestamps" @update:model-value="(v) => updateGutter({ showTimestamps: v === true })" />
-              <span>{{ t("gutter.showTimestamps") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("gutter.showTimestampsHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("gutter.timestampFormat") }}</span>
-              <input class="mono" spellcheck="false" :maxlength="64" :placeholder="GUTTER_TIMESTAMP_DEFAULT_FORMAT" :value="gutter.timestampFormat" @change="updateGutterFormat(textFieldValue($event))" />
-            </label>
-            <p class="muted settings-note">{{ t("gutter.timestampFormatHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("ctxSearch.sectionTitle") }}</h3>
-            <p class="muted settings-note">{{ t("ctxSearch.hint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("ctxSearch.enginesLabel") }}</span>
-              <textarea class="mono" rows="4" spellcheck="false" :value="ctxSearchEngines" @change="emit('update:ctxSearchEngines', ($event.target as HTMLTextAreaElement).value)"></textarea>
-            </label>
-
-            <p class="muted settings-note">{{ t("terminalBehavior.scopeNote") }}</p>
-            <p class="muted settings-note">{{ t("terminalFont.movedHint") }}</p>
-
-            <h3 class="settings-section-title">{{ t("x11.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="x11Enabled" size="sm" @update:model-value="setX11Enabled(Boolean($event))" />
-              <span>{{ t("x11.enabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("x11.enabledHint") }}</p>
-            <p v-if="x11ReadOnlyNote" class="muted settings-note">{{ t("x11.readOnlyNote") }}</p>
-
-            <h3 class="settings-section-title">{{ t("rdp.experimentalSection") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="rdpExperimentalEnabled" size="sm" @update:model-value="setRdpExperimentalEnabled(Boolean($event))" />
-              <span>{{ t("rdp.experimentalEnabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("rdp.experimentalHint") }}</p>
-
-            <!-- 会话自动录制（M14）：新会话自动挂录制器，标 iShell 录制增强。 -->
-            <h3 class="settings-section-title">{{ t("autoRecord.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="autoRecordEnabled" size="sm" @update:model-value="setAutoRecordEnabled(Boolean($event))" />
-              <span>{{ t("autoRecord.enabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("autoRecord.enabledHint") }}</p>
-
-            <!-- 启动命令（对标 Tabby「Login scripts」）：连接建立进入 shell 后按序
-                 自动键入；仅 SSH 交互 shell 会话生效（RemoteCommand exec 会话跳过）。 -->
-            <template v-if="connectionId">
-            <h3 class="settings-section-title">{{ t("startupCommands.sectionTitle") }}</h3>
-            <label class="settings-field settings-switch-row">
-              <Switch :model-value="startupEnabled" size="sm" @update:model-value="setStartupEnabled(Boolean($event))" />
-              <span>{{ t("startupCommands.enabled") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("startupCommands.enabledHint") }}</p>
-            <template v-if="startupEnabled">
-              <p v-if="!startupCommands.length" class="muted settings-note">{{ t("startupCommands.empty") }}</p>
-              <ul v-else class="settings-list startup-commands-list">
-                <li v-for="(entry, index) in startupCommands" :key="index">
-                  <input
-                    type="checkbox"
-                    :checked="entry.enabled"
-                    :aria-label="t('startupCommands.rowEnabled')"
-                    :title="t('startupCommands.rowEnabled')"
-                    @change="updateStartupEntry(index, { enabled: ($event.target as HTMLInputElement).checked })"
-                  />
-                  <input
-                    class="mono startup-command-text"
-                    spellcheck="false"
-                    :value="entry.command"
-                    :placeholder="t('startupCommands.commandPlaceholder')"
-                    :aria-label="t('startupCommands.commandPlaceholder')"
-                    @change="updateStartupEntry(index, { command: textFieldValue($event) })"
-                  />
-                  <input
-                    class="mono startup-command-delay"
-                    type="number"
-                    min="0"
-                    :max="STARTUP_DELAY_MAX_MS"
-                    step="50"
-                    :value="entry.delayMs"
-                    :aria-label="t('startupCommands.delay')"
-                    :title="t('startupCommands.delay')"
-                    @change="updateStartupEntry(index, { delayMs: clampStartupDelayInput(($event.target as HTMLInputElement).value) })"
-                  />
-                  <span class="settings-list-actions">
-                    <button class="icon-button" :disabled="index === 0" :title="t('startupCommands.moveUp')" :aria-label="t('startupCommands.moveUp')" @click="moveStartupEntry(index, -1)"><ArrowUp /></button>
-                    <button class="icon-button" :disabled="index === startupCommands.length - 1" :title="t('startupCommands.moveDown')" :aria-label="t('startupCommands.moveDown')" @click="moveStartupEntry(index, 1)"><ArrowDown /></button>
-                    <button class="icon-button" :title="t('startupCommands.remove')" :aria-label="t('startupCommands.remove')" @click="removeStartupEntry(index)"><Trash2 /></button>
-                  </span>
-                </li>
-              </ul>
-              <button v-if="startupCommands.length < STARTUP_COMMAND_MAX" class="link-button" type="button" @click="addStartupEntry"><Plus />{{ t("startupCommands.add") }}</button>
-              <p class="muted settings-note">{{ t("startupCommands.scopeNote") }}</p>
-            </template>
-
-            <!-- 连接级 SFTP 文件名编码（M16）：覆盖全局 `sftp_name_encoding`；
-                 缺省「跟随全局」（不落盘），白名单 auto/latin-1 与全局一致。 -->
-            <h3 class="settings-section-title">{{ t("connNameEncoding.sectionTitle") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("connNameEncoding.label") }}</span>
-              <Select :model-value="connNameEncodingChoice" @update:model-value="setConnNameEncoding(String($event) as ConnectionNameEncodingChoice)">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="follow">{{ t("connNameEncoding.follow") }}</SelectItem>
-                  <SelectItem value="auto">{{ t("transferCfg.encoding.auto") }}</SelectItem>
-                  <SelectItem value="latin-1">{{ t("transferCfg.encoding.latin-1") }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("connNameEncoding.hint") }}</p>
-            </template>
+              <SettingsTerminalPane
+                ref="terminalPaneRef"
+                :t="t"
+                :connection-id="connectionId"
+                :terminal-behavior="terminalBehavior"
+                :pane-direction="paneDirection"
+                :toolbar-visibility="toolbarVisibility"
+                :webgl-enabled="webglEnabled"
+                :local-shell="localShell"
+                :local-shell-options="localShellOptions"
+                :action-links="actionLinks"
+                :gutter="gutter"
+                :ctx-search-engines="ctxSearchEngines"
+                :update-behavior="updateBehavior"
+                :update-action-links="updateActionLinks"
+                :update-gutter="updateGutter"
+                :set-pane-direction="(value) => emit('update:paneDirection', value)"
+                :set-toolbar-visibility="(id, visible) => emit('update-toolbar-visibility', id, visible)"
+                :set-webgl="(value) => emit('update:webgl', value)"
+                :set-local-shell="(program) => emit('set-local-shell', program)"
+                :set-ctx-search-engines="(value) => emit('update:ctxSearchEngines', value)"
+                @error="(cause) => emit('error', cause)"
+              />
             </div>
+
             <!-- 命令建议独立分栏：从 Terminal 分栏拆出（#138 反馈——建议/补全/ghost
                  配置挤在终端页难找）。历史建议 + 结构化补全 + 行内 ghost 三组
                  配置与忽略列表、接受键换绑在此集中管理。 -->
