@@ -286,6 +286,9 @@ SOCKS5 CONNECT（BIND/UDP ASSOCIATE 拒绝）；本地监听通配 `*` 被拒绝
 ### Docker 面板
 
 - 容器列表（名称/镜像/状态/端口）、一次性日志、启动/停止/重启/终止/删除。
+- **列表搜索与筛选**：搜索按空白分词 AND，匹配名称/镜像/ID/状态/端口，标识字段
+  （ID/名称）另支持子序列模糊（`31b4` 可命中 `3f2a1b4c5d6e`）；状态筛选 all /
+  running / stopped，搜索时显示命中/总数；纯前端本地过滤，不发 RPC。
 - **实时指标**：`docker/stats` 一次批量采样 CPU/内存/网络/块设备/PID（1–50 个容器），
   只读；速率由 sidecar 用同一采样键做差分（窗口 <250ms 记 0），旧 payload 缺速率时
   前端用上一帧自算。CLI 缺失或 daemon 不可达时返回 `available:false`，不报错。
