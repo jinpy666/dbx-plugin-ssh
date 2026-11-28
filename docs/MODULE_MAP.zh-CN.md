@@ -165,8 +165,8 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `TunnelManager.vue` (78) | 端口映射工作台根（同时服务 `presentation: "dialog"` 的右键入口） | `ssh/forward/*` | `components/ui/dialog` |
 | `components/`（52 个 `.vue`；15,647 行） | 面板与对话框（设置、SFTP 预览、Docker、监控、OTP、导入、搜索…） | 见 §3.1 | `lib`、`composables`、`ui` |
 | `components/ui/`（10 组，1,165 行） | reka-ui/shadcn 风格基础原语（dialog/select/table/tabs…） | — | reka-ui |
-| `composables/`（52 个，12,281 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制、浮层锚点…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
-| `lib/`（199 个生产 `.ts`，33,820 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
+| `composables/`（53 个，12,307 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制/回放、浮层锚点…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
+| `lib/`（200 个生产 `.ts`，33,835 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
 | `lib/completion/`（子目录，2,849 行） | 结构化补全（fig 语料、parser、worker、host 客户端） | `CompletionController`、`lib/completion/host/hostClient.ts` | `completion/execute` RPC |
 | `rdp/`（1,598 行） | RDP 画布、帧解码、会话与工作台 | `useRdpSession`、`useRdpWorkbench`、`rdpFrame`、`RdpSurface` | `lib`、`components` |
 | `styles/tailwind.css` (64) | Tailwind v4 入口（`style.css` 1,619 行为主题与组件样式） | — | tailwind |

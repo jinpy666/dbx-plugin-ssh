@@ -31,7 +31,6 @@ const LINE_ALLOWLIST: Record<string, number> = {
   "./components/OtpPanel.vue": 822,
   "./components/MonitorPanel.vue": 792,
   "./components/DockerPanel.vue": 759,
-  "./composables/useRecording.ts": 749,
   "./composables/useCommandSuggestions.ts": 663,
   "./components/PreviewPane.vue": 629,
 };
