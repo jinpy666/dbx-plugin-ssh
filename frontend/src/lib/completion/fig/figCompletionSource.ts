@@ -20,9 +20,6 @@
 import { splitCommandLine } from "../core/tokenize";
 import type {
   CompletionContext,
-  CompletionEdit,
-  CompletionItem,
-  CompletionItemKind,
   CompletionResponse,
 } from "../core/types";
 import type { FigGeneratorSlot } from "./generatorScheduler";
@@ -31,131 +28,38 @@ import type {
   FigSpecManifest,
   FigCompletionSource,
 } from "./source";
+import {
+  buildCommandNameResponse,
+  buildSpecItems,
+} from "./figCandidates";
+import {
+  firstString,
+  isRecord,
+  lastAnnotationType,
+  pickCurrentArg,
+  safeFlatten,
+  safeIndex,
+} from "./parserUtils";
+import { TokenType } from "./parserTypes";
+import type {
+  ParserArgument,
+  ParserCommand,
+  ParserEngineApi,
+  ParserResult,
+  ParserState,
+  ParserSubcommand,
+} from "./parserTypes";
 
 // ---------------------------------------------------------------------------
-// parser.js 的最小类型面（vendored 产物无类型；防御性收敛，不污染全局命名空间）
+// parser.js 的最小类型面与纯函数工具下沉至 parserTypes / parserUtils；候选
+// 枚举（命令名 / spec 静态候选）下沉至 figCandidates。本文件只保留驱动：
+// 上游状态机推进、loadSpec 换轨与冻结接口实现。
 // ---------------------------------------------------------------------------
 
 // @ts-expect-error — vendored parser 是无类型 JS 产物（见 vendor README / NOTICE）
 import * as parserModule from "../../../../vendor/autocomplete-engine/parser.js";
 // @ts-nocheck 无法只作用于单条 import；manifest 为生成物（自带 @ts-nocheck）
 import generatedManifest from "../../../../vendor/fig-specs/spec-manifest.generated";
-
-/** 上游 TokenType（parseArguments.ts）。 */
-const TokenType = {
-  None: "none",
-  Subcommand: "subcommand",
-  Option: "option",
-  OptionArg: "option_arg",
-  SubcommandArg: "subcommand_arg",
-  Composite: "composite",
-} as const;
-
-/** 上游 SuggestionFlag 位标志（shared/utils.ts）。 */
-const SuggestionFlag = {
-  None: 0,
-  Subcommands: 1 << 0,
-  Options: 1 << 1,
-  Args: 1 << 2,
-  Any: (1 << 2) | (1 << 1) | (1 << 0),
-} as const;
-
-interface ParserAnnotation {
-  type: string;
-  text: string;
-  tokenName?: string;
-  subtokens?: ParserAnnotation[];
-}
-
-interface ParserTokenNode {
-  startIndex: number;
-  endIndex: number;
-}
-
-interface ParserCommandToken {
-  text: string;
-  node: ParserTokenNode;
-}
-
-interface ParserCommand {
-  tokens: ParserCommandToken[];
-}
-
-interface ParserArgument {
-  name?: string | string[];
-  isOptional?: boolean;
-  isVariadic?: boolean;
-  isCommand?: boolean;
-  isModule?: boolean;
-  isScript?: boolean;
-  loadSpec?: unknown;
-  suggestions?: Array<{ name: string; description?: string; type?: string }>;
-  generators?: unknown[];
-}
-
-interface ParserOption {
-  name?: string[];
-  description?: string;
-  isRepeatable?: boolean | number;
-}
-
-interface ParserSubcommand {
-  name?: string[];
-  description?: string;
-  subcommands?: Record<string, ParserSubcommand>;
-  options?: Record<string, ParserOption>;
-  persistentOptions?: Record<string, ParserOption>;
-  args?: ParserArgument[];
-  loadSpec?: unknown;
-  generateSpec?: unknown;
-  parserDirectives?: Record<string, unknown>;
-}
-
-interface ParserState {
-  completionObj: ParserSubcommand;
-  passedOptions: ParserOption[];
-  annotations: ParserAnnotation[];
-  optionArgState: { args: ParserArgument[] | null; index: number };
-  subcommandArgState: { args: ParserArgument[] | null; index: number };
-  haveEnteredSubcommandArgs: boolean;
-  isEndOfOptions: boolean;
-}
-
-interface ParserResult {
-  completionObj: ParserSubcommand;
-  passedOptions: ParserOption[];
-  annotations: ParserAnnotation[];
-  currentArg: ParserArgument | null;
-  searchTerm: string;
-  suggestionFlags: number;
-}
-
-/** parser.js 实际暴露面（由 vendor/amazon-q-autocomplete/facades/parserEntry.ts 冻结）。 */
-interface ParserEngineApi {
-  TokenType: typeof TokenType;
-  SuggestionFlag: typeof SuggestionFlag;
-  createArgState: (args?: ParserArgument[]) => { args: ParserArgument[] | null; index: number };
-  updateState: (
-    state: ParserState,
-    token: string,
-    isFinalToken?: boolean,
-  ) => ParserState;
-  getInitialState: (
-    spec: ParserSubcommand,
-    text?: string,
-    specLocation?: { name: string; type: string },
-  ) => ParserState;
-  getResultFromState: (state: ParserState) => ParserResult;
-  flattenAnnotations: (annotations: ParserAnnotation[]) => ParserAnnotation[];
-  countEqualOptions: (option: ParserOption, options: ParserOption[]) => number;
-  getCommand: (
-    buffer: string,
-    aliases: Record<string, string>,
-    cursorIndex?: number,
-  ) => ParserCommand | null;
-  convertSubcommand: (spec: unknown, initializeDefault: unknown) => ParserSubcommand;
-  initializeDefault: (spec: unknown) => unknown;
-}
 
 const engine = parserModule as unknown as ParserEngineApi;
 
@@ -176,9 +80,6 @@ export interface FigSourceRuntime {
   readonly specCount: number;
   readonly prewarmedSpecNames: readonly string[];
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
 
 export class FigCompletionSourceImpl implements FigCompletionSource {
   readonly id = "fig-spec";
@@ -357,7 +258,7 @@ export class FigCompletionSourceImpl implements FigCompletionSource {
     if (!isRecord(result)) return { response: null, slots: [] };
 
     // 候选枚举（语义全部来自上游状态机：哪些类目可建议由 suggestionFlags 决定）。
-    const items = this.buildItems(result, lastToken, line.length);
+    const items = buildSpecItems({ engine, sourceId: this.id, result, token: lastToken, lineLength: line.length });
 
     // generator 声明参数位（currentArg.generators）：resolve() 静态面不执行
     // generator（冻结同步接口），静态候选照常给出；完全无静态候选的动态位
@@ -505,227 +406,12 @@ export class FigCompletionSourceImpl implements FigCompletionSource {
     command: ParserCommand,
     searchTerm: string,
   ): CompletionResponse | null {
-    const names = Object.keys(this.manifest)
-      .filter((name) => name.startsWith(searchTerm))
-      .sort((a, b) => a.localeCompare(b))
-      .slice(0, MAX_COMMAND_ITEMS);
-    if (names.length === 0) return null;
-    const lastToken = command.tokens[command.tokens.length - 1];
-    const items = names.map((name) =>
-      this.toItem(name, name + " ", "command", 460, lastToken, lineLengthOf(lastToken)),
-    );
-    const context: CompletionContext = {
-      command: searchTerm || null,
-      commandPath: [],
-      tokenStart: safeIndex(lastToken.node?.startIndex, 0, 0),
-      tokenEnd: safeIndex(lastToken.node?.endIndex, 0, 0),
-    };
-    return {
-      requestId: request.requestId,
-      revision: request.revision,
-      state: "ready",
-      context,
-      items,
-    };
+    return buildCommandNameResponse({ manifest: this.manifest, sourceId: this.id, request, command, searchTerm });
   }
 
-  private buildItems(
-    result: ParserResult,
-    token: ParserCommandToken,
-    lineLength: number,
-  ): CompletionItem[] {
-    const items: CompletionItem[] = [];
-    const flags = result.suggestionFlags ?? 0;
-    const searchTerm = result.searchTerm ?? "";
-    const spec = result.completionObj;
-
-    if ((flags & SuggestionFlag.Options) !== 0 && isRecord(spec?.options)) {
-      const seen = new Set<string>();
-      const collect = (record: Record<string, ParserOption> | undefined, persistent: boolean) => {
-        for (const [label, option] of Object.entries(record ?? {})) {
-          if (!label.startsWith(searchTerm) || seen.has(label)) continue;
-          seen.add(label);
-          if (isOptionExhausted(engine, option, result.passedOptions)) continue;
-          const description =
-            (persistent ? "[persistent] " : "") +
-            (typeof option.description === "string" ? option.description : "");
-          items.push(
-            this.toItem(
-              label,
-              label,
-              "option",
-              400 + (label === searchTerm ? 200 : 0),
-              token,
-              lineLength,
-              description || undefined,
-            ),
-          );
-        }
-      };
-      collect(spec.options, false);
-      collect(spec.persistentOptions, true);
-    }
-
-    if (
-      (flags & SuggestionFlag.Subcommands) !== 0 &&
-      isRecord(spec?.subcommands)
-    ) {
-      const seen = new Set<string>();
-      for (const sub of Object.values(spec.subcommands)) {
-        const label = firstString(sub?.name);
-        if (!label || !label.startsWith(searchTerm) || seen.has(label)) continue;
-        seen.add(label);
-        items.push(
-          this.toItem(
-            label,
-            label + " ",
-            "subcommand",
-            420 + (label === searchTerm ? 200 : 0),
-            token,
-            lineLength,
-            typeof sub.description === "string" ? sub.description : undefined,
-          ),
-        );
-      }
-    }
-
-    if ((flags & SuggestionFlag.Args) !== 0) {
-      const arg = result.currentArg;
-      for (const suggestion of arg?.suggestions ?? []) {
-        // Fig 的 hidden 标记 = 不进菜单、也不参与 Tab 接受的特殊参数
-        // （cd 语料里的 `-`/`~` 就是这种）。展示它们会让 `cd ` 的菜单只剩
-        // 两个特殊值，Tab 直接把 `cd -` 写进输入行。用户手打 `cd -`/`cd ~`
-        // 后仍按原有 shell 语义执行，这里只影响本地候选面。
-        // parser 的 suggestion 类型未声明该字段（spec 数据面），按 Fig 语义读。
-        if ((suggestion as { hidden?: boolean } | undefined)?.hidden === true) continue;
-        const label = suggestion?.name;
-        if (typeof label !== "string" || !label.startsWith(searchTerm)) continue;
-        items.push(
-          this.toItem(
-            label,
-            label.startsWith("-") ? label : label + " ",
-            mapArgSuggestionKind(suggestion.type),
-            380 + (label === searchTerm ? 200 : 0),
-            token,
-            lineLength,
-            typeof suggestion.description === "string" ? suggestion.description : undefined,
-          ),
-        );
-      }
-    }
-    return items;
-  }
-
-  private toItem(
-    id: string,
-    editText: string,
-    kind: CompletionItemKind,
-    score: number,
-    token: ParserCommandToken | undefined,
-    lineLength: number,
-    description?: string,
-  ): CompletionItem {
-    const endIndex = safeIndex(token?.node?.endIndex, lineLength, 0);
-    const startIndex = safeIndex(token?.node?.startIndex, endIndex, 0);
-    const edit: CompletionEdit = {
-      text: editText,
-      replaceStart: Math.min(startIndex, endIndex),
-      replaceEnd: endIndex,
-    };
-    edit.cursorOffset = edit.replaceStart + editText.length;
-    return {
-      id: `${this.id}:${id}`,
-      label: editText.trimEnd(),
-      description,
-      kind,
-      score,
-      source: "fig-spec",
-      edit,
-    };
-  }
 }
 
-// ---------------------------------------------------------------------------
-// 纯函数工具（防御性收敛，不信任 vendored 动态面）
-// ---------------------------------------------------------------------------
-
-const EMPTY_ALIASES: Readonly<Record<string, string>> = Object.freeze({});
-const MAX_COMMAND_ITEMS = 32;
-
-function lastAnnotationType(
-  engineRef: ParserEngineApi,
-  state: ParserState,
-): string {
-  const annotations = safeFlatten(engineRef, state.annotations);
-  const last = annotations[annotations.length - 1];
-  return last?.type ?? TokenType.None;
-}
-
-function safeFlatten(
-  engineRef: ParserEngineApi,
-  annotations: ParserAnnotation[],
-): ParserAnnotation[] {
-  try {
-    const flattened = engineRef.flattenAnnotations(annotations ?? []);
-    return Array.isArray(flattened) ? flattened : [];
-  } catch {
-    return [];
-  }
-}
-
-/** 参数态里"当前 arg"：镜像上游 preferOptionArg（optionArg 优先）。 */
-function pickCurrentArg(state: ParserState): ParserArgument | null {
-  const optionArg = state.optionArgState?.args?.[state.optionArgState.index];
-  if (optionArg && (optionArg.isVariadic || optionArg.isOptional !== true)) {
-    return optionArg;
-  }
-  const subcommandArg = state.subcommandArgState?.args?.[state.subcommandArgState.index];
-  return subcommandArg ?? optionArg ?? null;
-}
-
-/** 非可重复选项已传过 → 不再候选（镜像上游 suggestions 过滤语义）。 */
-function isOptionExhausted(
-  engineRef: ParserEngineApi,
-  option: ParserOption | undefined,
-  passedOptions: ParserOption[],
-): boolean {
-  if (!option || option.isRepeatable === true) return false;
-  const limit = typeof option.isRepeatable === "number" ? option.isRepeatable : 1;
-  try {
-    return engineRef.countEqualOptions(option, passedOptions ?? []) >= limit;
-  } catch {
-    return false;
-  }
-}
-
-function firstString(value: unknown): string | null {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) {
-    const first = value.find((entry) => typeof entry === "string");
-    if (typeof first === "string") return first;
-  }
-  return null;
-}
-
-/** token 的行尾收敛长度（节点缺偏移时的 fallback）。 */
-function lineLengthOf(token: ParserCommandToken | undefined): number {
-  return typeof token?.node?.endIndex === "number" ? token.node.endIndex : 0;
-}
-
-function mapArgSuggestionKind(type: unknown): CompletionItemKind {
-  if (type === "file") return "file";
-  if (type === "folder") return "directory";
-  if (type === "subcommand") return "subcommand";
-  if (type === "option") return "option";
-  return "argument";
-}
-
-function safeIndex(value: unknown, fallback: number, minimum: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return Number.isFinite(fallback) ? fallback : minimum;
-  }
-  return Math.max(minimum, Math.min(value, Number.MAX_SAFE_INTEGER));
-}
+const EMPTY_ALIASES: Readonly<Record<string, string>> = Object.freeze({})
 
 // ---------------------------------------------------------------------------
 // 默认实例（Lane A' 的注入来源；单测可经 createFigCompletionSource 换 fixture）
