@@ -25,7 +25,8 @@ import { HIGHLIGHT_RULES_LIMIT, type HighlightDisplayMode, type HighlightRuleVie
 import { QUICK_COMMANDS_LIMIT, type QuickCommand } from "../lib/quickCommands";
 import { AGENT_MODES, SSH_AGENT_APPROVED_STORE_KEY, SSH_AGENT_MODES_STORE_KEY, sanitizeAgentTerminalMode, sanitizeRememberedCommands } from "../lib/agentTerminal";
 import { connectionEntryEquals, loadConnectionEntry, saveConnectionEntry } from "../lib/connectionSettingMirror";
-import { clampFontSize, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
+import { TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/terminalZoom";
+import { useTerminalFontDraft, TERMINAL_FONT_CUSTOM, TERMINAL_FONT_FOLLOW_HOST, TERMINAL_FONT_PRESETS } from "../composables/useTerminalFontDraft";
 import { confirmDialog } from "../lib/confirmDialog";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
 import { MCP_LIMIT_CEILING_MIB, SFTP_DOUBLE_CLICK_ACTIONS, mibField, parseMibInput, persistMcpSettingsMirror, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SftpDoubleClickAction, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
@@ -509,10 +510,6 @@ const agentTerminalModeHint = computed(() => t(
   : "agentTerminalOffHint",
 ));
 
-// 终端字体设置控件态（issue #31）：预设等宽字体 + 跟随宿主 + 自定义；哨兵值
-// 只作选择器键使用，不会作为字体串写入（写入前映射回 null/真实字体串）。
-const TERMINAL_FONT_FOLLOW_HOST = "__follow-host__";
-
 // 背景图上传（P2-9）：本地 FileReader 读成 data URL，拆出 mime + 纯 base64
 // 交 App 走 sidecar 落盘（web/docker 失败时 App 降级会话内存态）。客户端先做
 // 8MiB 上限与 accept 类型粗校验，权威校验在 sidecar（魔数 + 大小）。
@@ -540,72 +537,26 @@ function onWallpaperFileChange(event: Event) {
   reader.onerror = () => emit("error", new Error(t("wallpaper.invalidImage")));
   reader.readAsDataURL(file);
 }
-const TERMINAL_FONT_CUSTOM = "__custom__";
-const TERMINAL_FONT_PRESETS: Array<{ value: string; label: string }> = [
-  { value: "'JetBrains Mono', Consolas, monospace", label: "JetBrains Mono" },
-  { value: "'Cascadia Code', 'Cascadia Mono', monospace", label: "Cascadia Code" },
-  { value: "'Fira Code', monospace", label: "Fira Code" },
-  { value: "'Source Code Pro', monospace", label: "Source Code Pro" },
-  { value: "Menlo, Monaco, monospace", label: "Menlo" },
-  { value: "Consolas, 'Courier New', monospace", label: "Consolas" },
-  { value: "'DejaVu Sans Mono', monospace", label: "DejaVu Sans Mono" },
-  { value: "monospace", label: "monospace" },
-];
-const terminalFontFamilyChoice = ref(TERMINAL_FONT_FOLLOW_HOST);
-const terminalFontCustomDraft = ref("");
-const terminalFontSizeDraft = ref(String(props.terminalFontSize));
-
-// 字体控件回显当前覆盖态：初始化与应用/恢复默认后都会刷新，避免草稿漂移。
-function syncFontControls(family: string | null, size: number) {
-  if (!family) {
-    terminalFontFamilyChoice.value = TERMINAL_FONT_FOLLOW_HOST;
-    terminalFontCustomDraft.value = "";
-  } else if (TERMINAL_FONT_PRESETS.some((preset) => preset.value === family)) {
-    terminalFontFamilyChoice.value = family;
-    terminalFontCustomDraft.value = "";
-  } else {
-    terminalFontFamilyChoice.value = TERMINAL_FONT_CUSTOM;
-    terminalFontCustomDraft.value = family;
-  }
-  terminalFontSizeDraft.value = String(size);
-}
-syncFontControls(loadTerminalFontOverride().fontFamily, props.terminalFontSize);
-
-// 设置页字体族下拉：跟随宿主/预设即时应用并持久化；选「自定义」时仅展开
-// 输入框，待输入 @change 再应用（applyTerminalFontFromControls）。
-function onTerminalFontFamilyChoice(choice: string) {
-  terminalFontFamilyChoice.value = choice;
-  if (choice === TERMINAL_FONT_CUSTOM) return;
-  applyTerminalFont(choice === TERMINAL_FONT_FOLLOW_HOST ? null : choice, props.terminalFontSize);
-}
-
-function applyTerminalFontFromControls() {
-  let family: string | null;
-  if (terminalFontFamilyChoice.value === TERMINAL_FONT_CUSTOM) {
-    const custom = terminalFontCustomDraft.value.trim();
-    family = custom.length > 0 ? custom : null; // 空自定义视作跟随宿主
-  } else if (terminalFontFamilyChoice.value === TERMINAL_FONT_FOLLOW_HOST) {
-    family = null;
-  } else {
-    family = terminalFontFamilyChoice.value;
-  }
-  const parsed = Number(terminalFontSizeDraft.value);
-  const size = Number.isFinite(parsed) && parsed > 0 ? clampFontSize(parsed, 0) : props.hostFontSize;
-  applyTerminalFont(family, size);
-}
-
-// 恢复默认：并入「外观」分类的 resetAppearance（同一套默认值链路），
-// 此处不再保留独立的字体重置入口。
-
-/// 应用用户字体设置：应用侧（App）负责落到 xterm、持久化与 toast。
-function applyTerminalFont(family: string | null, size: number) {
-  emit("apply-font", { family, size });
-  syncFontControls(family, size);
-}
-
 // ---------------------------------------------------------------------------
 // 终端外观（配色方案 / 主题快照 / 字体间距 / 光标）
 // ---------------------------------------------------------------------------
+// 字体控件草稿（预设/跟随宿主/自定义 + 应用回显）下沉 useTerminalFontDraft。
+const {
+  terminalFontFamilyChoice,
+  terminalFontCustomDraft,
+  terminalFontSizeDraft,
+  syncFontControls,
+  applyTerminalFontFromControls,
+  onTerminalFontFamilyChoice,
+} = useTerminalFontDraft({
+  terminalFontSize: () => props.terminalFontSize,
+  hostFontSize: () => props.hostFontSize,
+  applyFont: (payload) => emit("apply-font", payload),
+});
+
+// 初次挂载即按持久化覆盖态回显（下面的 open watch 只在弹窗开关时刷新）。
+syncFontControls(loadTerminalFontOverride().fontFamily, props.terminalFontSize);
+
 const appearanceSettings = computed(() => props.appearance.settings);
 // 配色方案面板（主题快照/方案选择/导入）外抽 SettingsSchemePane，apply-theme
 // 在父层拦截以同步字体控件草稿；预览纯函数合成留在父层——scheme 与外观两个
