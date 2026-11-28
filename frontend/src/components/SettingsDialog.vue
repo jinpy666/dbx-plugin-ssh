@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs";
 import { Switch } from "./ui/switch";
 import TerminalAppearancePreview from "./TerminalAppearancePreview.vue";
+import SettingsTransferPane from "./SettingsTransferPane.vue";
 import TerminalSchemePicker from "./TerminalSchemePicker.vue";
 import TerminalHotkeyEditor from "./TerminalHotkeyEditor.vue";
 import HighlightRulesSection from "./HighlightRulesSection.vue";
@@ -26,10 +27,10 @@ import { clampFontSize, TERMINAL_FONT_MAX, TERMINAL_FONT_MIN } from "../lib/term
 import { confirmDialog } from "../lib/confirmDialog";
 import { loadTerminalFontOverride } from "../lib/terminalFont";
 import { MCP_LIMIT_CEILING_MIB, SFTP_DOUBLE_CLICK_ACTIONS, mibField, parseMibInput, persistMcpSettingsMirror, settingsErrorOf, type DiscoveredKey, type KnownHostEntry, type McpSizeSettings, type SftpDoubleClickAction, type SshSettings, type SudoProfileView } from "../lib/settingsModel";
-import { DOWNLOAD_CONFLICT_POLICIES, type DownloadConflictPolicy } from "../lib/downloadPrefs";
-import { type EditorAssociation, type EditorConfig, type KnownEditor } from "../lib/editorRules";
-import { TRANSFER_DUPLICATE_POLICIES, type TransferDuplicatePolicy } from "../lib/transferQueue";
-import { SFTP_NAME_ENCODINGS, type SftpNameEncoding } from "../lib/sftpName";
+import { type DownloadConflictPolicy } from "../lib/downloadPrefs";
+import { type EditorConfig, type KnownEditor } from "../lib/editorRules";
+import { type TransferDuplicatePolicy } from "../lib/transferQueue";
+import { type SftpNameEncoding } from "../lib/sftpName";
 import {
   allAppearanceProfiles,
   applySchemeToTerminalTheme,
@@ -730,80 +731,9 @@ const settingsDraft = reactive({
   agentTerminalMode: "off",
   rememberedCommands: [] as string[],
 });
-const downloadDirDraft = ref("");
-const downloadUseDefaultDraft = ref(props.downloadPrefs.loadUseDefault());
-const downloadConflictDraft = ref<DownloadConflictPolicy>("rename");
-// 上传并发（1..10，默认 3）与重复目标策略（P1-5）草稿；建议设置草稿（P1-1）。
-const transferConcurrencyDraft = ref(String(props.transferPrefs.loadConcurrency()));
-const transferDuplicateDraft = ref<TransferDuplicatePolicy>(props.transferPrefs.loadDuplicatePolicy());
-// M14-B：会话并发深度（1-8）/ 兼容模式 / 文件名编码草稿。
-const transferMaxActiveDraft = ref(String(props.transferPrefs.loadMaxActive()));
-const transferDownloadLimitDraft = ref(String(props.transferPrefs.loadDownloadLimit()));
-const sftpCompatModeDraft = ref(props.transferPrefs.loadCompatMode());
-const sftpNameEncodingDraft = ref<SftpNameEncoding>(props.transferPrefs.loadNameEncoding());
-// 文件浏览（双击文件行为）：preview=预览（默认）/ edit=直接编辑；主保存写穿。
-const sftpDoubleClickDraft = ref<SftpDoubleClickAction>(props.transferPrefs.loadDoubleClickAction());
-// 外部编辑器草稿（transfer 面板）：配置整体草稿化、随主「保存」落库；
-// known 目录（local/editors/list 探测）每次打开设置时重探。
-const editorConfigDraft = ref<EditorConfig>({ associations: [], customEditors: [], uploadPolicy: "auto" });
-const editorKnownEditors = ref<KnownEditor[]>([]);
-const editorAssociationPatternDraft = ref("");
-const editorAssociationTargetDraft = ref("");
-const editorDefaultDraft = ref("");
-const editorTargetOptions = computed(() => [
-  ...editorKnownEditors.value.filter((editor) => editor.available).map((editor) => ({ value: `known:${editor.id}`, label: editor.name })),
-  ...editorConfigDraft.value.customEditors.map((editor) => ({ value: `custom:${editor.id}`, label: editor.name })),
-]);
-function editorTargetName(target: string): string {
-  if (target.startsWith("custom:")) {
-    const id = target.slice(7);
-    return editorConfigDraft.value.customEditors.find((editor) => editor.id === id)?.name || id;
-  }
-  if (target.startsWith("known:")) {
-    const id = target.slice(6);
-    return editorKnownEditors.value.find((editor) => editor.id === id)?.name || id;
-  }
-  return target;
-}
-function associationTargetValue(assoc: EditorAssociation): string {
-  return assoc.customId ? `custom:${assoc.customId}` : assoc.editorId ? `known:${assoc.editorId}` : "";
-}
-function editorDefaultValue(config: EditorConfig): string {
-  return config.defaultCustomId
-    ? `custom:${config.defaultCustomId}`
-    : config.defaultEditorId
-      ? `known:${config.defaultEditorId}`
-      : /* reka Select 不接受空串 value，用 "system" 哨兵表示系统默认 */ "system";
-}
-function addEditorAssociation() {
-  const pattern = editorAssociationPatternDraft.value.trim();
-  const target = editorAssociationTargetDraft.value;
-  if (!pattern || !target) return;
-  const assoc: EditorAssociation = target.startsWith("custom:")
-    ? { pattern, customId: target.slice("custom:".length) }
-    : { pattern, editorId: target.slice("known:".length) };
-  editorConfigDraft.value = { ...editorConfigDraft.value, associations: [...editorConfigDraft.value.associations, assoc] };
-  editorAssociationPatternDraft.value = "";
-  editorAssociationTargetDraft.value = "";
-}
-function removeEditorAssociation(index: number) {
-  editorConfigDraft.value = {
-    ...editorConfigDraft.value,
-    associations: editorConfigDraft.value.associations.filter((_, i) => i !== index),
-  };
-}
-function removeCustomEditor(id: string) {
-  editorConfigDraft.value = {
-    ...editorConfigDraft.value,
-    customEditors: editorConfigDraft.value.customEditors.filter((editor) => editor.id !== id),
-    associations: editorConfigDraft.value.associations.filter((assoc) => assoc.customId !== id),
-  };
-  if (editorDefaultDraft.value === `custom:${id}`) editorDefaultDraft.value = "system";
-}
-// M33：压缩传输策略与阈值草稿（阈值 0=不限下限，上限 65536 MiB）。
-const TRANSFER_COMPRESS_MODES = ["auto", "on", "off"] as const;
-const transferCompressModeDraft = ref(props.transferPrefs.loadCompressMode());
-const transferCompressThresholdDraft = ref(String(props.transferPrefs.loadCompressThreshold()));
+// 传输/编辑器草稿（下载、上传并发/重复策略、双击行为、外部编辑器、管线、
+// 压缩）与 known 编辑器目录探测随 transfer 分类面板下沉 SettingsTransferPane；
+// 父层经模板 ref 委托 reload()/save()。
 const suggestionsEnabledDraft = ref(props.suggestionPrefs.loadEnabled());
 const suggestionMinCharsDraft = ref(String(props.suggestionPrefs.loadMinChars()));
 const suggestionMaxCharsDraft = ref(String(props.suggestionPrefs.loadMaxChars()));
@@ -1245,25 +1175,16 @@ async function syncAgentSettingsMirror() {
   }
 }
 
+// 传输分类面板把手：reload（开窗/刷新重读）与 save（主保存委托）。
+const transferPaneRef = ref<InstanceType<typeof SettingsTransferPane>>();
+
 async function reloadSettings() {
-  downloadDirDraft.value = props.downloadPrefs.loadDir();
-  downloadUseDefaultDraft.value = props.downloadPrefs.loadUseDefault();
-  downloadConflictDraft.value = props.downloadPrefs.loadConflict();
-  transferConcurrencyDraft.value = String(props.transferPrefs.loadConcurrency());
-  transferDuplicateDraft.value = props.transferPrefs.loadDuplicatePolicy();
-  transferMaxActiveDraft.value = String(props.transferPrefs.loadMaxActive());
-  transferDownloadLimitDraft.value = String(props.transferPrefs.loadDownloadLimit());
-  sftpCompatModeDraft.value = props.transferPrefs.loadCompatMode();
-  sftpNameEncodingDraft.value = props.transferPrefs.loadNameEncoding();
-  sftpDoubleClickDraft.value = props.transferPrefs.loadDoubleClickAction();
-  transferCompressModeDraft.value = props.transferPrefs.loadCompressMode();
-  transferCompressThresholdDraft.value = String(props.transferPrefs.loadCompressThreshold());
+  // 传输/编辑器草稿随 SettingsTransferPane 重读（首次开窗可能早于子组件
+  // 挂载，子组件自身 onMounted 也会 reload 一次）。
   suggestionsEnabledDraft.value = props.suggestionPrefs.loadEnabled();
   suggestionMinCharsDraft.value = String(props.suggestionPrefs.loadMinChars());
   suggestionMaxCharsDraft.value = String(props.suggestionPrefs.loadMaxChars());
-  editorConfigDraft.value = props.editorPrefs.loadConfig();
-  editorDefaultDraft.value = editorDefaultValue(editorConfigDraft.value);
-  void props.editorPrefs.reloadEditors().then((list) => { editorKnownEditors.value = list; });
+  void transferPaneRef.value?.reload();
   if (settingsLoading.value || settingsSaving.value) return;
   settingsLoading.value = true;
   settingsLoadFailed.value = false;
@@ -1602,27 +1523,11 @@ async function saveSettings() {
   if (!isLocalSession.value && !settingsMeta.value) return;
   settingsSaving.value = true;
   try {
-    props.downloadPrefs.persistDir(downloadDirDraft.value);
-    props.downloadPrefs.persistUseDefault(downloadUseDefaultDraft.value);
-    props.downloadPrefs.persistConflict(downloadConflictDraft.value);
-    props.transferPrefs.persistConcurrency(Number.parseInt(transferConcurrencyDraft.value, 10) || 3);
-    props.transferPrefs.persistDuplicatePolicy(transferDuplicateDraft.value);
-    props.transferPrefs.persistMaxActive(Number.parseInt(transferMaxActiveDraft.value, 10) || 3);
-    props.transferPrefs.persistDownloadLimit(Math.max(0, Number.parseInt(transferDownloadLimitDraft.value, 10) || 0));
-    props.transferPrefs.persistCompatMode(sftpCompatModeDraft.value);
-    props.transferPrefs.persistNameEncoding(sftpNameEncodingDraft.value);
-    props.transferPrefs.persistDoubleClickAction(sftpDoubleClickDraft.value);
-    props.transferPrefs.persistCompressMode(transferCompressModeDraft.value);
-    props.transferPrefs.persistCompressThreshold(Math.min(65536, Math.max(0, Number.parseInt(transferCompressThresholdDraft.value, 10) || 0)));
+    // 传输/编辑器草稿写穿随 SettingsTransferPane（数值裁剪与缺省回退在子组件）。
+    transferPaneRef.value?.save();
     props.suggestionPrefs.persistEnabled(suggestionsEnabledDraft.value);
     props.suggestionPrefs.persistMinChars(Number.parseInt(suggestionMinCharsDraft.value, 10) || 1);
     props.suggestionPrefs.persistMaxChars(Number.parseInt(suggestionMaxCharsDraft.value, 10) || 64);
-    props.editorPrefs.persistConfig({
-      ...editorConfigDraft.value,
-      defaultEditorId: editorDefaultDraft.value.startsWith("known:") ? editorDefaultDraft.value.slice("known:".length) : undefined,
-      defaultCustomId: editorDefaultDraft.value.startsWith("custom:") ? editorDefaultDraft.value.slice("custom:".length) : undefined,
-      // editorDefaultDraft === "system"（或意外值）时不落默认编辑器字段。
-    });
     if (profileEditing.value) await saveProfileDraft();
     // 会话级段：本地 Shell 工作台整段跳过（分类已隐藏，无表单可改）。
     if (!isLocalSession.value) {
@@ -1694,13 +1599,14 @@ function consumeInlineEsc(): boolean {
 
 
 /// 下载询问弹窗勾选「设为默认」/目录选择器回填后，App 同步设置页草稿
-/// （弹窗开着也能立即看到）。
+/// （弹窗开着也能立即看到）。草稿随 transfer 分类面板在子组件，这里委托；
+/// 弹窗未挂载时为 no-op（下次开窗 reload 自会重读权威态）。
 function setDownloadDirDraft(dir: string) {
-  downloadDirDraft.value = dir;
+  transferPaneRef.value?.setDownloadDirDraft(dir);
 }
 
 function setDownloadUseDefaultDraft(value: boolean) {
-  downloadUseDefaultDraft.value = value;
+  transferPaneRef.value?.setDownloadUseDefaultDraft(value);
 }
 
 function shortFingerprint(fingerprint: string) {
@@ -2146,139 +2052,16 @@ defineExpose({ consumeInlineEsc, setDownloadDirDraft, setDownloadUseDefaultDraft
             </div>
 
             <div v-show="settingsCategory === 'transfer'" class="settings-pane">
-            <h3 class="settings-section-title">{{ t("downloadSettings.title") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("downloadSettings.directory") }}</span>
-              <span class="settings-dir-row">
-                <input v-model="downloadDirDraft" class="mono" spellcheck="false" :placeholder="localDownloadDir || t('downloadSettings.default')" />
-                <button v-if="localCanSave" type="button" class="browse-button" :title="t('downloadSettings.browse')" :aria-label="t('downloadSettings.browse')" @click="emit('browse-download-dir')"><FolderOpen /></button>
-              </span>
-            </label>
-            <label class="settings-field settings-switch-row">
-              <Switch v-model="downloadUseDefaultDraft" size="sm" />
-              <span>{{ t("downloadSettings.useDefaultDir") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("downloadSettings.useDefaultDirHint") }}</p>
-            <h3 class="settings-section-title">{{ t("downloadSettings.conflictTitle") }}</h3>
-            <label v-for="policy in DOWNLOAD_CONFLICT_POLICIES" :key="policy" class="settings-field settings-radio-row">
-              <input v-model="downloadConflictDraft" type="radio" name="download-conflict-policy" :value="policy" />
-              <span>{{ t(`downloadSettings.conflict.${policy}`) }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("downloadSettings.conflictHint") }}</p>
-            <p class="muted settings-note">{{ t("downloadSettings.hint") }}</p>
-            <!-- 上传设置（issue #337 第 2 条）：上传相关项独立成组，不再混在
-                 「下载设置」标题下；上传并发 + 远端同名策略搬出编辑器组之后。 -->
-            <h3 class="settings-section-title">{{ t("uploadSettings.title") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.concurrency") }}</span>
-              <input v-model="transferConcurrencyDraft" type="number" min="1" max="10" step="1" @change="transferConcurrencyDraft = String(Math.min(10, Math.max(1, Number.parseInt(transferConcurrencyDraft, 10) || 3)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.concurrencyHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.duplicatePolicy") }}</span>
-              <Select :model-value="transferDuplicateDraft" @update:model-value="(v) => (transferDuplicateDraft = String(v) as TransferDuplicatePolicy)">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="policy in TRANSFER_DUPLICATE_POLICIES" :key="policy" :value="policy">{{ t(`transferCfg.policy.${policy}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.duplicatePolicyHint") }}</p>
-            <h3 class="settings-section-title">{{ t("fileBrowse.title") }}</h3>
-            <label v-for="action in SFTP_DOUBLE_CLICK_ACTIONS" :key="action" class="settings-field settings-radio-row">
-              <input v-model="sftpDoubleClickDraft" type="radio" name="sftp-double-click-action" :value="action" />
-              <span>{{ t(`fileBrowse.doubleClick.${action}`) }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("fileBrowse.doubleClickHint") }}</p>
-            <h3 class="settings-section-title">{{ t("sftpEdit.settingsSection") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("sftpEdit.defaultEditorTitle") }}</span>
-              <Select :model-value="editorDefaultDraft" @update:model-value="(v) => (editorDefaultDraft = String(v))">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="system">{{ t("sftpEdit.defaultEditorSystem") }}</SelectItem>
-                  <SelectItem v-for="option in editorTargetOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("sftpEdit.defaultEditorHint") }}</p>
-            <span class="settings-field"><span>{{ t("sftpEdit.uploadPolicyTitle") }}</span></span>
-            <label class="settings-field settings-radio-row">
-              <input v-model="editorConfigDraft.uploadPolicy" type="radio" name="editor-upload-policy" value="auto" />
-              <span>{{ t("sftpEdit.uploadPolicy.auto") }}</span>
-            </label>
-            <label class="settings-field settings-radio-row">
-              <input v-model="editorConfigDraft.uploadPolicy" type="radio" name="editor-upload-policy" value="ask" />
-              <span>{{ t("sftpEdit.uploadPolicy.ask") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("sftpEdit.uploadPolicyHint") }}</p>
-            <h3 class="settings-section-title">{{ t("sftpEdit.associationsTitle") }}</h3>
-            <p v-if="!editorConfigDraft.associations.length" class="muted settings-note">{{ t("sftpEdit.noAssociations") }}</p>
-            <div v-for="(assoc, index) in editorConfigDraft.associations" :key="`${assoc.pattern}-${index}`" class="flex items-center gap-2 py-0.5">
-              <span class="mono">{{ assoc.pattern }}</span>
-              <span class="muted truncate">→ {{ editorTargetName(associationTargetValue(assoc)) }}</span>
-              <button type="button" class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="removeEditorAssociation(index)"><Trash2 /></button>
-            </div>
-            <div class="settings-dir-row">
-              <input v-model="editorAssociationPatternDraft" class="mono" spellcheck="false" :placeholder="t('sftpEdit.associationPatternPlaceholder')" />
-              <Select :model-value="editorAssociationTargetDraft" @update:model-value="(v) => (editorAssociationTargetDraft = String(v))">
-                <SelectTrigger size="xs"><SelectValue :placeholder="t('sftpEdit.associationTargetPlaceholder')" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="option in editorTargetOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <button type="button" :disabled="!editorAssociationPatternDraft.trim() || !editorAssociationTargetDraft" @click="addEditorAssociation"><Plus />{{ t("sftpEdit.addAssociation") }}</button>
-            <p class="muted settings-note">{{ t("sftpEdit.associationsHint") }}</p>
-            <h3 class="settings-section-title">{{ t("sftpEdit.customEditorsTitle") }}</h3>
-            <p v-if="!editorConfigDraft.customEditors.length" class="muted settings-note">{{ t("sftpEdit.noCustomEditors") }}</p>
-            <div v-for="editor in editorConfigDraft.customEditors" :key="editor.id" class="flex items-center gap-2 py-0.5">
-              <span class="shrink-0">{{ editor.name }}</span>
-              <span class="muted mono truncate">{{ editor.command }}</span>
-              <button type="button" class="icon-button" :title="t('delete')" :aria-label="t('delete')" @click="removeCustomEditor(editor.id)"><Trash2 /></button>
-            </div>
-            <h3 class="settings-section-title">{{ t("transferCfg.pipelineTitle") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.maxActive") }}</span>
-              <input v-model="transferMaxActiveDraft" type="number" min="1" max="8" step="1" @change="transferMaxActiveDraft = String(Math.min(8, Math.max(1, Number.parseInt(transferMaxActiveDraft, 10) || 3)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.maxActiveHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.downloadLimit") }}</span>
-              <input v-model="transferDownloadLimitDraft" type="number" min="0" max="1048576" step="64" @change="transferDownloadLimitDraft = String(Math.min(1048576, Math.max(0, Number.parseInt(transferDownloadLimitDraft, 10) || 0)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.downloadLimitHint") }}</p>
-            <label class="settings-field settings-switch-row">
-              <Switch v-model="sftpCompatModeDraft" size="sm" />
-              <span>{{ t("transferCfg.compatMode") }}</span>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.compatModeHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.nameEncoding") }}</span>
-              <Select :model-value="sftpNameEncodingDraft" @update:model-value="(v) => (sftpNameEncodingDraft = String(v) as SftpNameEncoding)">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="encoding in SFTP_NAME_ENCODINGS" :key="encoding" :value="encoding">{{ t(`transferCfg.encoding.${encoding}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.nameEncodingHint") }}</p>
-            <h3 class="settings-section-title">{{ t("transferCfg.compressTitle") }}</h3>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.compressMode") }}</span>
-              <Select :model-value="transferCompressModeDraft" @update:model-value="(v) => (transferCompressModeDraft = String(v))">
-                <SelectTrigger size="xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="mode in TRANSFER_COMPRESS_MODES" :key="mode" :value="mode">{{ t(`transferCfg.compressMode.${mode}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.compressModeHint") }}</p>
-            <label class="settings-field">
-              <span>{{ t("transferCfg.compressThreshold") }}</span>
-              <input v-model="transferCompressThresholdDraft" type="number" min="0" max="65536" step="16" :disabled="transferCompressModeDraft === 'off'" @change="transferCompressThresholdDraft = String(Math.min(65536, Math.max(0, Number.parseInt(transferCompressThresholdDraft, 10) || 0)))" />
-            </label>
-            <p class="muted settings-note">{{ t("transferCfg.compressThresholdHint") }}</p>
+              <SettingsTransferPane
+                ref="transferPaneRef"
+                :t="t"
+                :download-prefs="downloadPrefs"
+                :transfer-prefs="transferPrefs"
+                :editor-prefs="editorPrefs"
+                :local-can-save="localCanSave"
+                :local-download-dir="localDownloadDir"
+                @browse-download-dir="emit('browse-download-dir')"
+              />
             </div>
 
             <!-- 终端（对标 Tabby「Terminal」页）：渲染 / 键盘 / 鼠标 / 剪贴板 / 声音五组。
