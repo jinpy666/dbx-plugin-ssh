@@ -6498,7 +6498,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.settingsMinCharsHint": "Suggestions appear after this many typed characters (1-16).",
     "suggestions.settingsMaxChars": "Maximum characters",
     "suggestions.settingsMaxCharsHint": "Suggestions stop above this input length (8-512).",
-    "transferCfg.title": "Upload concurrency",
     "transferCfg.concurrency": "Parallel uploads",
     "transferCfg.concurrencyHint": "How many files upload at the same time (1-10). Paused uploads keep their slot; cancelled ones release it.",
     "transferCfg.duplicatePolicy": "When the remote file already exists",
@@ -6526,7 +6525,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.settingsMinCharsHint": "输入达到该字符数后才开始建议（1-16）。",
     "suggestions.settingsMaxChars": "最多字符数",
     "suggestions.settingsMaxCharsHint": "超过该长度后不再建议（8-512）。",
-    "transferCfg.title": "上传并发",
     "transferCfg.concurrency": "并行上传数",
     "transferCfg.concurrencyHint": "同时上传的文件数量（1-10）。暂停的上传占用并发槽，取消后立即释放。",
     "transferCfg.duplicatePolicy": "远端已有同名文件时",
@@ -6554,7 +6552,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.settingsMinCharsHint": "輸入達到該字元數後才開始建議（1-16）。",
     "suggestions.settingsMaxChars": "最多字元數",
     "suggestions.settingsMaxCharsHint": "超過該長度後不再建議（8-512）。",
-    "transferCfg.title": "上傳並行",
     "transferCfg.concurrency": "並行上傳數",
     "transferCfg.concurrencyHint": "同時上傳的檔案數量（1-10）。暫停的上傳佔用並行槽，取消後立即釋放。",
     "transferCfg.duplicatePolicy": "遠端已有同名檔案時",
@@ -6582,7 +6579,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.settingsMinCharsHint": "Las sugerencias aparecen tras escribir esta cantidad de caracteres (1-16).",
     "suggestions.settingsMaxChars": "Caracteres máximos",
     "suggestions.settingsMaxCharsHint": "Las sugerencias se detienen por encima de esta longitud (8-512).",
-    "transferCfg.title": "Subidas en paralelo",
     "transferCfg.concurrency": "Subidas simultáneas",
     "transferCfg.concurrencyHint": "Cuántos archivos se suben a la vez (1-10). Las subidas en pausa conservan su espacio; las canceladas lo liberan.",
     "transferCfg.duplicatePolicy": "Cuando ya existe el archivo remoto",
@@ -6610,7 +6606,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.settingsMinCharsHint": "I suggerimenti compaiono dopo questo numero di caratteri (1-16).",
     "suggestions.settingsMaxChars": "Caratteri massimi",
     "suggestions.settingsMaxCharsHint": "Oltre questa lunghezza i suggerimenti si interrompono (8-512).",
-    "transferCfg.title": "Caricamenti paralleli",
     "transferCfg.concurrency": "Caricamenti simultanei",
     "transferCfg.concurrencyHint": "Quanti file vengono caricati contemporaneamente (1-10). I caricamenti in pausa mantengono lo slot; quelli annullati lo rilasciano.",
     "transferCfg.duplicatePolicy": "Quando il file remoto esiste già",
@@ -6638,7 +6633,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.settingsMinCharsHint": "この文字数を入力すると候補表示を開始します（1-16）。",
     "suggestions.settingsMaxChars": "最大文字数",
     "suggestions.settingsMaxCharsHint": "この長さを超えると候補表示を停止します（8-512）。",
-    "transferCfg.title": "アップロードの並列数",
     "transferCfg.concurrency": "同時アップロード数",
     "transferCfg.concurrencyHint": "同時にアップロードするファイル数（1-10）。一時停止中のアップロードはスロットを保持し、キャンセルすると解放されます。",
     "transferCfg.duplicatePolicy": "リモートに同名ファイルがある場合",
@@ -6666,7 +6660,6 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
     "suggestions.settingsMinCharsHint": "As sugestões aparecem após esta quantidade de caracteres digitados (1-16).",
     "suggestions.settingsMaxChars": "Máximo de caracteres",
     "suggestions.settingsMaxCharsHint": "As sugestões param acima deste comprimento (8-512).",
-    "transferCfg.title": "Uploads em paralelo",
     "transferCfg.concurrency": "Uploads simultâneos",
     "transferCfg.concurrencyHint": "Quantos arquivos são enviados ao mesmo tempo (1-10). Uploads pausados mantêm a vaga; cancelados a liberam.",
     "transferCfg.duplicatePolicy": "Quando o arquivo remoto já existe",
@@ -6681,6 +6674,50 @@ const suggestionTransferMessages: Record<string, Record<string, string>> = {
 };
 for (const locale of Object.keys(suggestionTransferMessages)) {
   supplemental[locale] = { ...(supplemental[locale] ?? {}), ...suggestionTransferMessages[locale] };
+}
+
+// #337：传输设置分组（上传相关设置独立成「上传设置」组 + 传输 tab 导航标签
+// 中性化，不再叫「下载设置」）与 SFTP 面板快捷键说明。七语齐套，缺一即被
+// workbench.spec 的键集对比测试拦下。
+const transferSettingsGroupMessages: Record<string, Record<string, string>> = {
+  en: {
+    "settingsNav.transfer": "Transfer",
+    "uploadSettings.title": "Uploads",
+    "settingsHotkeys.sftpNote": "SFTP panel shortcuts: F2 rename · Delete delete (single or multi-selection)",
+  },
+  "zh-CN": {
+    "settingsNav.transfer": "传输",
+    "uploadSettings.title": "上传设置",
+    "settingsHotkeys.sftpNote": "SFTP 面板快捷键：F2 重命名 · Delete 删除（单选/多选均生效）",
+  },
+  "zh-TW": {
+    "settingsNav.transfer": "傳輸",
+    "uploadSettings.title": "上傳設定",
+    "settingsHotkeys.sftpNote": "SFTP 面板快捷鍵：F2 重新命名 · Delete 刪除（單選/多選均生效）",
+  },
+  es: {
+    "settingsNav.transfer": "Transferencias",
+    "uploadSettings.title": "Subidas",
+    "settingsHotkeys.sftpNote": "Atajos del panel SFTP: F2 renombrar · Supr eliminar (selección simple o múltiple)",
+  },
+  it: {
+    "settingsNav.transfer": "Trasferimenti",
+    "uploadSettings.title": "Caricamenti",
+    "settingsHotkeys.sftpNote": "Scorciatoie del pannello SFTP: F2 rinomina · Canc elimina (selezione singola o multipla)",
+  },
+  ja: {
+    "settingsNav.transfer": "転送",
+    "uploadSettings.title": "アップロード",
+    "settingsHotkeys.sftpNote": "SFTP パネルのショートカット：F2 名前変更 · Delete 削除（単一・複数選択の両方に対応）",
+  },
+  "pt-BR": {
+    "settingsNav.transfer": "Transferências",
+    "uploadSettings.title": "Envios",
+    "settingsHotkeys.sftpNote": "Atalhos do painel SFTP: F2 renomear · Delete excluir (seleção única ou múltipla)",
+  },
+};
+for (const locale of Object.keys(transferSettingsGroupMessages)) {
+  supplemental[locale] = { ...(supplemental[locale] ?? {}), ...transferSettingsGroupMessages[locale] };
 }
 
 // #334 阶段 1：SFTP 跨会话传输（右键「发送到会话…」）。七语齐套，缺一即被

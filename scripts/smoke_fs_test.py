@@ -305,6 +305,23 @@ def main() -> None:
                 raise AssertionError(f"exists(missing) -> {json.dumps(absent)[:120]}, want false")
             print(f"    exists({home})=true, exists(no-such-path-xyz)=false")
 
+        def case_sftp_rename_unique():
+            # sftp/rename-unique 常规车道（#337 回归锁定）：空闲名直赢、撞名
+            # 让位 name(1)——sudo 车道见 case_sudo_rename_unique，两车道极性
+            # 必须一致；高层探测走共享通道 LSTAT，NO_SUCH_FILE 之外的答复上抛。
+            base_name = "smoke-unique-plain.bin"
+            first = req("sftp/rename-unique", {"sessionId": session_id, "dir": home,
+                                               "name": base_name})
+            if first.get("name") != base_name:
+                raise AssertionError(f"free name should win: {json.dumps(first)[:160]}")
+            req("sftp/touch", {"sessionId": session_id, "path": f"{home}/{base_name}"})
+            second = req("sftp/rename-unique", {"sessionId": session_id, "dir": home,
+                                                "name": base_name})
+            if second.get("name") != "smoke-unique-plain(1).bin":
+                raise AssertionError(f"conflict should defer: {json.dumps(second)[:160]}")
+            req("sftp/delete", {"sessionId": session_id, "path": f"{home}/{base_name}"})
+            print(f"    rename-unique defers to {second.get('name')}")
+
         def case_sftp_touch_stat():
             req("sftp/touch", {"sessionId": session_id, "path": touch_path})
             stat = req("sftp/stat", {"sessionId": session_id, "path": touch_path})
@@ -1496,6 +1513,8 @@ def main() -> None:
         print("\n--- sftp_ext group ---")
         report.run("sftp/stat /config", "sftp/stat", case_sftp_stat)
         report.run("sftp/exists true/false", "sftp/exists", case_sftp_exists)
+        report.run("sftp/rename-unique collision probe (regular lane)", "sftp/rename-unique",
+                   case_sftp_rename_unique)
         report.run("sftp/touch + sftp/stat empty file", "sftp/touch", case_sftp_touch_stat)
         report.run("sftp/write + sftp/read round-trip", "sftp/write", case_sftp_write_read)
         report.run("sftp/write overwrite keeps chmod 0755", "sftp/write",

@@ -157,6 +157,45 @@ describe("receiveZmodemSession", () => {
     session.has_ended = () => true;
     await expect(receiveZmodemSession(session as never, vi.fn())).resolves.toEqual({});
   });
+
+  it("waits for the in-flight offer handler before settling session_end (issue #336)", async () => {
+    // sz 传完最后一块后 ZFIN/"OO" 两轮往返就触发 session_end，而落盘保存
+    // （同步 base64 + local/saveFile IPC）还在途。结算若不等处理器，
+    // useZmodem 的完成回调会在 savedFileCount 仍为 0 时读数——进度走完、
+    // 文件落盘，但成功提示/自动定位目录被静默跳过（issue #336）。
+    const session = stubSession();
+    let releaseHandler!: () => void;
+    const onOffer = vi.fn(() => new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    }));
+    const done = receiveZmodemSession(session as never, onOffer);
+    session.emit("offer", {} as never);
+    await vi.waitFor(() => expect(onOffer).toHaveBeenCalledTimes(1));
+    session.emit("session_end");
+    let settled = false;
+    void done.then(() => {
+      settled = true;
+    });
+    // 处理器未结算前，session_end 不得兑现（旧实现此时已 settle）。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    releaseHandler();
+    await expect(done).resolves.toEqual({});
+  });
+
+  it("resolves with the handler error when a handler rejects after session_end", async () => {
+    const session = stubSession();
+    let rejectHandler!: (cause: Error) => void;
+    const onOffer = vi.fn(() => new Promise<void>((_resolve, reject) => {
+      rejectHandler = reject;
+    }));
+    const done = receiveZmodemSession(session as never, onOffer);
+    session.emit("offer", {} as never);
+    await vi.waitFor(() => expect(onOffer).toHaveBeenCalledTimes(1));
+    session.emit("session_end");
+    rejectHandler(new Error("late save failure"));
+    await expect(done).resolves.toEqual({ error: expect.any(Error) });
+  });
 });
 
 describe("mergeZmodemChunks", () => {
