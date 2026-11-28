@@ -163,9 +163,9 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `App.vue` (12,658) | 工作台根组件：工具条/会话菜单/布局、xterm 生命周期与加固、SFTP 与传输编排、跨面板状态 | 全部 RPC 调用点；挂载各 dialog/panel | `composables`、`lib`、`components`、`rdp` |
 | `main.ts` (140) | 启动：`pluginStore` 水合 → 装主题桥 → 按 contribution 挂 3 个根之一 | `dbx-plugin-init` 事件、`host.context` | `shared/frontend/themeSync`、`lib/pluginContext` |
 | `TunnelManager.vue` (78) | 端口映射工作台根（同时服务 `presentation: "dialog"` 的右键入口） | `ssh/forward/*` | `components/ui/dialog` |
-| `components/`（55 个 `.vue`；15,627 行） | 面板与对话框（设置、SFTP 预览、Docker、监控、OTP、导入、搜索…） | 见 §3.1 | `lib`、`composables`、`ui` |
+| `components/`（56 个 `.vue`；15,543 行） | 面板与对话框（设置、SFTP 预览、Docker、监控、OTP、导入、搜索…） | 见 §3.1 | `lib`、`composables`、`ui` |
 | `components/ui/`（10 组，1,165 行） | reka-ui/shadcn 风格基础原语（dialog/select/table/tabs…） | — | reka-ui |
-| `composables/`（54 个，12,564 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制/回放、浮层锚点…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
+| `composables/`（56 个，12,800 行） | 有状态 UI 流程（分屏、传输队列、上传链、SFTP 下载/预览、ZMODEM/trzsz、监控编排、录制/回放、浮层锚点…） | `useSplitPanes`、`useTransferQueue`、`useUploadChain`、`useSftpDownload`、`useZmodem`、`useTrzsz`、`useMonitorPanel`、`useMetricsPanel`、`useRecording`、`usePluginEvents` | `lib` |
 | `lib/`（201 个生产 `.ts`，33,880 行） | 纯逻辑、协议镜像、解析、持久化门面 | `pluginStore`、`i18n`、`aiBridge`、`sftpEntries`、`downloadPrefs`、`keywordHighlight`、`previewResolver`、`terminalInput` | 少量 vue；不依赖 `App.vue` |
 | `lib/completion/`（子目录，2,849 行） | 结构化补全（fig 语料、parser、worker、host 客户端） | `CompletionController`、`lib/completion/host/hostClient.ts` | `completion/execute` RPC |
 | `rdp/`（1,598 行） | RDP 画布、帧解码、会话与工作台 | `useRdpSession`、`useRdpWorkbench`、`rdpFrame`、`RdpSurface` | `lib`、`components` |
@@ -176,7 +176,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 
 | 组件 | 职责 | 关键行为 |
 | --- | --- | --- |
-| `SettingsDialog.vue` (2,876) | 13 个设置分类：appearance / scheme / terminal / suggestions / highlight / commands / ai / hotkeys / sudo / agent / transfer / security / mcp | 会话级分类（sudo/agent）对本地终端隐藏 |
+| `SettingsDialog.vue` (2,078) + `SettingsTransferPane.vue` (329) + `SettingsTerminalPane.vue` (510) | 13 个设置分类：appearance / scheme / terminal / suggestions / highlight / commands / ai / hotkeys / sudo / agent / transfer / security / mcp（transfer 与 terminal 分类已外抽，各自自治偏好 RPC 随迁） | 会话级分类（sudo/agent）对本地终端隐藏 |
 | `DockerPanel.vue` (577) + `DockerContainerList.vue` (503) + `DockerEngineSettingsPopover.vue` (127) + `DockerActionConfirmDialog.vue` (100) + `lib/dockerListPayload.ts` (45) + `DockerLogsDrawer.vue` (327) + `DockerStatsBar.vue` (137) + `DockerWorkbench.vue` (141) + `DockerFilesPane.vue` (559) + `DockerFilePreview.vue` (151) + `DockerFilesConfirmBar.vue` (72) + `DockerTerminalPane.vue` (257) + `lib/dockerStats.ts` (271) + `lib/dockerContainerFilter.ts` (72) + `lib/dockerFiles.ts` (307) + `lib/dockerLogStream.ts` (90) + `lib/dockerTerminalFrames.ts` (107) + `lib/dockerEngine.ts` (127) + `lib/dockerActions.ts` (32) + `lib/dockerRowMenu.ts` (113) + `composables/useDockerStats.ts` (180) + `composables/useDockerLogStream.ts` (198) + `composables/useDockerTerminal.ts` (254) + `composables/useDockerOpenInTerminal.ts` (32) | 容器列表（本地搜索：空白分词 AND + 标识字段子序列；状态筛选 all/running/stopped）、启停/重启/删除、引擎设置（docker/podman、socket/host）、运行中容器的 CPU/内存/网络/IO/PIDs 指标条（3s 只读轮询，隐藏即停；CPU/内存/网络总量趋势 60 点 sparkline，换容器集合即清空）、日志抽屉与日志流（64 KiB/100 ms 批量、30 min/20 MiB TTL）、容器文件工作台（list/read/write/delete，原子写 + 64 KiB 上限，预览编辑器已外抽为 `DockerFilePreview`）、容器终端（PTY，`sudo_plan` 三段式授权）；列表/行菜单、日志抽屉与「在终端打开」均已外抽 | 也可作为指标面板的 docker tab 内容 |
 | `MonitorPanel.vue` (791) | 多主机监控卡片、分组、过滤（all/live/issues）、隐私模式 | 独立工作台；分组依赖宿主 `listConnections` 的 `groupId` |
 | `MetricsPanel.vue` (490) | 单机会话指标：概览/进程/磁盘/网络/docker | 5s 刷新，GPU/NPU 卡片 |
@@ -251,7 +251,7 @@ SSH 服务器   Telnet/VNC/RDP   串口设备        本机 shell     外部 CLI
 | `frontend/src/lib/i18n.ts` | **10,984** | ① 7 个 locale 的全部文案数据（`en`/`es`/`it`/`ja`/`pt-BR`/`zh-CN`/`zh-TW`）；② 工作台消息表与 locale 解析/插值函数（`workbenchMessageTable`、`resolveWorkbenchLocale`、`workbenchMessage`） |
 | `frontend/src/composables/useCommandSuggestions.ts` | **663** | 历史/快速命令建议与 fig 结构化补全两层浮层的采集→抑制门→检索→定位→按键消费（互斥调度带 issue 链行为面 #120/#138/#169/#317，不宜机械再拆）；锚点量测（`useTerminalSuggestionAnchor`）、Windows shell 采样（`lib/completion/shell/shellSniff`）、空结果宽限（`lib/suggestionCloseGrace`）与键入分类（`lib/suggestionGuard`）已外抽 |
 | `backend/src/mcp.rs` | 9,266 | ① MCP stdio 传输与初始化；② 16 个工具的 schema 目录；③ `mcp/call` 分派与工具实现（exec/SFTP/known_hosts）；④ 桥模式与独立模式的差异处理 |
-| `frontend/src/components/SettingsDialog.vue` | 2,876 | 13 个设置分类的全部表单、校验、加载/保存与局部状态机集中在单文件 |
+| `frontend/src/components/SettingsDialog.vue` | **2,078** | 13 个设置分类的表单/校验/加载保存与局部状态机（transfer/terminal 分类已外抽为 SettingsTransferPane/SettingsTerminalPane，启动命令与连接级编码下沉 useStartupCommands/useConnectionNameEncoding） |
 | `backend/src/exec.rs` | 4,777 | ① 普通远程 exec 与取消；② Quick Sudo 编排（密码注入、提示词应答、保活）；③ 进程列表与终止；④ metrics/docker/completion 复用的执行底座 |
 
 > 拆分建议不是本文的范围；这里只记录「改一处要同时理解几件事」。例如改 SSH
