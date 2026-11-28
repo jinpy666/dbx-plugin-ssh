@@ -12,10 +12,13 @@
 import { onScopeDispose, ref, watch, type Ref } from "vue";
 import {
   EMPTY_DOCKER_STATS,
+  aggregateDockerStats,
   normalizeContainerIds,
   normalizeDockerStatsPayload,
+  pushDockerStatsPoint,
   resolveDockerRates,
   type DockerStatSample,
+  type DockerStatsPoint,
   type DockerStatsSnapshot,
 } from "../lib/dockerStats";
 
@@ -44,6 +47,8 @@ export interface UseDockerStatsOptions {
 
 export interface UseDockerStatsResult {
   snapshot: Ref<DockerStatsSnapshot>;
+  /** 面板打开期间的总量趋势（60 点 × 3s ≈ 3 分钟），换容器集合即清空。 */
+  history: Ref<DockerStatsPoint[]>;
   error: Ref<string>;
   loading: Ref<boolean>;
   refresh: () => Promise<void>;
@@ -61,6 +66,7 @@ function defaultInvoke(
 
 export function useDockerStats(options: UseDockerStatsOptions): UseDockerStatsResult {
   const snapshot = ref<DockerStatsSnapshot>({ ...EMPTY_DOCKER_STATS, stats: [] });
+  const history = ref<DockerStatsPoint[]>([]);
   const error = ref("");
   const loading = ref(false);
   const intervalMs = options.intervalMs ?? DOCKER_STATS_INTERVAL_MS;
@@ -108,6 +114,13 @@ export function useDockerStats(options: UseDockerStatsOptions): UseDockerStatsRe
         return { ...sample, netRxRate: rates.netRxRate, netTxRate: rates.netTxRate };
       });
       snapshot.value = { ...next, stats };
+      const totals = aggregateDockerStats(stats);
+      history.value = pushDockerStatsPoint(history.value, {
+        at: next.sampledAt || at,
+        cpuPercent: totals.cpuPercent,
+        memPercent: totals.memPercent,
+        netBytesPerSec: totals.netRxRate + totals.netTxRate,
+      });
       previous = { at, samples: new Map(stats.map((sample) => [sample.containerId, sample])) };
       error.value = "";
     } catch (cause) {
@@ -147,7 +160,9 @@ export function useDockerStats(options: UseDockerStatsOptions): UseDockerStatsRe
 
   watch(
     [() => normalizeContainerIds(options.containerIds()).join(","), () => isEnabled()],
-    ([, enabled]) => {
+    ([idsKey, enabled], [previousIdsKey]) => {
+      // 换了容器集合，旧曲线不再可比：清空趋势但保留轮询状态机。
+      if (idsKey !== previousIdsKey) history.value = [];
       if (enabled) start();
       else stop();
     },
@@ -161,5 +176,5 @@ export function useDockerStats(options: UseDockerStatsOptions): UseDockerStatsRe
     }
   });
 
-  return { snapshot, error, loading, refresh, start, stop };
+  return { snapshot, history, error, loading, refresh, start, stop };
 }

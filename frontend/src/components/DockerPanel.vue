@@ -323,7 +323,7 @@ onMounted(() => {
 onUnmounted(stopPolling);
 
 // —— B2 容器指标（只读，3s 轮询；页面隐藏即停）——————————————————
-const { snapshot: statsSnapshot, error: statsError } = useDockerStats({
+const { snapshot: statsSnapshot, history: statsHistory, error: statsError } = useDockerStats({
   params: dockerParams,
   containerIds: () => containers.value.filter((c) => c.state === "running").map((c) => c.id),
   enabled: () => available.value === true,
@@ -553,7 +553,7 @@ const running = (container: DockerContainer): boolean => container.state === "ru
       {{ props.t("docker.actionFailed", { error: actionError }) }}
     </p>
 
-    <DockerStatsBar v-if="available === true" :t="props.t" :snapshot="statsSnapshot" :error="statsError" />
+    <DockerStatsBar v-if="available === true" :t="props.t" :snapshot="statsSnapshot" :history="statsHistory" :error="statsError" />
 
     <!-- 加载中 -->
     <p v-if="loading && available === null" class="docker-empty"><Loader2 class="spinning" />{{ props.t("docker.loading") }}</p>

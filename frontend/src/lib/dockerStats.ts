@@ -197,6 +197,53 @@ export function aggregateDockerStats(stats: DockerStatSample[]): DockerStatsTota
   return totals;
 }
 
+/** 趋势环缓冲容量：60 点 × 3s 轮询 ≈ 最近 3 分钟。 */
+export const DOCKER_STATS_HISTORY_CAPACITY = 60;
+
+/**
+ * 容器总体指标的一次客户端采样（面板打开期间才有，不持久化）。
+ * `at` 取 sidecar 的 `sampledAt`，缺省时用本地时钟。
+ */
+export interface DockerStatsPoint {
+  at: number;
+  cpuPercent: number;
+  memPercent: number;
+  /** 每秒网络吞吐（rx+tx，字节/秒）。 */
+  netBytesPerSec: number;
+}
+
+/**
+ * 推入一个趋势采样并返回新数组（不可变语义，同 `pushSample` 风格）：
+ * - 非有限/负值按 0，防 NaN 污染曲线；
+ * - 同一 `at` 的重复采样替换末点（重试/重绘不会把曲线拉平）；
+ * - 超容量丢最旧，容量 ≤0 返回空数组。
+ */
+export function pushDockerStatsPoint(
+  history: readonly DockerStatsPoint[],
+  point: DockerStatsPoint,
+  capacity = DOCKER_STATS_HISTORY_CAPACITY,
+): DockerStatsPoint[] {
+  if (capacity <= 0) return [];
+  const value = (input: number) => (Number.isFinite(input) && input > 0 ? input : 0);
+  const normalized: DockerStatsPoint = {
+    at: Number.isFinite(point.at) ? point.at : 0,
+    cpuPercent: value(point.cpuPercent),
+    memPercent: value(point.memPercent),
+    netBytesPerSec: value(point.netBytesPerSec),
+  };
+  const last = history[history.length - 1];
+  const base = last && last.at === normalized.at ? history.slice(0, -1) : history;
+  return [...base, normalized].slice(-capacity);
+}
+
+/** 取某一维度的序列（sparkline 输入；顺序与采样顺序一致）。 */
+export function dockerStatsSeries(
+  history: readonly DockerStatsPoint[],
+  key: "cpuPercent" | "memPercent" | "netBytesPerSec",
+): number[] {
+  return history.map((point) => point[key]);
+}
+
 const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"] as const;
 
 /** 1024 进制的紧凑字节格式（`0 B`、`1.5 KiB`、`2.3 GiB`）。 */

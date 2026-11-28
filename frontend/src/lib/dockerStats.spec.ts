@@ -3,14 +3,17 @@ import {
   EMPTY_DOCKER_STATS,
   aggregateDockerStats,
   deriveDockerRates,
+  dockerStatsSeries,
   formatBytes,
   formatPercent,
   formatRate,
   normalizeDockerStatSample,
   normalizeDockerStatsPayload,
   normalizeContainerIds,
+  pushDockerStatsPoint,
   resolveDockerRates,
   type DockerStatSample,
+  type DockerStatsPoint,
 } from "./dockerStats";
 
 function sample(overrides: Partial<DockerStatSample> = {}): DockerStatSample {
@@ -182,5 +185,51 @@ describe("formatters", () => {
     expect(formatPercent(12.34)).toBe("12.3%");
     expect(formatPercent(0)).toBe("0%");
     expect(formatPercent(Number.NaN)).toBe("0%");
+  });
+});
+
+describe("stats history", () => {
+  const point = (at: number, extras: Partial<DockerStatsPoint> = {}): DockerStatsPoint => ({
+    at,
+    cpuPercent: 12,
+    memPercent: 40,
+    netBytesPerSec: 2048,
+    ...extras,
+  });
+
+  it("appends samples in order", () => {
+    const history = pushDockerStatsPoint([], point(1_000));
+    expect(pushDockerStatsPoint(history, point(2_000)).map((p) => p.at)).toEqual([1_000, 2_000]);
+  });
+
+  it("caps the window by dropping the oldest sample", () => {
+    let history: DockerStatsPoint[] = [];
+    for (let index = 0; index < 5; index += 1) history = pushDockerStatsPoint(history, point(index), 3);
+    expect(history.map((p) => p.at)).toEqual([2, 3, 4]);
+  });
+
+  it("replaces the last sample when timestamps collide", () => {
+    const history = pushDockerStatsPoint([point(1_000)], point(1_000, { cpuPercent: 99 }));
+    expect(history).toHaveLength(1);
+    expect(history[0].cpuPercent).toBe(99);
+  });
+
+  it("normalizes non-finite and negative values to zero", () => {
+    const [stored] = pushDockerStatsPoint([], point(Number.NaN, {
+      cpuPercent: Number.NaN,
+      memPercent: -3,
+      netBytesPerSec: Infinity,
+    }));
+    expect(stored).toEqual({ at: 0, cpuPercent: 0, memPercent: 0, netBytesPerSec: 0 });
+  });
+
+  it("returns empty for a zero capacity", () => {
+    expect(pushDockerStatsPoint([], point(1), 0)).toEqual([]);
+  });
+
+  it("extracts one series for the sparkline", () => {
+    const history = [point(1, { cpuPercent: 1 }), point(2, { cpuPercent: 5 })];
+    expect(dockerStatsSeries(history, "cpuPercent")).toEqual([1, 5]);
+    expect(dockerStatsSeries([], "netBytesPerSec")).toEqual([]);
   });
 });
