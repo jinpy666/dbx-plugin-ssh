@@ -13,6 +13,7 @@ import {
   decodeBase64Bytes,
   decodeFileText,
   encodeFileText,
+  filterDockerFileEntries,
   formatFileSize,
   initialDockerMutation,
   isHiddenDockerName,
@@ -44,6 +45,7 @@ const props = defineProps<{
 
 const path = ref("/");
 const showHidden = ref(false);
+const fileQuery = ref("");
 const listing = ref<DockerFilesListing | null>(null);
 const loading = ref(false);
 const error = ref("");
@@ -60,7 +62,10 @@ const mutationError = ref("");
 const notice = ref("");
 
 const visibleEntries = computed(() =>
-  (listing.value?.entries ?? []).filter((entry) => showHidden.value || !isHiddenDockerName(entry.name)),
+  filterDockerFileEntries(
+    (listing.value?.entries ?? []).filter((entry) => showHidden.value || !isHiddenDockerName(entry.name)),
+    fileQuery.value,
+  ),
 );
 
 const previewText = computed(() => {
@@ -314,11 +319,21 @@ watch(
         <input v-model="showHidden" type="checkbox" @change="toggleHidden" />
         {{ props.t("docker.filesShowHidden") }}
       </label>
+      <input
+        v-model="fileQuery"
+        class="docker-files-search"
+        type="search"
+        :placeholder="props.t('docker.filesSearchPlaceholder')"
+        :aria-label="props.t('docker.filesSearchPlaceholder')"
+        data-test="docker-files-search"
+      />
     </div>
 
     <p v-if="error" class="docker-files-error">{{ props.t("docker.filesLoadFailed") }} {{ error }}</p>
     <p v-else-if="loading && !listing" class="docker-files-hint">{{ props.t("docker.filesLoading") }}</p>
-    <p v-else-if="visibleEntries.length === 0" class="docker-files-hint">{{ props.t("docker.filesEmpty") }}</p>
+    <p v-else-if="visibleEntries.length === 0" class="docker-files-hint">
+      {{ props.t(fileQuery.trim() ? "docker.filesNoMatch" : "docker.filesEmpty") }}
+    </p>
     <p v-if="listing?.truncated" class="docker-files-hint">{{ props.t("docker.filesTruncated", { count: 500 }) }}</p>
 
     <DockerFilesConfirmBar
@@ -433,6 +448,16 @@ watch(
   gap: 0.25rem;
   font-size: 0.78rem;
   white-space: nowrap;
+}
+.docker-files-search {
+  flex: 0 1 9rem;
+  min-width: 5rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  border-radius: 0.3rem;
+  background: transparent;
+  color: inherit;
+  font-size: 0.78rem;
 }
 .docker-files-body {
   display: grid;

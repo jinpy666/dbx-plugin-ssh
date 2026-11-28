@@ -6,6 +6,7 @@ import {
   decodeBase64Bytes,
   decodeFileText,
   encodeFileText,
+  filterDockerFileEntries,
   formatFileSize,
   initialDockerMutation,
   isHiddenDockerName,
@@ -225,5 +226,34 @@ describe("dockerFiles mutation confirmation state machine", () => {
 
   it("settles back to idle after an RPC", () => {
     expect(settleDockerMutation().state).toEqual({ pending: null, busy: false });
+  });
+});
+
+describe("dockerFiles search", () => {
+  const entries = [
+    entry("app.conf", "file"),
+    entry("app.log", "file"),
+    entry("backup.tar.gz", "file"),
+    entry("AppDir", "dir"),
+  ];
+
+  it("returns a copy and keeps order for an empty query", () => {
+    const out = filterDockerFileEntries(entries, "  ");
+    expect(out).toEqual(entries);
+    expect(out).not.toBe(entries);
+  });
+
+  it("matches name substrings case-insensitively", () => {
+    expect(filterDockerFileEntries(entries, "APP").map((item) => item.name)).toEqual([
+      "app.conf",
+      "app.log",
+      "AppDir",
+    ]);
+    expect(filterDockerFileEntries(entries, ".tar").map((item) => item.name)).toEqual(["backup.tar.gz"]);
+  });
+
+  it("requires every whitespace token to match", () => {
+    expect(filterDockerFileEntries(entries, "app log").map((item) => item.name)).toEqual(["app.log"]);
+    expect(filterDockerFileEntries(entries, "app tar")).toEqual([]);
   });
 });

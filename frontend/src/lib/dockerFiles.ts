@@ -74,6 +74,23 @@ export function isHiddenDockerName(name: string): boolean {
   return String(name ?? "").startsWith(".");
 }
 
+/**
+ * 目录内本地搜索：空白分词 AND、大小写不敏感的名称子串。
+ * 空查询返回浅拷贝（调用方可继续叠加隐藏项过滤而不改输入）。
+ * 只搜名称：容器里的完整路径由当前目录决定，把父路径放进匹配只会重复命中。
+ */
+export function filterDockerFileEntries<T extends { name: string }>(
+  entries: readonly T[],
+  query: string,
+): T[] {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return [...entries];
+  return entries.filter((entry) => {
+    const name = entry.name.toLowerCase();
+    return tokens.every((token) => name.includes(token));
+  });
+}
+
 /** 人类可读大小（IEC，1024 进制；B 不带小数）。 */
 export function formatFileSize(bytes: number): string {
   const value = Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
